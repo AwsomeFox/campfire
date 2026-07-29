@@ -500,7 +500,7 @@ function UserRow({
                     <label htmlFor={displayNameId} style={{ overflowWrap: 'anywhere' }}>
                       Display name for {user.username}
                     </label>
-                    <TextInput density="xs"
+                    <TextInput density="compact"
                       ref={displayNameRef}
                       id={displayNameId}
                       name={`displayName-${user.id}`}
@@ -520,7 +520,7 @@ function UserRow({
                     <select
                       id={roleId}
                       name={`serverRole-${user.id}`}
-                      className="cf-select text-sm cf-density-xs"
+                      className="cf-select text-sm cf-density-compact"
                       value={serverRole}
                       onChange={(e) => setServerRole(e.target.value as ServerRole)}
                       aria-invalid={!!formError}

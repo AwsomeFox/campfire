@@ -1077,7 +1077,7 @@ function SessionDetail({
                   Reload latest
                 </Btn>
               )}
-              <Btn density="xs"
+              <Btn density="compact"
                 ghost
                 type="button"
                 className="text-xs"
@@ -1095,7 +1095,7 @@ function SessionDetail({
               >
                 Cancel
               </Btn>
-              <Btn density="xs" type="submit" className="text-xs" disabled={saving || !detailReady}>
+              <Btn density="compact" type="submit" className="text-xs" disabled={saving || !detailReady}>
                 {saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>
@@ -1343,10 +1343,10 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
             </div>
           )}
           <div className="flex gap-2 justify-end">
-            <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
+            <Btn density="compact" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
               Cancel
             </Btn>
-            <Btn density="xs" className="text-xs" onClick={save} disabled={saving || !attendanceReady}>
+            <Btn density="compact" className="text-xs" onClick={save} disabled={saving || !attendanceReady}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>

@@ -558,7 +558,7 @@ function ProposalCard({
       )}
 
       {canResolve && expanded && (
-        <TextInput density="xs"
+        <TextInput density="compact"
           className="text-sm"
           placeholder="Optional note…"
           value={note}

@@ -1608,7 +1608,7 @@ function AddMemberForm({
           </label>
           <select
             id={roleId}
-            className="cf-select text-sm cf-density-xs"
+            className="cf-select text-sm cf-density-compact"
             value={role}
             aria-describedby={roleHelpId}
             onChange={(e) => setRole(e.target.value as Role)}

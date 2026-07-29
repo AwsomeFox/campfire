@@ -794,6 +794,7 @@ function ArcCard({
             target="beat"
             arcId={arc.id}
             label="Draft beat with AI"
+            density="xs"
           />
         )}
       </div>

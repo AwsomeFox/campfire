@@ -297,7 +297,7 @@ function NewTokenForm({
         directly.
       </p>
       <div className="grid sm:grid-cols-2 gap-2">
-        <TextInput density="xs"
+        <TextInput density="compact"
           className="text-sm"
           placeholder="Name, e.g. claude-scribe"
           aria-label="Token name (required)"
@@ -307,7 +307,7 @@ function NewTokenForm({
           autoFocus
         />
         <select
-          className="cf-select text-sm cf-density-xs"
+          className="cf-select text-sm cf-density-compact"
           value={scope}
           onChange={(e) => setScope(e.target.value as TokenScope)}
           aria-label="Read scope"
@@ -317,7 +317,7 @@ function NewTokenForm({
           <option value="viewer">Read: Viewer</option>
         </select>
         <select
-          className="cf-select text-sm cf-density-xs"
+          className="cf-select text-sm cf-density-compact"
           value={writeScope}
           onChange={(e) => setWriteScope(e.target.value as WriteScope)}
           aria-label="Write mode"
@@ -327,7 +327,7 @@ function NewTokenForm({
           <option value="direct">Write: Direct (no review)</option>
         </select>
         <select
-          className="cf-select text-sm cf-density-xs"
+          className="cf-select text-sm cf-density-compact"
           value={campaignId}
           onChange={(e) => setCampaignId(e.target.value)}
           aria-label="Campaign binding"

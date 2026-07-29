@@ -172,7 +172,7 @@ export function GetAMapPanel({
             candidates with cost/readiness + honest provenance. Available to any DM (falls
             back to the offline procedural renderer when no image provider is configured). */}
         {isDm && <AiMapButton campaignId={campaignId} onAttached={onImported} />}
-        {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
+        {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" density="xs" />}
       </div>
 
       {showPurposeControls && (

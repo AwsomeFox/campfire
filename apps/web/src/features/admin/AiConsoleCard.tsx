@@ -364,7 +364,7 @@ function AllowlistEditor({
       </p>
       <textarea
         id={inputId}
-        className="cf-input py-2 text-sm w-full max-w-full font-mono cf-density-xs"
+        className="cf-input py-2 text-sm w-full max-w-full font-mono cf-density-compact"
         rows={3}
         placeholder="gpt-4o-mini&#10;claude-3-5-haiku"
         value={text}
