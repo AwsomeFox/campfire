@@ -105,6 +105,22 @@ export function settleEncounterOverride(
 }
 
 /**
+ * Revoke a granted override the instant DM authority is lost (issue #1446 review fix,
+ * round 4): the override is a DM decision, and a viewer demoted to player mid-outage must
+ * not keep acting on a stale-data acknowledgement they no longer have standing to have
+ * made — `canDmWrite` going false has to actually clear the flag, not just hide the
+ * confirm affordance, or a demoted player's owned-combatant mutations stay unblocked.
+ * Idempotent (returns the same reference) when there is nothing to revoke.
+ */
+export function revokeEncounterOverrideIfUnauthorized(
+  override: EncounterOverrideState,
+  canDmWrite: boolean,
+): EncounterOverrideState {
+  if (!canDmWrite && override.active) return ENCOUNTER_OVERRIDE_INACTIVE;
+  return override;
+}
+
+/**
  * Whether the "Continue anyway" affordance should be offered at all: not while
  * live (nothing to override), and not during the initial connecting grace period
  * (a genuine sub-second cold connect should just block quietly, not prompt).
@@ -115,7 +131,10 @@ export function encounterOverrideOfferable(state: EncounterSyncState): boolean {
 
 /**
  * The actual action gate: conflict-prone mutations are blocked unless the stream is
- * live OR the DM has confirmed the override for this outage.
+ * live OR the DM has confirmed the override for this outage. `override` should already
+ * reflect current DM authority (see {@link revokeEncounterOverrideIfUnauthorized}) —
+ * this function does not itself take a `canDmWrite` param so it stays a pure two-input
+ * gate composable with the existing permission checks callers already run.
  */
 export function encounterActionsBlocked(state: EncounterSyncState, override: EncounterOverrideState): boolean {
   return encounterRiskyActionsBlocked(state) && !override.active;

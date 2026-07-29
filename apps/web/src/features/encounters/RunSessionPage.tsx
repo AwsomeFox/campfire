@@ -202,6 +202,7 @@ import {
   encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
   isConnectingGraceElapsed,
+  revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
   type EncounterOverrideState,
   type EncounterSyncRevision,
@@ -1308,11 +1309,20 @@ export default function RunSessionPage() {
   });
   // Issue #1446: a confirmed override is scoped to ONE outage — consumed the moment the
   // stream is live again, so a later, separate outage prompts again rather than silently
-  // sailing through on a stale confirmation from a previous disconnect.
+  // sailing through on a stale confirmation from a previous disconnect. Issue #1446 review
+  // fix (round 4): ALSO revoked the instant DM authority is lost — the override is a DM
+  // decision, and a viewer demoted to player mid-outage must not keep acting on a
+  // stale-data acknowledgement they no longer have standing to have made. Re-promotion
+  // requires a fresh confirmation rather than silently resuming the earlier one.
   useEffect(() => {
-    setEncounterSyncOverride((prev) => settleEncounterOverride(prev, encounterSync));
-  }, [encounterSync]);
-  const riskyBlocked = encounterActionsBlocked(encounterSync, encounterSyncOverride);
+    setEncounterSyncOverride((prev) => revokeEncounterOverrideIfUnauthorized(settleEncounterOverride(prev, encounterSync), canDmWrite));
+  }, [encounterSync, canDmWrite]);
+  // Belt-and-braces alongside the effect above: mask the override synchronously at
+  // render time too, so there is no one-render gap between `canDmWrite` flipping false
+  // and the stored flag actually being cleared where a demoted player's mutations could
+  // still slip through.
+  const effectiveEncounterSyncOverride = canDmWrite ? encounterSyncOverride : ENCOUNTER_OVERRIDE_INACTIVE;
+  const riskyBlocked = encounterActionsBlocked(encounterSync, effectiveEncounterSyncOverride);
   // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
   // issue text) — a player confirming it would re-enable their own owned-combatant HP /
   // death-save / action mutations against possibly-stale data. Gate the affordance to
@@ -1361,29 +1371,46 @@ export default function RunSessionPage() {
   const [showMapGuidance, setShowMapGuidance] = useState(false);
   // Drop action errors (and any lingering map-attach guidance) when navigating to a
   // different encounter.
+  // Issue #1446 review fix (round 3) — the encounter-switch lifecycle, considered as a
+  // whole rather than one symptom at a time. `RunSessionPage` is reused across encounters
+  // within the SAME campaign, so every piece of sync state here has to be deliberately
+  // classified as ENCOUNTER-scoped (this encounter's own history — reset on `eid` change)
+  // or STREAM/SESSION-scoped (belongs to the campaign SSE connection or the DM's outage
+  // acknowledgement, which both outlive any one encounter — must NOT reset here):
+  //
+  //   ENCOUNTER-scoped (reset below):
+  //     - actionError / showMapGuidance: this encounter's own action-error and
+  //       post-map-attach UI state.
+  //     - encounterReadStale / resyncPending: this encounter's own REST-read staleness.
+  //     - syncRevision: this encounter's own updatedAt/lastSyncAt watermark.
+  //
+  //   STREAM/SESSION-scoped (deliberately left untouched here):
+  //     - eventStatus: tracks `useCampaignEvents(cid, …)` below, keyed on `cid` — the
+  //       SAME connection survives an encounter switch, and the reconnect loop only calls
+  //       onStatusChange when the status actually CHANGES, so a still-`connected` stream
+  //       never re-announces itself. Nulling this here used to strand the derived sync
+  //       state on a stale `connecting` (review round 2 regression).
+  //     - connectingSinceRef / connectingGraceElapsed: how long the CURRENT connecting
+  //       attempt has run is a stream-level fact, computed entirely inside the
+  //       `[eventStatus]`-keyed effect below. Resetting these two HERE, on a dependency
+  //       array that does not include `eventStatus`, used to leave that other effect
+  //       never re-firing (its own dependency hadn't changed) — so the grace timer could
+  //       never be re-armed for the new encounter and it sat on `Connecting` forever with
+  //       no override offered (review round 3 regression: the exact permanent block this
+  //       issue exists to remove). They now live ENTIRELY in that other effect.
+  //     - encounterSyncOverride: a "continue anyway" acknowledgement about the STREAM's
+  //       health, not about any one encounter's data — an outage that started while
+  //       viewing encounter A is still the same outage after switching to encounter B, so
+  //       clearing it here would reintroduce exactly the "confirm on every click" friction
+  //       the issue asks to eliminate. Settled only by `settleEncounterOverride` (stream
+  //       back to `live`) or by losing DM authority (see the effect below) — never by an
+  //       encounter switch.
   useEffect(() => {
     setActionError(null);
     setShowMapGuidance(false);
     setEncounterReadStale(false);
     setResyncPending(false);
     setSyncRevision(null);
-    // Issue #1446 review fix: deliberately NOT resetting `eventStatus` here. It tracks the
-    // CAMPAIGN's SSE stream (`useCampaignEvents(cid, …)` below), which is keyed on `cid`, not
-    // `eid` — switching to a different encounter in the SAME campaign reuses this component
-    // and the SAME underlying connection; the reconnect loop only calls onStatusChange when
-    // the status actually CHANGES, so a still-`connected` stream never re-announces itself.
-    // Nulling `eventStatus` here used to just leave the chip stuck on "Connecting" (annoying
-    // but survivable pre-#1446, since `connecting` blocked forever anyway with no timeout).
-    // Once the connecting-grace timeout was added, that stale null falsely degraded a
-    // perfectly healthy stream to `offline` after CONNECTING_GRACE_MS on every ordinary
-    // encounter switch — DMs got a bogus override prompt and players were blocked for no
-    // reason. Retaining `eventStatus` across `eid` changes fixes both.
-    // Issue #1446: a "continue anyway" override (and the connecting-grace timer) is
-    // scoped to this encounter's session — navigating to a different encounter must not
-    // carry over an unconfirmed stale-state acknowledgement.
-    setEncounterSyncOverride(ENCOUNTER_OVERRIDE_INACTIVE);
-    connectingSinceRef.current = null;
-    setConnectingGraceElapsed(false);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or

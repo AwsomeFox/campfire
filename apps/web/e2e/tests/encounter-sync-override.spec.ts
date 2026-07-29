@@ -414,3 +414,215 @@ test('switching between two encounters in one campaign does not degrade a connec
     await Promise.all([reader.close(), writer.close()]);
   }
 });
+
+/**
+ * Issue #1446 review fix (round 3): the connecting-grace timer used to be reset (to "not
+ * elapsed yet") by the `[eid]` effect on every encounter switch, but its OWN re-arming
+ * effect is keyed on `[eventStatus]` alone — while a stream that never connects sits at
+ * the literal string `connecting` for the whole session, that dependency never changes,
+ * so the timer was never rescheduled and the new encounter got stuck on `Connecting`
+ * forever with no override ever offered again. That is the exact permanent block this
+ * issue exists to remove, reintroduced on the encounter-switch path.
+ */
+test('switching encounters while the stream never connects still offers the override', async ({ browser }) => {
+  const { campaignId } = seed();
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  let encounterAId: number | null = null;
+  let encounterBId: number | null = null;
+  let releaseEvents: () => void = () => {};
+
+  try {
+    const live = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+    for (const e of live as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+
+    const encA = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 NeverConnect A', hidden: false },
+      })
+    ).json();
+    encounterAId = encA.id;
+    const encB = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 NeverConnect B', hidden: false },
+      })
+    ).json();
+    encounterBId = encB.id;
+
+    // The events fetch hangs forever for the WHOLE session — both encounters. `eventStatus`
+    // never changes from `connecting` at any point in this test.
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await reader.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.abort('connectionfailed');
+    });
+
+    await page.goto(`/c/${campaignId}/encounters/${encounterAId}`);
+
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    // Grace elapses on encounter A: the override becomes offered.
+    await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toBeVisible();
+
+    // In-app navigation to encounter B, WITHOUT confirming the override on A.
+    await page.getByRole('link', { name: /Back to encounters/i }).click();
+    await page.getByRole('link', { name: /E2E1446 NeverConnect B/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/encounters/${encounterBId}$`));
+
+    // The regression: encounter B must NOT be stuck on a bare `Connecting` with the
+    // override never offered again — the already-elapsed grace state carries over
+    // correctly, immediately, with no further wait required.
+    await expect(syncChip).toHaveText('Offline');
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toBeVisible();
+  } finally {
+    releaseEvents();
+    for (const id of [encounterAId, encounterBId]) {
+      if (id != null) {
+        await writer.request.post(`/api/v1/encounters/${id}/end`).catch(() => undefined);
+        await writer.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      }
+    }
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});
+
+/**
+ * Issue #1446 review fix (round 4): an active override must not survive loss of DM
+ * authority. The override is only settled by `settleEncounterOverride` (stream back to
+ * `live`) — a co-DM demoted to player mid-outage kept `encounterSyncOverride.active`
+ * untouched, so `riskyBlocked` stayed false and their own owned-combatant HP/death-save/
+ * action mutations remained unblocked against possibly-stale data.
+ *
+ * The demoted member's browser has no way to learn about a role change except via THIS
+ * campaign's own SSE stream (`membership.updated`, relayed cross-tab over BroadcastChannel
+ * by `useMembershipLiveSync` — see AuthProvider.tsx / useMembershipLiveSync.ts) or a full
+ * reload. Since the main tab's stream is deliberately stubbed dead for this test (the only
+ * way to reach an active override in the first place), a second "sidecar" tab in the SAME
+ * browser context keeps a REAL, healthy connection to the same campaign so the demotion
+ * still reaches the main tab exactly the way it would in production — through the existing
+ * cross-tab relay, not a page reload (which would trivially reset the in-memory override
+ * state regardless of whether this fix exists).
+ */
+test('an active override is revoked the instant DM authority is lost', async ({ browser }) => {
+  const { campaignId } = seed();
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+  const sidecar = await reader.newPage();
+
+  let encounterId: number | null = null;
+  let characterId: number | null = null;
+  let playerMemberId: number | null = null;
+  let releaseEvents: () => void = () => {};
+
+  try {
+    const members = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/members`)).json();
+    const playerMember = (members as Array<{ id: number; userId: number; username: string }>).find(
+      (m) => m.username === CREDS.player.username,
+    );
+    if (!playerMember) throw new Error('expected seeded player membership');
+    playerMemberId = playerMember.id;
+
+    // Temporarily promote the player to co-DM so they can legitimately confirm the
+    // override — this IS the "was a co-DM, got demoted mid-outage" scenario.
+    await writer.request.patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`, {
+      data: { role: 'dm' },
+    });
+
+    const live = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+    for (const e of live as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+
+    const character = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/characters`, {
+        data: {
+          name: 'Revoke Guard Test PC',
+          className: 'Fighter',
+          level: 3,
+          ownerUserId: String(playerMember.userId),
+          hpCurrent: 20,
+          hpMax: 20,
+          stats: { DEX: 12 },
+        },
+      })
+    ).json();
+    characterId = character.id;
+
+    // A new encounter auto-adds every active party PC — the owned combatant we need.
+    const enc = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 Revoke Guard', hidden: false },
+      })
+    ).json();
+    encounterId = enc.id;
+    const heroCombatant = (enc.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (c) => c.characterId === characterId,
+    );
+    if (!heroCombatant) throw new Error('expected auto-added hero combatant');
+
+    await writer.request.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+    await writer.request.post(`/api/v1/encounters/${encounterId}/start`);
+
+    // The sidecar's job is ONLY to keep a real, healthy stream open so the membership
+    // sync relay works — it never touches the encounter under test.
+    await sidecar.goto(`/c/${campaignId}/encounters`);
+    await expect(sidecar.getByText('E2E1446 Revoke Guard')).toBeVisible();
+
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    // Page-scoped route (not context-scoped): only the main tab's stream is stubbed dead —
+    // the sidecar tab must stay genuinely connected.
+    await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.abort('connectionfailed');
+    });
+
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
+    await page.getByTestId('encounter-sync-override-confirm').click();
+    await expect(page.getByTestId('encounter-sync-override-active')).toBeVisible();
+
+    // Confirm the override actually unblocked their own combatant before revoking anything.
+    const heroRow = page.getByTestId(`combatant-row-${heroCombatant.id}`);
+    await expect(heroRow.getByTestId('hp-steppers')).toBeVisible();
+
+    // Demote back to player. The sidecar's healthy stream receives membership.updated and
+    // relays it cross-tab; the main (SSE-dead) tab picks it up via BroadcastChannel and
+    // refreshes /me — exactly the production path, no reload.
+    await writer.request.patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`, {
+      data: { role: 'player' },
+    });
+
+    // The override must be REVOKED, not just its confirmation UI hidden: the previously
+    // unblocked owned-combatant controls disappear again.
+    await expect(heroRow.getByTestId('hp-steppers')).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
+  } finally {
+    releaseEvents();
+    if (playerMemberId != null) {
+      await writer.request
+        .patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`, { data: { role: 'player' } })
+        .catch(() => undefined);
+    }
+    if (encounterId != null) {
+      await writer.request.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+      await writer.request.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
+    }
+    if (characterId != null) {
+      await writer.request.delete(`/api/v1/characters/${characterId}`).catch(() => undefined);
+    }
+    await Promise.all([page.close(), sidecar.close()]);
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});

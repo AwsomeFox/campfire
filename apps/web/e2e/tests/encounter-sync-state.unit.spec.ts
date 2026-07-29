@@ -18,6 +18,7 @@ import {
   encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
   isConnectingGraceElapsed,
+  revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
 } from '../../src/features/encounters/encounterSyncState';
 
@@ -106,6 +107,10 @@ test.describe('encounter sync state (issue #471)', () => {
     // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
     expect(source).toMatch(/canDmWrite\s*&&\s*encounterOverrideOfferable/);
     expect(source).toMatch(/encounterSyncOverrideBannerKey/);
+    // Issue #1446 review fix (round 4): the override must not survive loss of DM
+    // authority — revoked in the persisted state AND masked atomically at render time.
+    expect(source).toMatch(/revokeEncounterOverrideIfUnauthorized/);
+    expect(source).toMatch(/canDmWrite \? encounterSyncOverride : ENCOUNTER_OVERRIDE_INACTIVE/);
   });
 });
 
@@ -195,6 +200,25 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // "cannot clobber via a stale confirmation" balance the issue asks for).
     expect(encounterActionsBlocked('stale', override)).toBe(true);
     expect(encounterOverrideOfferable('stale')).toBe(true);
+  });
+
+  test('revokeEncounterOverrideIfUnauthorized clears an active override the instant DM authority is lost (issue #1446 review fix)', () => {
+    let override = confirmEncounterOverride();
+    expect(override.active).toBe(true);
+
+    // Still a DM: untouched.
+    override = revokeEncounterOverrideIfUnauthorized(override, true);
+    expect(override.active).toBe(true);
+
+    // Demoted: the override is REVOKED (cleared), not merely masked — a later
+    // re-promotion must require a fresh confirmation, matching the acceptance
+    // criterion's "revoked on demotion" (not "temporarily hidden").
+    override = revokeEncounterOverrideIfUnauthorized(override, false);
+    expect(override.active).toBe(false);
+    expect(encounterActionsBlocked('offline', override)).toBe(true);
+
+    // Idempotent / no-op when there's nothing to revoke.
+    expect(revokeEncounterOverrideIfUnauthorized(ENCOUNTER_OVERRIDE_INACTIVE, false)).toBe(ENCOUNTER_OVERRIDE_INACTIVE);
   });
 
   test('encounterRiskyActionsBlocked (base primitive) is unaffected by the override layer', () => {
