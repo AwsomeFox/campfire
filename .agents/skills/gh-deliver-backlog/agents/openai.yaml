@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deliver GitHub Backlog"
+  short_description: "Deliver prioritized issues through merge"
+  default_prompt: "Use $gh-deliver-backlog to drain open PRs, then implement prioritized issues with four Terra workers until everything in scope is merged or externally blocked."
