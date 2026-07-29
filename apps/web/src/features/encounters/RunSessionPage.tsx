@@ -2298,7 +2298,7 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <>
-            <div className="flex basis-full lg:basis-auto w-full lg:w-auto items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
+            <div className="order-first flex basis-full lg:order-none lg:basis-auto w-full lg:w-auto items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
               {/* Open synchronously from this button's click stack. The newly minted
                   #547 capability navigates only that separate window, never the DM cockpit. */}
               <Btn ghost className="cf-target-44 text-xs" onClick={openPlayerDisplay}>
