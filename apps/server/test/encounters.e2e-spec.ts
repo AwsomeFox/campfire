@@ -11,6 +11,7 @@ import {
   encounterEvents as encounterEventsTable,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { EncountersService } from '../src/modules/encounters/encounters.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -1733,6 +1734,145 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
     const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(after.body.name).toBe('Crossroads Ambush'); // unchanged from the prior test
     expect(after.body.fog.enabled).toBe(true); // Tab A's edit survived
+  });
+});
+
+describe('encounters — lifecycle write serialization (issue #1461, e2e)', () => {
+  let ctx: TestAppContext;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Lifecycle Race Campaign' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Lifecycle Race' });
+    encounterId = encounter.body.id;
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'First', hpMax: 12 });
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Second', hpMax: 12 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function freshRunningEncounter(withCharacter = false) {
+    const server = ctx.app.getHttpServer();
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: `Lifecycle Gate ${Date.now()}` });
+    let characterId: number | undefined;
+    if (withCharacter) {
+      characterId = (await request(server).post(`/api/v1/campaigns/${campaign.body.id}/characters`).set(dm).send({ name: 'Gate Aria', hpCurrent: 20, hpMax: 20 })).body.id;
+    }
+    const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Gated Fight' });
+    if (!withCharacter) {
+      await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Gate One', hpMax: 12 });
+      await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Gate Two', hpMax: 12 });
+    }
+    await request(server).post(`/api/v1/encounters/${encounter.body.id}/roll-initiative`).set(dm).send({});
+    const started = await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm).send({});
+    return { encounterId: encounter.body.id as number, characterId, currentCombatantId: started.body.currentCombatantId as number };
+  }
+
+  function holdFirstEncounterRead(encounterId: number) {
+    const service = ctx.app.get(EncountersService) as unknown as { getRowOrThrow: (id: number) => Promise<unknown> };
+    const original = EncountersService.prototype.getRowOrThrow;
+    let hold = true;
+    let observed!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { observed = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id) => {
+      const row = await original.call(service as never, id);
+      if (hold && id === encounterId) {
+        hold = false;
+        observed();
+        await resume;
+      }
+      return row;
+    });
+    return { reached, release, restore: () => jest.restoreAllMocks() };
+  }
+
+  it('keeps a manual initiative written after roll reads but before its transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId: gatedEncounterId } = await freshRunningEncounter();
+    const combatant = (await request(server).get(`/api/v1/encounters/${gatedEncounterId}`).set(dm)).body.combatants[0];
+    await request(server).patch(`/api/v1/encounters/${gatedEncounterId}/combatants/${combatant.id}`).set(dm).send({ initiative: null });
+    const gate = holdFirstEncounterRead(gatedEncounterId);
+    const rolling = request(server).post(`/api/v1/encounters/${gatedEncounterId}/roll-initiative`).set(dm).send({}).then((response) => response);
+    await gate.reached;
+    expect((await request(server).patch(`/api/v1/encounters/${gatedEncounterId}/combatants/${combatant.id}`).set(dm).send({ initiative: 19 })).status).toBe(200);
+    gate.release();
+    await rolling;
+    gate.restore();
+    const after = await request(server).get(`/api/v1/encounters/${gatedEncounterId}`).set(dm);
+    expect(after.body.combatants.find((row: { id: number }) => row.id === combatant.id).initiative).toBe(19);
+  });
+
+  it('writes a heal that lands after End reads but before its transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId: gatedEncounterId, characterId } = await freshRunningEncounter(true);
+    const combatantId = (await request(server).get(`/api/v1/encounters/${gatedEncounterId}`).set(dm)).body.combatants[0].id;
+    expect((await request(server).patch(`/api/v1/encounters/${gatedEncounterId}/combatants/${combatantId}`).set(dm).send({ hpSet: 10 })).status).toBe(200);
+    const gate = holdFirstEncounterRead(gatedEncounterId);
+    const ending = request(server).post(`/api/v1/encounters/${gatedEncounterId}/end`).set(dm).send({}).then((response) => response);
+    await gate.reached;
+    const healed = await request(server).patch(`/api/v1/encounters/${gatedEncounterId}/combatants/${combatantId}`).set(dm).send({ hpSet: 17 });
+    expect(healed.status).toBe(200);
+    expect(healed.body.hpCurrent).toBe(17);
+    expect((await request(server).get(`/api/v1/encounters/${gatedEncounterId}`).set(dm)).body.combatants[0].hpCurrent).toBe(17);
+    gate.release();
+    expect((await ending).status).toBe(201);
+    gate.restore();
+    expect((await request(server).get(`/api/v1/characters/${characterId}`).set(dm)).body.hpCurrent).toBe(17);
+  });
+
+  it('concurrent next-turn and end-turn advance exactly once', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId: gatedEncounterId, currentCombatantId } = await freshRunningEncounter();
+    const [next, end] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${gatedEncounterId}/next-turn`).set(dm).send({ expectedCurrentCombatantId: currentCombatantId }),
+      request(server).post(`/api/v1/encounters/${gatedEncounterId}/end-turn`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({ expectedCurrentCombatantId: currentCombatantId }),
+    ]);
+    expect([next.status, end.status].sort()).toEqual([201, 409]);
+    const loser = next.status === 409 ? next : end;
+    expect(loser.body.code ?? loser.body.message?.code).toBe('TURN_ALREADY_ADVANCED');
+  });
+
+  it('concurrent initiative rolls commit one value/log set, then only one concurrent end wins', async () => {
+    const server = ctx.app.getHttpServer();
+    const [firstRoll, secondRoll] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm).send({}),
+      request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({}),
+    ]);
+    expect([firstRoll.body.rolledCount, secondRoll.body.rolledCount].sort()).toEqual([0, 2]);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rollEvents = (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))).filter(
+      (event) => event.type === 'roll',
+    );
+    expect(rollEvents).toHaveLength(2);
+
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm).send({})).status).toBe(201);
+    const [firstEnd, secondEnd] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm).send({}),
+      request(server).post(`/api/v1/encounters/${encounterId}/end`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({}),
+    ]);
+    // A request that reaches the end transaction after the winner returns 409, while
+    // one that observes the already-ended encounter before entering it retains the
+    // established 400 endpoint contract. Either path must leave exactly one winner.
+    const endStatuses = [firstEnd.status, secondEnd.status];
+    expect(endStatuses.filter((status) => status === 201)).toHaveLength(1);
+    expect([400, 409]).toContain(endStatuses.find((status) => status !== 201));
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.status).toBe('ended');
   });
 });
 

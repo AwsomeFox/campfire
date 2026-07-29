@@ -15,13 +15,18 @@ function encounterUrl(encounterId: number): string {
 function isDefaultPatch(request: Request): boolean {
   if (request.method() !== 'PATCH') return false;
   const body = request.postDataJSON() as Record<string, unknown> | null;
-  return body?.gridScale === 5 && body?.gridUnit === 'ft' && Object.keys(body).length === 2;
+  return (
+    body?.gridScale === 5 &&
+    body?.gridUnit === 'ft' &&
+    typeof body.expectedUpdatedAt === 'string' &&
+    Object.keys(body).length === 3
+  );
 }
 
 function isScaleOnlyDefaultPatch(request: Request): boolean {
   if (request.method() !== 'PATCH') return false;
   const body = request.postDataJSON() as Record<string, unknown> | null;
-  return body?.gridScale === 5 && Object.keys(body).length === 1;
+  return body?.gridScale === 5 && typeof body.expectedUpdatedAt === 'string' && Object.keys(body).length === 2;
 }
 
 async function createGridEncounter(page: Page, name: string): Promise<number> {
@@ -108,8 +113,10 @@ test.describe('battle-grid default normalization — issue #865', () => {
     await expect
       .poll(async () => readEncounter(page, encounterId))
       .toMatchObject({ gridSize: 8, gridScale: 5, gridUnit: 'ft' });
-    await page.waitForTimeout(750);
-    expect(defaultPatches).toBe(1);
+    // The deliberately concurrent name update advances the encounter revision while the
+    // held default request is in flight. Its CAS failure must retry against fresh truth;
+    // the pre-settlement assertions above still pin that SSE/poll do not queue duplicates.
+    await expect.poll(() => defaultPatches).toBe(2);
     expect(await meaningfulDefaultAuditCount(page, encounterId)).toBe(1);
   });
 

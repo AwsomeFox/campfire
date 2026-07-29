@@ -70,7 +70,7 @@ import {
 import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
+import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
@@ -90,6 +90,13 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
+import {
+  isAdjacentDuplicateEncounterPatch,
+  observedEncounterPatchRevision,
+  reconcileEncounterPatchResponse,
+  type QueuedEncounterPatch,
+} from './encounterPatchQueue';
+import { pendingFogForEncounter, reconcileFogSyncState, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -496,12 +503,12 @@ function EncounterLinks({
   campaignId,
   encounter,
   canEdit,
-  onSaved,
+  onSave,
 }: {
   campaignId: number;
   encounter: EncounterWithCombatants;
   canEdit: boolean;
-  onSaved: (updated: Partial<EncounterWithCombatants>) => void;
+  onSave: (patch: Record<string, number | null>) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
@@ -569,8 +576,7 @@ function EncounterLinks({
     setSaving(true);
     setError(null);
     try {
-      const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
-      onSaved(updated);
+      await onSave(patch);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.updateLinks' }));
     } finally {
@@ -985,6 +991,10 @@ export default function RunSessionPage() {
   // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
   const [actionError, setActionError] = useState<ActionErrorState>(null);
+  const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
+  const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
+  const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
+  const lastLocalEncounterRevision = useRef(new Map<number, string>());
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
@@ -1181,7 +1191,13 @@ export default function RunSessionPage() {
   // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
-    queryFn: () => api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+    queryFn: async () =>
+      reconcileEncounterPatchResponse(
+        await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+        pendingEncounterPatches.current.values(),
+        '',
+        eid,
+      ),
     enabled: Number.isFinite(eid),
     refetchInterval: 5_000,
   });
@@ -1455,6 +1471,13 @@ export default function RunSessionPage() {
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);
+  const reportTurnAdvanceError = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.code === 'TURN_ALREADY_ADVANCED') {
+      surfaceActionError('Another device already advanced the turn. The tracker has refreshed.');
+      return;
+    }
+    reportError(err);
+  }, [reportError, surfaceActionError]);
 
   // Issue #580 — the ambiguous-outcome gate. When a combat write times out or its socket
   // drops, the outcome is genuinely unknown: the server may have committed. Showing a
@@ -1548,7 +1571,7 @@ export default function RunSessionPage() {
     onMutate: () => setActionError(null),
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
-      else reportError(err);
+      else reportTurnAdvanceError(err);
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
@@ -1567,7 +1590,7 @@ export default function RunSessionPage() {
     onMutate: () => setActionError(null),
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
-      else reportError(err);
+      else reportTurnAdvanceError(err);
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
@@ -1893,7 +1916,10 @@ export default function RunSessionPage() {
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
-  const pendingEncounterPatchKeys = useRef(new Set<string>());
+  const encounterPatchQueue = useRef<Promise<void>>(Promise.resolve());
+  const encounterPatchSequence = useRef(0);
+  const activeEncounterIdRef = useRef(eid);
+  activeEncounterIdRef.current = eid;
   const gridDefaultAttempts = useRef(new Set<string>());
   // #1589 — a default-normalization attempt that DEDUPES against another in-flight PATCH
   // owning the same pending key (see `queueEncounterPatch` below) registers a wake-up here,
@@ -1912,15 +1938,46 @@ export default function RunSessionPage() {
   // which of those two things happens to occur.
   const gridDefaultRetryOnFree = useRef(new Map<string, () => void>());
   const setMap = useMutation({
-    mutationFn: ({ patch }: { patch: Record<string, unknown>; pendingKey: string; defaultAttemptKey?: string }) =>
-      api.patch(`${API}/encounters/${eid}`, patch),
-    onMutate: () => setActionError(null),
+    mutationFn: ({
+      encounterId,
+      patch,
+      expectedUpdatedAt,
+    }: {
+      encounterId: number;
+      patch: Record<string, unknown>;
+      queueId: string;
+      pendingKey: string;
+      defaultAttemptKey?: string;
+      expectedUpdatedAt?: string;
+    }) => api.patch<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { ...patch, expectedUpdatedAt }),
+    onMutate: (variables) => {
+      if (variables.encounterId !== activeEncounterIdRef.current) return;
+      setActionError(null);
+      setEncounterPatchConflict(null);
+    },
     onError: (error, variables) => {
       if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
-      reportError(error);
+      if (variables.encounterId !== activeEncounterIdRef.current) return;
+      if (isStaleWrite(error)) {
+        if (!variables.defaultAttemptKey) {
+          setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
+        }
+      } else reportError(error);
+    },
+    onSuccess: (updated, variables) => {
+      lastLocalEncounterRevision.current.set(variables.encounterId, updated.updatedAt);
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), () =>
+        reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.queueId, variables.encounterId),
+      );
     },
     onSettled: (_data, error, variables) => {
-      pendingEncounterPatchKeys.current.delete(variables.pendingKey);
+      pendingEncounterPatches.current.delete(variables.queueId);
+      if (!Array.from(pendingEncounterPatches.current.values()).some((entry) => entry.encounterId === variables.encounterId)) {
+        lastLocalEncounterRevision.current.delete(variables.encounterId);
+      }
+      const hasLaterPendingFog = Array.from(pendingEncounterPatches.current.values()).some(
+        (entry) => entry.encounterId === variables.encounterId && Object.prototype.hasOwnProperty.call(entry.patch, 'fog'),
+      );
       // #1589 — wake a default attempt that deduped against this exact pending key, but ONLY
       // when the request that just settled was NOT itself a default attempt.
       //
@@ -1944,21 +2001,25 @@ export default function RunSessionPage() {
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
       if (wake && error && !variables.defaultAttemptKey) wake();
+      if (!hasLaterPendingFog && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
+        const settledFog = variables.patch.fog as FogState | null;
+        setPendingFog((current) =>
+          current?.encounterId === variables.encounterId && fogStatesEqual(current.fog, settledFog) ? undefined : current,
+        );
+      }
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
       // than mutation-render churn immediately creating an unbounded failure loop.
-      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, eid);
+      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, variables.encounterId);
     },
   });
-  const mutateMapRef = useRef(setMap.mutate);
-  mutateMapRef.current = setMap.mutate;
 
   const attemptGridDefaultsRef = useRef<() => void>(() => {});
 
   const queueEncounterPatch = useCallback(
-    (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
+    (patch: Record<string, unknown>, defaultAttemptKey?: string): Promise<void> | false => {
       const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
-      if (pendingEncounterPatchKeys.current.has(pendingKey)) {
+      if (isAdjacentDuplicateEncounterPatch(pendingEncounterPatches.current.values(), eid, pendingKey)) {
         // #1589 — dedup against the in-flight request that already owns this exact body. A
         // default-normalization attempt (`defaultAttemptKey` set) that loses this race must
         // still get its retry once the owning request frees the key — see the ref's doc
@@ -1968,22 +2029,38 @@ export default function RunSessionPage() {
         }
         return false;
       }
-      pendingEncounterPatchKeys.current.add(pendingKey);
+      const queueId = `${pendingKey}:${++encounterPatchSequence.current}`;
+      const observedUpdatedAt = observedEncounterPatchRevision(
+        pendingEncounterPatches.current.values(),
+        eid,
+        queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt,
+      );
+      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, observedUpdatedAt, patch });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
-      // Record the default intent before dispatch. Strict Mode's second effect pass, mutation
-      // renders, and stale polling/SSE responses therefore all see committed-looking defaults;
-      // the pending-key guard remains the final backstop if a stale response overwrites them.
-      if (defaultAttemptKey) {
-        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
-          current ? { ...current, ...patch } : current,
-        );
-      }
+      // Make every encounter patch optimistic. Fog edits in particular need their cache value
+      // to survive the next poll while the write is in flight; the version token below turns a
+      // real remote collision into an explicit conflict rather than last-writer-wins.
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+        current ? { ...current, ...patch } : current,
+      );
 
-      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey });
-      return true;
+      // Serialize local writes. Each queued patch reads the version only when it is about
+      // to dispatch, after the preceding success has installed its returned revision in
+      // the cache. Different fog bodies therefore cannot race each other with the same CAS
+      // token and discard the later local edit as a false stale-write conflict.
+      const queuedEncounterId = eid;
+      const mutateQueuedPatch = setMap.mutateAsync;
+      const queued = encounterPatchQueue.current
+        .catch(() => undefined)
+        .then(async () => {
+          const expectedUpdatedAt = lastLocalEncounterRevision.current.get(queuedEncounterId) ?? observedUpdatedAt;
+          await mutateQueuedPatch({ encounterId: queuedEncounterId, queueId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
+        });
+      encounterPatchQueue.current = queued.catch(() => undefined);
+      return queued;
     },
-    [eid, queryClient],
+    [eid, queryClient, setMap.mutateAsync],
   );
 
   // #1589 — the single place that decides "is a grid default still missing, and have we not
@@ -2015,7 +2092,9 @@ export default function RunSessionPage() {
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
   const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
-  const setEncounterFog = useCallback((fog: FogState | null) => queueEncounterPatch({ fog }), [queueEncounterPatch]);
+  const setEncounterFog = useCallback((fog: FogState | null) => {
+    if (queueEncounterPatch({ fog })) setPendingFog({ encounterId: eid, fog });
+  }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
 
@@ -2301,6 +2380,16 @@ export default function RunSessionPage() {
           onDismiss={actionError ? () => setActionError(null) : undefined}
         />
       )}
+      {encounterPatchConflict && (
+        <ErrorNote
+          message={encounterPatchConflict}
+          onRetry={() => {
+            setEncounterPatchConflict(null);
+            refetchEncounter();
+          }}
+          onDismiss={() => setEncounterPatchConflict(null)}
+        />
+      )}
 
       {/* Issue #580 — ambiguous outcome. NOT an error banner: the write may well have
           succeeded, and calling it a failure is what pushes a DM into re-clicking (a new
@@ -2330,12 +2419,10 @@ export default function RunSessionPage() {
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
-            await api.patch(`${API}/encounters/${eid}`, { hidden: true });
-            invalidateEncounter(queryClient, eid);
+            await queueEncounterPatch({ hidden: true });
           }}
           onUndoHide={async () => {
-            await api.patch(`${API}/encounters/${eid}`, { hidden: false });
-            invalidateEncounter(queryClient, eid);
+            await queueEncounterPatch({ hidden: false });
           }}
         />
       )}
@@ -2624,11 +2711,9 @@ export default function RunSessionPage() {
         campaignId={cid}
         encounter={encounter}
         canEdit={canEditEncounter}
-        onSaved={(updated) =>
-          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
-            prev ? { ...prev, ...updated } : prev,
-          )
-        }
+        onSave={async (patch) => {
+          await queueEncounterPatch(patch);
+        }}
       />
 
       {canDmWrite && preparingSetupGuidance && (
@@ -2685,6 +2770,7 @@ export default function RunSessionPage() {
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
+          pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
@@ -3286,6 +3372,7 @@ export function BattleMap({
   onSetTokenSize,
   onSetGrid,
   onSetFog,
+  pendingFog,
   onSetAoe,
   onGenerateMap,
   onImportMap,
@@ -3314,6 +3401,8 @@ export function BattleMap({
   onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
+  /** A fog write is optimistic until the server settles; polls must not discard its local undo history. */
+  pendingFog?: FogState | null;
   onSetAoe: (aoe: AoeTemplate[]) => void;
   /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
@@ -3640,7 +3729,9 @@ export function BattleMap({
     if (effectiveIsDm) return all;
     return filterAoeTemplatesForViewer(all, encounter.fog, { viewerUserId });
   }, [encounter.aoe, encounter.fog, effectiveIsDm, viewerUserId]);
-  const fog = encounter.fog;
+  // Keep the optimistic fog as both the rendered and editable source until its PATCH
+  // settles; a stale poll must not make the map appear to revert mid-gesture.
+  const fog = pendingFog === undefined ? encounter.fog : pendingFog;
   const fogOn = !!fog?.enabled;
 
   const commitFogEdit = useCallback(
@@ -3654,14 +3745,25 @@ export function BattleMap({
   );
 
   useEffect(() => {
-    if (!fogStatesEqual(encounter.fog, lastLocalFogRef.current)) {
-      lastLocalFogRef.current = encounter.fog;
-      fogUndoStackRef.current.reset();
-      setSelectedFogRegionId(null);
-      setFogRegionDrag(null);
-      syncFogUndoUi();
+    // The query cache is updated optimistically, but an older poll/SSE response can still
+    // arrive before the PATCH settles. Keep the local edit and its active drag/undo state
+    // authoritative during that interval; on settle the parent clears this marker and the
+    // fresh server snapshot becomes the new baseline.
+    const sync = reconcileFogSyncState({
+      serverFog: encounter.fog,
+      localFog: lastLocalFogRef.current,
+      pendingFog,
+    });
+    if (!sync.resetLocalUi) {
+      lastLocalFogRef.current = sync.fog;
+      return;
     }
-  }, [encounter.fog, syncFogUndoUi]);
+    lastLocalFogRef.current = sync.fog;
+    fogUndoStackRef.current.reset();
+    setSelectedFogRegionId(null);
+    setFogRegionDrag(null);
+    syncFogUndoUi();
+  }, [encounter.fog, pendingFog, syncFogUndoUi]);
 
   const undoFogEdit = useCallback(() => {
     if (!fogUndoStackRef.current.canUndo()) return;
