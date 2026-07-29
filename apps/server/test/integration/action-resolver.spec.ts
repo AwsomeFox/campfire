@@ -678,6 +678,24 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [] }), bob, 'player')).toThrow(/own character/i);
   });
 
+  it('a player may resolve or apply only on their active turn, while the DM may override', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const request = ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false });
+
+    // A direct resolve after the turn advances is refused even though Alice still owns the actor.
+    orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+    expect(() => service.resolve(encounterId, request, alice, 'player')).toThrow(/active turn/i);
+
+    // A preview opened on Alice's turn cannot be applied after the turn advances.
+    orm.update(encounters).set({ currentCombatantId: actor }).where(eq(encounters.id, encounterId)).run();
+    const preview = service.resolve(encounterId, request, alice, 'player');
+    orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+    expect(() => service.apply(encounterId, preview.resolution, alice, 'player')).toThrow(/active turn/i);
+
+    // DM override remains available for the same stale resolution.
+    expect(service.apply(encounterId, preview.resolution, dmUser, 'dm').undoToken).toBeDefined();
+  });
+
   it('the DM resolves a monster action against a player via an inline spec', () => {
     const { orm, service, encounterId, drake, bob: bobCombat } = seed();
     const res = service.resolve(

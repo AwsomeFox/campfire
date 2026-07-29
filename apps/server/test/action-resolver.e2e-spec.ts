@@ -92,8 +92,14 @@ describe('action resolver (e2e HTTP)', () => {
     monsterHp = monRes.body.hpCurrent; // DM view: exact HP (statblock-derived, not redacted)
     expect(monsterHp).toBeGreaterThan(6);
 
-    // Put the encounter into a running round so HP applies land.
-    await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ status: 'running', round: 1 });
+    // Start through the lifecycle route with the player's PC holding the active turn.
+    // The resolver now enforces that player actions belong to this live turn, not merely
+    // to an owned character.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${actorId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ initiative: 10 });
+    const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm).send({});
+    expect(startRes.status).toBe(201);
+    expect(startRes.body.currentCombatantId).toBe(actorId);
   });
 
   afterAll(async () => {
@@ -385,5 +391,39 @@ describe('action resolver (e2e HTTP)', () => {
     const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
     expect(monsterAfter).toBe(monsterBefore);
+  });
+
+  it('issue #1316: a stale player preview cannot resolve or apply after the DM advances the turn', async () => {
+    const server = ctx.app.getHttpServer();
+    const previewRes = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(player)
+      .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+    expect(previewRes.status).toBe(200);
+
+    const advanceRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm).send({});
+    expect(advanceRes.status).toBe(201);
+    expect(advanceRes.body.currentCombatantId).toBe(monsterId);
+
+    const staleResolve = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(player)
+      .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true });
+    expect(staleResolve.status).toBe(403);
+
+    const beforeApply = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const staleApply = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(player).send({ chainId: previewRes.body.chainId });
+    expect(staleApply.status).toBe(403);
+    const afterApply = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(afterApply.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent).toBe(
+      beforeApply.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent,
+    );
+
+    // The same server-owned chain remains available to the DM as an override.
+    const dmApply = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(dm).send({ chainId: previewRes.body.chainId });
+    expect(dmApply.status).toBe(200);
+    const undo = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(dm).send(dmApply.body.undoToken);
+    expect(undo.status).toBe(200);
+  });
   });
 });

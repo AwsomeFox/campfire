@@ -2831,7 +2831,7 @@ export default function RunSessionPage() {
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
           onUseSuggestedAction={
-            currentCombatantId != null && (isDm || turnWorkspace?.isYourTurn === true)
+            currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
                   const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
                   if (!actor || !spec) return;

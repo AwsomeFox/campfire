@@ -397,6 +397,14 @@ export class ActionResolverService {
     return character !== null && character.ownerUserId === user.id;
   }
 
+  /** A player may act only with their owned character while it holds the live combat turn. */
+  private assertPlayerActiveTurn(encounter: typeof encounters.$inferSelect, actor: typeof combatants.$inferSelect, role: Role): void {
+    if (role === 'dm') return;
+    if (encounter.status !== 'running' || encounter.turnPhase !== 'combatant' || encounter.currentCombatantId !== actor.id) {
+      throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+    }
+  }
+
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
   private resolveSpec(
     actor: typeof combatants.$inferSelect,
@@ -525,7 +533,7 @@ export class ActionResolverService {
   /**
    * Resolve an action into a full preview, and — when `commit` is set and the caller is
    * authorized under the policy — apply it atomically in the same call. A monster/NPC-actor
-   * action is DM-only; a player may only act with their own PC (issue #414 authorization).
+   * action is DM-only; a player may act only with their own PC on its active turn.
    */
   resolve(encounterId: number, req: ActionResolveRequest, user: RequestUser, role: Role): ActionResolveResult {
     const encounter = this.encounterRowOrThrow(encounterId);
@@ -537,6 +545,7 @@ export class ActionResolverService {
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
         throw new ForbiddenException('Only the DM may resolve a monster/NPC action; a player may act only with their own character.');
       }
+      this.assertPlayerActiveTurn(encounter, actor, role);
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
@@ -1315,6 +1324,7 @@ export class ActionResolverService {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
       }
+      this.assertPlayerActiveTurn(encounter, actor, role);
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
       if (!canApply) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'policy_forbids');

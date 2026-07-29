@@ -729,7 +729,7 @@ export class EncountersController {
     description:
       'Requires at least the player role (issue #1450). Rolls the attack or the targets’ saves with the correct modifiers, compares ' +
       'against AC / DC, classifies the outcome (5e hit/miss/crit or PF2e degrees), and returns a per-target PREVIEW with ' +
-      'player-safe text separated from DM-only mechanics. A player may resolve only their OWN character’s action (a ' +
+      'player-safe text separated from DM-only mechanics. A player may resolve only their OWN active character’s action (a ' +
       'monster/NPC action is DM-only) but may target anyone — so a player can finish an attack against a monster ' +
       'end-to-end. Pass `commit: true` to apply atomically in the same call when the campaign policy permits (automatic); ' +
       'otherwise the result is a declaration the DM applies (dm-confirmed / player-declares). An unsupported action shape ' +
@@ -755,7 +755,7 @@ export class EncountersController {
       'Requires at least the player role (issue #1450). Pass the `chainId` returned by /actions/resolve — a LOOKUP KEY ' +
       'only (issue #1451): the server re-reads the exact resolution it computed and persisted at resolve time, so a ' +
       'caller cannot inflate damage, alter a per-target delta, or inject a condition/effect never in the resolved spec. ' +
-      'The DM may apply any resolution; a player only their own character’s action under an automatic policy. Returns ' +
+      'The DM may apply any resolution; a player only their own active character’s action under an automatic policy. Returns ' +
       'an undo token that reverses the whole apply.',
   })
   @ApiResponse({ status: 200, description: 'Applied; returns the undo token.' })
