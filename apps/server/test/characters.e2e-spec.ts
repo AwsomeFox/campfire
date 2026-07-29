@@ -1138,7 +1138,7 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
     expect(rejected.status).toBe(400);
   });
 
-  it('resources persist on the general PATCH (and reject used outside [0, max] instead of clamping)', async () => {
+  it('resources persist on the general PATCH (reject used outside [0, max], merge over existing)', async () => {
     const res = await dbUpdate(server, dm1492, charId, {
       resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
     });
@@ -1158,6 +1158,30 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
       resources: { ki: { max: 5, used: -1 } },
     });
     expect(overrestore.status).toBe(400);
+    // MERGE, not wholesale replace: sending a second pool preserves the first (and its
+    // name/recharge metadata). A caller — notably MCP upsert_character, which advertises
+    // resources as optional — must not erase pools it didn't mention.
+    const merged = await dbUpdate(server, dm1492, charId, {
+      resources: { sorcery: { max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' } },
+    });
+    expect(merged.status).toBe(200);
+    expect(merged.body.resources.ki).toMatchObject({ max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' });
+    expect(merged.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
+  });
+
+  it('clearing deathState to none on a dead character flips lifecycle status back to active', async () => {
+    // Seed a dead character (lifecycle status + death state), then revive via the general PATCH
+    // without redundantly sending status — matching patchHp / encounter /end, which both flip
+    // status dead -> active on a definitive revive so the PC is re-included in encounter auto-add.
+    const dead = await dbUpdate(server, dm1492, charId, { status: 'dead', deathState: 'dead', hpCurrent: 0 });
+    expect(dead.status).toBe(200);
+    expect(dead.body.status).toBe('dead');
+    expect(dead.body.deathState).toBe('dead');
+    const revived = await dbUpdate(server, dm1492, charId, { deathState: 'none', deathSaveFailures: 0, hpCurrent: 5 });
+    expect(revived.status).toBe(200);
+    expect(revived.body.deathState).toBe('none');
+    expect(revived.body.status).toBe('active');
+    expect(revived.body.hpCurrent).toBe(5);
   });
 });
 

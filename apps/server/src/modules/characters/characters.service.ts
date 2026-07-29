@@ -993,7 +993,18 @@ export class CharactersService {
     // encounter tracker stays the source of truth during a fight; on /end these reconcile back,
     // so a manual sheet PATCH is the out-of-combat path that was missing.
     if (input.hpTemp !== undefined) update.hpTemp = Math.max(0, input.hpTemp);
-    if (input.deathState !== undefined) update.deathState = input.deathState;
+    if (input.deathState !== undefined) {
+      update.deathState = input.deathState;
+      // Synchronize the lifecycle status on a definitive revive, matching patchHp (issue #711)
+      // and the encounter /end reconciliation: a character explicitly cleared to
+      // `deathState: 'none'` while its lifecycle `status` is `'dead'` is alive again, so flip
+      // the status back to `'active'` so the next encounter's auto-add (which selects only
+      // `active` PCs) picks them up. Without this, a DM reviving a dead PC from the sheet would
+      // leave them excluded from future fights despite being alive.
+      if (input.deathState === 'none' && existing.status === 'dead') {
+        update.status = 'active';
+      }
+    }
     if (input.deathSaveSuccesses !== undefined) {
       update.deathSaveSuccesses = clampDeathSaveCount(input.deathSaveSuccesses);
     }
@@ -1006,6 +1017,14 @@ export class CharactersService {
     // a successful spend that was never applied. The general PATCH shares that contract: a
     // silent clamp would return 200 after persisting a different pool than requested. A
     // negative `used` (over-restore) is rejected for the mirror reason.
+    //
+    // MERGE, not wholesale replace: the supplied pools are overlaid on the existing map so a
+    // caller (notably MCP `upsert_character`, which advertises `resources` as optional) that
+    // sends only one pool updates it without erasing the others and their `name`/`recharge`
+    // metadata. This matches the `stats` merge above and the dedicated POST :id/resources
+    // path's single-pool-adjust semantic; the fields that ARE genuine full-snapshot replaces
+    // (`skills`/`actions`/`spellSlots`) are documented as such, but `resources` pools carry
+    // per-pool config the caller would not want to re-send on every edit.
     if (input.resources !== undefined) {
       for (const [key, resource] of Object.entries(input.resources)) {
         if (resource.used < 0 || resource.used > resource.max) {
@@ -1014,7 +1033,11 @@ export class CharactersService {
           );
         }
       }
-      update.resources = toJsonText(input.resources);
+      const merged: Record<string, CharacterResource> = {
+        ...fromJsonText<Record<string, CharacterResource>>(existing.resources, {}),
+        ...input.resources,
+      };
+      update.resources = toJsonText(merged);
     }
     if (input.conditions !== undefined) {
       Object.assign(update, sheetConditionWriteSetFromNames(input.conditions, existing.conditionInstances));

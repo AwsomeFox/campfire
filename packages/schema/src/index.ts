@@ -611,13 +611,16 @@ export type Character = z.infer<typeof Character>;
 // `conditionInstances` is omitted here (issue #1643): it's a READ projection Character
 // exposes so a client can see a leveled condition's `stacks`, not a general write surface —
 // writes go through the dedicated POST :id/conditions (names) and POST :id/conditions/level
-// (a leveled track's level) endpoints, same division as `resources` (read via GET
-// :id/resource-vocabulary + the Character.resources projection, written via POST
-// :id/resources, never the general update). Also a real necessity, not just tidiness: its
-// `z.lazy()` (see the field's own doc comment on `Character`) makes zod-to-json-schema emit
-// a `$ref` for any tool whose input schema spreads `CharacterUpdate.shape` — some MCP
-// clients don't resolve `$ref`, which is exactly what upsert_character's own test asserts
-// never happens (`test/mcp.e2e-spec.ts`, "no tool schema may contain a $ref at all").
+// (a leveled track's level) endpoints. `resources` (read via GET :id/resource-vocabulary +
+// the Character.resources projection) is writable through BOTH the dedicated POST :id/resources
+// spend path (transactional single-pool adjust, issue #1039) AND the general update since
+// issue #1492 — the general update MERGES supplied pools over the existing map (so a partial
+// send preserves the rest) and rejects an overspend the same way the dedicated path does.
+// Also a real necessity, not just tidiness: its `z.lazy()` (see the field's own doc comment on
+// `Character`) makes zod-to-json-schema emit a `$ref` for any tool whose input schema spreads
+// `CharacterUpdate.shape` — some MCP clients don't resolve `$ref`, which is exactly what
+// upsert_character's own test asserts never happens (`test/mcp.e2e-spec.ts`, "no tool schema
+// may contain a $ref at all").
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true, conditionInstances: true })
   .partial()
   .required({ name: true });
