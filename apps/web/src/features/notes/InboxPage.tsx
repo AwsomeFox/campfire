@@ -87,6 +87,9 @@ export default function InboxPage() {
   // render that started the request, never a later one.
   const cidRef = useRef(cid);
   cidRef.current = cid;
+  // Monotonically increments for each sweep start; lets later code ignore completions
+  // that belong to an older run after the user switched campaigns or re-triggered.
+  const sweepTokenRef = useRef(0);
   const { isDm, canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const [searchParams] = useSearchParams();
