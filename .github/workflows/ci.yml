@@ -329,6 +329,7 @@ jobs:
   e2e-web:
     name: e2e-web (${{ matrix.shard }}/4)
     needs: build
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -400,6 +401,7 @@ jobs:
   pwa-web:
     name: pwa-web
     needs: build
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -444,30 +446,80 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
-  # Aggregate required status check for the branch ruleset (context name: "ci").
-  # Depends on the green required gates only. e2e-web and pwa-web still run
-  # independently for signal; main currently fails dozens of unrelated Playwright
-  # tests, and a browser check in the required set would block every PR on a
-  # service-worker timing race.
+  # Aggregate CI signal. Keep `if: always()` so a failed, skipped, or cancelled
+  # dependency still produces an explicit verdict. Browser jobs are included so
+  # `ci: success` means the whole workflow passed, not just the fast required
+  # subset. A cancelled-only run remains red but gets a useful explanation; it
+  # must not silently turn green through GitHub's skipped-job semantics.
   ci:
     name: ci
     if: always()
-    needs: [lint, build, build-test-22, build-test-24, coverage, server-tests, unit-web]
+    needs:
+      [
+        lint,
+        build,
+        build-test-22,
+        build-test-24,
+        coverage,
+        server-tests,
+        unit-web,
+        e2e-web,
+        pwa-web,
+      ]
     runs-on: ubuntu-latest
     steps:
-      - name: Required gates succeeded
+      - name: Evaluate CI jobs
         run: |
-          echo "lint=${{ needs.lint.result }}"
-          echo "build=${{ needs.build.result }}"
-          echo "build-test-22=${{ needs.build-test-22.result }}"
-          echo "build-test-24=${{ needs.build-test-24.result }}"
-          echo "coverage=${{ needs.coverage.result }}"
-          echo "server-tests=${{ needs.server-tests.result }}"
-          echo "unit-web=${{ needs.unit-web.result }}"
-          test "${{ needs.lint.result }}" = "success"
-          test "${{ needs.build.result }}" = "success"
-          test "${{ needs.build-test-22.result }}" = "success"
-          test "${{ needs.build-test-24.result }}" = "success"
-          test "${{ needs.coverage.result }}" = "success"
-          test "${{ needs.server-tests.result }}" = "success"
-          test "${{ needs.unit-web.result }}" = "success"
+          jobs=(
+            "lint:${{ needs.lint.result }}"
+            "build:${{ needs.build.result }}"
+            "build-test-22:${{ needs.build-test-22.result }}"
+            "build-test-24:${{ needs.build-test-24.result }}"
+            "coverage:${{ needs.coverage.result }}"
+            "server-tests:${{ needs.server-tests.result }}"
+            "unit-web:${{ needs.unit-web.result }}"
+            "e2e-web:${{ needs.e2e-web.result }}"
+            "pwa-web:${{ needs.pwa-web.result }}"
+          )
+
+          failed=()
+          incomplete=()
+          for job in "${jobs[@]}"; do
+            name="${job%%:*}"
+            result="${job#*:}"
+            echo "${name}=${result}"
+            if [ "$result" = "failure" ]; then
+              failed+=("$name")
+            elif [ "$result" != "success" ]; then
+              incomplete+=("${name}:${result}")
+            fi
+          done
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            {
+              echo "### CI failed"
+              echo
+              echo "Failed job(s): ${failed[*]}"
+              if [ "${#incomplete[@]}" -gt 0 ]; then
+                echo
+                echo "Also incomplete: ${incomplete[*]}"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if [ "${#incomplete[@]}" -gt 0 ]; then
+            {
+              echo "### CI incomplete"
+              echo
+              echo "No dependency explicitly failed, but these jobs did not finish successfully:"
+              echo
+              echo "${incomplete[*]}"
+              echo
+              echo "This usually means a newer push cancelled this run. Confirm that this run's"
+              echo "commit is still the PR head before investigating it as a regression."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "All CI jobs passed." >> "$GITHUB_STEP_SUMMARY"
