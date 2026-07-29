@@ -59,7 +59,7 @@ async function stubAuthoritativeResult(page: Page, drill: Drill, outcome: Outcom
   const face = outcome === 'stable' ? 10 : 2;
   await page.route(`**/api/v1/encounters/${drill.encounterId}/combatants/${drill.combatantId}/death-save`, async (route) => {
     expect(route.request().method()).toBe('POST');
-    expect(route.request().postDataJSON()).toEqual({});
+    expect(route.request().postDataJSON()).toEqual({ idempotencyKey: expect.any(String) });
     requestCount += 1;
     await route.fulfill({
       status: 201,

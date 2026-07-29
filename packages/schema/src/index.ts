@@ -10069,7 +10069,12 @@ export const CombatantUpdate = z.object({
  * the shared dice log. An explicit contract prevents REST and MCP from drifting into
  * accepting a player-selected result.
  */
-export const DeathSaveRollRequest = z.object({});
+export const DeathSaveRollRequest = z.object({
+  // Unlike legacy combatant PATCHes, this endpoint is new and every call changes
+  // state. Require an intent key so a client that loses its response can replay
+  // the same d20 outcome rather than roll again.
+  idempotencyKey: z.string().min(1).max(128),
+});
 export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**

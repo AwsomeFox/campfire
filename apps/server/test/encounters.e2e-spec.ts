@@ -3135,7 +3135,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       const res = await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
         .set(player)
-        .send({});
+        .send({ idempotencyKey: 'death-save-storage-failure' });
       expect(res.status).toBe(500);
       expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
       const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
@@ -3154,7 +3154,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     const res = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
       .set(player)
-      .send({});
+      .send({ idempotencyKey: 'death-save-natural-one' });
 
     expect(res.status).toBe(201);
     expect(rollSpy).toHaveBeenCalledTimes(1);
@@ -3184,7 +3184,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     const res = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
       .set(player)
-      .send({});
+      .send({ idempotencyKey: 'death-save-natural-twenty' });
 
     expect(res.status).toBe(201);
     expect(rollSpy).toHaveBeenCalledTimes(1);
@@ -3196,6 +3196,34 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(matching).toHaveLength(2);
     expect(matching[0]).toMatchObject({ expr: '1d20', rolls: [20], total: 20 });
     rollSpy.mockRestore();
+  });
+
+  it('replays one committed REST death-save intent after a lost response without another d20 or dice row', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-rest-lost-response' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+
+      expect(first.status).toBe(201);
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+      expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(3);
+    } finally {
+      rollSpy.mockRestore();
+    }
   });
 });
 

@@ -1991,9 +1991,9 @@ export default function RunSessionPage() {
     [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
 
-  const deathSaveRoll = useMutation({
-    mutationFn: (combatantId: number) =>
-      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, {}),
+  const deathSaveRoll = useKeyedMutation({
+    mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
+      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
     onMutate: () => setActionError(null),
     onError: reportError,
     onSettled: () => invalidateEncounter(queryClient, eid),
@@ -2006,7 +2006,7 @@ export default function RunSessionPage() {
 
   /** One server roll drives both the death-save outcome and its shared dice-log entry. */
   const rollDeathSave = useCallback(
-    (combatant: Pick<Combatant, 'id'>) => deathSaveRoll.mutate(combatant.id),
+    (combatant: Pick<Combatant, 'id'>) => deathSaveRoll.mutate({ combatantId: combatant.id }),
     [deathSaveRoll],
   );
 

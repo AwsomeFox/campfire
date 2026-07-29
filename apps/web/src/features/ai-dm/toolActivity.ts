@@ -63,6 +63,7 @@ const RESOURCE_BY_NAME: Record<string, ToolResource> = {
   add_combatant: 'encounter',
   remove_combatant: 'encounter',
   update_combatant: 'encounter',
+  roll_death_save: 'encounter',
   next_turn: 'encounter',
   set_escalation_die: 'encounter',
   roll_initiative: 'encounter',

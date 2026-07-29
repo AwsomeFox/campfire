@@ -29,7 +29,7 @@ export class EncounterEscalationUpdateDto extends createZodDto(EncounterEscalati
 // the unrecognized key) and silently did nothing.
 export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {}
 export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {}
-export class DeathSaveRollDto extends createZodDto(DeathSaveRollRequest.strict().default({})) {}
+export class DeathSaveRollDto extends createZodDto(DeathSaveRollRequest.strict()) {}
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
 export class ActionRollRequestDto extends createZodDto(ActionRollRequest.strict()) {}
 export class ManualRollRequestDto extends createZodDto(ManualRollRequest.strict()) {}

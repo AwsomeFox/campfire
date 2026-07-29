@@ -522,12 +522,12 @@ export class EncountersController {
   async rollDeathSave(
     @Param('id', ParseIntPipe) id: number,
     @Param('cid', ParseIntPipe) cid: number,
-    @Body() _body: DeathSaveRollDto,
+    @Body() body: DeathSaveRollDto,
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
-    return this.encounters.rollDeathSave(id, cid, user, role);
+    return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
   }
 
   @Post(':id/token-batches/preview') @HttpCode(200)

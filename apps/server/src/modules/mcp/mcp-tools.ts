@@ -45,6 +45,7 @@ import {
   EntityType,
   ExpectedUpdatedAt,
   Id,
+  IdempotencyKey,
   LocationCreate,
   LocationStatus,
   LocationUpdate,
@@ -4337,12 +4338,16 @@ export class McpToolsService {
       server,
       user,
       'roll_death_save',
-      'Roll exactly one server-authoritative d20 for a dying character combatant. The same face drives the 5e death-save outcome and one shared dice-log entry; callers cannot choose the result.',
-      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Dying character combatant id — from get_encounter') },
-      async ({ encounterId, combatantId }) => {
+      'Roll exactly one server-authoritative d20 for a dying character combatant. The same face drives the 5e death-save outcome and one shared dice-log entry; callers cannot choose the result. Reuse idempotencyKey after a lost response to replay that exact outcome.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Dying character combatant id — from get_encounter'),
+        idempotencyKey: IdempotencyKey.unwrap().describe('Client-minted action intent key; reuse for retries of this roll'),
+      },
+      async ({ encounterId, combatantId, idempotencyKey }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
-        return this.encounters.rollDeathSave(encounterId as number, combatantId as number, user, role);
+        return this.encounters.rollDeathSave(encounterId as number, combatantId as number, idempotencyKey as string, user, role);
       },
     );
 

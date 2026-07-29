@@ -53,6 +53,7 @@ describe('collaborative handoff tool policy (#1051)', () => {
     for (const name of ['roll_dice', 'roll_action_dice', 'roll_initiative', 'saving_throw']) {
       expect(resolveDriverToolPolicy({ ...livePlay(name), collaborative: true }).policy).toBe('auto');
     }
+    expect(resolveDriverToolPolicy({ ...livePlay('roll_death_save'), collaborative: true }).policy).toBe('confirm');
     // Undo exists to reverse a mistake. A confirmation in front of the undo button leaves a
     // wrong outcome on the board until someone approves removing it.
     expect(resolveDriverToolPolicy({ ...livePlay('undo_action'), collaborative: true }).policy).toBe('auto');

@@ -52,8 +52,8 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 
 An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 
-- ✅ **Full MCP parity — 251 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), the session-zero charter, the AI Dungeon Master seat, members, membership-integrity recovery, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
-- ✅ **MCP resources & prompts** — 6 read surfaces plus 2 prep/recap prompts, beyond the 251-tool set
+- ✅ **Full MCP parity — 252 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), the session-zero charter, the AI Dungeon Master seat, members, membership-integrity recovery, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
+- ✅ **MCP resources & prompts** — 6 read surfaces plus 2 prep/recap prompts, beyond the 252-tool set
 - ✅ **Strict schemas & structured errors** — unknown args are rejected with named keys; errors are machine-parseable `{status, code, message}` JSON
 - ✅ **Headless agent auth** — `POST /auth/token` (credentials → PAT) and an admin "mint a token for a user", so agents and whole tables bootstrap without a browser
 - ✅ **Self-describing REST** — OpenAPI annotations across every controller
@@ -117,7 +117,7 @@ who hits them. Grouped by theme:
 
 **AI depth**
 
-- ✅ **MCP resources & prompts** — 6 read surfaces plus 2 prep/recap prompts, beyond the 251-tool set
+- ✅ **MCP resources & prompts** — 6 read surfaces plus 2 prep/recap prompts, beyond the 252-tool set
 - ✅ **AI Dungeon Master seat** (issue #28, still experimental & admin-gated) — a per-campaign "DM seat" with a full **web UI** (**Settings → AI Dungeon Master**) and an **operating mode**: **off**, **co-DM** (proposes only → the approval queue), or **driver** (holds the seat and runs the live session). Even a driver's **canon writes are forced through proposals**, and it's **tool-scoped to live-play tools** with cross-campaign and admin/destructive tools refused. The UI configures provider (OpenAI/Anthropic/mock) + a **write-only, encrypted API key** (only last-4 shown), a model allowlist, a token budget, and steering instructions; a server admin gets an **AI console** at `/admin/ai` (kill switch, server-wide token cap, provider health). The **shipped default provider is still a no-op that makes no vendor call** — Campfire never calls an LLM vendor from the server by default; narration comes from a connected MCP agent (dm-scoped PAT) or a provider you configure. Players can **nudge / flag / table-vote / request a human takeover** on a stuck driver. All turns are metered against the budget and **audited**. See [AI capabilities](../ai/capabilities.md)
 - ✅ **AI co-DM** — the seat's **co-DM mode**: generated NPCs, encounters, recaps, and story beats always routed through the **approval queue**, never written to canon directly
 - ✅ **Scheduled AI scribe** — an opt-in scribe that drafts session recaps (after a scheduled session ends, or on a per-campaign cron) and files each **as a proposal** for the DM to approve; same experimental gating and token budget as the seat

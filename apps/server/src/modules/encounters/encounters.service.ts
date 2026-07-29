@@ -84,6 +84,14 @@ type CombatantTransactionHook = (
   tx: SyncDb,
   fresh: typeof combatants.$inferSelect,
 ) => void;
+/** Narrow extension point for an action whose idempotent response is not just a combatant. */
+type CombatantUpdateTransactionOptions = {
+  beforeWriteInTransaction?: CombatantTransactionHook;
+  operation?: EncounterOpClaim['operation'];
+  operationFingerprint?: unknown;
+  operationResponse?: (combatant: Combatant) => unknown;
+  replayCombatant?: (response: unknown) => Combatant | null;
+};
 type RollRequestInput = z.infer<typeof RollRequest>;
 type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
@@ -3115,6 +3123,7 @@ export class EncountersService {
   async rollDeathSave(
     encounterId: number,
     combatantId: number,
+    idempotencyKey: string,
     user: RequestUser,
     role: Role,
   ): Promise<{ combatant: Combatant; roll: DiceRoll }> {
@@ -3122,12 +3131,9 @@ export class EncountersService {
     this.assertMutable(encounter);
     const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
-    // Keep the action narrow and authoritative: the endpoint is only meaningful for an
-    // actual dying character. The generic PATCH still permits manual DM counter edits,
-    // but never a client-selected die face.
-    if (combatant.kind !== 'character' || combatant.hpCurrent !== 0 || combatant.deathState !== 'dying') {
-      throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
-    }
+    // This pre-read authorizes the actor. The lifecycle guard itself lives below on a
+    // transaction-local read so a retry can replay the already-committed outcome even
+    // after that first roll made the character stable or dead.
     if (role !== 'dm') {
       if (combatant.characterId === null) throw new ForbiddenException('Only dm may modify this combatant');
       const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
@@ -3136,31 +3142,50 @@ export class EncountersService {
       }
     }
 
-    const result = this.rollDeathSaveD20();
     let roll: DiceRoll | null = null;
+    let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
+    const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
     const updated = await this.updateCombatant(
       encounterId,
       combatantId,
-      { deathSaveRoll: result.total },
+      deathSavePatch,
       user,
       role,
-      (tx, fresh) => {
-        // The pre-read above authorizes the actor; this fresh, transaction-local read is
-        // the authoritative lifecycle gate. A concurrent first roll cannot leave a
-        // second request applying a face to a no-longer-dying combatant.
-        if (
-          fresh.encounterId !== encounterId ||
-          fresh.kind !== 'character' ||
-          fresh.hpCurrent !== 0 ||
-          fresh.deathState !== 'dying'
-        ) {
-          throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
-        }
-        result.label = `${fresh.name} · death save`;
-        roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
+      {
+        operation: 'combatant.death_save_roll',
+        // The d20 is server generated inside the transaction. Bind the key to the action
+        // target, not that random face, so the same intent replays before any new RNG work.
+        operationFingerprint: { combatantId },
+        beforeWriteInTransaction: (tx, fresh) => {
+          // A concurrent first roll cannot leave a second request applying a face to a
+          // no-longer-dying combatant. This code is deliberately after the prior-claim
+          // lookup, so a lost-response retry returns its stored outcome instead.
+          if (
+            fresh.encounterId !== encounterId ||
+            fresh.kind !== 'character' ||
+            fresh.hpCurrent !== 0 ||
+            fresh.deathState !== 'dying'
+          ) {
+            throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
+          }
+          const result = this.rollDeathSaveD20();
+          result.label = `${fresh.name} · death save`;
+          roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
+          // `updateCombatant` applies this server-only face after the hook returns.
+          deathSavePatch.deathSaveRoll = result.total;
+        },
+        operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
+        replayCombatant: (response) => {
+          const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
+          if (!candidate.combatant || !candidate.roll) return null;
+          replayed = { combatant: candidate.combatant, roll: candidate.roll };
+          return candidate.combatant;
+        },
       },
     );
+    if (replayed) return replayed;
     if (roll === null) throw new Error('Death-save dice roll was not persisted');
+    const persistedRoll = roll as DiceRoll;
 
     await this.audit.log({
       actor: auditActor(user),
@@ -3169,10 +3194,10 @@ export class EncountersService {
       entityType: 'combatant',
       entityId: combatantId,
       campaignId: encounter.campaignId,
-      detail: `${combatant.name}: d20 ${result.total}`,
+      detail: `${combatant.name}: d20 ${persistedRoll.total}`,
     });
 
-    return { combatant: updated, roll };
+    return { combatant: updated, roll: persistedRoll };
   }
 
   /** Kept as a seam for deterministic death-save endpoint regressions. */
@@ -3186,7 +3211,7 @@ export class EncountersService {
     patch: CombatantInternalUpdateInput,
     user: RequestUser,
     role: Role,
-    beforeWriteInTransaction?: CombatantTransactionHook,
+    options?: CombatantUpdateTransactionOptions,
   ): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
@@ -3394,14 +3419,16 @@ export class EncountersService {
     const opClaim: EncounterOpClaim | null = patch.idempotencyKey
       ? {
           actorId: user.id,
-          operation: 'combatant.update',
+          operation: options?.operation ?? 'combatant.update',
           key: patch.idempotencyKey,
           encounterId,
           campaignId: encounterRow.campaignId,
           // Fingerprint the payload minus the key itself, plus the target combatant: the
           // same key resent for a DIFFERENT patch is a client bug, and replaying the
           // first response for it would hide the bug rather than surface it.
-          fingerprint: encounterOpFingerprint({ combatantId, ...patch, idempotencyKey: undefined }),
+          fingerprint: encounterOpFingerprint(
+            options?.operationFingerprint ?? { combatantId, ...patch, idempotencyKey: undefined },
+          ),
         }
       : null;
     let replayedCombatant: Combatant | null = null;
@@ -3415,7 +3442,9 @@ export class EncountersService {
             // client does not know the outcome, so the committed HP is the whole point.
             // (A missing body cannot happen here: the combatant response is stored inside
             // this transaction, never backfilled. Fall back defensively anyway.)
-            replayedCombatant = (prior.response as Combatant | null) ?? null;
+            replayedCombatant = options?.replayCombatant
+              ? options.replayCombatant(prior.response)
+              : (prior.response as Combatant | null) ?? null;
             if (replayedCombatant) return;
           }
         }
@@ -3424,7 +3453,7 @@ export class EncountersService {
         // fresh lifecycle read but before this mutation. A failure rolls both it and
         // the ensuing combatant write back. Used only for #1462's mandatory dice-log
         // evidence, which must never diverge from its death-save outcome.
-        beforeWriteInTransaction?.(tx, fresh);
+        options?.beforeWriteInTransaction?.(tx, fresh);
         beforeHp = fresh.hpCurrent;
         beforeTemp = fresh.hpTemp;
         beforeDeath = fresh.deathState;
@@ -3662,7 +3691,11 @@ export class EncountersService {
         // no instant at which the effect exists without its key (double-apply on retry) or
         // the key exists without its effect (a retry blocked from ever applying).
         if (opClaim) {
-          recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+          const committed = combatantToDomain(row);
+          recordEncounterOp(tx, opClaim, nowIso(), {
+            body: options?.operationResponse ? options.operationResponse(committed) : committed,
+            role,
+          });
         }
       });
     } catch (err) {
@@ -3670,7 +3703,12 @@ export class EncountersService {
         // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
         // Replay their response so exactly one apply survives (issue #580).
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response) return prior.response as Combatant;
+        if (prior.response) {
+          const replayed = options?.replayCombatant
+            ? options.replayCombatant(prior.response)
+            : (prior.response as Combatant | null);
+          if (replayed) return replayed;
+        }
         return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
       }
       throw err;

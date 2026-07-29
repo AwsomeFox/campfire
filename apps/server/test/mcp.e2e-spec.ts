@@ -1100,6 +1100,35 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('roll_death_save replays the original MCP outcome for a lost-response retry', async () => {
+    const character = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'MCP Retry Nyx', hpCurrent: 8, hpMax: 8 });
+    expect(character.status).toBe(201);
+    const encounter = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Death Save Retry' });
+    expect(encounter.status).toBe(201);
+    const combatantId = (encounter.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (combatant) => combatant.characterId === character.body.id,
+    )?.id;
+    expect(combatantId).toBeDefined();
+    const dying = await dmAgent.patch(`/api/v1/encounters/${encounter.body.id}/combatants/${combatantId}`).send({ hpSet: 0 });
+    expect(dying.status).toBe(200);
+
+    const client = await mcpClient(dmToken);
+    const arguments_ = {
+      encounterId: encounter.body.id,
+      combatantId: combatantId!,
+      idempotencyKey: 'mcp-death-save-lost-response',
+    };
+    const first = parseResult(await client.callTool({ name: 'roll_death_save', arguments: arguments_ }));
+    const replay = parseResult(await client.callTool({ name: 'roll_death_save', arguments: arguments_ }));
+
+    expect(replay).toEqual(first);
+    const rolls = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(rolls.status).toBe(200);
+    expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Retry Nyx · death save')).toHaveLength(1);
+  });
+
   it('end_turn and set_turn_state (delay/readied) via MCP (issue #487)', async () => {
     const dmClient = await mcpClient(dmToken);
 
