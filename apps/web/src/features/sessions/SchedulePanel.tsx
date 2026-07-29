@@ -1197,10 +1197,10 @@ function ScheduleForm({
         describedBy={error ? formErrorId : undefined}
       />
       <div className="flex gap-2 justify-end">
-        <Btn density="xs" ghost className="text-xs" onClick={onCancel} disabled={saving}>
+        <Btn density="compact" ghost className="text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn density="xs" className="text-xs" onClick={() => void save()} disabled={saving} aria-busy={saving || undefined}>
+        <Btn density="compact" className="text-xs" onClick={() => void save()} disabled={saving} aria-busy={saving || undefined}>
           {saving ? 'Saving…' : initial ? 'Save' : 'Schedule'}
         </Btn>
       </div>

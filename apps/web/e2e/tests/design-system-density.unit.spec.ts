@@ -137,17 +137,12 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
  * by exact match, not by file, for the same reason — see its own comment; none
  * of these files carry any of the className-based patterns above).
  */
-const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  [
-    'inline minHeight:0 override on a .btn/cf-btn control',
-    new Set([
-      resolve(ROOT, 'features/characters/CharacterPage.tsx'),
-      resolve(ROOT, 'features/dashboard/RegionMap.tsx'),
-      resolve(ROOT, 'features/encounters/RunSessionPage.tsx'),
-      resolve(ROOT, 'features/dice/DiceTray.tsx'),
-      resolve(ROOT, 'features/settings/CampaignSettingsPage.tsx'),
-    ]),
-  ],
+const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, number> = new Map([
+  [resolve(ROOT, 'features/characters/CharacterPage.tsx'), 1],
+  [resolve(ROOT, 'features/dashboard/RegionMap.tsx'), 4],
+  [resolve(ROOT, 'features/encounters/RunSessionPage.tsx'), 1],
+  [resolve(ROOT, 'features/dice/DiceTray.tsx'), 1],
+  [resolve(ROOT, 'features/settings/CampaignSettingsPage.tsx'), 2],
 ]);
 
 /**
@@ -328,7 +323,16 @@ test.describe('Design-system density (#674, #1683)', () => {
       if (file.endsWith('design-system-density.unit.spec.ts')) continue;
       const text = READ(file);
       for (const { name, pattern, why } of DRIFT_PATTERNS) {
-        if (INLINE_MIN_HEIGHT_ZERO_ALLOWED.get(name)?.has(file)) continue;
+        if (name === 'inline minHeight:0 override on a .btn/cf-btn control') {
+          const globalPattern = new RegExp(pattern.source, 'g');
+          const matches = text.match(globalPattern);
+          const count = matches ? matches.length : 0;
+          const allowed = INLINE_MIN_HEIGHT_ZERO_ALLOWED.get(file) ?? 0;
+          if (count > allowed) {
+            offenders.push(`${file.replace(ROOT + '/', '')}: ${name} (${count} found, max allowed ${allowed}) (${why})`);
+          }
+          continue;
+        }
         if (pattern.test(text)) {
           offenders.push(`${file.replace(ROOT + '/', '')}: ${name} (${why})`);
         }
