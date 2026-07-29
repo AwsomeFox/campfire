@@ -199,6 +199,7 @@ import {
   encounterSyncBannerMessage,
   encounterSyncChipClass,
   encounterSyncChipLabel,
+  encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
   isConnectingGraceElapsed,
   settleEncounterOverride,
@@ -1319,7 +1320,12 @@ export default function RunSessionPage() {
   // blocked (with the informational banner) for the duration of the outage.
   const encounterSyncOverrideOfferable =
     canDmWrite && encounterOverrideOfferable(encounterSync) && !encounterSyncOverride.active;
-  const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
+  // Issue #1446 review fix: once the override is active, controls ARE actionable again —
+  // the base banner's "combat actions are paused" copy would be actively false (and
+  // contradict the enabled controls for both screen-reader and sighted users). Swap to an
+  // override-aware i18n variant that keeps the stale-data warning without that claim.
+  const overrideBannerKey = encounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
+  const encounterSyncBanner = overrideBannerKey ? t(overrideBannerKey) : encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
     if (syncRevision?.lastSyncAt == null) return undefined;
@@ -1361,7 +1367,17 @@ export default function RunSessionPage() {
     setEncounterReadStale(false);
     setResyncPending(false);
     setSyncRevision(null);
-    setEventStatus(null);
+    // Issue #1446 review fix: deliberately NOT resetting `eventStatus` here. It tracks the
+    // CAMPAIGN's SSE stream (`useCampaignEvents(cid, …)` below), which is keyed on `cid`, not
+    // `eid` — switching to a different encounter in the SAME campaign reuses this component
+    // and the SAME underlying connection; the reconnect loop only calls onStatusChange when
+    // the status actually CHANGES, so a still-`connected` stream never re-announces itself.
+    // Nulling `eventStatus` here used to just leave the chip stuck on "Connecting" (annoying
+    // but survivable pre-#1446, since `connecting` blocked forever anyway with no timeout).
+    // Once the connecting-grace timeout was added, that stale null falsely degraded a
+    // perfectly healthy stream to `offline` after CONNECTING_GRACE_MS on every ordinary
+    // encounter switch — DMs got a bogus override prompt and players were blocked for no
+    // reason. Retaining `eventStatus` across `eid` changes fixes both.
     // Issue #1446: a "continue anyway" override (and the connecting-grace timer) is
     // scoped to this encounter's session — navigating to a different encounter must not
     // carry over an unconfirmed stale-state acknowledgement.
@@ -2723,14 +2739,17 @@ export default function RunSessionPage() {
               {encounter.escalationDieOverride != null ? ` · override +${encounter.escalationDieOverride}` : ''}
             </span>
             {canDmWrite && (
-              // Issue #1446 re-audit: updateEscalationDie only writes encounters.escalationDie*
-              // (no cross-entity write, no shared pointer, no CAS-worthy concurrent writer other
-              // than the DM themself) — genuinely local, so hold/override/clear stay ungated.
+              // Issue #1446 re-audit (2nd pass): `updateEscalationDie` has concurrent writers
+              // beyond this one tab — the REST controller lets any campaign DM call it, and
+              // `set_escalation_die` (mcp-tools.ts) exposes the same unconditional, no-CAS
+              // service write over MCP. A stale tab can clobber a newer override/hold set by a
+              // co-DM or an MCP caller — genuinely shared state, so these stay gated like the
+              // other conflict-prone controls.
               <div className="flex items-center gap-2 flex-wrap ml-auto">
                 <Btn density="xs"
                   ghost
                   className="text-xs"
-                  disabled={headerBusy}
+                  disabled={headerBusy || riskyBlocked}
                   onClick={() => toggleEscalationHold(!encounter.escalationDieHeld)}
                 >
                   {encounter.escalationDieHeld ? 'Resume auto' : 'Hold'}
@@ -2746,7 +2765,7 @@ export default function RunSessionPage() {
                 <Btn density="xs"
                   ghost
                   className="text-xs"
-                  disabled={headerBusy || escalationOverrideDraft.trim() === ''}
+                  disabled={headerBusy || riskyBlocked || escalationOverrideDraft.trim() === ''}
                   onClick={applyEscalationOverride}
                 >
                   Override
@@ -2755,7 +2774,7 @@ export default function RunSessionPage() {
                   <Btn density="xs"
                     ghost
                     className="text-xs"
-                    disabled={headerBusy}
+                    disabled={headerBusy || riskyBlocked}
                     onClick={clearEscalationOverride}
                   >
                     Clear

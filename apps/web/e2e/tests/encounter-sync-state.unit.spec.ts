@@ -15,6 +15,7 @@ import {
   encounterRiskyActionsBlocked,
   encounterSyncBannerMessage,
   encounterSyncChipLabel,
+  encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
   isConnectingGraceElapsed,
   settleEncounterOverride,
@@ -102,6 +103,9 @@ test.describe('encounter sync state (issue #471)', () => {
     expect(source).toMatch(/data-testid="encounter-sync-override-confirm"/);
     expect(source).toMatch(/confirmEncounterOverride/);
     expect(source).toMatch(/settleEncounterOverride/);
+    // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
+    expect(source).toMatch(/canDmWrite\s*&&\s*encounterOverrideOfferable/);
+    expect(source).toMatch(/encounterSyncOverrideBannerKey/);
   });
 });
 
@@ -199,5 +203,24 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // (none currently do, but the primitive is still a correct standalone building block).
     expect(encounterRiskyActionsBlocked('live')).toBe(false);
     expect(encounterRiskyActionsBlocked('offline')).toBe(true);
+  });
+
+  test('override-active banner copy never claims actions are paused (issue #1446 review fix)', () => {
+    // The base (non-override) banner legitimately says actions are paused — that's true
+    // while the DM hasn't confirmed yet.
+    expect(encounterSyncBannerMessage('offline')).toMatch(/paused/i);
+    // Once the override is active, the SAME state must resolve to a DIFFERENT, override-aware
+    // key whose (English) copy does not claim anything is paused/blocked, while still warning
+    // about stale data.
+    for (const state of ['offline', 'reconnecting', 'stale'] as const) {
+      const key = encounterSyncOverrideBannerKey(state);
+      expect(key).not.toBeNull();
+      expect(key).toMatch(/^encounters\.sync\.bannerOverride/);
+    }
+    // `live` (nothing to warn about) and `connecting` (unreachable while an override is
+    // active — encounterOverrideOfferable never offers one during the initial grace) have
+    // no override-banner variant.
+    expect(encounterSyncOverrideBannerKey('live')).toBeNull();
+    expect(encounterSyncOverrideBannerKey('connecting')).toBeNull();
   });
 });

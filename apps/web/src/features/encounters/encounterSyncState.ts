@@ -162,6 +162,31 @@ export function encounterSyncBannerMessage(state: EncounterSyncState): string | 
   }
 }
 
+/**
+ * i18n catalog key (under `encounters.sync.*`) for the banner while a "continue anyway"
+ * override is active (issue #1446 review fix). {@link encounterSyncBannerMessage}'s copy
+ * ("actions are paused") becomes actively FALSE the instant the override unblocks
+ * controls — screen-reader users get a live-region announcement that contradicts what
+ * just became interactive, and sighted users read the same contradiction. This variant
+ * keeps the stale-data warning (the banner must stay visible per the issue) without
+ * claiming anything is blocked. Returns null for `live` (no banner) and `connecting`
+ * (unreachable while an override is active — {@link encounterOverrideOfferable} never
+ * offers one during the initial connecting grace).
+ */
+export function encounterSyncOverrideBannerKey(state: EncounterSyncState): string | null {
+  switch (state) {
+    case 'offline':
+      return 'encounters.sync.bannerOverrideOffline';
+    case 'reconnecting':
+      return 'encounters.sync.bannerOverrideReconnecting';
+    case 'stale':
+      return 'encounters.sync.bannerOverrideStale';
+    case 'connecting':
+    default:
+      return null;
+  }
+}
+
 /** Snapshot written after each successful encounter read. */
 export type EncounterSyncRevision = {
   lastSyncAt: number;

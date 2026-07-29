@@ -342,3 +342,75 @@ test('a player never sees or can grant the override, and their owned combatant s
     await Promise.all([reader.close(), writer.close()]);
   }
 });
+
+/**
+ * Issue #1446 review fix: `RunSessionPage` is reused across encounters in the same
+ * campaign. `useCampaignEvents` is keyed on the CAMPAIGN, not the encounter, and its
+ * reconnect loop only calls `onStatusChange` when the status actually changes — so a
+ * still-`connected` stream never re-announces itself. The connecting-grace timeout added
+ * for this issue used to take the encounter-switch effect's stale `eventStatus` reset as
+ * ground truth and, after CONNECTING_GRACE_MS, wrongly degrade a perfectly healthy stream
+ * to `offline` on ordinary in-app navigation between two encounters — prompting the DM to
+ * override for no reason and leaving a player permanently blocked. No SSE stubbing here:
+ * this must hold up against the real server's real stream.
+ */
+test('switching between two encounters in one campaign does not degrade a connected stream', async ({ browser }) => {
+  const { campaignId } = seed();
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  let encounterAId: number | null = null;
+  let encounterBId: number | null = null;
+
+  try {
+    const live = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+    for (const e of live as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+
+    const encA = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 Switch A', hidden: false },
+      })
+    ).json();
+    encounterAId = encA.id;
+    const encB = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 Switch B', hidden: false },
+      })
+    ).json();
+    encounterBId = encB.id;
+
+    const initialStream = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/v1/campaigns/${campaignId}/events`),
+    );
+    await page.goto(`/c/${campaignId}/encounters/${encounterAId}`);
+    await initialStream;
+
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    await expect(syncChip).toHaveText('Live');
+
+    // In-app navigation (no full reload): back to the list, then into encounter B. Both
+    // links are react-router `<Link>`s (ListDetailLink / DetailPageWayfinding) — the SPA
+    // transition this bug requires, unlike a fresh `page.goto`.
+    await page.getByRole('link', { name: /Back to encounters/i }).click();
+    await page.getByRole('link', { name: /E2E1446 Switch B/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/encounters/${encounterBId}$`));
+
+    // Wait out the FULL connecting-grace window: the regression only manifests once the
+    // timeout elapses, so a shorter wait would pass even with the bug present.
+    await page.waitForTimeout(CONNECTING_GRACE_MS + 4_000);
+    await expect(syncChip).toHaveText('Live');
+    await expect(page.getByTestId('encounter-sync-banner')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
+  } finally {
+    for (const id of [encounterAId, encounterBId]) {
+      if (id != null) {
+        await writer.request.post(`/api/v1/encounters/${id}/end`).catch(() => undefined);
+        await writer.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      }
+    }
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});
