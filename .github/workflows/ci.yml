@@ -112,6 +112,7 @@ jobs:
       - run: npm run check:version
       - run: npm run check:mcp-catalog
       - run: npm run check:i18n
+      - run: npm run check:e2e-spec-coverage
       - run: npm run lint
       - run: npm run typecheck
 
