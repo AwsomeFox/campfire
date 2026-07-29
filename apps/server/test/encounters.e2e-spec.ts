@@ -2774,7 +2774,12 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
 
   it('a hidden NPC combatant hides its identity (npcId + name) from non-DMs (#374)', async () => {
     const server = ctx.app.getHttpServer();
-    const npcId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'The Traitor', hidden: true })).body.id;
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'The Traitor', hidden: true, disposition: 'hostile' })
+    ).body.id;
     const combatantId = (
       await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants`)
@@ -2783,16 +2788,22 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     ).body.id;
     // The DM still sees the real identity link + name.
     const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-    const dmC = (dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((c) => c.id === combatantId)!;
+    const dmC = (
+      dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>
+    ).find((c) => c.id === combatantId)!;
     expect(dmC.npcId).toBe(npcId);
     expect(dmC.name).toBe('The Traitor');
+    expect(dmC.npcDispositionSnapshot).toBe('hostile');
     // A non-DM sees the token in initiative but NOT who it is: identity link severed, name masked.
     for (const headers of [player, viewer]) {
       const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
-      const c = (res.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((x) => x.id === combatantId)!;
+      const c = (
+        res.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>
+      ).find((x) => x.id === combatantId)!;
       expect(c).toBeTruthy();
       expect(c.npcId).toBeNull();
       expect(c.name).not.toBe('The Traitor');
+      expect(c.npcDispositionSnapshot).toBeNull();
       expect(JSON.stringify(c)).not.toMatch(/Traitor/);
     }
   });
@@ -4452,14 +4463,17 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     await db.update(npcs).set({ disposition: 'friendly' }).where(eq(npcs.id, hostileNpcId));
     const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
     const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
     const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
     expect(imported.status).toBe(201);
     const importedEncounters = await request(server).get(`/api/v1/campaigns/${imported.body.id}/encounters`).set(dm);
     const importedNpcOnly = importedEncounters.body.find((encounter: { name: string }) => encounter.name === 'NPC-only fight');
+    const importedNpcOnlyDetail = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}`).set(dm);
+    const importedNpcCombatant = importedNpcOnlyDetail.body.combatants.find((combatant: { kind: string }) => combatant.kind === 'npc');
+    expect(importedNpcCombatant.npcId).toBeNull();
     const importedDifficulty = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}/difficulty`).set(dm);
     expect(importedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
-    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
     await db.update(combatantsTable).set({ npcDispositionSnapshot: null }).where(eq(combatantsTable.encounterId, npcOnly.body.id));
     const legacyDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });

@@ -1334,7 +1334,10 @@ export class EncountersService {
       list = sortCombatants(combatantRows.map(combatantToDomain), status);
     }
     if (viewerRole !== undefined && viewerRole !== 'dm') {
-      list = list.map(redactMonsterHp);
+      // The disposition snapshot preserves encounter-time enemy allegiance for
+      // server-side difficulty/XP calculation. It is DM-only: campaign-authored
+      // values may reveal a hidden NPC's allegiance to players.
+      list = list.map((c) => ({ ...redactMonsterHp(c), npcDispositionSnapshot: null }));
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
       // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
@@ -1930,7 +1933,7 @@ export class EncountersService {
       }
     }
     const enemyCombatants = combatantRows.filter((c) =>
-      c.kind === 'monster' || (c.kind === 'npc' && c.npcId !== null && ((c.npcDispositionSnapshot ?? (hostileNpcIds.has(c.npcId) ? 'hostile' : ''))
+      c.kind === 'monster' || (c.kind === 'npc' && ((c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : ''))
         .trim().toLowerCase() === 'hostile')),
     );
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
