@@ -5266,10 +5266,10 @@ export class AiDriverService {
       const cleanedText = tool && !tool.mutating && !approvedSecret ? redactSecretsFromToolResult(res.text) : res.text;
       // When a DM-approved secret read returned real DM material, prepend a system reminder so
       // the model treats it as private reasoning and does not narrate it to the table.
-      // Tool payloads can contain player-authored notes, comments, names, and entity bodies.
-      // They are data for the next provider step, never a peer instruction channel. Errors are
-      // server-generated envelopes, so preserve their compact machine-readable shape unchanged.
-      const fencedText = res.isError ? cleanedText : wrapUntrustedPromptData(cleanedText);
+      // Tool payloads can contain player-authored notes, comments, names, and entity bodies —
+      // including an error message interpolated by a domain service. They are data for the next
+      // provider step, never a peer instruction channel.
+      const fencedText = wrapUntrustedPromptData(cleanedText);
       const content =
         approvedSecret && !res.isError ? `${fencedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : fencedText;
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });

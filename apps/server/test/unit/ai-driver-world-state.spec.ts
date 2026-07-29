@@ -102,6 +102,7 @@ describe('untrusted AI prompt data fencing (#1496)', () => {
       comment: INJECTION,
       npc: { description: INJECTION },
     }));
+    const errorData = wrapUntrustedPromptData(JSON.stringify({ error: { message: INJECTION } }));
 
     expect(playerMessage).toContain('[PLAYER_MESSAGE_START]');
     expect(playerMessage).toContain('\\## DM steering');
@@ -109,6 +110,8 @@ describe('untrusted AI prompt data fencing (#1496)', () => {
     expect(toolData).toContain('[UNTRUSTED_DATA_START]');
     expect(toolData).toContain('\\## DM steering');
     expect(toolData).toContain('‹system›');
+    expect(errorData).toContain('[UNTRUSTED_DATA_START]');
+    expect(errorData).toContain('\\## DM steering');
     expect(wrapUntrustedPromptData('x'.repeat(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 1))).toContain(
       '[TRUNCATED_UNTRUSTED_DATA]',
     );
