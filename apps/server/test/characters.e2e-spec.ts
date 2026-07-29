@@ -527,6 +527,87 @@ describe('characters (e2e)', () => {
     expect(dmGet.body.dmSecret).toBe('');
   });
 
+  // Issue #1489: patchXp, levelUp, and patchSpellSlots each returned the raw
+  // `toDomain(row)` instead of `redactSecret(toDomain(row), role)`, so the owning
+  // player got the DM's dmSecret back verbatim on three of the most frequently-hit
+  // write paths in play (spending a spell slot happens constantly mid-session).
+  describe('dmSecret redaction on xp/level-up/spell-slots (issue #1489)', () => {
+    const secret = 'the amulet is feeding on her — she loses 1 max HP per long rest and does not know';
+    let secretCharId: number;
+
+    beforeEach(async () => {
+      const server = ctx.app.getHttpServer();
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Cursed Adventurer', dmSecret: secret, ownerUserId: 'dev:owner-1', level: 1, xp: 0 });
+      expect(createRes.status).toBe(201);
+      secretCharId = createRes.body.id;
+
+      // The owning player may set their own spell-slot maxima (same PATCH authority
+      // as any other sheet field) — needed so /spell-slots has a level to spend from.
+      const slotsRes = await request(server)
+        .patch(`/api/v1/characters/${secretCharId}`)
+        .set(owner)
+        .send({ spellSlots: { '1': { max: 4, used: 0 } } });
+      expect(slotsRes.status).toBe(200);
+    });
+
+    it('PATCH /characters/:id/xp — player sees no dmSecret, dm sees it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const playerRes = await request(server)
+        .post(`/api/v1/characters/${secretCharId}/xp`)
+        .set(owner)
+        .send({ delta: 10 });
+      expect(playerRes.status).toBe(201);
+      expect(playerRes.body.xp).toBe(10);
+      expect(playerRes.body.dmSecret).toBeFalsy();
+
+      const dmRes = await request(server)
+        .post(`/api/v1/characters/${secretCharId}/xp`)
+        .set(dm)
+        .send({ delta: 10 });
+      expect(dmRes.status).toBe(201);
+      expect(dmRes.body.xp).toBe(20);
+      expect(dmRes.body.dmSecret).toBe(secret);
+    });
+
+    it('POST /characters/:id/level-up — player sees no dmSecret, dm sees it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const playerRes = await request(server).post(`/api/v1/characters/${secretCharId}/level-up`).set(owner).send({});
+      expect(playerRes.status).toBe(201);
+      expect(playerRes.body.level).toBe(2);
+      expect(playerRes.body.dmSecret).toBeFalsy();
+
+      const dmRes = await request(server).post(`/api/v1/characters/${secretCharId}/level-up`).set(dm).send({});
+      expect(dmRes.status).toBe(201);
+      expect(dmRes.body.level).toBe(3);
+      expect(dmRes.body.dmSecret).toBe(secret);
+    });
+
+    it('POST /characters/:id/spell-slots — player sees no dmSecret, dm sees it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const playerRes = await request(server)
+        .post(`/api/v1/characters/${secretCharId}/spell-slots`)
+        .set(owner)
+        .send({ level: 1, delta: 1 });
+      expect(playerRes.status).toBe(201);
+      expect(playerRes.body.spellSlots['1']).toEqual({ max: 4, used: 1 });
+      expect(playerRes.body.dmSecret).toBeFalsy();
+
+      const dmRes = await request(server)
+        .post(`/api/v1/characters/${secretCharId}/spell-slots`)
+        .set(dm)
+        .send({ level: 1, delta: 1 });
+      expect(dmRes.status).toBe(201);
+      expect(dmRes.body.spellSlots['1']).toEqual({ max: 4, used: 2 });
+      expect(dmRes.body.dmSecret).toBe(secret);
+    });
+  });
+
   // Issue #48: stats keys are normalized to canonical uppercase on write, so a writer
   // that submits lowercase keys ({ str: 16 }) can't produce a sheet that reads all 10s.
   it('stats keys are normalized to uppercase on create', async () => {
