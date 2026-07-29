@@ -56,9 +56,10 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
   },
   {
     name: 'legacy .btn geometry override',
-    // Matches className/class strings that contain both `btn` and `!min-h-0`
-    // regardless of class token ordering, excluding `cf-btn` (issue #1695).
-    pattern: /\bclass(?:Name)?=["'`][^"'`\n]*(?=\bbtn\b)[^"'`\n]*!min-h-0|\bclass(?:Name)?=["'`][^"'`\n]*!min-h-0[^"'`\n]*(?=\bbtn\b)/,
+    // Matches className/class strings (including JSX template expressions `className={...}`)
+    // that contain both bare `btn` (excluding `cf-btn` via negative lookbehind) and `!min-h-0`
+    // regardless of token ordering (issue #1695).
+    pattern: /\bclass(?:Name)?=\{?["'`][^"'`}\n]*(?<!cf-)\bbtn\b[^"'`}\n]*!min-h-0|\bclass(?:Name)?=\{?["'`][^"'`}\n]*!min-h-0[^"'`}\n]*(?<!cf-)\bbtn\b/,
     why: 'use !min-h-[24px] (WCAG 2.2 SC 2.5.8 floor) instead of !min-h-0 on .btn — ' +
       '.btn aliases to the ramp default and !min-h-0 zeroes that out entirely (issue #1695)',
   },
