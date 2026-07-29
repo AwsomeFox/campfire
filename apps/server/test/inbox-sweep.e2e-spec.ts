@@ -6,6 +6,7 @@ import { inboxSweepItems, inboxSweepJobs } from '../src/db/schema';
 import { nowIso } from '../src/common/time';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 import type { AiProviderConfig } from '../src/modules/ai-dm/providers';
+import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import {
   INBOX_SWEEP_CLASSIFIER,
   InvalidInboxSweepClassificationError,
@@ -556,6 +557,87 @@ describe('inbox sweep (e2e)', () => {
     const [ledger] = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId)).limit(1);
     expect(ledger.entityType).toBe('quest');
     expect(ledger.entityId).toBeNull();
+  });
+
+  it('returns each item\'s own capture body, so a result is never limited to what the caller\'s paginated list happened to hold (issue #1718)', async () => {
+    const campaignId = await newCampaign('Sweep Body Beyond First Page');
+    // NOTES_LIST_DEFAULT_LIMIT (the web client's page size for the open-inbox list) is
+    // 50 — seed one more than that so at least one swept item is guaranteed to sit past
+    // whatever the caller's own first page held. The bug this guards: the server used to
+    // omit the item's identifying text entirely, forcing callers to rely on a client-side
+    // pre-sweep snapshot that only ever covered page one.
+    const TOTAL = NOTES_LIST_DEFAULT_LIMIT + 1;
+    const noteIds: number[] = [];
+    for (let i = 0; i < TOTAL; i++) {
+      const body = `Bulk sweep capture ${i} — unique text so the label can't come from anywhere else`;
+      const noteId = await submitInbox(campaignId, body);
+      noteIds.push(noteId);
+      classifier.script.set(body, {
+        action: 'dismiss',
+        entityType: null,
+        targetId: null,
+        fields: {},
+        reason: 'bulk sweep — no canon change needed',
+      });
+    }
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsTotal).toBe(TOTAL);
+    expect(res.body.job.itemsSkipped).toBe(TOTAL);
+    expect(res.body.job.itemsProposed).toBe(0);
+    expect(res.body.items).toHaveLength(TOTAL);
+
+    const byNoteId = new Map<number, { body?: string; outcome?: string }>(
+      res.body.items.map((item: { noteId: number; body?: string; outcome?: string }) => [item.noteId, item]),
+    );
+    // Every item, including the ones a 50-item client page would never have loaded,
+    // carries its own capture body straight from the server response.
+    noteIds.forEach((noteId, i) => {
+      const item = byNoteId.get(noteId);
+      expect(item).toBeDefined();
+      expect(item?.outcome).toBe('skipped');
+      expect(item?.body).toBe(`Bulk sweep capture ${i} — unique text so the label can't come from anywhere else`);
+    });
+  });
+
+  it('returns the capture body for a recovered prior ledger row too, not just a freshly classified item', async () => {
+    const campaignId = await newCampaign('Sweep Ledger Recovery Body');
+    const body = 'A create proposal was filed before resolution crashed (body recovery check).';
+    const noteId = await submitInbox(campaignId, body);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = nowIso();
+    const [job] = await db
+      .insert(inboxSweepJobs)
+      .values({
+        campaignId,
+        status: 'succeeded',
+        itemsTotal: 1,
+        itemsProposed: 1,
+        itemsSkipped: 0,
+        itemsErrored: 0,
+        detail: 'seeded recovery job',
+        createdBy: 'test',
+        createdAt: ts,
+      })
+      .returning();
+    await db.insert(inboxSweepItems).values({
+      campaignId,
+      noteId,
+      jobId: job.id,
+      outcome: 'proposed',
+      entityType: 'quest',
+      entityId: null,
+      proposalId: 9998,
+      reason: 'filed as create proposal #9998',
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(classifier.calls).toHaveLength(0);
+    expect(res.body.items[0]).toMatchObject({ noteId, body, outcome: 'proposed' });
   });
 
   it('reports a disabled job with a stated reason when no AI provider is configured, and touches nothing', async () => {
