@@ -184,7 +184,7 @@ export function TurnWorkspace({
   const isDying = turn.current.deathState === 'dying';
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="turn-workspace">
       {/* Prominent actor / round / next actor. */}
       <div className="flex items-center gap-2.5 flex-wrap">
         <span className="text-xs uppercase tracking-wide text-muted">Round {turn.round}</span>

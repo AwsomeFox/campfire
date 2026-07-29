@@ -1,6 +1,20 @@
 import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
+/**
+ * IMPORTANT — what these goldens can and cannot catch (issue #1694):
+ *
+ * Every screenshot in this file renders through `@page.emulateMedia({ media: 'print' })`,
+ * and index.css's `@media print` block sets
+ * `button, input, textarea, select, [role="button"] { display: none !important }`.
+ * That means these two PNGs (character-sheet-print.png, session-recap-print.png)
+ * structurally CANNOT catch a control, button, or density change — there are no controls
+ * left in the DOM by the time the screenshot fires. A green run here after a button
+ * geometry / `.cf-btn` / `.btn` / density change proves nothing about that change.
+ *
+ * For screen-mode control-surface coverage (toolbars, dialogs, card grids, the character
+ * sheet's control column), see control-surface-goldens.spec.ts instead.
+ */
 const SHARED_TOKEN = 'cf_share_11111111111111111111111111111111111111111111';
 
 async function mockPublicRecap(page: Page): Promise<void> {

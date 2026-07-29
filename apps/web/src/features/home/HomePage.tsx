@@ -610,6 +610,7 @@ export function HomePage() {
           <div
             className="grid gap-3.5"
             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
+            data-testid="home-campaign-grid"
           >
             {activeCampaigns.map(({ campaign, role }) => (
               <CampaignTile

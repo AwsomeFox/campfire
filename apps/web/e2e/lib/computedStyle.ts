@@ -4,6 +4,7 @@ import type { Locator, Page } from '@playwright/test';
 
 const FONT_EXT_MIME: Record<string, string> = { woff2: 'font/woff2', woff: 'font/woff' };
 
+
 /**
  * getComputedStyle helpers for pinning real rendered geometry (issue #1694).
  *
@@ -151,8 +152,9 @@ export async function renderCssFixture(
   const dir = distAssetsDir ?? defaultDistAssetsDir();
   const compiled = css ?? latestCompiledCss(dir);
   const inlined = inlineFontUrls(compiled, dir);
+  const safeCss = inlined.replace(/<\/style>/gi, '<\\/style>');
   await page.setContent(
-    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${inlined}</style></head>` +
+    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${safeCss}</style></head>` +
       `<body style="background:#111;color:#eee;">${bodyHtml}</body></html>`,
     { waitUntil: 'load' },
   );

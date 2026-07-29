@@ -143,6 +143,26 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
       }
     }
 
+    // /reopen preserves the turn pointer from a prior run. Step it back to round 1,
+    // boss first so every consumer has a deterministic starting turn (issue #1694).
+    let finalState: { round: number; currentCombatantId: number | null } | undefined;
+    for (let guard = 0; guard < 20; guard++) {
+      const stateRes = await dm.get(`/api/v1/encounters/${encounterId}`);
+      if (!stateRes.ok()) {
+        throw new Error(`verify seed encounter state -> ${stateRes.status()}: ${await readError(stateRes)}`);
+      }
+      const state = (await stateRes.json()) as { round: number; currentCombatantId: number | null };
+      finalState = state;
+      if (state.round === 1 && state.currentCombatantId === bossId) break;
+      const undoRes = await dm.post(`/api/v1/encounters/${encounterId}/undo-turn`);
+      if (!undoRes.ok()) {
+        throw new Error(`rewind seed encounter turn -> ${undoRes.status()}: ${await readError(undoRes)}`);
+      }
+    }
+    if (!finalState || finalState.round !== 1 || finalState.currentCombatantId !== bossId) {
+      throw new Error(`seed encounter turn did not rewind to round 1 / boss (got ${JSON.stringify(finalState)})`);
+    }
+
     // Keep the dedicated ended fixture ended if a prior test revived it.
     const endedGet = await dm.get(`/api/v1/encounters/${endedEncounterId}`);
     if (endedGet.ok()) {
