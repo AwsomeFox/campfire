@@ -3196,7 +3196,8 @@ export class CampaignsService {
       // Suspend invites before stamping deletedAt so a concurrent preview/accept
       // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
       await this.invites.suspendForCampaign(id, user, 'trash');
-      await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(eq(campaigns.id, id));
+      const res = await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(and(eq(campaigns.id, id), isNull(campaigns.deletedAt)));
+      if (res.changes === 0) return;
       await this.audit.log({
         actor: auditActor(user),
         actorRole: 'dm',
