@@ -503,12 +503,12 @@ function EncounterLinks({
   campaignId,
   encounter,
   canEdit,
-  onSaved,
+  onSave,
 }: {
   campaignId: number;
   encounter: EncounterWithCombatants;
   canEdit: boolean;
-  onSaved: (updated: Partial<EncounterWithCombatants>) => void;
+  onSave: (patch: Record<string, number | null>) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
@@ -576,8 +576,7 @@ function EncounterLinks({
     setSaving(true);
     setError(null);
     try {
-      const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
-      onSaved(updated);
+      await onSave(patch);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.updateLinks' }));
     } finally {
@@ -2018,7 +2017,7 @@ export default function RunSessionPage() {
   const attemptGridDefaultsRef = useRef<() => void>(() => {});
 
   const queueEncounterPatch = useCallback(
-    (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
+    (patch: Record<string, unknown>, defaultAttemptKey?: string): Promise<void> | false => {
       const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
       if (isAdjacentDuplicateEncounterPatch(pendingEncounterPatches.current.values(), eid, pendingKey)) {
         // #1589 — dedup against the in-flight request that already owns this exact body. A
@@ -2052,14 +2051,14 @@ export default function RunSessionPage() {
       // token and discard the later local edit as a false stale-write conflict.
       const queuedEncounterId = eid;
       const mutateQueuedPatch = setMap.mutateAsync;
-      encounterPatchQueue.current = encounterPatchQueue.current
+      const queued = encounterPatchQueue.current
         .catch(() => undefined)
         .then(async () => {
           const expectedUpdatedAt = lastLocalEncounterRevision.current.get(queuedEncounterId) ?? observedUpdatedAt;
           await mutateQueuedPatch({ encounterId: queuedEncounterId, queueId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
-        })
-        .catch(() => undefined);
-      return true;
+        });
+      encounterPatchQueue.current = queued.catch(() => undefined);
+      return queued;
     },
     [eid, queryClient, setMap.mutateAsync],
   );
@@ -2420,12 +2419,10 @@ export default function RunSessionPage() {
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
-            await api.patch(`${API}/encounters/${eid}`, { hidden: true });
-            invalidateEncounter(queryClient, eid);
+            await queueEncounterPatch({ hidden: true });
           }}
           onUndoHide={async () => {
-            await api.patch(`${API}/encounters/${eid}`, { hidden: false });
-            invalidateEncounter(queryClient, eid);
+            await queueEncounterPatch({ hidden: false });
           }}
         />
       )}
@@ -2714,11 +2711,9 @@ export default function RunSessionPage() {
         campaignId={cid}
         encounter={encounter}
         canEdit={canEditEncounter}
-        onSaved={(updated) =>
-          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
-            prev ? { ...prev, ...updated } : prev,
-          )
-        }
+        onSave={async (patch) => {
+          await queueEncounterPatch(patch);
+        }}
       />
 
       {canDmWrite && preparingSetupGuidance && (
