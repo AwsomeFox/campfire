@@ -85,5 +85,6 @@ test.describe('fog editor (issue #472)', () => {
     expect(source).toMatch(/await mutateQueuedPatch\(\{ encounterId: queuedEncounterId,/);
     expect(source).toMatch(/\.then\(async \(\) =>[\s\S]*?\.catch\(\(\) => undefined\);/);
     expect(source).toContain('pendingFogForEncounter(pendingFog, eid)');
+    expect(source).toMatch(/if \(!variables\.defaultAttemptKey\) \{\s*setEncounterPatchConflict/);
   });
 });

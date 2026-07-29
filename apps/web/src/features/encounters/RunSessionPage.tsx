@@ -1952,7 +1952,9 @@ export default function RunSessionPage() {
       if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
       if (variables.encounterId !== activeEncounterIdRef.current) return;
       if (isStaleWrite(error)) {
-        setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
+        if (!variables.defaultAttemptKey) {
+          setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
+        }
       } else reportError(error);
     },
     onSuccess: (updated, variables) => {
