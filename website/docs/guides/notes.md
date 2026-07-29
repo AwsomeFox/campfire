@@ -45,7 +45,7 @@ quest, update an NPC, or drop a line in a recap. Resolving clears it from the qu
     token needed, just an AI provider configured for the campaign (Campaign
     settings -> AI). It reads every open item and proposes the quest/NPC/recap
     updates for you to approve, turning a pile of one-liners into structured canon.
-    Prefer your own assistant? [Connect one](../ai/connect.md) and ask it to sweep
+    Prefer your own assistant? [Connect one](../ai/connect.md) (with a direct-write DM token) and ask it to sweep
     the inbox — it calls the exact same `sweep_inbox` operation the button does.
 
 ## List capacity & pagination

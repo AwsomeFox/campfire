@@ -90,10 +90,11 @@ Once connected, natural requests just work — the client picks the right tools:
     Sweeping the inbox is not something the agent has to figure out step by step —
     it's a single dedicated `sweep_inbox` tool that reads every open item and files
     each result as a create/update proposal or a skip with a stated reason, using
-    the exact same orchestration the web UI's own **Sweep inbox** button calls. So
-    there are two equivalent ways to trigger it: ask a connected AI in plain
-    language (above), or open **Scribe inbox** in Campfire and click **Sweep
-    inbox** directly — no AI client or token required for that path, only an AI
+    the exact same orchestration the web UI's own **Sweep inbox** button calls.
+    The `sweep_inbox` tool requires a direct-write DM token (the campaign DM role). So
+    there are two equivalent ways to trigger it: ask a connected AI with a direct-write
+    DM token in plain language (above), or open **Scribe inbox** in Campfire and click
+    **Sweep inbox** directly — no AI client or token required for that path, only an AI
     provider configured for the campaign. See [MCP tool & API
     reference](reference.md) for the tool's full signature.
 
