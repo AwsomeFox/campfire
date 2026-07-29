@@ -12,6 +12,7 @@ const testsDir = join(webDir, 'e2e/tests');
 const unitConfig = 'playwright.unit.config.ts';
 const unitSpec = /\.unit\.spec\.(?:[cm]?[jt]s)$/;
 const supportedUnitSpec = /\.unit\.spec\.m?ts$/;
+const browserUnitIgnore = /testIgnore:\s*\/\.\*\\\.unit\\\.spec\\\.m\?ts\//;
 
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -46,6 +47,7 @@ function main() {
   const webPackage = JSON.parse(readFileSync(join(webDir, 'package.json'), 'utf8'));
   const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+  const browserConfig = readFileSync(join(webDir, 'playwright.config.ts'), 'utf8');
   const jobBlock = (name) => {
     const match = ci.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:\\n|(?![\\s\\S]))`, 'm'));
     return match?.[1] ?? '';
@@ -57,6 +59,7 @@ function main() {
   const aggregateCi = jobBlock('ci');
   if (!unitWeb.includes('Run web unit specs') || !unitWeb.includes('npm run test:unit -w apps/web')) errors.push('CI unit-web job must invoke web test:unit');
   if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
+  if (!browserUnitIgnore.test(browserConfig)) errors.push('browser Playwright config must retain testIgnore: /.*\\.unit\\.spec\\.m?ts/ so supported unit specs cannot run in both tiers');
 
   const onDisk = new Set(walk(testsDir));
   for (const file of onDisk) {
