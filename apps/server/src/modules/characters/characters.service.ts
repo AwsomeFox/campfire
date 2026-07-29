@@ -721,7 +721,7 @@ export class CharactersService {
   private syncRecoveryCombatantsInTx(tx: SyncDb, campaignId: number, characterId: number, hpCurrent: number, hpTemp: number, deathState: string, deathSaveSuccesses: number, deathSaveFailures: number, sheetInstances: readonly ConditionInstance[], sheetUpdatedAt: string): number[] {
     const rows = tx.select({ combatant: combatants, encounterId: encounters.id })
       .from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id))
-      .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), ne(encounters.status, 'ended'), notDeleted(encounters.deletedAt))).all();
+      .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt))).all();
     for (const { combatant } of rows) {
       tx.update(combatants).set({
         hpCurrent: clampHpCurrent(hpCurrent, combatant.hpMax), hpTemp, deathState, deathSaveSuccesses, deathSaveFailures,
