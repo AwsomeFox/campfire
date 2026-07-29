@@ -88,20 +88,22 @@ function setupRuleEntriesFts(sqlite: Database.Database): boolean {
     sqlite.exec(RULE_ENTRIES_FTS_SQL);
     // External-content FTS tables read their content table for SELECT count(*),
     // so that count cannot distinguish a populated-but-unindexed legacy table.
-    // A short-lived FTS5 vocabulary table exposes actual indexed terms (unlike
-    // external-content SELECT count(*)); rebuild only when the populated index
-    // has no terms, which is the historical no-FTS -> FTS upgrade state.
+    // A short-lived FTS5 vocabulary table exposes actual indexed documents
+    // (unlike external-content SELECT count(*)); rebuild when the index does
+    // not cover every persisted entry, including a legacy-empty index that has
+    // since received a newly indexed row.
     const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
     if (entries.count > 0) {
-      let hasIndexedTerms = false;
+      let hasAllIndexedEntries = false;
       try {
         sqlite.exec('DROP TABLE IF EXISTS rule_entries_fts_vocab');
-        sqlite.exec("CREATE VIRTUAL TABLE rule_entries_fts_vocab USING fts5vocab(rule_entries_fts, 'row')");
-        hasIndexedTerms = !!sqlite.prepare('SELECT 1 FROM rule_entries_fts_vocab LIMIT 1').get();
+        sqlite.exec("CREATE VIRTUAL TABLE rule_entries_fts_vocab USING fts5vocab(rule_entries_fts, 'instance')");
+        const indexed = sqlite.prepare('SELECT count(DISTINCT doc) AS count FROM rule_entries_fts_vocab').get() as { count: number };
+        hasAllIndexedEntries = indexed.count === entries.count;
       } finally {
         sqlite.exec('DROP TABLE IF EXISTS rule_entries_fts_vocab');
       }
-      if (!hasIndexedTerms) {
+      if (!hasAllIndexedEntries) {
         sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
         dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
       }
