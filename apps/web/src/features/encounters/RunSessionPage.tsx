@@ -624,7 +624,7 @@ function EncounterLinks({
       {editing && canEdit && (
         <div {...regionProps} className="flex gap-2 flex-wrap w-full mt-1">
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Location"
             value={encounter.locationId ?? ''}
             disabled={saving}
@@ -638,7 +638,7 @@ function EncounterLinks({
             ))}
           </select>
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Quest"
             value={encounter.questId ?? ''}
             disabled={saving}
@@ -652,7 +652,7 @@ function EncounterLinks({
             ))}
           </select>
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Session"
             value={encounter.sessionId ?? ''}
             disabled={saving}
@@ -2179,9 +2179,9 @@ export default function RunSessionPage() {
             {/* No aria-label / title here: the visible word "Cast" is the
                 accessible name, and the adjacent TermHelp carries the
                 explanation without a hover-only tooltip (issue #518). */}
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1.5 text-xs"
+              className="text-xs"
               onClick={() => navigate(`/c/${cid}/screen`)}
             >
               <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
@@ -2313,9 +2313,9 @@ export default function RunSessionPage() {
             </span>
             {canDmWrite && (
               <div className="flex items-center gap-2 flex-wrap ml-auto">
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   disabled={headerBusy || riskyBlocked}
                   onClick={() => toggleEscalationHold(!encounter.escalationDieHeld)}
                 >
@@ -2329,18 +2329,18 @@ export default function RunSessionPage() {
                   placeholder="0–6"
                   style={{ width: 72, minHeight: 30, fontSize: 12 }}
                 />
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   disabled={headerBusy || riskyBlocked || escalationOverrideDraft.trim() === ''}
                   onClick={applyEscalationOverride}
                 >
                   Override
                 </Btn>
                 {encounter.escalationDieOverride != null && (
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     disabled={headerBusy || riskyBlocked}
                     onClick={clearEscalationOverride}
                   >
@@ -5966,7 +5966,7 @@ function CombatantRow({
                 {onUseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-[24px] !py-0.5 text-[11px]"
+                    className="btn btn-ghost text-[11px] cf-density-xs"
                     disabled={busy || legendaryActions.used >= legendaryActions.max}
                     onClick={onUseLegendary}
                   >
@@ -5976,7 +5976,7 @@ function CombatantRow({
                 {onReleaseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-[24px] !py-0.5 text-[11px]"
+                    className="btn btn-ghost text-[11px] cf-density-xs"
                     disabled={busy}
                     onClick={onReleaseLegendary}
                   >
@@ -6659,7 +6659,7 @@ function CombatantRow({
                   <span style={{ display: 'inline-flex', gap: 2, marginLeft: 2 }}>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-[24px] !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
                       disabled={busy || (combatant.rpCurrent ?? 0) <= 0}
                       title="Decrease Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: -1 })}
@@ -6668,7 +6668,7 @@ function CombatantRow({
                     </button>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-[24px] !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
                       disabled={busy || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
                       title="Increase Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: 1 })}

@@ -166,9 +166,9 @@ export default function NpcListPage() {
             <TextInput aria-label="NPC role" placeholder="Role (e.g. Townmaster)" value={newRole} onChange={(e) => setNewRole(e.target.value)} />
             <AudienceField value={audience} onChange={setAudience} entityLabel="NPC" name="npc-audience" />
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   closeCreating();
                   setNewName('');
@@ -179,7 +179,7 @@ export default function NpcListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createNpc}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createNpc}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>

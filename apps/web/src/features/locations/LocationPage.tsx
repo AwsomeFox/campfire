@@ -590,7 +590,7 @@ export default function LocationPage() {
                 /></div>
               )}
               {canDmWrite && nextStatus && location.status !== 'unexplored' && (
-                <Btn className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+                <Btn density="xs" className="cf-print-hide text-xs"
                   disabled={statusSaving}
                   onClick={() => setStatus(nextStatus)}
                   title={NEXT_STATUS_LABEL[location.status]}
@@ -600,9 +600,9 @@ export default function LocationPage() {
               )}
               {!isDm && role !== null && (
                 <div className="cf-print-hide flex gap-2 shrink-0">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     onClick={startPropose}
                     title="Suggest a change to the DM for approval"
                   >
@@ -612,7 +612,7 @@ export default function LocationPage() {
               )}
               {canDmWrite && (
                 <div className="cf-print-hide flex gap-2 shrink-0">
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                  <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                     ✎ Edit
                   </Btn>
                   <StatusMenuButton
@@ -663,7 +663,7 @@ export default function LocationPage() {
                     {location.name}
                   </span>
                   {canDmWrite && !movingPin && (
-                    <Btn ghost className="absolute bottom-2 right-2 !min-h-0 !py-1 text-[10px]" onClick={startMovePin}>
+                    <Btn density="xs" ghost className="absolute bottom-2 right-2 text-[10px]" onClick={startMovePin}>
                       Move pin (DM)
                     </Btn>
                   )}
@@ -923,7 +923,7 @@ export default function LocationPage() {
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
-              <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+              <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
                 {deleting ? 'Deleting…' : 'Delete location'}
               </Btn>
             ) : (
@@ -931,14 +931,14 @@ export default function LocationPage() {
             )}
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
+              <Btn density="xs" ghost className="text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

@@ -91,7 +91,8 @@ export function CharacterTrashMenu({
       <Btn
         ghost
         type="button"
-        className={`!min-h-0 !py-1 !px-2 text-xs ${triggerClassName}`}
+        density="xs"
+        className={`!px-2 text-xs ${triggerClassName}`}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-label={triggerAriaLabel}

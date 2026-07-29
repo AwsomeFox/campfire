@@ -122,10 +122,10 @@ export function ShortcutHelpDialog({
                     )}
                   </td>
                   <td className="py-3">
-                    <Btn
+                    <Btn density="xs"
                       type="button"
                       ghost
-                      className="!min-h-0 !py-1 text-xs"
+                      className="text-xs"
                       aria-pressed={rebindingId === cmd.id}
                       onClick={() => {
                         setRebindError(null);

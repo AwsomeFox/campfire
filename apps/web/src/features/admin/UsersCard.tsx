@@ -28,9 +28,9 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-3">
         <h2 className="font-bold text-white text-sm">All accounts</h2>
-        <Btn
+        <Btn density="xs"
           type="button"
-          className="!min-h-0 !py-1.5 text-xs"
+          className="text-xs"
           aria-haspopup="dialog"
           aria-expanded={showNew}
           onClick={() => {
@@ -500,11 +500,11 @@ function UserRow({
                     <label htmlFor={displayNameId} style={{ overflowWrap: 'anywhere' }}>
                       Display name for {user.username}
                     </label>
-                    <TextInput
+                    <TextInput density="compact"
                       ref={displayNameRef}
                       id={displayNameId}
                       name={`displayName-${user.id}`}
-                      className="!min-h-0 !py-2 text-sm"
+                      className="text-sm"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
                       autoComplete="nickname"
@@ -520,7 +520,7 @@ function UserRow({
                     <select
                       id={roleId}
                       name={`serverRole-${user.id}`}
-                      className="cf-select !min-h-0 !py-2 text-sm"
+                      className="cf-select text-sm cf-density-compact"
                       value={serverRole}
                       onChange={(e) => setServerRole(e.target.value as ServerRole)}
                       aria-invalid={!!formError}
@@ -553,19 +553,19 @@ function UserRow({
                   </p>
                 )}
                 <div className="flex gap-2 justify-end">
-                  <Btn
+                  <Btn density="xs"
                     ghost
                     type="button"
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     aria-label={`Cancel editing ${user.username}`}
                     onClick={onClose}
                     disabled={saving}
                   >
                     Cancel
                   </Btn>
-                  <Btn
+                  <Btn density="xs"
                     type="submit"
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     aria-label={`Save ${user.username}`}
                     disabled={saving}
                   >
@@ -667,10 +667,10 @@ function ResetPasswordRow({
                 <p className="text-sm text-emerald-400" role="status">
                   Password updated. Signed out of all sessions and revoked all access tokens.
                 </p>
-                <Btn
+                <Btn density="xs"
                   ghost
                   type="button"
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   aria-label={`Close password reset for ${user.username}`}
                   onClick={onClose}
                 >
@@ -687,11 +687,11 @@ function ResetPasswordRow({
                   <label htmlFor={passwordId} style={{ overflowWrap: 'anywhere' }}>
                     New password for {user.username}
                   </label>
-                  <TextInput
+                  <TextInput density="compact"
                     ref={passwordRef}
                     id={passwordId}
                     name={`new-password-${user.id}`}
-                    className="!min-h-0 !py-2 text-sm"
+                    className="text-sm"
                     type="password"
                     value={newPassword}
                     onChange={(e) => {
@@ -715,19 +715,19 @@ function ResetPasswordRow({
                   )}
                 </div>
                 <div className="flex gap-2 justify-end">
-                  <Btn
+                  <Btn density="compact"
                     ghost
                     type="button"
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     aria-label={`Cancel password reset for ${user.username}`}
                     onClick={onClose}
                     disabled={saving}
                   >
                     Cancel
                   </Btn>
-                  <Btn
+                  <Btn density="compact"
                     type="submit"
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     aria-label={`Set password for ${user.username}`}
                     disabled={saving}
                   >

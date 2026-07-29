@@ -212,18 +212,18 @@ export function ItemRow({
       </div>
       {editable && (
         <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end">
-          <Btn
+          <Btn density="xs"
             ghost
-            className="!min-h-0 !py-0.5 !px-2 text-xs"
+            className="!px-2 text-xs"
             disabled={busy || committed.qty <= 0}
             onClick={() => void adjustQty(-1)}
             aria-label={t('inventory.decreaseQtyAria', { name: committed.name })}
           >
             −
           </Btn>
-          <Btn
+          <Btn density="xs"
             ghost
-            className="!min-h-0 !py-0.5 !px-2 text-xs"
+            className="!px-2 text-xs"
             disabled={busy}
             onClick={() => void adjustQty(1)}
             aria-label={t('inventory.increaseQtyAria', { name: committed.name })}
@@ -231,7 +231,7 @@ export function ItemRow({
             +
           </Btn>
           <select
-            className="cf-select !min-h-0 !py-1 text-xs"
+            className="cf-select text-xs cf-density-xs"
             style={{ width: 'auto' }}
             value={currentOwnerValue}
             disabled={busy}
@@ -248,10 +248,10 @@ export function ItemRow({
               <option value={String(committed.characterId)}>{t('inventory.currentOwner')}</option>
             )}
           </select>
-          <Btn
+          <Btn density="xs"
             ghost
             danger
-            className="!min-h-0 !py-0.5 !px-2 text-xs"
+            className="!px-2 text-xs"
             disabled={busy}
             onClick={() => setConfirmingDelete(true)}
             aria-label={t('inventory.deleteAria', { name: committed.name })}
@@ -259,9 +259,9 @@ export function ItemRow({
             ✕
           </Btn>
           {committed.compendiumState && committed.compendiumState !== 'detached' && <>
-            {committed.compendiumState === 'linked_updated' && <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('refresh')}>Refresh source</Btn>}
-            <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('overridden')}>Keep local</Btn>
-            <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('detached')}>Detach</Btn>
+            {committed.compendiumState === 'linked_updated' && <Btn density="xs" ghost className="!px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('refresh')}>Refresh source</Btn>}
+            <Btn density="xs" ghost className="!px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('overridden')}>Keep local</Btn>
+            <Btn density="xs" ghost className="!px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('detached')}>Detach</Btn>
           </>}
         </div>
       )}
@@ -451,11 +451,11 @@ export function AddItemForm({
           <span className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--color-accent)] shrink-0" style={{ background: 'var(--color-neutral-800)' }}>
             <GameIcon slug={previewSlug} size={24} title={getIcon(previewSlug)?.name} />
           </span>
-          <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
+          <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setPickingIcon(true)}>
             {iconSlug ? t('inventory.changeIcon') : t('inventory.chooseIcon')}
           </Btn>
           {iconSlug && (
-            <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setIconSlug('')}>
+            <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setIconSlug('')}>
               {t('inventory.autoIcon')}
             </Btn>
           )}

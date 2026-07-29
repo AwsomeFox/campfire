@@ -105,7 +105,7 @@ export function EntityPicker({
   return (
     <div className="flex gap-2 flex-wrap w-full">
       <select
-        className="cf-select !min-h-0 !py-2 text-xs"
+        className="cf-select text-xs cf-density-xs"
         aria-label="Attach note to entity type"
         value={type}
         disabled={disabled}
@@ -125,7 +125,7 @@ export function EntityPicker({
       </select>
       {type && (
         <select
-          className="cf-select !min-h-0 !py-2 text-xs flex-1 min-w-0"
+          className="cf-select text-xs flex-1 min-w-0 cf-density-xs"
           aria-label="Attach note to entity"
           value={id}
           disabled={disabled || optionsLoading}

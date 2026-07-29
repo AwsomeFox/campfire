@@ -149,7 +149,7 @@ export function SafetyControlsCard({
 
           <div className="flex items-center gap-2 pt-1">
             <select
-              className="cf-select !min-h-0 !py-1 text-xs flex-1"
+              className="cf-select text-xs flex-1 cf-density-xs"
               value={target}
               aria-label="Member to block or mute"
               onChange={(e) => setTarget(e.target.value)}

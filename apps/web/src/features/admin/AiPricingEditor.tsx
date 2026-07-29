@@ -238,7 +238,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
               <tr key={i}>
                 <td className="py-0.5 pr-1">
                   <input
-                    className="cf-input !min-h-0 py-1 text-[11px] w-full"
+                    className="cf-input py-1 text-[11px] w-full cf-density-xs"
                     aria-label={t('admin.pricing.rowProvider', { n: i + 1 })}
                     value={r.providerType}
                     onChange={(e) => update(i, { providerType: e.target.value })}
@@ -246,7 +246,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 </td>
                 <td className="py-0.5 pr-1">
                   <input
-                    className="cf-input !min-h-0 py-1 text-[11px] w-full font-mono"
+                    className="cf-input py-1 text-[11px] w-full font-mono cf-density-xs"
                     aria-label={t('admin.pricing.rowModel', { n: i + 1 })}
                     value={r.model}
                     onChange={(e) => update(i, { model: e.target.value })}
@@ -254,7 +254,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 </td>
                 <td className="py-0.5 pr-1">
                   <input
-                    className="cf-input !min-h-0 py-1 text-[11px] w-full font-mono"
+                    className="cf-input py-1 text-[11px] w-full font-mono cf-density-xs"
                     aria-label={t('admin.pricing.rowBaseUrl', { n: i + 1 })}
                     placeholder={t('admin.pricing.baseUrlPlaceholder')}
                     value={r.baseUrl}
@@ -263,7 +263,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 </td>
                 <td className="py-0.5 pr-1">
                   <input
-                    className="cf-input !min-h-0 py-1 text-[11px] w-24"
+                    className="cf-input py-1 text-[11px] w-24 cf-density-xs"
                     aria-label={t('admin.pricing.rowInput', { n: i + 1 })}
                     inputMode="decimal"
                     value={r.input}
@@ -272,7 +272,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 </td>
                 <td className="py-0.5 pr-1">
                   <input
-                    className="cf-input !min-h-0 py-1 text-[11px] w-24"
+                    className="cf-input py-1 text-[11px] w-24 cf-density-xs"
                     aria-label={t('admin.pricing.rowOutput', { n: i + 1 })}
                     inputMode="decimal"
                     value={r.output}
@@ -312,8 +312,8 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
       )}
 
       <div className="flex gap-2 items-center flex-wrap">
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs"
+        <Btn density="xs"
+          className="text-xs"
           ghost
           disabled={rows.length >= AI_PRICING_MAX_ENTRIES}
           onClick={() => {
@@ -330,7 +330,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
         {providerOptions.length > 0 && (
           <>
             <select
-              className="cf-input !min-h-0 py-1.5 text-xs"
+              className="cf-input py-1.5 text-xs cf-density-xs"
               aria-label={t('admin.pricing.prefillLabel')}
               value={prefillProvider}
               onChange={(e) => setPrefillProvider(e.target.value)}
@@ -339,14 +339,14 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <option key={p} value={p}>{p}</option>
               ))}
             </select>
-            <Btn className="!min-h-0 !py-1.5 text-xs" ghost onClick={prefill}>
+            <Btn density="xs" className="text-xs" ghost onClick={prefill}>
               {t('admin.pricing.prefill')}
             </Btn>
           </>
         )}
 
         {saved && <span className="text-xs text-emerald-400">{t('admin.pricing.saved')}</span>}
-        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => void save()} disabled={saving || hasErrors}>
+        <Btn density="xs" className="text-xs ml-auto" onClick={() => void save()} disabled={saving || hasErrors}>
           {saving ? t('admin.pricing.saving') : t('admin.pricing.save')}
         </Btn>
       </div>

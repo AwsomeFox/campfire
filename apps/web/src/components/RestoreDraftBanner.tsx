@@ -23,10 +23,10 @@ export function RestoreDraftBanner({
           : `You have an unsaved local draft from ${when}.`}
       </p>
       <div className="flex flex-wrap gap-2">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onRestore}>
+        <Btn density="xs" className="text-xs" onClick={onRestore}>
           Restore draft
         </Btn>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onDismiss}>
+        <Btn density="xs" ghost className="text-xs" onClick={onDismiss}>
           Discard draft
         </Btn>
       </div>

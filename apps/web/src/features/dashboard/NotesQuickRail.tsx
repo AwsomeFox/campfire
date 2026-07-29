@@ -136,8 +136,7 @@ export function NotesQuickRail({
           hint={canMemberWrite ? 'Jot down quick thoughts, session notes, or ideas for the campaign.' : 'Notes created during sessions or shared with you will appear here.'}
           action={
             canMemberWrite ? (
-              <Btn
-                density="compact"
+              <Btn density="xs"
                 type="button"
                 className="text-xs btn-primary"
                 onClick={() => {
@@ -197,6 +196,8 @@ export function NotesQuickRail({
           aria-keyshortcuts={quickCaptureHint.ariaKeyshortcuts}
           title={`Quick note${quickCaptureHint.titleSuffix}`}
         />
+        {/* compact, not xs (issue #1692 review — Codex): the quick-note form's only
+            submit control, not a dense inline row action. */}
         <Btn density="compact" type="submit" className="text-sm shrink-0" disabled={saving || !quickNote.trim()}>
           {dest === 'inbox' ? 'Send' : 'Save'}
         </Btn>

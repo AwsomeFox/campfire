@@ -186,20 +186,20 @@ export default function ReaderPage() {
             </span>
             <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
-            {entry.type === 'item' && canPlayerWrite && <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setAcquiring(true)}>Add to inventory</Btn>}
+            {entry.type === 'item' && canPlayerWrite && <Btn density="xs" className="text-xs" onClick={() => setAcquiring(true)}>Add to inventory</Btn>}
             {isDm && canDmWrite && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
+                <Btn density="xs" ghost className="text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
                   {savingIcon ? 'Saving…' : entry.iconSlug ? 'Change icon' : 'Set icon'}
                 </Btn>
                 {entry.iconSlug && (
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => saveIcon('')}>
+                  <Btn density="xs" ghost className="text-xs" disabled={savingIcon} onClick={() => saveIcon('')}>
                     Reset
                   </Btn>
                 )}
               </span>
             )}
-            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={() => { const parsed = (() => { try { return JSON.parse(entry.dataJson ?? '{}') as Record<string, unknown>; } catch { return {}; } })(); setEditBody(entry.body); setEditName(entry.name); setEditSummary(entry.summary); setEditSlug(entry.slug); setEditType(entry.type); setEditRights(entry.rightsStatus); setEditLicense(entry.license); setEditAttribution(entry.attribution); setEditAuthor(entry.author); setEditSourceUrl(entry.sourceUrl); setEditDataJson(entry.dataJson ?? '{}'); setEditStructured(Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}
+            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={() => { const parsed = (() => { try { return JSON.parse(entry.dataJson ?? '{}') as Record<string, unknown>; } catch { return {}; } })(); setEditBody(entry.body); setEditName(entry.name); setEditSummary(entry.summary); setEditSlug(entry.slug); setEditType(entry.type); setEditRights(entry.rightsStatus); setEditLicense(entry.license); setEditAttribution(entry.attribution); setEditAuthor(entry.author); setEditSourceUrl(entry.sourceUrl); setEditDataJson(entry.dataJson ?? '{}'); setEditStructured(Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}
           </div>
           {iconError && <ErrorNote message={iconError} />}
           {actionError && <ErrorNote message={actionError} />}
