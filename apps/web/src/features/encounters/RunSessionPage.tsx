@@ -90,6 +90,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
+import { reconcileEncounterPatchResponse, type QueuedEncounterPatch } from './encounterPatchQueue';
 import { reconcileFogSyncState } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
@@ -1904,7 +1905,10 @@ export default function RunSessionPage() {
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
   const pendingEncounterPatchKeys = useRef(new Set<string>());
+  const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   const encounterPatchQueue = useRef<Promise<void>>(Promise.resolve());
+  const activeEncounterIdRef = useRef(eid);
+  activeEncounterIdRef.current = eid;
   const gridDefaultAttempts = useRef(new Set<string>());
   // #1589 — a default-normalization attempt that DEDUPES against another in-flight PATCH
   // owning the same pending key (see `queueEncounterPatch` below) registers a wake-up here,
@@ -1924,29 +1928,36 @@ export default function RunSessionPage() {
   const gridDefaultRetryOnFree = useRef(new Map<string, () => void>());
   const setMap = useMutation({
     mutationFn: ({
+      encounterId,
       patch,
       expectedUpdatedAt,
     }: {
+      encounterId: number;
       patch: Record<string, unknown>;
       pendingKey: string;
       defaultAttemptKey?: string;
       expectedUpdatedAt?: string;
-    }) => api.patch(`${API}/encounters/${eid}`, { ...patch, expectedUpdatedAt }),
-    onMutate: () => {
+    }) => api.patch<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { ...patch, expectedUpdatedAt }),
+    onMutate: (variables) => {
+      if (variables.encounterId !== activeEncounterIdRef.current) return;
       setActionError(null);
       setEncounterPatchConflict(null);
     },
     onError: (error, variables) => {
       if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
+      if (variables.encounterId !== activeEncounterIdRef.current) return;
       if (isStaleWrite(error)) {
         setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
       } else reportError(error);
     },
-    onSuccess: (updated) => {
-      queryClient.setQueryData(queryKeys.encounter(eid), updated);
+    onSuccess: (updated, variables) => {
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), () =>
+        reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.pendingKey, variables.encounterId),
+      );
     },
     onSettled: (_data, error, variables) => {
       pendingEncounterPatchKeys.current.delete(variables.pendingKey);
+      pendingEncounterPatches.current.delete(variables.pendingKey);
       // #1589 — wake a default attempt that deduped against this exact pending key, but ONLY
       // when the request that just settled was NOT itself a default attempt.
       //
@@ -1970,18 +1981,16 @@ export default function RunSessionPage() {
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
       if (wake && error && !variables.defaultAttemptKey) wake();
-      if (Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
+      if (variables.encounterId === activeEncounterIdRef.current && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
         const settledFog = variables.patch.fog as FogState | null;
         setPendingFog((current) => (current !== undefined && fogStatesEqual(current, settledFog) ? undefined : current));
       }
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
       // than mutation-render churn immediately creating an unbounded failure loop.
-      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, eid);
+      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, variables.encounterId);
     },
   });
-  const mutateMapRef = useRef(setMap.mutateAsync);
-  mutateMapRef.current = setMap.mutateAsync;
 
   const attemptGridDefaultsRef = useRef<() => void>(() => {});
 
@@ -1999,6 +2008,7 @@ export default function RunSessionPage() {
         return false;
       }
       pendingEncounterPatchKeys.current.add(pendingKey);
+      pendingEncounterPatches.current.set(pendingKey, { encounterId: eid, pendingKey, patch });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
       // Make every encounter patch optimistic. Fog edits in particular need their cache value
@@ -2012,15 +2022,18 @@ export default function RunSessionPage() {
       // to dispatch, after the preceding success has installed its returned revision in
       // the cache. Different fog bodies therefore cannot race each other with the same CAS
       // token and discard the later local edit as a false stale-write conflict.
+      const queuedEncounterId = eid;
+      const mutateQueuedPatch = setMap.mutateAsync;
       encounterPatchQueue.current = encounterPatchQueue.current
         .catch(() => undefined)
         .then(async () => {
-          const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
-          await mutateMapRef.current({ patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
-        });
+          const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(queuedEncounterId))?.updatedAt;
+          await mutateQueuedPatch({ encounterId: queuedEncounterId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
+        })
+        .catch(() => undefined);
       return true;
     },
-    [eid, queryClient],
+    [eid, queryClient, setMap.mutateAsync],
   );
 
   // #1589 — the single place that decides "is a grid default still missing, and have we not
