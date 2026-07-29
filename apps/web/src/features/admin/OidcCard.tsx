@@ -525,7 +525,7 @@ function OidcField({
         {label}
         {envPinned && <span className="cf-chip cf-chip-private !py-0 !text-[9px]">env</span>}
       </span>
-      <TextInput density="xs"
+      <TextInput density="compact"
         className="text-sm mt-1"
         value={value}
         type={type}

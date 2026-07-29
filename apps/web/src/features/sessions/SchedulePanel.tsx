@@ -1294,7 +1294,7 @@ function FeedCard({
           </>
         )}
         {canDmWrite && !absoluteUrl && (
-          <Btn density="xs" className="text-xs" onClick={rotate} disabled={busy}>
+          <Btn density="compact" className="text-xs" onClick={rotate} disabled={busy}>
             Enable feed
           </Btn>
         )}

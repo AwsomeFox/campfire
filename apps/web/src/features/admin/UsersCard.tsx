@@ -687,7 +687,7 @@ function ResetPasswordRow({
                   <label htmlFor={passwordId} style={{ overflowWrap: 'anywhere' }}>
                     New password for {user.username}
                   </label>
-                  <TextInput density="xs"
+                  <TextInput density="compact"
                     ref={passwordRef}
                     id={passwordId}
                     name={`new-password-${user.id}`}
@@ -715,7 +715,7 @@ function ResetPasswordRow({
                   )}
                 </div>
                 <div className="flex gap-2 justify-end">
-                  <Btn density="xs"
+                  <Btn density="compact"
                     ghost
                     type="button"
                     className="text-xs"
@@ -725,7 +725,7 @@ function ResetPasswordRow({
                   >
                     Cancel
                   </Btn>
-                  <Btn density="xs"
+                  <Btn density="compact"
                     type="submit"
                     className="text-xs"
                     aria-label={`Set password for ${user.username}`}
