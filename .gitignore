@@ -4,6 +4,7 @@ dist/
 dist-subpath/
 build/
 coverage/
+apps/server/.cache/
 data/
 /test-results/
 *.db

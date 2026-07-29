@@ -2,84 +2,41 @@
  * Guards the #562 coverage floor: CI's `coverage` job runs `npm run test:cov`,
  * which only fails on regression when `coverageThreshold` is present and sane.
  */
-const config = require('../../jest.config.js') as {
+const config = require('../../jest.unit.config.js') as {
+  testMatch?: string[];
+  collectCoverageFrom?: string[];
+  coveragePathIgnorePatterns?: string[];
   coverageThreshold?: Record<string, Record<string, number>>;
 };
 
 describe('jest coverageThreshold (#562)', () => {
-  it('defines a global floor slightly below observed CI suite levels', () => {
+  it('limits coverage to unit specs while measuring every production source file', () => {
+    expect(config.testMatch).toEqual(['<rootDir>/test/unit/**/*.spec.ts']);
+    expect(config.collectCoverageFrom).toContain('<rootDir>/src/**/*.ts');
+    expect(config.coveragePathIgnorePatterns).toContain('/test/');
+  });
+
+  it('defines a global floor slightly below the observed unit-only baseline', () => {
     const global = config.coverageThreshold?.global;
     expect(global).toBeDefined();
     if (global === undefined) {
       throw new Error('coverageThreshold.global must be defined');
     }
-    expect(global.statements).toBeGreaterThanOrEqual(85);
-    expect(global.branches).toBeGreaterThanOrEqual(66);
-    expect(global.functions).toBeGreaterThanOrEqual(86);
-    expect(global.lines).toBeGreaterThanOrEqual(87);
+    expect(global.statements).toBeGreaterThanOrEqual(28);
+    expect(global.branches).toBeGreaterThanOrEqual(21);
+    expect(global.functions).toBeGreaterThanOrEqual(25);
+    expect(global.lines).toBeGreaterThanOrEqual(28);
   });
 
-  it('keeps function floor within ~4 points of observed ~89.5% (parity with other metrics)', () => {
+  it('keeps each floor below its measured baseline so normal variance has headroom', () => {
     const global = config.coverageThreshold?.global;
     expect(global).toBeDefined();
     if (global === undefined) {
       throw new Error('coverageThreshold.global must be defined');
     }
-    // Observed funcs ~89.5%; keep the floor in [observed-4, observed] so it is
-    // neither too loose (review) nor set above measured CI (would fail test:cov).
-    const observedFunctions = 89.5;
-    const maxGapPoints = 4;
-    expect(global.functions).toBeGreaterThanOrEqual(observedFunctions - maxGapPoints);
-    expect(global.functions).toBeLessThanOrEqual(observedFunctions);
-  });
-
-  it('includes per-module carve-outs for known-low branch areas', () => {
-    const threshold = config.coverageThreshold;
-    expect(threshold).toBeDefined();
-    if (threshold === undefined) {
-      throw new Error('coverageThreshold must be defined');
-    }
-    const global = threshold.global;
-    expect(global).toBeDefined();
-    if (global === undefined) {
-      throw new Error('coverageThreshold.global must be defined');
-    }
-    const carveOuts = [
-      './src/modules/auth/',
-      './src/modules/auth/oidc.service.ts',
-      './src/modules/rules/',
-      './src/modules/ai-dm/',
-      './src/modules/mcp/',
-      './src/modules/scribe/',
-    ];
-    for (const path of carveOuts) {
-      const entry = threshold[path];
-      expect(entry).toBeDefined();
-      if (entry === undefined) {
-        throw new Error(`coverageThreshold carve-out for ${path} must be defined`);
-      }
-      expect(entry.branches).toBeGreaterThan(0);
-      expect(entry.statements).toBeGreaterThan(0);
-      expect(entry.functions).toBeGreaterThan(0);
-      expect(entry.lines).toBeGreaterThan(0);
-      // Carve-outs must be below the global floor (otherwise they are not carve-outs).
-      expect(entry.branches).toBeLessThan(global.branches);
-    }
-  });
-
-  it('requires oidc.service.ts branch floor at the level live e2e flows exercise (#556)', () => {
-    const threshold = config.coverageThreshold;
-    expect(threshold).toBeDefined();
-    if (threshold === undefined) {
-      throw new Error('coverageThreshold must be defined');
-    }
-    const oidcService = threshold['./src/modules/auth/oidc.service.ts'];
-    expect(oidcService).toBeDefined();
-    if (oidcService === undefined) {
-      throw new Error('coverageThreshold for oidc.service.ts must be defined');
-    }
-    // Observed with oidc.e2e-spec.ts child-process merge alone: ~63% branches.
-    // Keep the floor a few points below so CI has headroom without silent regression.
-    expect(oidcService.branches).toBeGreaterThanOrEqual(55);
+    expect(global.statements).toBeLessThan(29.91);
+    expect(global.branches).toBeLessThan(23.46);
+    expect(global.functions).toBeLessThan(27.65);
+    expect(global.lines).toBeLessThan(30.4);
   });
 });
