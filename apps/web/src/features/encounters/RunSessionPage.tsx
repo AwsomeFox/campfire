@@ -1914,14 +1914,22 @@ export default function RunSessionPage() {
   // role (DM moves any; a player only their own character's token).
   const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
   const tokenUndoKeys = useRef(new Map<string, string>());
+  const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
   // individual PATCHes: either every token lands or the roster remains unchanged.
   const batchMoveTokens = useCallback(async (placements: Array<{ combatantId: number; x: number; y: number }>) => {
-    const preview = await api.post<{ previewToken: string }>(`${API}/encounters/${eid}/token-batches/preview`, { placements });
+    const intentKey = JSON.stringify(placements);
+    let intent = tokenBatchApplyIntents.current.get(intentKey);
+    if (!intent) {
+      const preview = await api.post<{ previewToken: string }>(`${API}/encounters/${eid}/token-batches/preview`, { placements });
+      intent = { previewToken: preview.previewToken, idempotencyKey: newOperationId() };
+      tokenBatchApplyIntents.current.set(intentKey, intent);
+    }
     const applied = await api.post<{ undoToken: string }>(`${API}/encounters/${eid}/token-batches/apply`, {
-      previewToken: preview.previewToken,
-      idempotencyKey: newOperationId(),
+      previewToken: intent.previewToken,
+      idempotencyKey: intent.idempotencyKey,
     });
+    tokenBatchApplyIntents.current.delete(intentKey);
     await invalidateEncounter(queryClient, eid);
     return applied;
   }, [eid, queryClient]);
@@ -3375,6 +3383,11 @@ export function BattleMap({
     () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
     [surfaceW, surfaceH, imgNatural],
   );
+  // Percent coordinates are normalized to map width. Calibrated cells carry the
+  // authoritative height/width ratio; otherwise use the actual rendered map.
+  const tokenPlanningAspect = (gridOn && encounter.gridCellHeight && gridSize)
+    ? encounter.gridCellHeight / gridSize
+    : mapRect && mapRect.width > 0 ? mapRect.height / mapRect.width : 1;
 
   // Grid calibration (issue #417): resolve the persisted grid fields into ONE normalized
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
@@ -3980,7 +3993,7 @@ export function BattleMap({
       const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
-        const group = translateGroup(encounter.combatants, selectedTokenIds, gesture.tokenId, pt, gridOn ? Math.max(1, gridSize ?? 5) : 5);
+        const group = translateGroup(encounter.combatants, selectedTokenIds, gesture.tokenId, pt, gridOn ? Math.max(1, gridSize ?? 5) : 5, tokenPlanningAspect);
         // Player movement remains a single permitted token. A DM multi-drag is one
         // server-authoritative atomic batch, never a partial PATCH loop.
         if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y }))).then(result => {
@@ -5389,7 +5402,7 @@ export function BattleMap({
                   {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
                     let plan: Array<{ combatantId: number; x: number; y: number }>;
-                    try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square').map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
+                    try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect).map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
                     catch (error) { onError(error instanceof Error ? error.message : 'Unable to plan formation'); return; }
                     if (!onBatchTokens) return;
                     if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
@@ -5417,7 +5430,7 @@ export function BattleMap({
                         const index = remaining.findIndex(c => (slot.side === 'any' || (slot.side === 'party') === (c.kind === 'character')) && (!slot.kind || c.kind === slot.kind));
                         if (index < 0) return []; const [c] = remaining.splice(index, 1); return [{ token: c, desired: { x: 50 + slot.x, y: 50 + slot.y } }];
                       });
-                      const plan = resolveDesiredFormation(encounter.combatants, assigned, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square').map(p => ({ combatantId: p.id, x: p.x, y: p.y }));
+                      const plan = resolveDesiredFormation(encounter.combatants, assigned, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect).map(p => ({ combatantId: p.id, x: p.x, y: p.y }));
                       if (!plan.length) throw new Error('No selected tokens match this formation');
                       if (!onBatchTokens) return;
                       if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
@@ -5439,7 +5452,7 @@ export function BattleMap({
                         try {
                           // Planning completes before the first write, so an impossible map
                           // never quietly places only a prefix of the tray.
-                          const plan = planCollisionFreePlacement(encounter.combatants, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square');
+                          const plan = planCollisionFreePlacement(encounter.combatants, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect);
                           if (!onBatchTokens) return;
                           void onBatchTokens(plan.map(item => ({ combatantId: item.id, x: item.x, y: item.y }))).then(result => {
                             setTokenBatchUndo(result.undoToken); announce(`${plan.length} tokens placed with collision-free spacing`);

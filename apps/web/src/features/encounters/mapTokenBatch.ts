@@ -15,10 +15,16 @@ export type BatchToken = {
 };
 export type FormationKind = 'line' | 'cluster' | 'sides' | 'saved';
 
+/** Convert percentage coordinates to an isotropic planning plane. `aspect` is
+ * rendered height / width, so equal distances remain equal on rectangular maps. */
+export const isotropicPoint = (point: BatchPoint, aspect = 1): BatchPoint => ({ x: point.x, y: point.y * aspect });
+
 const SIZE_CELLS: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
 const clamp = (n: number) => Math.max(0, Math.min(100, n));
 export const tokenRadiusPercent = (token: Pick<BatchToken, 'tokenSize'>, cell = 5) => (SIZE_CELLS[token.tokenSize ?? 'medium'] ?? 1) * cell / 2;
-export const isTrulyUnplaced = (token: BatchToken) => token.tokenX == null && token.tokenY == null && !token.tokenHiddenByFog;
+// A partial coordinate is not renderable and belongs in the tray; treating it as
+// unplaced also lets the batch repair an interrupted one-axis token PATCH.
+export const isTrulyUnplaced = (token: BatchToken) => (token.tokenX == null || token.tokenY == null) && !token.tokenHiddenByFog;
 
 export function toggleTokenSelection(selected: ReadonlySet<number>, id: number, additive: boolean): Set<number> {
   if (!additive) return new Set([id]);
@@ -50,16 +56,17 @@ export function tokensInLasso(tokens: readonly BatchToken[], polygon: readonly B
   return selectBy(tokens, t => t.tokenX != null && t.tokenY != null && inside({ x: t.tokenX, y: t.tokenY }));
 }
 
-export function snapBatchPoint(point: BatchPoint, cell = 5): BatchPoint {
-  return { x: clamp(Math.round(point.x / cell) * cell), y: clamp(Math.round(point.y / cell) * cell) };
+export function snapBatchPoint(point: BatchPoint, cell = 5, aspect = 1): BatchPoint {
+  return { x: clamp(Math.round(point.x / cell) * cell), y: clamp(Math.round(point.y / (cell / aspect)) * (cell / aspect)) };
 }
 
-function overlaps(a: BatchPoint, ar: number, b: BatchPoint, br: number) {
-  return Math.hypot(a.x - b.x, a.y - b.y) < ar + br - .001;
+function overlaps(a: BatchPoint, ar: number, b: BatchPoint, br: number, aspect = 1) {
+  const ai = isotropicPoint(a, aspect), bi = isotropicPoint(b, aspect);
+  return Math.hypot(ai.x - bi.x, ai.y - bi.y) < ar + br - .001;
 }
 
 /** Finds a deterministic nearest free grid position. Existing placed tokens are obstacles. */
-export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square'): Array<{ id: number; x: number; y: number }> {
+export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
   const occupied = tokens.filter(t => t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cell) }));
   const plan: Array<{ id: number; x: number; y: number }> = [];
   for (const token of tokens.filter(isTrulyUnplaced)) {
@@ -68,13 +75,13 @@ export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor
     for (let ring = 0; ring <= 40 && !chosen; ring++) for (let dx = -ring; dx <= ring && !chosen; dx++) for (let dy = -ring; dy <= ring && !chosen; dy++) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
       const raw = gridType === 'hex'
-        ? { x: anchor.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: anchor.y + dy * cell * .8660254 }
-        : { x: anchor.x + dx * cell, y: anchor.y + dy * cell };
+        ? { x: anchor.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: anchor.y + dy * cell * .8660254 / aspect }
+        : { x: anchor.x + dx * cell, y: anchor.y + dy * cell / aspect };
       const point = gridType === 'hex'
         ? { x: clamp(Math.round(raw.x * 1000) / 1000), y: clamp(Math.round(raw.y * 1000) / 1000) }
-        : snapBatchPoint(raw, cell);
-      if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius < 0 || point.y + radius > 100) continue;
-      if (!occupied.some(o => overlaps(point, radius, o.point, o.radius))) chosen = point;
+        : snapBatchPoint(raw, cell, aspect);
+      if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius / aspect < 0 || point.y + radius / aspect > 100) continue;
+      if (!occupied.some(o => overlaps(point, radius, o.point, o.radius, aspect))) chosen = point;
     }
     if (!chosen) throw new Error(`No collision-free map position for ${token.name}`);
     occupied.push({ point: chosen, radius }); plan.push({ id: token.id, ...chosen });
@@ -94,15 +101,15 @@ export function formationOffsets(tokens: readonly BatchToken[], kind: FormationK
 /** Size-aware formation placement. Desired offsets keep the formation's character,
  * then the same deterministic free-cell search used by Place all prevents a large
  * footprint from overlapping a neighbour or clipping an edge. */
-export function planFormationPlacement(tokens: readonly BatchToken[], selected: ReadonlySet<number>, kind: Exclude<FormationKind, 'saved'>, anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square'): Array<{ id: number; x: number; y: number }> {
+export function planFormationPlacement(tokens: readonly BatchToken[], selected: ReadonlySet<number>, kind: Exclude<FormationKind, 'saved'>, anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
   const members = tokens.filter(t => selected.has(t.id));
   const offsets = formationOffsets(members, kind, cell);
-  return resolveDesiredFormation(tokens, members.map((token, i) => ({ token, desired: { x: anchor.x + offsets[i].x, y: anchor.y + offsets[i].y } })), cell, gridType);
+  return resolveDesiredFormation(tokens, members.map((token, i) => ({ token, desired: { x: anchor.x + offsets[i].x, y: anchor.y + offsets[i].y / aspect } })), cell, gridType, aspect);
 }
 
 /** Resolves saved formation slot offsets without ever clamping a centre independently:
  * each desired point is nudged to the nearest valid footprint-aware grid position. */
-export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: ReadonlyArray<{ token: BatchToken; desired: BatchPoint }>, cell = 5, gridType: 'square' | 'hex' = 'square'): Array<{ id: number; x: number; y: number }> {
+export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: ReadonlyArray<{ token: BatchToken; desired: BatchPoint }>, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
   const selected = new Set(desired.map(item => item.token.id));
   const occupied = tokens.filter(t => !selected.has(t.id) && t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cell) }));
   const output: Array<{ id: number; x: number; y: number }> = [];
@@ -111,10 +118,10 @@ export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: 
     let chosen: BatchPoint | undefined;
     for (let ring = 0; ring <= 40 && !chosen; ring++) for (let dx = -ring; dx <= ring && !chosen; dx++) for (let dy = -ring; dy <= ring && !chosen; dy++) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
-      const raw = gridType === 'hex' ? { x: desiredPoint.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: desiredPoint.y + dy * cell * .8660254 } : { x: desiredPoint.x + dx * cell, y: desiredPoint.y + dy * cell };
-      const point = gridType === 'hex' ? { x: Math.round(raw.x * 1000) / 1000, y: Math.round(raw.y * 1000) / 1000 } : snapBatchPoint(raw, cell);
-      if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius < 0 || point.y + radius > 100) continue;
-      if (!occupied.some(o => overlaps(point, radius, o.point, o.radius))) chosen = point;
+      const raw = gridType === 'hex' ? { x: desiredPoint.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: desiredPoint.y + dy * cell * .8660254 / aspect } : { x: desiredPoint.x + dx * cell, y: desiredPoint.y + dy * cell / aspect };
+      const point = gridType === 'hex' ? { x: Math.round(raw.x * 1000) / 1000, y: Math.round(raw.y * 1000) / 1000 } : snapBatchPoint(raw, cell, aspect);
+      if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius / aspect < 0 || point.y + radius / aspect > 100) continue;
+      if (!occupied.some(o => overlaps(point, radius, o.point, o.radius, aspect))) chosen = point;
     }
     if (!chosen) throw new Error(`No collision-free formation position for ${token.name}`);
     occupied.push({ point: chosen, radius }); output.push({ id: token.id, ...chosen });
@@ -123,13 +130,13 @@ export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: 
 }
 
 /** Preserve group offsets, translating once and clamping as a group (never collapse tokens). */
-export function translateGroup(tokens: readonly BatchToken[], selected: ReadonlySet<number>, leadId: number, target: BatchPoint, cell = 5): Array<{ id: number; x: number; y: number }> {
+export function translateGroup(tokens: readonly BatchToken[], selected: ReadonlySet<number>, leadId: number, target: BatchPoint, cell = 5, aspect = 1): Array<{ id: number; x: number; y: number }> {
   const lead = tokens.find(t => t.id === leadId);
   if (!lead || lead.tokenX == null || lead.tokenY == null) return [];
   const group = tokens.filter(t => selected.has(t.id) && t.tokenX != null && t.tokenY != null);
   let dx = target.x - lead.tokenX, dy = target.y - lead.tokenY;
   const minX = Math.min(...group.map(t => t.tokenX! - tokenRadiusPercent(t, cell))), maxX = Math.max(...group.map(t => t.tokenX! + tokenRadiusPercent(t, cell)));
-  const minY = Math.min(...group.map(t => t.tokenY! - tokenRadiusPercent(t, cell))), maxY = Math.max(...group.map(t => t.tokenY! + tokenRadiusPercent(t, cell)));
+  const minY = Math.min(...group.map(t => t.tokenY! - tokenRadiusPercent(t, cell) / aspect)), maxY = Math.max(...group.map(t => t.tokenY! + tokenRadiusPercent(t, cell) / aspect));
   dx = Math.max(-minX, Math.min(100 - maxX, dx)); dy = Math.max(-minY, Math.min(100 - maxY, dy));
   return group.map(t => ({ id: t.id, x: clamp(t.tokenX! + dx), y: clamp(t.tokenY! + dy) }));
 }

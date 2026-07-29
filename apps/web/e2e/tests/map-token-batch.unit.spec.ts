@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { planCollisionFreePlacement, planFormationPlacement, resolveDesiredFormation, tokenRadiusPercent, tokensInLasso, tokensInRectangle, translateGroup } from '../../src/features/encounters/mapTokenBatch';
+import { isTrulyUnplaced, planCollisionFreePlacement, planFormationPlacement, resolveDesiredFormation, tokenRadiusPercent, tokensInLasso, tokensInRectangle, translateGroup } from '../../src/features/encounters/mapTokenBatch';
 
 const token = (id: number, x: number | null, y: number | null, tokenSize = 'medium') => ({ id, name: `Token ${id}`, kind: id % 2 ? 'character' : 'monster', tokenX: x, tokenY: y, tokenSize });
 
@@ -47,6 +47,19 @@ test.describe('map token batch planner (issue #761)', () => {
     const roster = [token(1, null, null, 'huge'), token(2, null, null, 'large')];
     const plan = resolveDesiredFormation(roster, [{ token: roster[0], desired: { x: 5, y: 5 } }, { token: roster[1], desired: { x: 5, y: 5 } }], 5, 'square');
     expect(Math.hypot(plan[0].x - plan[1].x, plan[0].y - plan[1].y)).toBeGreaterThanOrEqual(tokenRadiusPercent(roster[0], 5) + tokenRadiusPercent(roster[1], 5) - .001);
+  });
+
+  test('plans in rendered-map units when calibrated cells are rectangular', () => {
+    const aspect = .5; // calibrated cell height / cell width
+    const roster = [token(1, null, null, 'large'), token(2, null, null, 'large')];
+    const plan = resolveDesiredFormation(roster, roster.map(source => ({ token: source, desired: { x: 50, y: 50 } })), 10, 'square', aspect);
+    const [a, b] = plan;
+    expect(Math.hypot(a.x - b.x, (a.y - b.y) * aspect)).toBeGreaterThanOrEqual(tokenRadiusPercent(roster[0], 10) + tokenRadiusPercent(roster[1], 10) - .001);
+    for (const point of plan) expect(point.y - tokenRadiusPercent(roster.find(source => source.id === point.id)!, 10) / aspect).toBeGreaterThanOrEqual(0);
+  });
+
+  test('treats a partially persisted coordinate as unplaced', () => {
+    expect(isTrulyUnplaced(token(1, null, 50))).toBe(true);
   });
 
   test('rectangle and lasso selections include only placed token centres', () => {

@@ -5848,18 +5848,20 @@ export class EncountersService {
     // never turn "Place all" into overlapping tokens by bypassing the UI planner.
     const sizeCells: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
     const cellPercent = Math.max(1, encounter.gridSize ?? 5);
+    const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+    const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
     const radius = (row: { tokenSize: string | null }) => (sizeCells[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
     const requested = input.placements.map(p => ({ ...p, radius: radius(byId.get(p.combatantId)!) }));
     for (const p of requested) {
-      if (p.x - p.radius < 0 || p.x + p.radius > 100 || p.y - p.radius < 0 || p.y + p.radius > 100) throw new BadRequestException('A token footprint is outside the map');
+      if (p.x - p.radius < 0 || p.x + p.radius > 100 || p.y - p.radius / aspect < 0 || p.y + p.radius / aspect > 100) throw new BadRequestException('A token footprint is outside the map');
       for (const existing of rows) {
         if (ids.includes(existing.id) || existing.tokenX == null || existing.tokenY == null) continue;
-        if (Math.hypot(p.x - existing.tokenX, p.y - existing.tokenY) < p.radius + radius(existing) - .001) throw new ConflictException('A token placement overlaps an existing token');
+        if (distance(p, { x: existing.tokenX, y: existing.tokenY }) < p.radius + radius(existing) - .001) throw new ConflictException('A token placement overlaps an existing token');
       }
     }
     for (let i = 0; i < requested.length; i++) for (let j = 0; j < i; j++) {
       const a = requested[i], b = requested[j];
-      if (Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius - .001) throw new ConflictException('Token batch placements overlap');
+      if (distance(a, b) < a.radius + b.radius - .001) throw new ConflictException('Token batch placements overlap');
     }
     const before = input.placements.map(p => { const r = byId.get(p.combatantId)!; return { id: r.id, tokenX: r.tokenX, tokenY: r.tokenY, tokenSize: r.tokenSize }; });
     const fingerprint = encounterOpFingerprint(input);
@@ -5893,17 +5895,19 @@ export class EncountersService {
       const selected = new Set(plan.map(p => p.combatantId));
       const liveById = new Map(live.map(row => [row.id, row]));
       const cellPercent = Math.max(1, encounter.gridSize ?? 5);
+      const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+      const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
       const batchSizes: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
       const radius = (row: { tokenSize: string | null }) => (batchSizes[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
       for (let i = 0; i < plan.length; i++) {
         const source = liveById.get(plan[i].combatantId)!;
         const sourceRadius = radius(source);
-        if (plan[i].x - sourceRadius < 0 || plan[i].x + sourceRadius > 100 || plan[i].y - sourceRadius < 0 || plan[i].y + sourceRadius > 100) throw new ConflictException('Grid size changed and a token no longer fits; refresh preview');
-        for (let j = 0; j < i; j++) if (Math.hypot(plan[i].x - plan[j].x, plan[i].y - plan[j].y) < sourceRadius + radius(liveById.get(plan[j].combatantId)!) - .001) throw new ConflictException('Grid size changed and batch tokens now overlap; refresh preview');
+        if (plan[i].x - sourceRadius < 0 || plan[i].x + sourceRadius > 100 || plan[i].y - sourceRadius / aspect < 0 || plan[i].y + sourceRadius / aspect > 100) throw new ConflictException('Grid size changed and a token no longer fits; refresh preview');
+        for (let j = 0; j < i; j++) if (distance(plan[i], plan[j]) < sourceRadius + radius(liveById.get(plan[j].combatantId)!) - .001) throw new ConflictException('Grid size changed and batch tokens now overlap; refresh preview');
       }
       for (const p of plan) for (const other of live) {
         if (selected.has(other.id) || other.tokenX == null || other.tokenY == null) continue;
-        if (Math.hypot(p.x - other.tokenX, p.y - other.tokenY) < radius(liveById.get(p.combatantId)!) + radius(other) - .001) throw new ConflictException('A token moved into this batch placement; refresh preview');
+        if (distance(p, { x: other.tokenX, y: other.tokenY }) < radius(liveById.get(p.combatantId)!) + radius(other) - .001) throw new ConflictException('A token moved into this batch placement; refresh preview');
       }
       for (const p of plan) tx.update(combatants).set({ tokenX: clampPercent(p.x), tokenY: clampPercent(p.y) }).where(eq(combatants.id, p.combatantId)).run();
       tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${plan.length} token placements`, createdAt: nowIso() }).run();
@@ -5929,7 +5933,36 @@ export class EncountersService {
     }
     if (batch.status !== 'applied') throw new ConflictException('Token batch cannot be undone');
     const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []); const after = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.afterJson, []);
-    this.db.transaction(tx => { for (const p of after) { const r = tx.select().from(combatants).where(eq(combatants.id, p.combatantId)).get(); if (!r || r.tokenX !== p.x || r.tokenY !== p.y) throw new ConflictException('A token changed after this batch'); } const selected = new Set(before.map(p => p.id)); const live = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all(); const byId = new Map(live.map(r => [r.id, r])); const radius = (size: string | null) => ({ tiny:.5, small:1, medium:1, large:2, huge:3, gargantuan:4 }[size ?? 'medium'] ?? 1) * Math.max(1, encounter.gridSize ?? 5) / 2; for (let i=0;i<before.length;i++) { const p=before[i], row=byId.get(p.id)!; const r=radius(row.tokenSize); if (p.tokenX != null && p.tokenY != null && (p.tokenX-r<0||p.tokenX+r>100||p.tokenY-r<0||p.tokenY+r>100)) throw new ConflictException('Current token size no longer fits the undo position'); for(let j=0;j<i;j++){const q=before[j], other=byId.get(q.id)!; if(p.tokenX!=null&&p.tokenY!=null&&q.tokenX!=null&&q.tokenY!=null&&Math.hypot(p.tokenX-q.tokenX,p.tokenY-q.tokenY)<r+radius(other.tokenSize)-.001) throw new ConflictException('Current token sizes make undo positions overlap');} } for (const p of before) if (p.tokenX != null && p.tokenY != null) for (const other of live) if (!selected.has(other.id) && other.tokenX != null && other.tokenY != null && Math.hypot(p.tokenX - other.tokenX, p.tokenY - other.tokenY) < radius(byId.get(p.id)!.tokenSize) + radius(other.tokenSize) - .001) throw new ConflictException('A token moved into this batch\'s prior position; cannot undo'); for (const p of before) tx.update(combatants).set({ tokenX:p.tokenX, tokenY:p.tokenY }).where(eq(combatants.id,p.id)).run(); tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, createdAt: nowIso() }).run(); this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` }); const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run(); if (changed.changes !== 1) throw new ConflictException('Token batch changed concurrently'); });
+    this.db.transaction(tx => {
+      for (const p of after) {
+        const row = tx.select().from(combatants).where(eq(combatants.id, p.combatantId)).get();
+        if (!row || row.tokenX !== p.x || row.tokenY !== p.y) throw new ConflictException('A token changed after this batch');
+      }
+      const selected = new Set(before.map(p => p.id));
+      const live = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const byId = new Map(live.map(row => [row.id, row]));
+      const cellPercent = Math.max(1, encounter.gridSize ?? 5);
+      const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+      const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
+      const radius = (size: string | null) => ({ tiny:.5, small:1, medium:1, large:2, huge:3, gargantuan:4 }[size ?? 'medium'] ?? 1) * cellPercent / 2;
+      for (let i = 0; i < before.length; i++) {
+        const p = before[i], row = byId.get(p.id)!;
+        const r = radius(row.tokenSize);
+        if (p.tokenX != null && p.tokenY != null && (p.tokenX - r < 0 || p.tokenX + r > 100 || p.tokenY - r / aspect < 0 || p.tokenY + r / aspect > 100)) throw new ConflictException('Current token size no longer fits the undo position');
+        for (let j = 0; j < i; j++) {
+          const q = before[j], other = byId.get(q.id)!;
+          if (p.tokenX != null && p.tokenY != null && q.tokenX != null && q.tokenY != null && distance({ x: p.tokenX, y: p.tokenY }, { x: q.tokenX, y: q.tokenY }) < r + radius(other.tokenSize) - .001) throw new ConflictException('Current token sizes make undo positions overlap');
+        }
+      }
+      for (const p of before) if (p.tokenX != null && p.tokenY != null) for (const other of live) {
+        if (!selected.has(other.id) && other.tokenX != null && other.tokenY != null && distance({ x: p.tokenX, y: p.tokenY }, { x: other.tokenX, y: other.tokenY }) < radius(byId.get(p.id)!.tokenSize) + radius(other.tokenSize) - .001) throw new ConflictException('A token moved into this batch\'s prior position; cannot undo');
+      }
+      for (const p of before) tx.update(combatants).set({ tokenX:p.tokenX, tokenY:p.tokenY }).where(eq(combatants.id,p.id)).run();
+      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, createdAt: nowIso() }).run();
+      this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` });
+      const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run();
+      if (changed.changes !== 1) throw new ConflictException('Token batch changed concurrently');
+    });
     this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false); return { ok:true };
   }
 }
