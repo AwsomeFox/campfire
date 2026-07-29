@@ -70,7 +70,7 @@ import {
 import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
+import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
@@ -985,6 +985,8 @@ export default function RunSessionPage() {
   // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
   const [actionError, setActionError] = useState<ActionErrorState>(null);
+  const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
+  const [pendingFog, setPendingFog] = useState<FogState | null | undefined>(undefined);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
@@ -1455,6 +1457,13 @@ export default function RunSessionPage() {
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);
+  const reportTurnAdvanceError = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.code === 'TURN_ALREADY_ADVANCED') {
+      surfaceActionError('Another device already advanced the turn. The tracker has refreshed.');
+      return;
+    }
+    reportError(err);
+  }, [reportError, surfaceActionError]);
 
   // Issue #580 — the ambiguous-outcome gate. When a combat write times out or its socket
   // drops, the outcome is genuinely unknown: the server may have committed. Showing a
@@ -1548,7 +1557,7 @@ export default function RunSessionPage() {
     onMutate: () => setActionError(null),
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
-      else reportError(err);
+      else reportTurnAdvanceError(err);
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
@@ -1567,7 +1576,7 @@ export default function RunSessionPage() {
     onMutate: () => setActionError(null),
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
-      else reportError(err);
+      else reportTurnAdvanceError(err);
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
@@ -1912,12 +1921,24 @@ export default function RunSessionPage() {
   // which of those two things happens to occur.
   const gridDefaultRetryOnFree = useRef(new Map<string, () => void>());
   const setMap = useMutation({
-    mutationFn: ({ patch }: { patch: Record<string, unknown>; pendingKey: string; defaultAttemptKey?: string }) =>
-      api.patch(`${API}/encounters/${eid}`, patch),
-    onMutate: () => setActionError(null),
+    mutationFn: ({
+      patch,
+      expectedUpdatedAt,
+    }: {
+      patch: Record<string, unknown>;
+      pendingKey: string;
+      defaultAttemptKey?: string;
+      expectedUpdatedAt?: string;
+    }) => api.patch(`${API}/encounters/${eid}`, { ...patch, expectedUpdatedAt }),
+    onMutate: () => {
+      setActionError(null);
+      setEncounterPatchConflict(null);
+    },
     onError: (error, variables) => {
       if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
-      reportError(error);
+      if (isStaleWrite(error)) {
+        setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
+      } else reportError(error);
     },
     onSettled: (_data, error, variables) => {
       pendingEncounterPatchKeys.current.delete(variables.pendingKey);
@@ -1944,6 +1965,10 @@ export default function RunSessionPage() {
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
       if (wake && error && !variables.defaultAttemptKey) wake();
+      if (Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
+        const settledFog = variables.patch.fog as FogState | null;
+        setPendingFog((current) => (current !== undefined && fogStatesEqual(current, settledFog) ? undefined : current));
+      }
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
       // than mutation-render churn immediately creating an unbounded failure loop.
@@ -1971,16 +1996,15 @@ export default function RunSessionPage() {
       pendingEncounterPatchKeys.current.add(pendingKey);
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
-      // Record the default intent before dispatch. Strict Mode's second effect pass, mutation
-      // renders, and stale polling/SSE responses therefore all see committed-looking defaults;
-      // the pending-key guard remains the final backstop if a stale response overwrites them.
-      if (defaultAttemptKey) {
-        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
-          current ? { ...current, ...patch } : current,
-        );
-      }
+      const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
+      // Make every encounter patch optimistic. Fog edits in particular need their cache value
+      // to survive the next poll while the write is in flight; the version token below turns a
+      // real remote collision into an explicit conflict rather than last-writer-wins.
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+        current ? { ...current, ...patch } : current,
+      );
 
-      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey });
+      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
       return true;
     },
     [eid, queryClient],
@@ -2015,7 +2039,9 @@ export default function RunSessionPage() {
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
   const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
-  const setEncounterFog = useCallback((fog: FogState | null) => queueEncounterPatch({ fog }), [queueEncounterPatch]);
+  const setEncounterFog = useCallback((fog: FogState | null) => {
+    if (queueEncounterPatch({ fog })) setPendingFog(fog);
+  }, [queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
 
@@ -2299,6 +2325,16 @@ export default function RunSessionPage() {
             refetchEncounter();
           }}
           onDismiss={actionError ? () => setActionError(null) : undefined}
+        />
+      )}
+      {encounterPatchConflict && (
+        <ErrorNote
+          message={encounterPatchConflict}
+          onRetry={() => {
+            setEncounterPatchConflict(null);
+            refetchEncounter();
+          }}
+          onDismiss={() => setEncounterPatchConflict(null)}
         />
       )}
 
@@ -2685,6 +2721,7 @@ export default function RunSessionPage() {
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
+          pendingFog={pendingFog}
           onSetAoe={setEncounterAoe}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
@@ -3286,6 +3323,7 @@ export function BattleMap({
   onSetTokenSize,
   onSetGrid,
   onSetFog,
+  pendingFog,
   onSetAoe,
   onGenerateMap,
   onImportMap,
@@ -3314,6 +3352,8 @@ export function BattleMap({
   onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
+  /** A fog write is optimistic until the server settles; polls must not discard its local undo history. */
+  pendingFog: FogState | null | undefined;
   onSetAoe: (aoe: AoeTemplate[]) => void;
   /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
@@ -3654,6 +3694,14 @@ export function BattleMap({
   );
 
   useEffect(() => {
+    // The query cache is updated optimistically, but an older poll/SSE response can still
+    // arrive before the PATCH settles. Keep the local edit and its active drag/undo state
+    // authoritative during that interval; on settle the parent clears this marker and the
+    // fresh server snapshot becomes the new baseline.
+    if (pendingFog !== undefined) {
+      lastLocalFogRef.current = pendingFog;
+      return;
+    }
     if (!fogStatesEqual(encounter.fog, lastLocalFogRef.current)) {
       lastLocalFogRef.current = encounter.fog;
       fogUndoStackRef.current.reset();
@@ -3661,7 +3709,7 @@ export function BattleMap({
       setFogRegionDrag(null);
       syncFogUndoUi();
     }
-  }, [encounter.fog, syncFogUndoUi]);
+  }, [encounter.fog, pendingFog, syncFogUndoUi]);
 
   const undoFogEdit = useCallback(() => {
     if (!fogUndoStackRef.current.canUndo()) return;

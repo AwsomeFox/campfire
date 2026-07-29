@@ -3869,92 +3869,113 @@ export class EncountersService {
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const initModel = initiativeModelForAdapter(adapter);
-    const rows = await this.listCombatantRows(encounterId);
-    const unrolled = rows.filter((row) => row.initiative === null);
+    let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
+    let freshEncounter = encounterRow;
 
-    let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }>;
-    if (initModel.mode === 'group') {
-      // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
-      const groupRolls = new Map<string, number>();
-      rolled = unrolled.map((row) => {
-        const group =
-          row.initiativeGroup ??
-          (row.kind === 'character' || row.kind === 'npc' ? 'party' : 'monsters');
-        if (!groupRolls.has(group)) {
-          groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
+    // The roster read, initiative assignment, log rows, and any turn-index repair must be
+    // one SQLite transaction. Otherwise two devices can both see the same unrolled roster,
+    // overwrite one another, and each append a conflicting set of roll events. Keep the
+    // IS NULL guard too: it preserves a manual initiative that landed between any older
+    // client's read and this write, even if this code is later called from a wider tx.
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMutable(fresh);
+      freshEncounter = fresh;
+      const unrolled = tx
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.encounterId, encounterId), isNull(combatants.initiative)))
+        .all();
+
+      if (initModel.mode === 'group') {
+        // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
+        const groupRolls = new Map<string, number>();
+        rolled = unrolled.map((row) => {
+          const group = row.initiativeGroup ?? (row.kind === 'character' || row.kind === 'npc' ? 'party' : 'monsters');
+          if (!groupRolls.has(group)) groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
+          const base = groupRolls.get(group)!;
+          const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, 0);
+          const breakdown = CombatantInitiativeBreakdown.parse({
+            ...existing,
+            die: adapter.initiativeDie,
+            roll: base,
+            modifier: 0,
+            total: base,
+            terms: [{ label: group, value: 0 }],
+            formula: initiativeFormula(adapter.initiativeDie, [{ label: group, value: 0 }], base, base),
+          });
+          return { id: row.id, initiative: base, breakdown, name: row.name };
+        });
+      } else {
+        rolled = unrolled.map((row) => {
+          const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
+          const natural = initiative - row.initMod;
+          const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
+          const breakdown = CombatantInitiativeBreakdown.parse({
+            ...existing,
+            die: adapter.initiativeDie,
+            roll: natural,
+            modifier: row.initMod,
+            total: initiative,
+            formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+          });
+          return { id: row.id, initiative, breakdown, name: row.name };
+        });
+      }
+
+      if (rolled.length === 0) return;
+      const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
+      const breakdownCases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${toJsonText(r.breakdown)}`), sql` `);
+      tx.update(combatants)
+        .set({
+          initiative: sql`CASE ${combatants.id} ${cases} END`,
+          initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+        })
+        .where(and(inArray(combatants.id, rolled.map((r) => r.id)), isNull(combatants.initiative)))
+        .run();
+
+      // Filling a late joiner's initiative mid-fight re-sorts the order, so keep the
+      // positional index aligned with the unchanged identity pointer.
+      if (fresh.status === 'running') {
+        const sorted = this.sortCombatantsWithAdapter(
+          tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+          'running',
+          adapter,
+        );
+        const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+        if (turnIndex !== fresh.turnIndex) {
+          tx.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
         }
-        const base = groupRolls.get(group)!;
-        const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, 0);
-        const breakdown = CombatantInitiativeBreakdown.parse({
-          ...existing,
-          die: adapter.initiativeDie,
-          roll: base,
-          modifier: 0,
-          total: base,
-          terms: [{ label: group, value: 0 }],
-          formula: initiativeFormula(adapter.initiativeDie, [{ label: group, value: 0 }], base, base),
-        });
-        return { id: row.id, initiative: base, breakdown, name: row.name };
-      });
-    } else {
-      rolled = unrolled.map((row) => {
-        const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
-        const natural = initiative - row.initMod;
-        const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
-        const breakdown = CombatantInitiativeBreakdown.parse({
-          ...existing,
-          die: adapter.initiativeDie,
-          roll: natural,
-          modifier: row.initMod,
-          total: initiative,
-          formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
-        });
-        return { id: row.id, initiative, breakdown, name: row.name };
-      });
-    }
+      }
 
-    // Fully-rolled roster (issue #702): nothing to write, nothing meaningful to audit.
-    // Bail out before the audit.log / SSE emit so the audit trail and other clients are
-    // not disturbed by an empty roll. We still return the current encounter + rolledCount
-    // so the caller has a fresh, consistent snapshot.
+      for (const r of rolled) {
+        tx.insert(encounterEvents)
+          .values({
+            encounterId,
+            round: fresh.round,
+            type: 'roll',
+            actor: null,
+            target: r.name,
+            actorId: null,
+            targetId: r.id,
+            detail: `initiative ${r.breakdown.formula}`,
+            chainId: null,
+            parentEventId: null,
+            phase: null,
+            performedByJson: null,
+            metadataJson: null,
+            createdAt: nowIso(),
+          })
+          .run();
+      }
+    });
+
+    // Fully-rolled roster: no write, audit, log, or SSE disturbance. The fresh snapshot
+    // still gives the caller a consistent result.
     if (rolled.length === 0) {
       const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
       return { ...snapshot, rolledCount: 0 };
-    }
-
-    const cases = sql.join(
-      rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
-      sql` `,
-    );
-    const breakdownCases = sql.join(
-      rolled.map((r) => sql`WHEN ${r.id} THEN ${toJsonText(r.breakdown)}`),
-      sql` `,
-    );
-    await this.db
-      .update(combatants)
-      .set({
-        initiative: sql`CASE ${combatants.id} ${cases} END`,
-        initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
-      })
-      .where(
-        inArray(
-          combatants.id,
-          rolled.map((r) => r.id),
-        ),
-      );
-
-    // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
-    // keep the positional turnIndex aligned with the (unchanged) identity pointer.
-    if (encounterRow.status === 'running') {
-      const sorted = this.sortCombatantsWithAdapter(
-        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
-        'running',
-        adapter,
-      );
-      const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
-      if (turnIndex !== encounterRow.turnIndex) {
-        await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
-      }
     }
 
     await this.audit.log({
@@ -3963,19 +3984,11 @@ export class EncountersService {
       action: 'encounter.roll_initiative',
       entityType: 'encounter',
       entityId: encounterId,
-      campaignId: encounterRow.campaignId,
+      campaignId: freshEncounter.campaignId,
       detail: `${rolled.length}`,
     });
 
-    for (const r of rolled) {
-      await this.appendEvent(encounterId, encounterRow.round, 'roll', {
-        target: r.name,
-        targetId: r.id,
-        detail: `initiative ${r.breakdown.formula}`,
-      });
-    }
-
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -5135,15 +5148,9 @@ export class EncountersService {
     if (encounterRow.status !== 'running') {
       throw new BadRequestException(`Encounter must be 'running' to end (currently '${encounterRow.status}')`);
     }
-    const rows = await this.listCombatantRows(encounterId);
+    let rows: Array<typeof combatants.$inferSelect> = [];
 
-    // Pre-compute the per-character write-back set inside the loop's planning phase
-    // so the transaction body is a tight, sequenced set of writes — same shape as the
-    // existing HP-only loop, just richer. The death-state → lifecycle mapping is the
-    // one piece of policy: only `dead` flips status; `dying`/`stable` leave it alone
-    // (a dying PC is still 'active' once the next encounter starts), and a revived
-    // (hp > 0) character is forced back to 'active' if it had been marked dead.
-    const characterWrites: Array<{
+    type CharacterWrite = {
       combatantId: number;
       characterId: number;
       hpCurrent: number;
@@ -5161,43 +5168,35 @@ export class EncountersService {
       conditionInstances: string;
       status: 'active' | 'dead';
       sheetSyncedUpdatedAt: string | null;
-    }> = [];
-    for (const row of rows) {
-      if (row.kind !== 'character' || row.characterId === null) continue;
-      const dead = row.deathState === 'dead';
-      const revived = !dead && row.hpCurrent > 0;
-      // Only flip lifecycle status on a definitive transition: dead -> 'dead', or a
-      // previously-dead character back to 'active' once they're healed above 0. A
-      // dying/stable character at 0 HP keeps whatever status it had (typically
-      // 'active') — the death STATE is carried by deathState, not lifecycle status.
-      let nextStatus: 'active' | 'dead' | undefined;
-      if (dead) nextStatus = 'dead';
-      else if (revived) nextStatus = 'active'; // cleared below if status is already 'active'
-      characterWrites.push({
-        combatantId: row.id,
-        characterId: row.characterId,
-        hpCurrent: row.hpCurrent,
-        hpTemp: row.hpTemp,
-        spCurrent: row.spCurrent ?? 0,
-        spMax: row.spMax ?? 0,
-        rpCurrent: row.rpCurrent ?? 0,
-        rpMax: row.rpMax ?? 0,
-        deathState: row.deathState,
-        deathSaveSuccesses: row.deathSaveSuccesses,
-        deathSaveFailures: row.deathSaveFailures,
-        ...sheetConditionWriteSetFromInstances(
-          readConditionInstances(row.conditionInstances, row.conditions),
-        ),
-        status: nextStatus ?? 'active',
-        sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
+    };
+    const planCharacterWrites = (sourceRows: Array<typeof combatants.$inferSelect>): CharacterWrite[] =>
+      sourceRows.flatMap((row) => {
+        if (row.kind !== 'character' || row.characterId === null) return [];
+        const dead = row.deathState === 'dead';
+        const revived = !dead && row.hpCurrent > 0;
+        const nextStatus: 'active' | 'dead' | undefined = dead ? 'dead' : revived ? 'active' : undefined;
+        return [{
+          combatantId: row.id,
+          characterId: row.characterId,
+          hpCurrent: row.hpCurrent,
+          hpTemp: row.hpTemp,
+          spCurrent: row.spCurrent ?? 0,
+          spMax: row.spMax ?? 0,
+          rpCurrent: row.rpCurrent ?? 0,
+          rpMax: row.rpMax ?? 0,
+          deathState: row.deathState,
+          deathSaveSuccesses: row.deathSaveSuccesses,
+          deathSaveFailures: row.deathSaveFailures,
+          ...sheetConditionWriteSetFromInstances(readConditionInstances(row.conditionInstances, row.conditions)),
+          status: nextStatus ?? 'active',
+          sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
+        }];
       });
-    }
+    let characterWrites: CharacterWrite[] = [];
 
-    // Pull the current lifecycle status + HP slice of every affected character so the
-    // write-back only touches `status` when it actually changes — avoids a
-    // wasteful write AND a misleading audit trail (a no-op status 'flip' would
-    // look like a deliberate DM action). Also feeds the issue #466 CAS guard.
-    const characterIds = characterWrites.map((w) => w.characterId);
+    // The transaction below re-reads the character lifecycle + HP slices before it
+    // plans the write-back. That keeps both the status policy and the #466 CAS guard
+    // aligned with the combatant snapshot that actually wins the transaction.
     const priorById = new Map<
       number,
       {
@@ -5214,70 +5213,10 @@ export class EncountersService {
         deathSaveFailures: number;
       }
     >();
-    if (characterIds.length > 0) {
-      const priorRows = await this.db
-        .select({
-          id: characters.id,
-          status: characters.status,
-          updatedAt: characters.updatedAt,
-          hpCurrent: characters.hpCurrent,
-          hpTemp: characters.hpTemp,
-          spCurrent: characters.spCurrent,
-          spMax: characters.spMax,
-          rpCurrent: characters.rpCurrent,
-          rpMax: characters.rpMax,
-          deathState: characters.deathState,
-          deathSaveSuccesses: characters.deathSaveSuccesses,
-          deathSaveFailures: characters.deathSaveFailures,
-        })
-        .from(characters)
-        .where(inArray(characters.id, characterIds));
-      for (const r of priorRows) priorById.set(r.id, r);
-    }
-
     // Issue #466 safety net: refuse to end when the sheet advanced since the last
     // acknowledged sync AND still differs from the combatant snapshot. The DM must
     // reopen with an explicit resync direction first (or heal the combatant to match).
-    const endConflicts: HpSyncConflict[] = [];
-    for (const w of characterWrites) {
-      const prior = priorById.get(w.characterId);
-      if (!prior) continue;
-      const combatantSlice = hpSyncSliceOf(w);
-      const sheetSlice = hpSyncSliceOf(prior);
-      if (
-        !canWriteBackHp({
-          sheet: { ...sheetSlice, updatedAt: prior.updatedAt },
-          combatant: combatantSlice,
-          sheetSyncedUpdatedAt: w.sheetSyncedUpdatedAt,
-        })
-      ) {
-        const combatantRow = rows.find((r) => r.id === w.combatantId);
-        endConflicts.push({
-          combatantId: w.combatantId,
-          characterId: w.characterId,
-          name: combatantRow?.name ?? `Character ${w.characterId}`,
-          combatant: combatantSlice,
-          sheet: { ...sheetSlice, updatedAt: prior.updatedAt },
-        });
-      }
-    }
-    if (endConflicts.length > 0) {
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: role,
-        action: 'encounter.end_hp_conflict',
-        entityType: 'encounter',
-        entityId: encounterId,
-        campaignId: encounterRow.campaignId,
-        detail: JSON.stringify({ conflicts: endConflicts }),
-      });
-      throw new ConflictException({
-        code: 'HP_SYNC_CONFLICT',
-        message:
-          'Character sheets changed since this encounter last synced HP. Reopen with an explicit resync direction for each conflict before ending again.',
-        conflicts: endConflicts,
-      });
-    }
+    let endConflicts: HpSyncConflict[] = [];
 
     const ts = nowIso();
     // Clear the campaign's activeEncounterId iff this encounter IS the active one (issue
@@ -5286,7 +5225,67 @@ export class EncountersService {
     // (legacy drift where the pointer disagreed with status) leaves the pointer untouched.
     // Issue #466: each character UPDATE is compare-and-set on updatedAt when we hold a
     // sync token, so a race that heals the sheet mid-transaction cannot be clobbered.
-    this.db.transaction((tx) => {
+    try {
+      this.db.transaction((tx) => {
+      // Re-read all mutable state after acquiring the SQLite write transaction. In
+      // particular, a heal that lands while End is queued must be the value written back
+      // to the character sheet, and a second End must see the winner's ended status.
+      const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+      if (!freshEncounter || freshEncounter.status !== 'running') {
+        throw new ConflictException({
+          code: 'ENCOUNTER_ALREADY_ENDED',
+          message: 'The encounter was already ended by another request.',
+        });
+      }
+      rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      characterWrites = planCharacterWrites(rows);
+      priorById.clear();
+      const freshCharacterIds = characterWrites.map((w) => w.characterId);
+      if (freshCharacterIds.length > 0) {
+        const freshPriorRows = tx
+          .select({
+            id: characters.id,
+            status: characters.status,
+            updatedAt: characters.updatedAt,
+            hpCurrent: characters.hpCurrent,
+            hpTemp: characters.hpTemp,
+            spCurrent: characters.spCurrent,
+            spMax: characters.spMax,
+            rpCurrent: characters.rpCurrent,
+            rpMax: characters.rpMax,
+            deathState: characters.deathState,
+            deathSaveSuccesses: characters.deathSaveSuccesses,
+            deathSaveFailures: characters.deathSaveFailures,
+          })
+          .from(characters)
+          .where(inArray(characters.id, freshCharacterIds))
+          .all();
+        for (const row of freshPriorRows) priorById.set(row.id, row);
+      }
+      endConflicts = [];
+      for (const w of characterWrites) {
+        const prior = priorById.get(w.characterId);
+        if (!prior) continue;
+        const combatantSlice = hpSyncSliceOf(w);
+        const sheetSlice = hpSyncSliceOf(prior);
+        if (!canWriteBackHp({ sheet: { ...sheetSlice, updatedAt: prior.updatedAt }, combatant: combatantSlice, sheetSyncedUpdatedAt: w.sheetSyncedUpdatedAt })) {
+          endConflicts.push({
+            combatantId: w.combatantId,
+            characterId: w.characterId,
+            name: rows.find((row) => row.id === w.combatantId)?.name ?? `Character ${w.characterId}`,
+            combatant: combatantSlice,
+            sheet: { ...sheetSlice, updatedAt: prior.updatedAt },
+          });
+        }
+      }
+      if (endConflicts.length > 0) {
+        throw new ConflictException({
+          code: 'HP_SYNC_CONFLICT',
+          message:
+            'Character sheets changed since this encounter last synced HP. Reopen with an explicit resync direction for each conflict before ending again.',
+          conflicts: endConflicts,
+        });
+      }
       for (const w of characterWrites) {
         const prior = priorById.get(w.characterId);
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
@@ -5354,12 +5353,29 @@ export class EncountersService {
           .where(eq(combatants.id, w.combatantId))
           .run();
       }
-      tx.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+      tx.update(encounters)
+        .set({ status: 'ended', endedAt: ts, updatedAt: ts })
+        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
+        .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
       if (camp?.activeEncounterId === encounterId) {
         tx.update(campaigns).set({ activeEncounterId: null, updatedAt: ts }).where(eq(campaigns.id, encounterRow.campaignId)).run();
       }
-    });
+      });
+    } catch (err) {
+      if (err instanceof ConflictException && endConflicts.length > 0) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'encounter.end_hp_conflict',
+          entityType: 'encounter',
+          entityId: encounterId,
+          campaignId: encounterRow.campaignId,
+          detail: JSON.stringify({ conflicts: endConflicts }),
+        });
+      }
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(user),

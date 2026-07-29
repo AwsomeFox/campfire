@@ -1736,6 +1736,57 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
   });
 });
 
+describe('encounters — lifecycle write serialization (issue #1461, e2e)', () => {
+  let ctx: TestAppContext;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Lifecycle Race Campaign' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Lifecycle Race' });
+    encounterId = encounter.body.id;
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'First', hpMax: 12 });
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Second', hpMax: 12 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('concurrent initiative rolls commit one value/log set, then only one concurrent end wins', async () => {
+    const server = ctx.app.getHttpServer();
+    const [firstRoll, secondRoll] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm).send({}),
+      request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({}),
+    ]);
+    expect([firstRoll.body.rolledCount, secondRoll.body.rolledCount].sort()).toEqual([0, 2]);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rollEvents = (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))).filter(
+      (event) => event.type === 'roll',
+    );
+    expect(rollEvents).toHaveLength(2);
+
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm).send({})).status).toBe(201);
+    const [firstEnd, secondEnd] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm).send({}),
+      request(server).post(`/api/v1/encounters/${encounterId}/end`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({}),
+    ]);
+    expect([firstEnd.status, secondEnd.status].sort()).toEqual([201, 409]);
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.status).toBe('ended');
+  });
+});
+
 // Dev-auth headers (x-dev-role/x-dev-user) always resolve to serverRole 'admin', and admins
 // are always treated as dm regardless of campaign membership (see RoleResolver.baseEffectiveRole)
 // — so a genuine "not a member" 403 can't be expressed with dev-auth users. Use real

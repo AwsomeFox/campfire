@@ -31,4 +31,13 @@ test.describe('fog editor (issue #472)', () => {
     expect(source).toMatch(/Ctrl\+Z.*fog|fog.*undo/i);
     expect(source).toMatch(/Erase|erase/);
   });
+
+  test('optimistically retains fog edits across polls until their versioned write settles', () => {
+    const source = readFileSync(RUN_SESSION, 'utf8');
+    expect(source).toMatch(/expectedUpdatedAt/);
+    expect(source).toMatch(/isStaleWrite/);
+    expect(source).toMatch(/setQueryData<EncounterWithCombatants>/);
+    expect(source).toMatch(/pendingFog/);
+    expect(source).toMatch(/fogStatesEqual\(current, settledFog\)/);
+  });
 });
