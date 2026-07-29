@@ -764,6 +764,27 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS party_rest_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  preview_token TEXT NOT NULL UNIQUE,
+  request_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'previewed',
+  idempotency_key TEXT,
+  undo_idempotency_key TEXT,
+  undo_result_json TEXT NOT NULL DEFAULT '{}',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  plan_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  applied_at TEXT,
+  undone_at TEXT,
+  UNIQUE(campaign_id, actor_user_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_party_rest_batches_campaign ON party_rest_batches(campaign_id, created_at DESC);
+
 -- Moderation / abuse incidents (issue #601).
 --
 -- Like audit_log directly above, and for a sharper reason, campaign_id carries NO

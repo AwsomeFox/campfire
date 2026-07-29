@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { CharactersService } from '../src/modules/characters/characters.service';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { characters as charactersTable } from '../src/db/schema';
+import { characters as charactersTable, combatants, encounters } from '../src/db/schema';
 import { HIT_DICE_RESOURCE_KEY } from '@campfire/schema';
 import type { RequestUser } from '../src/common/user.types';
 
@@ -77,6 +77,58 @@ describe('rest mechanics (#1041, e2e)', () => {
       .where(eq(charactersTable.id, id));
     return id;
   }
+
+  it('persists a previewed recovery and replays the same apply key', async () => {
+    const id = await batteredCharacter('Preview replay');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    expect(preview.failures).toEqual([]);
+    const first = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'apply-preview-replay', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const replay = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'apply-preview-replay', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    expect(replay).toEqual(first);
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'different-apply-key', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('rejects a stale preview without writing any selected participant', async () => {
+    const a = await batteredCharacter('Stale A');
+    const b = await batteredCharacter('Stale B');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [a, b] }, dmUser, 'dm');
+    await db.update(charactersTable).set({ hpCurrent: 7, updatedAt: new Date().toISOString() }).where(eq(charactersTable.id, b));
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'stale-party-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    const [aAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, a));
+    const [bAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, b));
+    expect(aAfter.hpCurrent).toBe(5);
+    expect(bAfter.hpCurrent).toBe(7);
+  });
+
+  it('requires acknowledgement for a running linked combatant before synchronizing it', async () => {
+    const id = await batteredCharacter('Combat rest');
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Running rest', status: 'running', createdAt: now, updatedAt: now }).returning();
+    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Combat rest', hpCurrent: 5, hpMax: 40 });
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    expect(preview.runningCombatantCharacterIds).toContain(id);
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'combat-ack-rest', acknowledgeRunningCombatants: false }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'combat-ack-rest', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const [combatant] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatant.hpCurrent).toBe(40);
+  });
+
+  it('replays an undo key and refuses a different key or later sheet edit', async () => {
+    const id = await batteredCharacter('Undo replay');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'undo-apply-key', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const undo = await characters.undoPartyRecovery(campaignId, applied.batchId, 'undo-replay-key', dmUser, 'dm');
+    await expect(characters.undoPartyRecovery(campaignId, applied.batchId, 'undo-replay-key', dmUser, 'dm')).resolves.toEqual(undo);
+    await expect(characters.undoPartyRecovery(campaignId, applied.batchId, 'different-undo-key', dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+
+    const second = await batteredCharacter('Undo changed');
+    const secondPreview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [second] }, dmUser, 'dm');
+    const secondApplied = await characters.applyPartyRecovery(campaignId, { previewToken: secondPreview.previewToken, idempotencyKey: 'undo-changed-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    await db.update(charactersTable).set({ hpCurrent: 17, updatedAt: new Date().toISOString() }).where(eq(charactersTable.id, second));
+    await expect(characters.undoPartyRecovery(campaignId, secondApplied.batchId, 'undo-changed-key', dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    const [after] = await db.select().from(charactersTable).where(eq(charactersTable.id, second));
+    expect(after.hpCurrent).toBe(17);
+  });
 
   /** Mark a character dead without going through a route that may not accept the field. */
   async function kill(id: number): Promise<void> {
@@ -166,6 +218,38 @@ describe('rest mechanics (#1041, e2e)', () => {
     // proves the decremented stacks round-tripped through the write, not just the in-memory plan.
     const again = await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');
     expect(again.characters[0].conditionsDecremented).toEqual([{ name: 'Exhaustion', stacksBefore: 4, stacksAfter: 3 }]);
+  });
+
+  it('#759: preview/apply/undo preserves structured condition stacks and linked combatant-only metadata', async () => {
+    const id = await batteredCharacter('Structured batch');
+    const sheetExhaustion = {
+      id: 'sheet-exhaustion', name: 'Exhaustion', ruleEntryId: null, source: 'fatigue', sourceCombatantId: null,
+      durationRounds: null, roundsRemaining: null, timing: 'none', saveTiming: 'none', saveDc: null, saveAbility: null,
+      isConcentration: false, stacks: 5, notes: 'keep sheet note', custom: false,
+    };
+    const combatantExhaustion = { ...sheetExhaustion, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, durationRounds: 4, roundsRemaining: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn', saveDc: 14, saveAbility: 'con', notes: 'keep combat note' };
+    await db.update(charactersTable).set({ hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([sheetExhaustion]) }).where(eq(charactersTable.id, id));
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Structured recovery', status: 'running', createdAt: now, updatedAt: now }).returning();
+    const [combatant] = await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Structured batch', hpCurrent: 5, hpMax: 40, hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([combatantExhaustion]) }).returning();
+
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'structured-batch-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const [appliedSheet] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [appliedCombatant] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(JSON.parse(appliedSheet.conditions!)).toEqual(['Exhaustion']);
+    expect(JSON.parse(appliedSheet.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 4, notes: 'keep sheet note' });
+    expect(JSON.parse(appliedCombatant.conditions!)).toEqual(['Exhaustion']);
+    expect(appliedCombatant).toMatchObject({ hpTemp: 0, deathSaveSuccesses: 0, deathSaveFailures: 0 });
+    expect(JSON.parse(appliedCombatant.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 4, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, roundsRemaining: 3, notes: 'keep combat note' });
+
+    await characters.undoPartyRecovery(campaignId, applied.batchId, 'structured-batch-undo', dmUser, 'dm');
+    const [undoneSheet] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [undoneCombatant] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(JSON.parse(undoneSheet.conditions!)).toEqual(['Exhaustion']);
+    expect(JSON.parse(undoneSheet.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 5, notes: 'keep sheet note' });
+    expect(undoneCombatant).toMatchObject({ hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1 });
+    expect(JSON.parse(undoneCombatant.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 5, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, roundsRemaining: 3, notes: 'keep combat note' });
   });
 
   it('a short rest spends hit dice and touches nothing a long rest owns', async () => {

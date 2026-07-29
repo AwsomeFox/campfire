@@ -13,6 +13,7 @@ import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/sch
 import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
@@ -24,6 +25,7 @@ import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { NewCharacterForm } from './NewCharacterForm';
 import { STATUS_LABEL, StatusTag } from './status';
+import { PartyRestPanel } from './PartyRestPanel';
 
 export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -45,6 +47,7 @@ export default function PartyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+  const [resting, setResting] = useState(false);
 
   const closeCreating = useCallback(() => {
     setCreating(false);
@@ -113,6 +116,11 @@ export default function PartyPage() {
   // Paused while an undo is pending so a restore in flight isn't clobbered by a
   // fresh list fetch that hasn't yet observed the restored row.
   usePollWhileVisible(() => void load(), 5000, Number.isFinite(id) && !pendingUndo);
+  useCampaignEvents(Number.isFinite(id) ? id : undefined, {
+    onEvent: useCallback((event) => {
+      if (event.type === 'party.rest.updated' || event.type === 'character.updated') void load();
+    }, [load]),
+  });
 
   // Roster trash (issue #716) — soft-delete the character, drop the card locally, and
   // surface an Undo. The card's own menu runs the DELETE; this handler is the page-level
@@ -151,7 +159,7 @@ export default function PartyPage() {
 
   const secondaryActions: PageHeaderSecondaryAction[] =
     canDmWrite && !awarding && characters.length > 0
-      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }]
+      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }, { key: 'rest-party', label: 'Rest party', onClick: () => setResting(true) }]
       : [];
 
   return (
@@ -183,6 +191,7 @@ export default function PartyPage() {
           }}
         />
       )}
+      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={characters} onClose={() => setResting(false)} onApplied={() => { void load(); }} />}
 
       {loading ? (
         <Card>

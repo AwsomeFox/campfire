@@ -90,6 +90,9 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'character.updated') {
     return typeof v.characterId === 'number' && typeof v.userId === 'string';
   }
+  if (v.type === 'party.rest.updated') {
+    return typeof v.batchId === 'number' && Array.isArray(v.characterIds) && v.characterIds.every((id) => typeof id === 'number');
+  }
   // Issue #415: DM check-request lifecycle. Thin — id-only; the client refetches the request
   // payload over the permission-checked REST read.
   if (v.type === 'check.requested' || v.type === 'check.resolved') {

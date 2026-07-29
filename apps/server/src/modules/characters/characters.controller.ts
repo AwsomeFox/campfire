@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, ConditionLevelPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, ConditionLevelPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto, PartyRecoveryPreviewDto, PartyRecoveryApplyDto, PartyRecoveryUndoDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -92,6 +92,38 @@ export class CampaignCharactersController {
   ) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.characters.awardXp(campaignId, body, user, role);
+  }
+
+  @Post('rest/preview')
+  @ApiOperation({ summary: 'Preview party recovery', description: 'DM only. Rolls short-rest dice once and persists the exact recovery plan for a later atomic apply.' })
+  @ApiResponse({ status: 201, description: 'Recovery preview, including every planned delta and any ineligible participant.' })
+  @ApiResponse({ status: 400, description: 'Invalid participant or recovery options.' })
+  @ApiResponse({ status: 403, description: 'DM role required or campaign is not writable.' })
+  async previewPartyRecovery(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: PartyRecoveryPreviewDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.characters.previewPartyRecovery(campaignId, body, user, role);
+  }
+
+  @Post('rest/apply')
+  @ApiOperation({ summary: 'Apply a previewed party recovery', description: 'DM only. Applies the persisted plan once, with idempotent retry and stale-sheet rejection.' })
+  @ApiResponse({ status: 201, description: 'Applied party recovery result.' })
+  @ApiResponse({ status: 409, description: 'Preview is stale, already used for another intent, or combat acknowledgement is required.' })
+  async applyPartyRecovery(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: PartyRecoveryApplyDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.characters.applyPartyRecovery(campaignId, body, user, role);
+  }
+
+  @Post('rest/:batchId/undo')
+  @ApiOperation({ summary: 'Undo an applied party recovery', description: 'DM only. Refuses to overwrite later sheet edits.' })
+  @ApiResponse({ status: 201, description: 'Party recovery batch undone.' })
+  @ApiResponse({ status: 409, description: 'Batch was already undone or a participant changed after the rest.' })
+  async undoPartyRecovery(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('batchId', ParseIntPipe) batchId: number, @Body() body: PartyRecoveryUndoDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.characters.undoPartyRecovery(campaignId, batchId, body.idempotencyKey, user, role);
   }
 }
 
