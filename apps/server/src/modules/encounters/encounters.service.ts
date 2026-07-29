@@ -5872,8 +5872,6 @@ export class EncountersService {
 
   async applyTokenBatch(encounterId: number, input: { previewToken: string; idempotencyKey: string }, user: RequestUser, role: Role) {
     if (role !== 'dm') throw new ForbiddenException('Only dm may batch-place tokens');
-    const encounter = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounter);
     const batch = this.db.select().from(encounterTokenBatches).where(eq(encounterTokenBatches.previewToken, input.previewToken)).get();
     if (!batch || batch.encounterId !== encounterId || batch.actorId !== user.id) throw new NotFoundException('Token batch preview not found');
     const keyOwner = this.db.select().from(encounterTokenBatches).where(and(eq(encounterTokenBatches.actorId, user.id), eq(encounterTokenBatches.applyKey, input.idempotencyKey))).get();
@@ -5882,6 +5880,8 @@ export class EncountersService {
       if (batch.applyKey !== input.idempotencyKey) throw new ConflictException('Idempotency key was reused for a different token batch');
       return fromJsonText<{ batchId: number; undoToken: string; placements: Array<{ combatantId: number; x: number; y: number }>}>(batch.resultJson, { batchId: batch.id, undoToken: batch.previewToken, placements: [] });
     }
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
     if (batch.status !== 'previewed') throw new ConflictException('Token batch is no longer applicable');
     const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []);
     const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });

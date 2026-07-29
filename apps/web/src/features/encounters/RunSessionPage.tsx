@@ -1925,13 +1925,20 @@ export default function RunSessionPage() {
       intent = { previewToken: preview.previewToken, idempotencyKey: newOperationId() };
       tokenBatchApplyIntents.current.set(intentKey, intent);
     }
-    const applied = await api.post<{ undoToken: string }>(`${API}/encounters/${eid}/token-batches/apply`, {
-      previewToken: intent.previewToken,
-      idempotencyKey: intent.idempotencyKey,
-    });
-    tokenBatchApplyIntents.current.delete(intentKey);
-    await invalidateEncounter(queryClient, eid);
-    return applied;
+    try {
+      const applied = await api.post<{ undoToken: string }>(`${API}/encounters/${eid}/token-batches/apply`, {
+        previewToken: intent.previewToken,
+        idempotencyKey: intent.idempotencyKey,
+      });
+      tokenBatchApplyIntents.current.delete(intentKey);
+      await invalidateEncounter(queryClient, eid);
+      return applied;
+    } catch (err) {
+      // A definitive 4xx means the preview is stale; drop the intent so the next
+      // attempt creates a fresh preview. Keep it for ambiguous network failures.
+      if (err instanceof ApiError) tokenBatchApplyIntents.current.delete(intentKey);
+      throw err;
+    }
   }, [eid, queryClient]);
   const undoTokenBatch = useCallback(async (undoToken: string) => {
     const idempotencyKey = tokenUndoKeys.current.get(undoToken) ?? newOperationId();
@@ -3387,6 +3394,9 @@ export function BattleMap({
   // rendered height/width ratio is persisted with every batch preview so server
   // preview, apply, and undo validate the same physical footprint geometry.
   const tokenPlanningAspect = mapRect && mapRect.width > 0 ? mapRect.height / mapRect.width : 1;
+  // When a map is attached but still loading, the fallback surface aspect is wrong for
+  // non-square maps. Disable batch placement until the intrinsic image size is known.
+  const tokenPlanningReady = encounter.mapAttachmentId == null || imgNatural != null;
 
   // Grid calibration (issue #417): resolve the persisted grid fields into ONE normalized
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
@@ -5398,7 +5408,7 @@ export function BattleMap({
                   <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind !== 'character'))}>Select enemies</button>
                   <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'monster'))}>Select monsters</button>
                   <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'npc'))}>Select NPCs</button>
-                  {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
+                  {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={!tokenPlanningReady || selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
                     let plan: Array<{ combatantId: number; x: number; y: number }>;
                     try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect).map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
@@ -5414,14 +5424,14 @@ export function BattleMap({
                     </div>
                   </details>
                   <TextInput aria-label="Saved formation name" value={formationName} onChange={(e) => setFormationName(e.target.value)} placeholder="Formation name" style={{ width: 130 }} />
-                  <button type="button" className="cf-chip" disabled={!formationName.trim() || selectedTokenIds.size === 0} onClick={() => {
+                  <button type="button" className="cf-chip" disabled={!tokenPlanningReady || !formationName.trim() || selectedTokenIds.size === 0} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
                     const anchor = chosen[0]; if (!anchor || anchor.tokenX == null || anchor.tokenY == null) return;
                     void api.post(`${API}/campaigns/${campaignId}/encounters/token-formations`, { name: formationName, slots: chosen.map(c => ({ side: c.kind === 'character' ? 'party' : 'enemy', kind: c.kind, x: (c.tokenX ?? anchor.tokenX!) - anchor.tokenX!, y: (c.tokenY ?? anchor.tokenY!) - anchor.tokenY! })) }).then(() => {
                       setFormationName(''); void formationsQuery.refetch(); announce('Formation saved');
                     }).catch(error => onError(error instanceof Error ? error.message : 'Unable to save formation'));
                   }}>Save formation</button>
-                  {(formationsQuery.data ?? []).map(formation => <span key={formation.id} className="flex gap-1 items-center"><button type="button" className="cf-chip" onClick={() => {
+                  {(formationsQuery.data ?? []).map(formation => <span key={formation.id} className="flex gap-1 items-center"><button type="button" className="cf-chip" disabled={!tokenPlanningReady} onClick={() => {
                     try {
                       const slots = JSON.parse(formation.layoutJson) as Array<{ side: 'party' | 'enemy' | 'any'; kind?: string; x: number; y: number }>;
                       const remaining = [...placed.filter(c => selectedTokenIds.size === 0 || selectedTokenIds.has(c.id))];
@@ -5446,7 +5456,7 @@ export function BattleMap({
                       type="button"
                       className="cf-chip"
                       data-testid="map-token-place-all"
-                      disabled={busy}
+                      disabled={!tokenPlanningReady || busy}
                       onClick={() => {
                         try {
                           // Planning completes before the first write, so an impossible map

@@ -136,7 +136,7 @@ export function translateGroup(tokens: readonly BatchToken[], selected: Readonly
   const group = tokens.filter(t => selected.has(t.id) && t.tokenX != null && t.tokenY != null);
   let dx = target.x - lead.tokenX, dy = target.y - lead.tokenY;
   const minX = Math.min(...group.map(t => t.tokenX! - tokenRadiusPercent(t, cell))), maxX = Math.max(...group.map(t => t.tokenX! + tokenRadiusPercent(t, cell)));
-  const minY = Math.min(...group.map(t => t.tokenY! - tokenRadiusPercent(t, cell) / aspect)), maxY = Math.max(...group.map(t => t.tokenY! + tokenRadiusPercent(t, cell) / aspect));
-  dx = Math.max(-minX, Math.min(100 - maxX, dx)); dy = Math.max(-minY, Math.min(100 - maxY, dy));
+  const minY = Math.min(...group.map(t => t.tokenY! * aspect - tokenRadiusPercent(t, cell))), maxY = Math.max(...group.map(t => t.tokenY! * aspect + tokenRadiusPercent(t, cell)));
+  dx = Math.max(-minX, Math.min(100 - maxX, dx)); dy = Math.max(-minY, Math.min(100 - maxY, dy * aspect)) / aspect;
   return group.map(t => ({ id: t.id, x: clamp(t.tokenX! + dx), y: clamp(t.tokenY! + dy) }));
 }

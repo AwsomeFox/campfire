@@ -4239,17 +4239,20 @@ function migrateEncounterTokenBatches761(sqlite: Database.Database): void {
       plan_json TEXT NOT NULL, after_json TEXT, result_json TEXT, apply_key TEXT, undo_key TEXT, created_at TEXT NOT NULL, applied_at TEXT, undone_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_encounter_token_batches_encounter ON encounter_token_batches(encounter_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_apply ON encounter_token_batches(actor_id, apply_key) WHERE apply_key IS NOT NULL;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_undo ON encounter_token_batches(actor_id, undo_key) WHERE undo_key IS NOT NULL;
     CREATE TABLE IF NOT EXISTS campaign_token_formations (
       id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, name TEXT NOT NULL, layout_json TEXT NOT NULL,
       created_by TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(campaign_id, name)
     );
     CREATE INDEX IF NOT EXISTS idx_campaign_token_formations_campaign ON campaign_token_formations(campaign_id);
   `);
+  // Repair older tables that predate apply_key/undo_key before the unique indexes reference them.
   const cols = sqlite.prepare(`PRAGMA table_info(encounter_token_batches)`).all() as Array<{ name: string }>;
   if (!cols.some(c => c.name === 'apply_key')) sqlite.exec('ALTER TABLE encounter_token_batches ADD COLUMN apply_key TEXT');
   if (!cols.some(c => c.name === 'undo_key')) sqlite.exec('ALTER TABLE encounter_token_batches ADD COLUMN undo_key TEXT');
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_apply ON encounter_token_batches(actor_id, apply_key) WHERE apply_key IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_undo ON encounter_token_batches(actor_id, undo_key) WHERE undo_key IS NOT NULL;
+  `);
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
