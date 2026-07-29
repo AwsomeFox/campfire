@@ -2200,6 +2200,23 @@ CREATE TABLE IF NOT EXISTS data_repair_previews (
 CREATE INDEX IF NOT EXISTS idx_data_repair_runs_completed ON data_repair_runs(completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_data_repair_findings_open ON data_repair_findings(status, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_data_repair_findings_campaign ON data_repair_findings(campaign_id, status);
+
+-- Issue #1449: server-side snapshot of an applied action chain. apply() writes one row
+-- per chain (keyed by the same chainId already minted for the combat-log correlation), and
+-- undo() is scoped to reading THIS row rather than trusting the client-supplied token's
+-- targets/hpBefore values — closing the cross-encounter/cross-campaign forgery this table
+-- exists to prevent. undone_at makes a chain single-use (replay of a valid token is a 400,
+-- not a silent double-revert).
+CREATE TABLE IF NOT EXISTS action_apply_chains (
+  id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+  action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
+  cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
+  concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
+  started_concentration INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL, undone_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**

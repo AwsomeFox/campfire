@@ -2142,6 +2142,34 @@ export const encounterEvents = sqliteTable('encounter_events', {
   createdAt: text('created_at').notNull(),
 });
 
+// Issue #1449: server-side snapshot of an applied action chain (see ActionResolverService).
+// Keyed on the SAME chainId already minted for the encounter_events correlation (issue #426)
+// so `undo()` can look up the real pre-apply target snapshot by chainId alone, rather than
+// trusting the client-supplied ActionUndoToken's `targets`/`hpBefore` values — the only
+// server-side check before this was that `actorCombatantId` belonged to the encounter, so a
+// forged token naming any combatant's id anywhere in the database was accepted verbatim.
+// `undoneAt` makes a chain single-use: a replayed (or forged, or cross-encounter) token 400s
+// rather than silently reverting whatever state now exists for that combatant.
+export const actionApplyChains = sqliteTable('action_apply_chains', {
+  id: text('id').primaryKey(), // the chain id (see ActionResolverService.applyInternal)
+  encounterId: integer('encounter_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  actorCombatantId: integer('actor_combatant_id').notNull(),
+  actionName: text('action_name').notNull().default(''),
+  // The ActionTargetAllow the apply-time spec declared, replayed at undo for defense in depth.
+  targetsAllow: text('targets_allow').notNull().default('any'),
+  costSlot: text('cost_slot').notNull().default(''),
+  costCount: integer('cost_count').notNull().default(0),
+  spellLevelSpent: integer('spell_level_spent').notNull().default(0),
+  concentrationBefore: text('concentration_before'),
+  pendingConcentrationChecksBeforeJson: text('pending_concentration_checks_before_json').notNull().default('[]'),
+  startedConcentration: integer('started_concentration', { mode: 'boolean' }).notNull().default(false),
+  // The ActionUndoTarget[] pre-apply snapshot — the authoritative source undo() restores from.
+  targetsJson: text('targets_json').notNull().default('[]'),
+  createdAt: text('created_at').notNull(),
+  undoneAt: text('undone_at'),
+});
+
 // Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and
 // turn advancement). The row is written inside the SAME synchronous better-sqlite3
 // transaction as the effect it guards, so claim and effect commit or roll back together.
