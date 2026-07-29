@@ -24,8 +24,8 @@ export default defineConfig({
   // near-identical config (`pw-unit.config.ts`) sat alongside this one, referenced by
   // no script and no workflow, while ~185 `.unit.spec.ts` files accumulated behind it
   // without ever being executed. It has been deleted; `scripts/check-e2e-spec-coverage.mjs`
-  // (wired into `npm run test:all`) now fails CI if a spec file is ever picked up by zero
-  // or by more than one config under e2e/tests, so that trap cannot reopen unnoticed.
+  // (wired into `npm run test:all`) now verifies this browserless unit tier is collected
+  // by the supported config and required CI job, so that trap cannot reopen unnoticed.
   testIgnore: /.*\.unit\.spec\.m?ts/,
   // One seeded backend shared by every spec — keep it serial and deterministic.
   fullyParallel: false,
