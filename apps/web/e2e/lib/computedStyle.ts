@@ -135,12 +135,6 @@ function inlineFontUrls(css: string, assetsDir: string): string {
     }
     return `url(data:${mime};base64,${bytes.toString('base64')})`;
   });
-=======
-  const newest = cssFiles
-    .map((f) => ({ f, mtime: statSync(resolve(dir, f)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime)[0]!.f;
-  return readFileSync(resolve(dir, newest), 'utf8');
->>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
 }
 
 /**
@@ -150,7 +144,6 @@ function inlineFontUrls(css: string, assetsDir: string): string {
  * matches the app shell; Campfire ships one theme only (see index.css's `@media print`
  * comment — "the app is intentionally optimized for an interactive dark UI") so there is
  * no light-theme variant to also render.
-<<<<<<< HEAD
  *
  * Font URLs are rewritten to inline `data:` URIs (see `inlineFontUrls`) and the returned
  * promise doesn't resolve until `document.fonts.ready` — `waitUntil: 'load'` alone does
@@ -166,20 +159,11 @@ export async function renderCssFixture(
   const dir = distAssetsDir ?? defaultDistAssetsDir();
   const compiled = css ?? latestCompiledCss(dir);
   const inlined = inlineFontUrls(compiled, dir);
+  const safeCss = inlined.replace(/<\/style>/gi, '<\\/style>');
   await page.setContent(
-    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${inlined}</style></head>` +
+    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${safeCss}</style></head>` +
       `<body style="background:#111;color:#eee;">${bodyHtml}</body></html>`,
     { waitUntil: 'load' },
   );
   await page.evaluate(() => document.fonts.ready);
-=======
- */
-export async function renderCssFixture(page: Page, bodyHtml: string, css?: string): Promise<void> {
-  const compiled = css ?? latestCompiledCss();
-  await page.setContent(
-    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${compiled}</style></head>` +
-      `<body style="background:#111;color:#eee;">${bodyHtml}</body></html>`,
-    { waitUntil: 'load' },
-  );
->>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
 }

@@ -53,7 +53,7 @@ test.describe('control surface goldens (#1694)', () => {
     await expect(grid).toHaveScreenshot('home-campaign-grid.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
   });
 
@@ -80,7 +80,7 @@ test.describe('control surface goldens (#1694)', () => {
     await expect(workspace).toHaveScreenshot('turn-workspace.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
   });
 
@@ -100,7 +100,7 @@ test.describe('control surface goldens (#1694)', () => {
     await expect(tabs).toHaveScreenshot('character-sheet-tabs-desktop.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
   });
 
@@ -116,7 +116,7 @@ test.describe('control surface goldens (#1694)', () => {
     await expect(tabs).toHaveScreenshot('character-sheet-tabs-narrow.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
   });
 });
@@ -137,23 +137,26 @@ test.describe('control surface goldens (#1694) — quick capture dialog', () => 
     await expect(async () => {
       await page.keyboard.press(`${MODIFIER}+Shift+KeyN`);
       await expect(dialog).toBeVisible({ timeout: 500 });
-    }).toPass({ timeout: 15_000 });
+    }).toPass({ timeout: 5_000 });
 
     // Pin the real computed floor on the exact controls #1695 fixed in this dialog
     // (`btn btn-ghost !min-h-[24px] !py-1`).
-    const destButtons = dialog.getByRole('button', { name: /Private note|To DM inbox/ });
-    const destCount = await destButtons.count();
-    expect(destCount, 'destination toggle must render for a non-DM member').toBe(2);
-    for (let i = 0; i < destCount; i++) {
-      const box = await measureBox(destButtons.nth(i));
+    const privateNoteBtn = dialog.getByRole('button', { name: 'Private note' });
+    const dmInboxBtn = dialog.getByRole('button', { name: 'To DM inbox' });
+    await expect(privateNoteBtn).toBeVisible();
+    await expect(dmInboxBtn).toBeVisible();
+
+    for (const btn of [privateNoteBtn, dmInboxBtn]) {
+      const box = await measureBox(btn);
       expect(box.height, 'quick-capture destination buttons must clear the 24px floor').toBeGreaterThanOrEqual(24);
+      expect(box.minHeight, 'quick-capture destination buttons must declare a 24px min-height floor').toBe('24px');
     }
 
     await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
     await expect(dialog).toHaveScreenshot('quick-capture-dialog.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.005,
     });
 
     await page.keyboard.press('Escape');
