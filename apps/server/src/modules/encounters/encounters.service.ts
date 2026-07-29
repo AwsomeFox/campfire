@@ -5883,6 +5883,8 @@ export class EncountersService {
     const encounter = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounter);
     if (batch.status !== 'previewed') throw new ConflictException('Token batch is no longer applicable');
+    const previewTtlMs = 24 * 60 * 60 * 1000;
+    if (batch.createdAt < new Date(Date.now() - previewTtlMs).toISOString()) throw new ConflictException('Token batch preview has expired; preview again');
     const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []);
     const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });
     const plan = batchPlan.placements;
