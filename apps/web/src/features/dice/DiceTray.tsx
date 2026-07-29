@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { openLegendAttributeDicePool, type ActionRollRequest, type DiceRoll } from '@campfire/schema';
 import { Btn, TextInput } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useAnnounce } from '../../components/Announcer';
 import { RolledDice } from './RolledDice';
@@ -632,9 +633,9 @@ export function DiceTray({
                 onClick={() => removeGroup(sides)}
                 aria-label={t('dice.removeAll', { sides })}
                 className="text-muted"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, padding: '0 2px' }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px' }}
               >
-                ✕
+                <UIIcon name="close" size="xs" />
               </button>
             </span>
           ))
@@ -729,9 +730,9 @@ export function DiceTray({
               onClick={() => deletePreset(p.label)}
               aria-label={t('dice.deletePreset', { label: p.label })}
               className="text-muted"
-              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, padding: '6px 8px 6px 2px' }}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px 8px 6px 2px' }}
             >
-              ✕
+              <UIIcon name="close" size="xs" />
             </button>
           </span>
         ))}
@@ -866,12 +867,11 @@ export function DiceTray({
               border: 'none',
               color: 'var(--color-neutral-400, #999)',
               cursor: 'pointer',
-              fontSize: 16,
               lineHeight: 1,
               padding: '2px 4px',
             }}
           >
-            ✕
+            <UIIcon name="close" size="sm" />
           </button>
         </div>
       )}

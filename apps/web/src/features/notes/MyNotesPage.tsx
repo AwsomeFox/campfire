@@ -25,6 +25,7 @@ import { Field, sanitizeFieldPrefix } from '../../components/Field';
 import { NOTES_EDIT_PREFIX, NOTES_FIELD } from '../../components/formFieldLabels';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { UIIcon } from '../../components/UIIcon';
 import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
@@ -443,10 +444,10 @@ export default function MyNotesPage() {
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-secondary hover:text-[var(--color-neutral-300)] text-sm"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-secondary hover:text-[var(--color-neutral-300)]"
             aria-label="Clear search"
           >
-            ✕
+            <UIIcon name="close" size="xs" />
           </button>
         )}
       </div>

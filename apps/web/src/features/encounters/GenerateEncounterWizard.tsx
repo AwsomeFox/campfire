@@ -25,6 +25,7 @@ import type {
 } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, Chip, ErrorNote } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { Field } from '../../components/Field';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { GameIcon } from '../../components/GameIcon';
@@ -520,7 +521,7 @@ function RosterSlotRow({
             {slot.pinned ? 'Unpin' : 'Pin'}
           </Btn>
           <Btn ghost type="button" onClick={onRemove} disabled={disabled} title="Remove this slot" aria-label={`Remove ${slot.name}`}>
-            <span aria-hidden="true">✕</span>
+            <UIIcon name="close" size="xs" />
           </Btn>
         </div>
       </div>

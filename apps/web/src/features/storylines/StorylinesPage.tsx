@@ -31,6 +31,7 @@ import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
+import { UIIcon } from '../../components/UIIcon';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
@@ -1333,7 +1334,7 @@ function BeatRow({
             aria-label={`Delete beat ${beat.title}`}
             onClick={() => setConfirmingDelete(true)}
           >
-            ✕
+            <UIIcon name="close" size="xs" />
           </button>
         )}
       </div>
@@ -1610,7 +1611,7 @@ function BeatRow({
                 aria-label={`Delete branch ${branch.label} from ${beat.title}`}
                 onClick={() => void removeBranch(branch)}
               >
-                ✕
+                <UIIcon name="close" size="xs" />
               </button>
             )}
             {branchErr && (

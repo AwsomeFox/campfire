@@ -22,6 +22,7 @@ import type { UiDensity } from '../../components/density';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
+import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useDraftWithAiAvailable } from './useDraftWithAiAvailable';
 
@@ -251,12 +252,12 @@ function DraftWithAiModal({
           </div>
           <button
             type="button"
-            className="text-secondary hover:text-white text-lg leading-none disabled:opacity-50"
+            className="text-secondary hover:text-white leading-none disabled:opacity-50"
             onClick={onClose}
             aria-label="Close AI drafting dialog"
             disabled={busy}
           >
-            ×
+            <UIIcon name="close" size="sm" />
           </button>
         </div>
 

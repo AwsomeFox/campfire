@@ -18,6 +18,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
+import { UIIcon } from '../../components/UIIcon';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -4268,9 +4269,9 @@ export function BattleMap({
                   aria-label="Dismiss map setup guidance"
                   onClick={onDismissGuidance}
                   className="btn btn-ghost"
-                  style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
+                  style={{ minHeight: 20, padding: '0 6px' }}
                 >
-                  <span aria-hidden="true">✕</span>
+                  <UIIcon name="close" size="xs" />
                 </button>
               </div>
               <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
@@ -5059,13 +5060,12 @@ export function BattleMap({
                             border: '1px solid rgba(15,23,42,.85)',
                             background: 'var(--color-danger, #b91c1c)',
                             color: '#fff',
-                            fontSize: 11,
                             lineHeight: 1,
                             cursor: busy ? 'default' : 'pointer',
                             zIndex: 3,
                           }}
                         >
-                          <span aria-hidden="true">×</span>
+                          <UIIcon name="close" size="xs" />
                         </button>
                       )}
                     </div>
@@ -5585,7 +5585,7 @@ function ApplyDamageBar({
         style={{ marginLeft: 'auto' }}
         data-testid="apply-damage-dismiss"
       >
-        <span aria-hidden="true">✕</span>
+        <UIIcon name="close" size="sm" />
       </button>
     </div>
   );
@@ -5868,11 +5868,10 @@ function CombatantRow({
                 background: 'transparent',
                 cursor: busy ? 'default' : 'pointer',
                 color: 'var(--color-neutral-500)',
-                fontSize: 13,
                 lineHeight: 1,
               }}
             >
-              ×
+              <UIIcon name="close" size="xs" />
             </button>
           )}
         </div>
@@ -6185,8 +6184,8 @@ function CombatantRow({
                       color: 'inherit',
                     }}
                   >
-                    <span aria-hidden="true">✕</span>
-                    </button>
+                    <UIIcon name="close" size="xs" />
+                  </button>
                 )}
               </span>
             ))}
@@ -6742,12 +6741,12 @@ function CombatantRow({
       {canRemove && (
         <button
           className="btn btn-icon btn-ghost cf-target-44"
-          style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
+          style={{ width: 44, height: 44, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
           aria-label={`Remove ${combatant.name}`}
         >
-          <span aria-hidden="true">✕</span>
+          <UIIcon name="close" size="xs" />
         </button>
       )}
     </div>

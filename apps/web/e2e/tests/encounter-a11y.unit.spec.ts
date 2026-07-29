@@ -34,10 +34,15 @@ test.describe('encounter accessibility (#476)', () => {
   });
 
   test('remove controls hide decorative glyphs from assistive tech', () => {
-    expect(runSession).toMatch(/aria-label=\{`Remove \$\{combatant\.name\}`\}[\s\S]*<span aria-hidden="true">✕<\/span>/);
-    expect(runSession).toMatch(/aria-label=\{`Remove \$\{inst\.name\}`\}[\s\S]*<span aria-hidden="true">✕<\/span>/);
+    // Issue #1715: the raw ✕/× glyphs these controls used to render inline
+    // (manually wrapped in `aria-hidden`) migrated to `<UIIcon name="close">`,
+    // which is aria-hidden by construction (GameIcon sets aria-hidden={true}
+    // whenever no `title` is passed — see GameIcon.tsx). The accessible name
+    // still comes entirely from each button's own `aria-label`, unchanged.
+    expect(runSession).toMatch(/aria-label=\{`Remove \$\{combatant\.name\}`\}[\s\S]*<UIIcon name="close"/);
+    expect(runSession).toMatch(/aria-label=\{`Remove \$\{inst\.name\}`\}[\s\S]*<UIIcon name="close"/);
     expect(runSession).toMatch(/aria-label=\{`Dismiss apply \$\{amount\} \$\{label\} bar`\}/);
-    expect(wizard).toMatch(/aria-label=\{`Remove \$\{slot\.name\}`\}[\s\S]*<span aria-hidden="true">✕<\/span>/);
+    expect(wizard).toMatch(/aria-label=\{`Remove \$\{slot\.name\}`\}[\s\S]*<UIIcon name="close"/);
   });
 
   test('difficulty badge exposes visible focusable help instead of title-only tooltips', () => {

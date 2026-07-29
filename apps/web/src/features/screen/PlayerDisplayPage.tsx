@@ -41,6 +41,7 @@ import {
   useAnnounce,
 } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
+import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { SafetyHoldDisplayOverlay } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
@@ -779,7 +780,7 @@ export default function PlayerDisplayPage() {
           aria-label={isCastMode ? 'Exit kiosk' : 'Exit player display'}
           title={isCastMode ? 'Exit kiosk' : 'Exit the display'}
         >
-          <span aria-hidden="true">✕</span> {isCastMode ? 'Exit kiosk' : 'Exit'}
+          <UIIcon name="close" size="xs" /> {isCastMode ? 'Exit kiosk' : 'Exit'}
         </button>
         {role === 'dm' && scene === 'party' && (
           <label className="cf-screen-alumni-toggle" title="Show dead, retired, and inactive PCs on the Party scene">

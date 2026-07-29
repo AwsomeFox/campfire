@@ -9,6 +9,7 @@ import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor } from '../lib/d20Flavor';
+import { UIIcon } from './UIIcon';
 
 export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
   const flavor = d20Flavor(roll);
@@ -37,7 +38,7 @@ export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismis
         className="cf-dismiss-target shrink-0"
         data-testid="roll-result-dismiss"
       >
-        ✕
+        <UIIcon name="close" size="sm" />
       </button>
     </div>
   );
