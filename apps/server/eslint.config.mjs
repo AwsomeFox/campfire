@@ -44,7 +44,7 @@ export default tseslint.config(
     // Plain Node/CommonJS infra scripts (jest config, worker helpers spawned
     // via `node`) — not part of the TS app graph, so they get Node globals
     // instead of the app's default (browser-less, TS-checked) environment.
-    files: ['jest.config.js', '**/*.cjs'],
+    files: ['jest*.config.js', '**/*.cjs'],
     languageOptions: {
       sourceType: 'commonjs',
       globals: { ...globals.node },

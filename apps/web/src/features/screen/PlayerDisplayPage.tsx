@@ -883,6 +883,11 @@ export default function PlayerDisplayPage() {
     </div>
   );
   const renderScreen = (content: ReactNode, centered = false) => (
+    // Issue #1685: `.cf-screen` on THIS <main> is what most selectors in SCREEN_CSS
+    // are ancestor-scoped to (`.cf-screen .whatever { … }`, see SCREEN_CSS below). A
+    // <style> element applies document-wide regardless of its position in the DOM tree,
+    // so nesting it inside <main> alone provided no scoping — the ancestor class on each
+    // non-portalled selector is what actually confines those rules to this subtree.
     <main className={`cf-screen${centered ? ' centered' : ''}`}>
       <style>{SCREEN_CSS}</style>
       {operatorControls}
@@ -947,14 +952,14 @@ export default function PlayerDisplayPage() {
           {summary.campaign.name}
         </h1>
         {location ? (
-          <span className="cf-chip cf-chip-accent cf-status-location">
+          <span className="cf-screen-chip cf-screen-chip-accent cf-status-location">
             {location.isCurrent ? (
               <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" />
             ) : null}
             <span className="cf-clamp-1">{location.name}</span>
           </span>
         ) : (
-          <span className="cf-chip">Location unset</span>
+          <span className="cf-screen-chip">Location unset</span>
         )}
       </div>
       <div className="cf-status-combat" data-testid="cf-status-combat">
@@ -1310,17 +1315,17 @@ function PartyScene({
                       {c.name}
                     </span>
                     {!isActive && (
-                      <span className="cf-chip cf-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
+                      <span className="cf-screen-chip cf-screen-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
                     )}
                   </span>
-                  {c.ac != null && <span className="cf-chip cf-chip-sm">AC {c.ac}</span>}
+                  {c.ac != null && <span className="cf-screen-chip cf-screen-chip-sm">AC {c.ac}</span>}
                 </div>
                 <div className="cf-party-sub">
                   {[c.species, c.className && `${c.className} ${c.level}`].filter(Boolean).join(' · ') ||
                     `Level ${c.level}`}
                 </div>
                 <div className="cf-hp-row">
-                  <div className={`cf-hp ${tone}`}>
+                  <div className={`cf-screen-hp ${tone}`}>
                     <div style={{ width: `${pct}%` }} />
                   </div>
                   <span className="cf-hp-num">
@@ -1374,7 +1379,7 @@ function QuestsScene({
                   <span className="cf-quest-title cf-clamp-1" title={q.title}>
                     {q.title}
                   </span>
-                  <QuestStatusBadge status={q.status} className="cf-chip-sm" iconSize={14} />
+                  <QuestStatusBadge status={q.status} className="cf-screen-chip cf-screen-chip-sm" iconSize={14} />
                 </div>
                 {q.objectives.length > 0 && (
                   <ul className="cf-objs">
@@ -1411,7 +1416,7 @@ function QuestsScene({
                 {n.role && <span className="cf-npc-role cf-clamp-1">{n.role}</span>}
                 <NpcDispositionBadge
                   disposition={n.disposition}
-                  className="cf-chip-sm cf-npc-disposition"
+                  className="cf-screen-chip cf-screen-chip-sm cf-npc-disposition"
                   iconSize={14}
                 />
               </div>
@@ -1498,7 +1503,7 @@ function InitiativeRow({
           <span className="cf-clamp-1" title={combatant.name}>
             {combatant.name}
           </span>
-          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
+          <span className={`cf-screen-chip cf-screen-chip-sm ${isMonster ? '' : 'cf-screen-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
         </div>
         <ConditionChips conditions={combatant.conditions} tick={tick} />
       </div>
@@ -1506,7 +1511,7 @@ function InitiativeRow({
         {isMonster ? (
           <>
             <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
-            <div className={`cf-hp ${bandTone}`}>
+            <div className={`cf-screen-hp ${bandTone}`}>
               <div style={{ width: `${bandPct}%` }} />
             </div>
           </>
@@ -1515,7 +1520,7 @@ function InitiativeRow({
             <span className="cf-hp-num">
               {combatant.hpCurrent}/{combatant.hpMax}
             </span>
-            <div className={`cf-hp ${charTone}`}>
+            <div className={`cf-screen-hp ${charTone}`}>
               <div style={{ width: `${charPct}%` }} />
             </div>
           </>
@@ -1564,6 +1569,22 @@ function CenteredMessage({
 // .cf-stage is a size container, so scene typography/spacing use cqh/cqw and
 // scale identically at 720p, 1080p, 4K, and 200% zoom. Colors come from the
 // shared Nocturne tokens.
+//
+// Issue #1685: every non-portalled selector below (other than the
+// `.cf-screen`/`.cf-screen.centered` root rule itself) is prefixed with the `.cf-screen `
+// ancestor — a plain descendant combinator, not `@scope` (this is a TV/cast surface,
+// plausibly reached by more unusual browser environments than the rest of the app, and
+// a descendant combinator has zero extra browser-support risk vs. the container-query
+// units this file already depends on). `.cf-screen` is the outer <main> this stylesheet
+// renders inside (see renderScreen above), so this is real, load-bearing scoping — a bare
+// `<style>` tag has none of its own from where it sits in the DOM. The kiosk-exit PIN
+// dialog is the lone exception because it is portalled to <body>; its unique
+// `.cf-exit-pin` selectors must match there. This is IN ADDITION TO, not instead of,
+// giving the two previously-colliding families (`cf-chip`→`cf-screen-chip`,
+// `cf-hp`→`cf-screen-hp`) unique names: the ancestor prefix confines every rule
+// (including ones whose name doesn't currently collide with anything, e.g. `.cf-init`,
+// `.cf-cond`) so a future addition anywhere else in the app can never be silently
+// reskinned just by sharing a class name with something in here.
 const SCREEN_CSS = `
 .cf-screen {
   position: relative;
@@ -1576,7 +1597,7 @@ const SCREEN_CSS = `
 .cf-screen.centered { display: flex; align-items: center; justify-content: center; }
 
 /* Operator control stack (issue #595 wiring preserved verbatim). */
-.cf-screen-control-stack {
+.cf-screen .cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
@@ -1588,18 +1609,18 @@ const SCREEN_CSS = `
 }
 /* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
    reveal painted even before React flips data-visible (issue #595). */
-.cf-screen-control-stack[data-visible="false"]:not(:focus-within) {
+.cf-screen .cf-screen-control-stack[data-visible="false"]:not(:focus-within) {
   opacity: 0;
   pointer-events: none;
 }
-.cf-screen-controls {
+.cf-screen .cf-screen-controls {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
-.cf-screen-alumni-toggle {
+.cf-screen .cf-screen-alumni-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -1613,37 +1634,37 @@ const SCREEN_CSS = `
   cursor: pointer;
   user-select: none;
 }
-.cf-screen-alumni-toggle input {
+.cf-screen .cf-screen-alumni-toggle input {
   margin: 0;
   accent-color: var(--color-accent);
 }
 /* Strong focus ring for cast controls at high zoom / shared-TV distances. */
-.cf-screen-controls .btn:focus-visible {
+.cf-screen .cf-screen-controls .btn:focus-visible {
   outline: 3px solid var(--color-accent-2, var(--color-accent));
   outline-offset: 4px;
 }
 
 /* DM cockpit — the private scene picker + paging controls (issue #823). Lives in
    the auto-hiding control stack, so it never burns into the public broadcast. */
-.cf-cockpit {
+.cf-screen .cf-cockpit {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   align-items: flex-end;
 }
-.cf-scene-picker,
-.cf-cockpit-row,
-.cf-aspect-toggle,
-.cf-page-controls {
+.cf-screen .cf-scene-picker,
+.cf-screen .cf-cockpit-row,
+.cf-screen .cf-aspect-toggle,
+.cf-screen .cf-page-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
   align-items: center;
 }
-.cf-cockpit-row { gap: 10px; }
-.cf-cockpit .btn {
+.cf-screen .cf-cockpit-row { gap: 10px; }
+.cf-screen .cf-cockpit .btn {
   padding: 6px 12px;
   font-size: 13px;
   line-height: 1.2;
@@ -1652,18 +1673,18 @@ const SCREEN_CSS = `
   background: color-mix(in srgb, var(--color-surface) 92%, transparent);
   color: var(--color-neutral-200);
 }
-.cf-scene-btn.active,
-.cf-aspect-btn.active {
+.cf-screen .cf-scene-btn.active,
+.cf-screen .cf-aspect-btn.active {
   border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
   background: color-mix(in srgb, var(--color-accent) 20%, transparent);
   color: var(--color-accent-2);
 }
-.cf-cockpit .btn:focus-visible {
+.cf-screen .cf-cockpit .btn:focus-visible {
   outline: 3px solid var(--color-accent-2, var(--color-accent));
   outline-offset: 3px;
 }
 
-.cf-screen-fullscreen-notice {
+.cf-screen .cf-screen-fullscreen-notice {
   margin: 8px 0 0 auto;
   width: fit-content;
   max-width: 38ch;
@@ -1676,11 +1697,14 @@ const SCREEN_CSS = `
   line-height: 1.4;
   box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
 }
-.cf-screen-fullscreen-notice.error {
-  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 58%, transparent);
+.cf-screen .cf-screen-fullscreen-notice.error {
+  /* Issue #1685: dropped this custom property's inline hex fallback — it names an
+     unconditional :root token (index.css/nocturne.css), never runtime-optional like
+     the accent tokens, so the fallback was dead and could only ever drift silently. */
+  border-color: color-mix(in srgb, var(--color-danger) 58%, transparent);
   color: #fff;
 }
-.cf-screen-wakelock-notice {
+.cf-screen .cf-screen-wakelock-notice {
   margin: 8px 0 0 auto;
   width: fit-content;
   max-width: 38ch;
@@ -1719,7 +1743,7 @@ const SCREEN_CSS = `
 .cf-exit-pin-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
 /* Fixed-aspect letterboxed stage. */
-.cf-stage-wrap {
+.cf-screen .cf-stage-wrap {
   position: absolute;
   inset: 0;
   display: flex;
@@ -1728,7 +1752,7 @@ const SCREEN_CSS = `
   background: #000;
   overflow: hidden;
 }
-.cf-stage {
+.cf-screen .cf-stage {
   --cf-ar-w: 16;
   --cf-ar-h: 9;
   position: relative;
@@ -1748,7 +1772,7 @@ const SCREEN_CSS = `
 
 /* Clamp helpers — ellipsis (single line) / line clamp (multi-line). Paired with
    paging/rotation so clamped content is never lost, just taking turns. */
-.cf-clamp-1 {
+.cf-screen .cf-clamp-1 {
   display: inline-block;
   max-width: 100%;
   overflow: hidden;
@@ -1756,7 +1780,7 @@ const SCREEN_CSS = `
   white-space: nowrap;
   vertical-align: bottom;
 }
-.cf-clamp-2 {
+.cf-screen .cf-clamp-2 {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -1764,9 +1788,9 @@ const SCREEN_CSS = `
 }
 
 /* Persistent status band (kept across every scene). */
-.cf-status-band { flex: none; display: flex; flex-direction: column; gap: 1cqh; }
-.cf-status-lead { display: flex; align-items: baseline; gap: 2cqw; flex-wrap: wrap; min-width: 0; }
-.cf-status-campaign {
+.cf-screen .cf-status-band { flex: none; display: flex; flex-direction: column; gap: 1cqh; }
+.cf-screen .cf-status-lead { display: flex; align-items: baseline; gap: 2cqw; flex-wrap: wrap; min-width: 0; }
+.cf-screen .cf-status-campaign {
   margin: 0;
   font-family: var(--font-heading);
   font-weight: 800;
@@ -1778,8 +1802,8 @@ const SCREEN_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.cf-status-location { max-width: 30cqw; }
-.cf-status-combat {
+.cf-screen .cf-status-location { max-width: 30cqw; }
+.cf-screen .cf-status-combat {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1787,21 +1811,31 @@ const SCREEN_CSS = `
   font-size: 2.7cqh;
   color: var(--color-neutral-200);
 }
-.cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
-.cf-status-round { font-weight: 600; }
-.cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
-.cf-status-turn-label {
+.cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
+.cf-screen .cf-status-round { font-weight: 600; }
+.cf-screen .cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
+.cf-screen .cf-status-turn-label {
   font-size: 1.9cqh;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--color-neutral-400);
 }
-.cf-status-turn-name { font-weight: 700; color: #fff; max-width: 24cqw; }
-.cf-status-next .cf-status-turn-label { color: var(--color-neutral-500); }
-.cf-status-next .cf-status-turn-name { color: var(--color-neutral-200); }
-.cf-status-idle { color: var(--color-neutral-400); font-size: 2.5cqh; }
+.cf-screen .cf-status-turn-name { font-weight: 700; color: #fff; max-width: 24cqw; }
+.cf-screen .cf-status-next .cf-status-turn-label { color: var(--color-neutral-500); }
+.cf-screen .cf-status-next .cf-status-turn-name { color: var(--color-neutral-200); }
+.cf-screen .cf-status-idle { color: var(--color-neutral-400); font-size: 2.5cqh; }
 
-.cf-chip {
+/* Issue #1685: named cf-screen-chip*, NOT the app-wide .cf-chip (index.css) —
+   reusing the bare .cf-chip name here silently overrode every .cf-chip in the
+   app for as long as this route was mounted. Non-portalled selectors in this
+   stylesheet are now ALSO prefixed with the .cf-screen ancestor (the <main>
+   this <style> tag renders inside, see the render call below) — a <style>
+   element has no scoping of its own from where it sits in the DOM, so the
+   ancestor prefix is real, load-bearing scoping, not the unique name alone.
+   The larger/higher-contrast cqh/cqw sizing below IS a deliberate choice for
+   this across-the-room TV surface — kept as an override, just confined to
+   this route and under a name that also cannot collide with anything else. */
+.cf-screen .cf-screen-chip {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--color-divider);
@@ -1811,13 +1845,13 @@ const SCREEN_CSS = `
   white-space: nowrap;
   max-width: 100%;
 }
-.cf-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
-.cf-chip-accent {
+.cf-screen .cf-screen-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
+.cf-screen .cf-screen-chip-accent {
   border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   color: var(--color-accent-2);
 }
-.cf-screen-sync {
+.cf-screen .cf-screen-sync {
   margin: 1cqh 0 0;
   width: fit-content;
   max-width: 60cqw;
@@ -1829,10 +1863,10 @@ const SCREEN_CSS = `
   font-size: 2cqh;
   line-height: 1.35;
 }
-.cf-screen-sync.offline {
-  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 45%, transparent);
+.cf-screen .cf-screen-sync.offline {
+  border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
 }
-.cf-ai-ticker {
+.cf-screen .cf-ai-ticker {
   margin: 1cqh 0 0;
   font-size: 2.2cqh;
   color: var(--color-accent-2, var(--color-accent));
@@ -1841,9 +1875,9 @@ const SCREEN_CSS = `
 }
 
 /* Scene body — fills remaining stage, never scrolls. */
-.cf-scene-body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
-.cf-scene { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
-.cf-scene-title {
+.cf-screen .cf-scene-body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.cf-screen .cf-scene { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.cf-screen .cf-scene-title {
   margin: 0 0 1.6cqh;
   font-family: var(--font-heading);
   font-weight: 700;
@@ -1856,14 +1890,14 @@ const SCREEN_CSS = `
   justify-content: space-between;
   gap: 2cqw;
 }
-.cf-scene-pageflag {
+.cf-screen .cf-scene-pageflag {
   font-size: 2cqh;
   color: var(--color-neutral-400);
   font-weight: 600;
   letter-spacing: normal;
   text-transform: none;
 }
-.cf-scene-empty {
+.cf-screen .cf-scene-empty {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -1873,13 +1907,13 @@ const SCREEN_CSS = `
   color: var(--color-neutral-400);
   text-align: center;
 }
-.cf-scene-empty-title { margin: 0; font-size: 3.2cqh; font-weight: 700; color: var(--color-text); }
-.cf-scene-empty-sub { margin: 0; font-size: 2.2cqh; color: var(--color-neutral-500); max-width: 60cqw; }
-.cf-rail-retry { margin-top: 1.5cqh; align-self: center; }
+.cf-screen .cf-scene-empty-title { margin: 0; font-size: 3.2cqh; font-weight: 700; color: var(--color-text); }
+.cf-screen .cf-scene-empty-sub { margin: 0; font-size: 2.2cqh; color: var(--color-neutral-500); max-width: 60cqw; }
+.cf-screen .cf-rail-retry { margin-top: 1.5cqh; align-self: center; }
 
 /* Initiative */
-.cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1.2cqh; flex: 1 1 auto; min-height: 0; }
-.cf-init {
+.cf-screen .cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1.2cqh; flex: 1 1 auto; min-height: 0; }
+.cf-screen .cf-init {
   display: flex;
   align-items: center;
   gap: 2cqw;
@@ -1888,12 +1922,12 @@ const SCREEN_CSS = `
   border-left: 0.5cqh solid transparent;
   background: color-mix(in srgb, var(--color-bg) 40%, transparent);
 }
-.cf-init.current {
+.cf-screen .cf-init.current {
   border-left-color: var(--color-accent);
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
-.cf-init-num {
+.cf-screen .cf-init-num {
   flex: none;
   width: 6cqw;
   text-align: center;
@@ -1902,9 +1936,9 @@ const SCREEN_CSS = `
   font-size: 4cqh;
   color: var(--color-accent-2);
 }
-.cf-init.current .cf-init-num { color: var(--color-accent); }
-.cf-init-main { flex: 1; min-width: 0; }
-.cf-init-name {
+.cf-screen .cf-init.current .cf-init-num { color: var(--color-accent); }
+.cf-screen .cf-init-main { flex: 1; min-width: 0; }
+.cf-screen .cf-init-name {
   display: flex;
   align-items: center;
   gap: 1.5cqw;
@@ -1913,30 +1947,38 @@ const SCREEN_CSS = `
   font-size: 3cqh;
   min-width: 0;
 }
-.cf-init-name .cf-clamp-1 { max-width: 34cqw; }
-.cf-init-hp { flex: none; width: 22cqw; text-align: right; }
+.cf-screen .cf-init-name .cf-clamp-1 { max-width: 34cqw; }
+.cf-screen .cf-init-hp { flex: none; width: 22cqw; text-align: right; }
 
-/* HP bars (shared look with the app's cf-hp) */
-.cf-hp {
+/* HP bars — same colours as the app's .cf-hp (index.css), issue #1685: this
+   used to hardcode its own hex (#5bd18b/#e5c15b/#e5735b) that had drifted
+   from the token values, so the SAME bar rendered a different colour on the
+   TV display than in the session runner, and neither followed accent
+   theming. Now reads the identical tokens as index.css's .cf-hp, so the two
+   surfaces can never disagree again and both re-theme together. Renamed
+   cf-hp -> cf-screen-hp (see the .cf-screen-chip comment above) — the taller
+   1.4cqh bar height is a deliberate TV-legibility override kept here, not
+   removed; only the colour source changed. */
+.cf-screen .cf-screen-hp {
   height: 1.4cqh;
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-text) 12%, transparent);
   overflow: hidden;
   margin-top: 0.6cqh;
 }
-.cf-hp > div { height: 100%; background: #5bd18b; border-radius: 999px; transition: width 0.4s ease; }
-.cf-hp.low > div { background: #e5c15b; }
-.cf-hp.crit > div { background: #e5735b; }
-.cf-hp-num { font-size: 2.3cqh; font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
-.cf-hp-row { display: flex; align-items: center; gap: 1.5cqw; margin-top: 0.8cqh; }
-.cf-hp-row .cf-hp { flex: 1; margin-top: 0; }
+.cf-screen .cf-screen-hp > div { height: 100%; background: var(--cf-success); border-radius: 999px; transition: width 0.4s ease; }
+.cf-screen .cf-screen-hp.low > div { background: var(--color-accent); }
+.cf-screen .cf-screen-hp.crit > div { background: var(--cf-danger); }
+.cf-screen .cf-hp-num { font-size: 2.3cqh; font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
+.cf-screen .cf-hp-row { display: flex; align-items: center; gap: 1.5cqw; margin-top: 0.8cqh; }
+.cf-screen .cf-hp-row .cf-screen-hp { flex: 1; margin-top: 0; }
 
 /* Party */
-.cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(24cqw, 1fr)); gap: 1.5cqw; align-content: start; overflow: hidden; }
-.cf-party-card { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1.4cqh 1.6cqw; min-width: 0; }
-.cf-party-card.alumni { opacity: 0.62; }
-.cf-party-top { display: flex; align-items: center; justify-content: space-between; gap: 1cqw; }
-.cf-party-name {
+.cf-screen .cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(24cqw, 1fr)); gap: 1.5cqw; align-content: start; overflow: hidden; }
+.cf-screen .cf-party-card { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1.4cqh 1.6cqw; min-width: 0; }
+.cf-screen .cf-party-card.alumni { opacity: 0.62; }
+.cf-screen .cf-party-top { display: flex; align-items: center; justify-content: space-between; gap: 1cqw; }
+.cf-screen .cf-party-name {
   display: inline-flex;
   align-items: center;
   gap: 1cqw;
@@ -1945,17 +1987,17 @@ const SCREEN_CSS = `
   font-size: 2.6cqh;
   min-width: 0;
 }
-.cf-party-name .cf-clamp-1 { max-width: 15cqw; }
-.cf-party-status {
+.cf-screen .cf-party-name .cf-clamp-1 { max-width: 15cqw; }
+.cf-screen .cf-party-status {
   text-transform: none;
   color: var(--color-neutral-300);
   border-color: color-mix(in srgb, var(--color-neutral-400) 45%, transparent);
 }
-.cf-party-sub { color: var(--color-neutral-400); font-size: 2cqh; margin-top: 0.4cqh; text-transform: capitalize; }
+.cf-screen .cf-party-sub { color: var(--color-neutral-400); font-size: 2cqh; margin-top: 0.4cqh; text-transform: capitalize; }
 
 /* Conditions */
-.cf-conds { display: flex; flex-wrap: wrap; gap: 0.6cqw; margin-top: 0.8cqh; align-items: center; }
-.cf-cond {
+.cf-screen .cf-conds { display: flex; flex-wrap: wrap; gap: 0.6cqw; margin-top: 0.8cqh; align-items: center; }
+.cf-screen .cf-cond {
   border: 1px solid var(--color-divider);
   border-radius: 999px;
   padding: 0.3cqh 1cqw;
@@ -1966,14 +2008,14 @@ const SCREEN_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.cf-cond-more { color: var(--color-neutral-400); font-size: 1.8cqh; }
+.cf-screen .cf-cond-more { color: var(--color-neutral-400); font-size: 1.8cqh; }
 
 /* Quests */
-.cf-quests { display: flex; flex-direction: column; gap: 1.5cqh; overflow: hidden; }
-.cf-quest-top { display: flex; align-items: center; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
-.cf-quest-title { font-weight: 700; color: #fff; font-size: 2.8cqh; max-width: 70cqw; }
-.cf-objs { list-style: none; margin: 0.8cqh 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.6cqh; }
-.cf-objs li {
+.cf-screen .cf-quests { display: flex; flex-direction: column; gap: 1.5cqh; overflow: hidden; }
+.cf-screen .cf-quest-top { display: flex; align-items: center; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
+.cf-screen .cf-quest-title { font-weight: 700; color: #fff; font-size: 2.8cqh; max-width: 70cqw; }
+.cf-screen .cf-objs { list-style: none; margin: 0.8cqh 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.6cqh; }
+.cf-screen .cf-objs li {
   display: flex;
   gap: 1.2cqw;
   align-items: baseline;
@@ -1981,13 +2023,13 @@ const SCREEN_CSS = `
   font-size: 2.2cqh;
   min-width: 0;
 }
-.cf-objs li.done { color: var(--color-neutral-500); text-decoration: line-through; }
-.cf-obj-mark { color: var(--color-accent); flex: none; }
-.cf-obj-text { min-width: 0; }
-.cf-objs li.done .cf-obj-mark { color: var(--color-text-decorative); }
+.cf-screen .cf-objs li.done { color: var(--color-neutral-500); text-decoration: line-through; }
+.cf-screen .cf-obj-mark { color: var(--color-accent); flex: none; }
+.cf-screen .cf-obj-text { min-width: 0; }
+.cf-screen .cf-objs li.done .cf-obj-mark { color: var(--color-text-decorative); }
 
 /* NPCs */
-.cf-npc-head {
+.cf-screen .cf-npc-head {
   margin: 2cqh 0 1cqh;
   font-family: var(--font-heading);
   font-weight: 700;
@@ -1996,29 +2038,29 @@ const SCREEN_CSS = `
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.cf-npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(22cqw, 1fr)); gap: 1.2cqw; }
-.cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1cqh 1.3cqw; min-width: 0; }
-.cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: 2.3cqh; }
-.cf-npc-role { display: block; color: var(--color-neutral-400); font-size: 1.9cqh; }
-.cf-npc-disposition { margin-top: 0.8cqh; }
+.cf-screen .cf-npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(22cqw, 1fr)); gap: 1.2cqw; }
+.cf-screen .cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1cqh 1.3cqw; min-width: 0; }
+.cf-screen .cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: 2.3cqh; }
+.cf-screen .cf-npc-role { display: block; color: var(--color-neutral-400); font-size: 1.9cqh; }
+.cf-screen .cf-npc-disposition { margin-top: 0.8cqh; }
 
 /* Map */
-.cf-scene-map { align-items: stretch; justify-content: stretch; }
-.cf-cast-battle-map { width: 100%; height: 100%; min-height: 0; }
-.cf-map-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: var(--radius-md); }
+.cf-screen .cf-scene-map { align-items: stretch; justify-content: stretch; }
+.cf-screen .cf-cast-battle-map { width: 100%; height: 100%; min-height: 0; }
+.cf-screen .cf-map-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: var(--radius-md); }
 
 /* Intermission */
-.cf-intermission { align-items: center; justify-content: center; text-align: center; gap: 2cqh; color: var(--color-neutral-300); }
-.cf-intermission h2 { margin: 0; font-family: var(--font-heading); font-size: 6cqh; color: #fff; }
-.cf-intermission p { margin: 0; font-size: 3cqh; }
-.cf-intermission-loc { font-size: 2.4cqh; color: var(--color-neutral-400); }
+.cf-screen .cf-intermission { align-items: center; justify-content: center; text-align: center; gap: 2cqh; color: var(--color-neutral-300); }
+.cf-screen .cf-intermission h2 { margin: 0; font-family: var(--font-heading); font-size: 6cqh; color: #fff; }
+.cf-screen .cf-intermission p { margin: 0; font-size: 3cqh; }
+.cf-screen .cf-intermission-loc { font-size: 2.4cqh; color: var(--color-neutral-400); }
 
 /* Blackout */
-.cf-blackout { position: absolute; inset: 0; background: #000; }
+.cf-screen .cf-blackout { position: absolute; inset: 0; background: #000; }
 
 @media (prefers-reduced-motion: reduce) {
-  .cf-screen-control-stack,
-  .cf-hp > div {
+  .cf-screen .cf-screen-control-stack,
+  .cf-screen .cf-screen-hp > div {
     transition: none;
   }
 }
