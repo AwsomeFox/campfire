@@ -1206,7 +1206,7 @@ export class CharactersService {
       detail: JSON.stringify(patch),
     });
     this.emitCharacterUpdated(row.campaignId, id, user.id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /**
@@ -1293,7 +1293,7 @@ export class CharactersService {
     for (const character of updated) {
       this.emitCharacterUpdated(campaignId, character.id, user.id);
     }
-    return updated;
+    return redactSecrets(updated, role);
   }
 
   /**
@@ -1346,7 +1346,7 @@ export class CharactersService {
       detail: JSON.stringify({ level: row.level, ...(input.hpMax !== undefined ? { hpMax: input.hpMax } : {}) }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async patchConditions(id: number, patch: ConditionsPatchInput, user: RequestUser, role: Role): Promise<Character> {
@@ -1557,7 +1557,7 @@ export class CharactersService {
       }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /** Slots remaining at one level — read-only, for callers that want to check before spending. */
@@ -1647,7 +1647,7 @@ export class CharactersService {
       detail: JSON.stringify(patch),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /** Execute a short rest, long rest, or refocus on a character sheet (issue #422). */
@@ -2035,6 +2035,6 @@ export class CharactersService {
       detail: JSON.stringify({ restType }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 }
