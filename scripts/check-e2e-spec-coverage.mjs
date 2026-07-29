@@ -48,6 +48,7 @@ function main() {
   const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
   const browserConfig = readFileSync(join(webDir, 'playwright.config.ts'), 'utf8');
+  const browserProjects = browserConfig.match(/^\s*projects:\s*\[([\s\S]*?)^\s*webServer:/m)?.[1];
   const jobBlock = (name) => {
     const match = ci.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:\\n|(?![\\s\\S]))`, 'm'));
     return match?.[1] ?? '';
@@ -62,6 +63,7 @@ function main() {
   if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
   if (!/['"]unit-web:\$\{\{\s*needs\.unit-web\.result\s*\}\}['"]/.test(aggregateCi)) errors.push('aggregate ci must evaluate needs.unit-web.result');
   if (!browserUnitIgnore.test(browserConfig)) errors.push('browser Playwright config must retain testIgnore: /.*\\.unit\\.spec\\.m?ts/ so supported unit specs cannot run in both tiers');
+  if (!browserProjects || /\btest(?:Ignore|Match)\s*:/.test(browserProjects)) errors.push('browser Playwright projects must not override testIgnore or testMatch for unit specs');
 
   const onDisk = new Set(walk(testsDir));
   for (const file of onDisk) {
