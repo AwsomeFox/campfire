@@ -2,6 +2,7 @@ import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 
 /**
  * Driver-runtime SECURITY + correctness regressions (post-merge review of the AI-DM program).
@@ -499,5 +500,247 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     expect(fulfilled).toHaveLength(2);
     const seat = await h.getSeat(campaignId);
     expect(seat.body.turnCount).toBe(2);
+  });
+});
+
+// ── #1499 (character-ownership + scene/step-cap authorization) ─────────────────────────────────
+//
+// THE BUG. `POST /ai-dm/message` resolved `characterId` by finding WHICH member owned it and
+// used that member's name for the speaker prefix — it never compared the resolved owner to the
+// CALLER. Any player could send another player's `characterId` and the AI (and the shared
+// transcript) would attribute the action to the victim. The same handler also wrote a
+// player-supplied `scene` unconditionally (the UI hides the field behind `isDm`, client-side
+// only) and let `maxSteps`/`maxTokens` reach the DM's hard ceiling regardless of who asked.
+//
+// These tests need GENUINE `campaign_members` rows with a real owning `userId`, which the
+// header-only `dm`/`player` dev-auth shortcut used elsewhere in this file never creates
+// (`MembersService.addCreatorAsDm` explicitly skips `dev:*` ids, and `effectiveRole` short-
+// circuits straight to the header for every dev-auth request). So player identity here uses
+// real registered users + real cookie sessions (`SessionAuthGuard` prefers a valid cookie over
+// the dev-auth headers), while the DM and campaign/seat setup keep using the lighter `dm`
+// header shortcut like the rest of the file.
+describe('ai-dm driver — #1499 characterId ownership, scene, and step/token caps (e2e)', () => {
+  let h: AiEvalHarness;
+  let campaignId: number;
+  let otherCampaignId: number;
+  let playerAId: number;
+  let playerBId: number;
+  let agentA: ReturnType<typeof request.agent>;
+  let agentB: ReturnType<typeof request.agent>;
+  let characterAId: number;
+  let characterBId: number;
+  let foreignCharacterId: number;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'sec-1499-model' });
+    await h.enableExperimental();
+
+    campaignId = await h.createCampaign('Sec 1499 Ownership');
+    otherCampaignId = await h.createCampaign('Sec 1499 Other Campaign');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const createA = await request(h.server)
+      .post('/api/v1/users')
+      .set(dm)
+      .send({ username: 'sec-1499-player-a', password: 'password-1499-player-a', serverRole: 'user' });
+    const createB = await request(h.server)
+      .post('/api/v1/users')
+      .set(dm)
+      .send({ username: 'sec-1499-player-b', password: 'password-1499-player-b', serverRole: 'user' });
+    expect(createA.status).toBe(201);
+    expect(createB.status).toBe(201);
+    playerAId = createA.body.id;
+    playerBId = createB.body.id;
+
+    agentA = request.agent(h.server);
+    const loginA = await agentA.post('/api/v1/auth/login').send({ username: 'sec-1499-player-a', password: 'password-1499-player-a' });
+    expect(loginA.status).toBe(201);
+    // B needs its own agent too — the ownerUserId-reassignment regression test at the end
+    // authenticates as B once ownership is transferred to them.
+    agentB = request.agent(h.server);
+    const loginB = await agentB.post('/api/v1/auth/login').send({ username: 'sec-1499-player-b', password: 'password-1499-player-b' });
+    expect(loginB.status).toBe(201);
+
+    // A character each, owned by A and B respectively, in the shared campaign.
+    const charA = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aldric', ownerUserId: String(playerAId), hpMax: 12, hpCurrent: 12 });
+    const charB = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Bryn', ownerUserId: String(playerBId), hpMax: 12, hpCurrent: 12 });
+    expect(charA.status).toBe(201);
+    expect(charB.status).toBe(201);
+    characterAId = charA.body.id;
+    characterBId = charB.body.id;
+
+    // Real campaign-member rows, each linked to its owner's character — `characterId` at
+    // creation both claims the exclusive seat AND syncs `ownerUserId` (#819).
+    const memberA = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .set(dm)
+      .send({ userId: playerAId, role: 'player', characterId: characterAId });
+    const memberB = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .set(dm)
+      .send({ userId: playerBId, role: 'player', characterId: characterBId });
+    expect(memberA.status).toBe(201);
+    expect(memberB.status).toBe(201);
+
+    // A character that exists but belongs to an ENTIRELY DIFFERENT campaign — never linked to
+    // any member of `campaignId`.
+    const foreign = await request(h.server)
+      .post(`/api/v1/campaigns/${otherCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Stranger', hpMax: 10, hpCurrent: 10 });
+    expect(foreign.status).toBe(201);
+    foreignCharacterId = foreign.body.id;
+  });
+
+  beforeEach(() => {
+    h.resetMock();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it("Player A sending Player B's characterId is refused (403) and nothing reaches the transcript", async () => {
+    const res = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I attack the innkeeper.', characterId: characterBId });
+    expect(res.status).toBe(403);
+
+    const transcript = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`)
+      .set(dm)
+      .query({ limit: 200 });
+    const items = transcript.body.items as AiDmTranscriptEvent[];
+    expect(items.some((e) => e.payload.text === 'I attack the innkeeper.')).toBe(false);
+  });
+
+  it('Player A sending their OWN characterId succeeds (200) with the correct speaker prefix', async () => {
+    h.script({ text: 'Aldric swings at the innkeeper.' });
+    const res = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I attack the innkeeper.', characterId: characterAId });
+    expect(res.status).toBe(201);
+
+    const lastReq = h.mock.received.at(-1)!;
+    const lastUserMessage = lastReq.messages.filter((m) => m.role === 'user').at(-1);
+    expect(lastUserMessage?.content).toContain('[Aldric, played by');
+
+    // The acting user (player A) and the character (Aldric) are BOTH recorded, distinctly.
+    const transcript = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`)
+      .set(dm)
+      .query({ limit: 200 });
+    const entry = (transcript.body.items as AiDmTranscriptEvent[]).find((e) => e.payload.text === 'I attack the innkeeper.');
+    expect(entry).toBeDefined();
+    expect(entry!.actorUserId).toBe(String(playerAId));
+    expect(entry!.payload.characterId).toBe(characterAId);
+  });
+
+  it('a DM may speak as ANY character; the acting user is recorded distinctly from the character', async () => {
+    h.script({ text: 'Bryn leaps into the fray.' });
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .set(dm)
+      .send({ input: 'Bryn charges the goblin.', characterId: characterBId });
+    expect(res.status).toBe(201);
+
+    const transcript = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`)
+      .set(dm)
+      .query({ limit: 200 });
+    const entry = (transcript.body.items as AiDmTranscriptEvent[]).find((e) => e.payload.text === 'Bryn charges the goblin.');
+    expect(entry).toBeDefined();
+    // The ACTING user is the DM's own (synthetic dev) id — never player B's, even though the
+    // character spoken as belongs to player B.
+    expect(entry!.actorUserId).toBe('dev:ai-eval-dm');
+    expect(entry!.payload.characterId).toBe(characterBId);
+  });
+
+  it('a characterId belonging to ANOTHER campaign is refused (403)', async () => {
+    const res = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: "borrowing the other table's hero", characterId: foreignCharacterId });
+    expect(res.status).toBe(403);
+  });
+
+  it('a player-supplied `scene` is ignored server-side (the UI hides the field; the server enforces it)', async () => {
+    h.script({ text: 'The scene is set.' });
+    const byDm = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .set(dm)
+      .send({ input: 'we are in the tavern', scene: 'The Rusty Tankard' });
+    expect(byDm.status).toBe(201);
+    let session = await h.getDriverSession(campaignId);
+    expect(session.body.scene).toBe('The Rusty Tankard');
+
+    h.script({ text: 'ignored.' });
+    const byPlayer = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I declare we are elsewhere', scene: 'Player-Overwritten Scene', characterId: characterAId });
+    expect(byPlayer.status).toBe(201);
+    session = await h.getDriverSession(campaignId);
+    // Still the DM's scene — the player-supplied value never landed.
+    expect(session.body.scene).toBe('The Rusty Tankard');
+  });
+
+  it("a player's maxSteps/maxTokens are clamped to the campaign default, not the DM's hard ceiling", async () => {
+    h.script({ text: 'a short reply.' });
+    const res = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'go all out', maxSteps: 12, maxTokens: 4096, characterId: characterAId });
+    expect(res.status).toBe(201);
+
+    const lastReq = h.mock.received.at(-1)!;
+    // DEFAULT_STEP_MAX_TOKENS (1024) — NOT the 4096 the player asked for.
+    expect(lastReq.maxTokens).toBeLessThanOrEqual(1024);
+  });
+
+  it("a DM's maxTokens is honored above the player default, up to the hard ceiling", async () => {
+    h.script({ text: 'a longer, DM-authorized reply.' });
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .set(dm)
+      .send({ input: 'go all out', maxTokens: 4096 });
+    expect(res.status).toBe(201);
+
+    const lastReq = h.mock.received.at(-1)!;
+    // Not clamped down to the player default (1024) — the DM's requested ceiling is honored.
+    expect(lastReq.maxTokens).toBeGreaterThan(1024);
+  });
+
+  // Runs LAST — it reassigns characterAId's canonical owner, which every test above assumes
+  // is still player A.
+  it('ownership follows characters.ownerUserId, NOT the stale campaign_members.characterId seat link', async () => {
+    // The DM reassigns Aldric's owner directly (a supported flow, membership.e2e-spec.ts)
+    // WITHOUT touching member A's `characterId`, which is left still pointing at Aldric —
+    // the denormalized seat link is now stale.
+    const reassign = await request(h.server)
+      .patch(`/api/v1/characters/${characterAId}`)
+      .set(dm)
+      .send({ ownerUserId: String(playerBId) });
+    expect(reassign.status).toBe(200);
+    expect(reassign.body.ownerUserId).toBe(String(playerBId));
+
+    // The ACTUAL new owner (B) may now speak as Aldric, even though B's member row was
+    // never linked to Aldric's characterId.
+    h.script({ text: 'Aldric, now played by B, swings again.' });
+    const asNewOwner = await agentB
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I swing again.', characterId: characterAId });
+    expect(asNewOwner.status).toBe(201);
+
+    // The STALE former owner (A) — still the member whose `characterId` seat link points at
+    // Aldric — is now refused. Authorizing off that stale seat link would let A keep
+    // speaking as a character they no longer own.
+    const asStaleOwner = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I swing again.', characterId: characterAId });
+    expect(asStaleOwner.status).toBe(403);
   });
 });

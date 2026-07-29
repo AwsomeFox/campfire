@@ -263,12 +263,15 @@ export class AiDriverController {
     @Body() body: AiDmMessageDto,
     @CurrentUser() user: RequestUser,
   ): Promise<AiDmTurnRunResultHttp> {
-    await this.access.requireRole(user, id, 'player');
+    const role = await this.access.requireRole(user, id, 'player');
     const turn = await this.driver.runTurn(id, user, body.input, {
       scene: body.scene,
       maxSteps: body.maxSteps,
       maxTokens: body.maxTokens,
       characterId: body.characterId,
+      // #1499: the caller's SERVER-RESOLVED role, never the request body — governs whether
+      // characterId/scene/maxSteps/maxTokens above are honored or overridden inside runTurn.
+      callerRole: role,
       narrationLanguage: body.narrationLanguage,
       // #572: carried through to the persisted `player.action` transcript event.
       clientRef: body.clientRef,
