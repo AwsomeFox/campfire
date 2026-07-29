@@ -42,9 +42,8 @@
  *   another .tsx file uses) — a second, independent line of defence in case ancestor-scoping
  *   is ever accidentally dropped from a new rule.
  *
- * Pure source scan — no browser, no server — runs under playwright.unit.config.ts (the
- * config `npm run test:unit` / CI actually invoke; NOT pw-unit.config.ts, which is currently
- * wired into no script — see issue #1532).
+ * Pure source scan — no browser, no server — runs under the playwright.unit.config.ts
+ * config that `npm run test:unit` and CI invoke.
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

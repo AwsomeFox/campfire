@@ -7,9 +7,9 @@
  * homepage, and when to say "Source unavailable" instead of implying
  * traceability.
  *
- * Pure helper coverage via `pw-unit.config.ts` (no browser / seeded server):
+ * Pure helper coverage via `playwright.unit.config.ts` (no browser / seeded server):
  *
- *   npx playwright test --config pw-unit.config.ts e2e/tests/compendium-provenance.unit.spec.ts
+ *   npx playwright test --config playwright.unit.config.ts e2e/tests/compendium-provenance.unit.spec.ts
  */
 import { expect, test } from '@playwright/test';
 import {

@@ -10,7 +10,7 @@
  * English strings live in `i18n/locales/en/factions.json`; `FACTION_STANDING_LABELS`
  * re-exports that map as the runtime fallback. No third copy.
  *
- * Pure helper coverage via `pw-unit.config.ts` (no browser / seeded server) —
+ * Pure helper coverage via `playwright.unit.config.ts` (no browser / seeded server) —
  * kept next to sibling `*.unit.spec.ts` helpers under e2e/tests so one runner
  * exercises src/ imports without standing up the full Playwright e2e suite.
  */

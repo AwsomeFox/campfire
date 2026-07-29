@@ -13,6 +13,15 @@ import type { CampaignEventsStatus } from '../../lib/useCampaignEvents';
 
 export type EncounterSyncState = 'live' | 'connecting' | 'reconnecting' | 'offline' | 'stale';
 
+/**
+ * `data-testid` values for the sync chip and banner — a single source of truth
+ * shared by RunSessionPage.tsx and its unit spec so the two cannot silently
+ * drift apart (issue #1453: a spec that re-typed the literal independently
+ * would keep passing after a copy/paste typo broke the real attribute).
+ */
+export const ENCOUNTER_SYNC_CHIP_TESTID = 'encounter-sync-chip';
+export const ENCOUNTER_SYNC_BANNER_TESTID = 'encounter-sync-banner';
+
 export type EncounterSyncInput = {
   eventStatus: CampaignEventsStatus | null;
   /** True when the latest encounter read failed transiently but last-known data renders. */

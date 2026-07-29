@@ -3,7 +3,7 @@
  * chunk boundaries, UTF-8 splits, malformed-frame recovery.
  *
  * Pure parser tests (no browser / no seeded server). Run with:
- *   npx playwright test --config pw-unit.config.ts e2e/tests/sse-parse.unit.spec.ts
+ *   npx playwright test --config playwright.unit.config.ts e2e/tests/sse-parse.unit.spec.ts
  */
 import { expect, test } from '@playwright/test';
 import { SseParser, parseSseText, type SseParseSignal } from '../../src/lib/sseParse';
