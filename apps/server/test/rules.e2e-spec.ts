@@ -997,21 +997,16 @@ describe('rules / rule packs — uninstall clears campaigns\' ruleSystem (issue 
     const beforeGet = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
     expect(beforeGet.body.ruleSystem).toBe('open5e-srd');
 
-    // Uninstall — the dangling slug must be cleared, not left behind.
+    // Uninstall is blocked rather than silently changing live campaign mechanics.
     const uninstallRes = await request(server).delete(`/api/v1/rules/packs/${packId}`).set(uninstallDm);
-    expect(uninstallRes.status).toBe(200);
+    expect(uninstallRes.status).toBe(409);
+    expect(String(uninstallRes.body.message)).toMatch(/selected by 1 campaign/i);
 
     const afterGet = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
     expect(afterGet.status).toBe(200);
-    expect(afterGet.body.ruleSystem).toBe('');
-
-    // Reinstalling must NOT silently re-link the campaign (the slug is gone for good).
-    const reJob = await installOpen5e(server, uninstallDm, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
-    expect(reJob.status).toBe('completed');
-    const afterReinstall = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
-    expect(afterReinstall.body.ruleSystem).toBe('');
-
-    await request(server).delete(`/api/v1/rules/packs/${reJob.pack.id}`).set(uninstallDm);
+    expect(afterGet.body.ruleSystem).toBe('open5e-srd');
+    await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(uninstallDm);
   });
 });
 
@@ -1442,9 +1437,8 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
     expect(monstersJob.added).toBe(2);
     expect(monstersJob.removed).toBe(0);
 
-    // The pack label still COVERS the retained spells, and now also covers the new monsters.
-    expect(monstersJob.pack.license).toContain('Open Game License v1.0a');
-    expect(monstersJob.pack.license).toContain('Creative Commons Attribution 4.0');
+    // Pack provenance stays one canonical license; each entry retains its own term.
+    expect(monstersJob.pack.license).toBe('Open Game License v1.0a');
     // Name + source stay on the pack's established provenance — a partial add is not a
     // re-homing of the pack.
     expect(monstersJob.pack.sourceUrl).toBe(origin.baseUrl);
@@ -1530,13 +1524,10 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
       const second = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
       expect(attempts).toBe(2); // lost once, retried once
       expect(second.outcome).toBe('updated');
-      expect(second.added).toBe(2);
-      // The retry unions against what the winner COMMITTED. A stale snapshot would have
-      // produced "Open Game License v1.0a, Creative Commons Attribution 4.0", throwing the
-      // competing writer's ORC term away.
-      expect(second.pack.license).toContain('ORC License');
-      expect(second.pack.license).toContain('Creative Commons Attribution 4.0');
-      expect(second.pack.license).not.toContain('Open Game License v1.0a');
+      expect(second.added).toBe(0);
+      // A partial update retains the already-established canonical label rather than
+      // manufacturing a comma-joined list from the competing manifest.
+      expect(second.pack.license).toBe('ORC License');
 
       // The audit trail diffs against the row the committing attempt actually found, so it
       // reports the real before→after rather than one anchored to the pre-race snapshot.
@@ -1547,7 +1538,7 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
         .all()
         .map((row) => row.detail);
       expect(
-        auditDetails.some((d) => d.includes('license:"ORC License"->"ORC License, Creative Commons Attribution 4.0"')),
+        auditDetails.some((d) => d.includes('license:"ORC License"')),
       ).toBe(true);
     } finally {
       if (original) Object.defineProperty(orm, 'transaction', original);
@@ -1889,8 +1880,10 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     const { startFakeOsr } = await import('./fake-osr');
     const fake = await startFakeOsr();
     try {
-      // Default variant installs under 'basic-fantasy'.
-      const dflt = await installSource({ source: 'osr', url: fake.baseUrl });
+      // A custom mirror must name its system, so it cannot inherit Basic Fantasy provenance.
+      const missingSystem = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'osr', url: fake.baseUrl });
+      expect(missingSystem.status).toBe(400);
+      const dflt = await installSource({ source: 'osr', url: fake.baseUrl, system: 'basic-fantasy' });
       expect(dflt.status).toBe('completed');
       expect(dflt.pack.slug).toBe('basic-fantasy');
       const monster = await request(server).get('/api/v1/rules/search').query({ q: 'skeleton', type: 'monster' }).set(dm);

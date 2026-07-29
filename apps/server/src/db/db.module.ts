@@ -86,6 +86,16 @@ export const CAMPAIGN_SEARCH_FTS_AVAILABLE = Symbol('CAMPAIGN_SEARCH_FTS_AVAILAB
 function setupRuleEntriesFts(sqlite: Database.Database): boolean {
   try {
     sqlite.exec(RULE_ENTRIES_FTS_SQL);
+    // Older installs may have imported entries while the SQLite build had no
+    // FTS5 support. Creating the external-content table later installs triggers
+    // for future writes but leaves its index empty. Rebuild exactly in that
+    // populated/empty state so startup repairs it without needless work.
+    const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
+    const indexed = sqlite.prepare('SELECT count(*) AS count FROM rule_entries_fts').get() as { count: number };
+    if (entries.count > 0 && indexed.count === 0) {
+      sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
+      dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
+    }
     return true;
   } catch {
     return false;

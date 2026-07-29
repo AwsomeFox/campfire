@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
@@ -408,25 +409,20 @@ function completeManifestOptions(
   return { removeMissing: complete && dropsAreCounted, rewritePackProvenance: complete };
 }
 
-/**
- * A pack's `license` column is a de-duplicated, comma-joined list of the license terms its
- * entries fall under (each importer builds it as `[...new Set(entryLicenses)].join(', ')`).
- * When a PARTIAL re-import brings in a section under different terms, the pack-level label has
- * to keep COVERING the retained sections as well as the new one — so the two labels are unioned
- * rather than the new one replacing the old. Splitting on ',' is the exact inverse of that join
- * and round-trips a single operator-authored label (even one containing commas) unchanged,
- * because the parts are re-joined with the same separator in the same order.
- */
-function unionLicenseLabels(existing: string, incoming: string): string {
-  const terms: string[] = [];
-  const seen = new Set<string>();
-  for (const term of [...existing.split(','), ...incoming.split(',')].map((t) => t.trim())) {
-    if (!term || seen.has(term)) continue;
-    seen.add(term);
-    terms.push(term);
-  }
-  return terms.join(', ') || incoming;
+/** Keep one canonical pack license on partial re-imports; entry rows carry their own terms. */
+function canonicalLicense(existing: string, incoming: string): string {
+  // A pack label is one canonical provenance statement, not a lossy list of all
+  // licenses found while fetching a subset of its entries. Keep the established
+  // canonical label for incremental section adds; complete manifests replace it.
+  return existing.trim() || incoming;
 }
+
+function canonicalPackLicense(entries: readonly ImportedEntry[], fallback: string): string {
+  return entries.map((entry) => entry.license.trim()).find(Boolean) ?? fallback;
+}
+
+/** Thrown before a job's SQLite persistence transaction when it was cancelled. */
+class ImportJobCancelledError extends Error {}
 
 /**
  * ORDER BY expression that ranks name matches ahead of summary/body matches
@@ -561,6 +557,7 @@ function buildRuleFacets(
 @Injectable()
 export class RulesService implements OnModuleInit {
   private readonly runningJobs = new Map<string, { cancelled: boolean }>();
+  private readonly importJobContext = new AsyncLocalStorage<string>();
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -617,7 +614,7 @@ export class RulesService implements OnModuleInit {
     return {
       id: row.id,
       source: row.source as RulePackInstallJob['source'],
-      status: row.status === 'queued' ? 'pending' : row.status === 'cancelled' ? 'failed' : row.status as RulePackInstallJob['status'],
+      status: row.status === 'queued' ? 'pending' : row.status as RulePackInstallJob['status'],
       progress: progress.sections.map((s) => ({ section: s.section, status: s.status as 'pending' | 'running' | 'done' | 'failed', imported: s.imported })),
       totalSections: progress.sections.length,
       completedSections: progress.sections.filter((s) => s.status === 'done').length,
@@ -669,7 +666,6 @@ export class RulesService implements OnModuleInit {
       preview?: RulePackUpdatePreview;
     },
     pack?: RulePack,
-    isIncremental = false,
   ): void {
     const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
     if (!row || row.status === 'cancelled') {
@@ -677,10 +673,10 @@ export class RulesService implements OnModuleInit {
       return;
     }
     const progress = RulesService.parseProgress(row.progress);
-    if (isIncremental) {
-      progress.committed = result.added;
-      progress.skipped = result.skippedExisting;
-    }
+    // Fetch progress is deliberately not the outcome: imports de-duplicate across
+    // sections before persistence. The terminal counts must equal committed rows.
+    progress.committed = result.added;
+    progress.skipped = result.skippedExisting;
     progress.changed = result.changed ?? 0;
     progress.removed = result.removed ?? 0;
     if (result.sourceHash) progress.sourceHash = result.sourceHash;
@@ -734,6 +730,12 @@ export class RulesService implements OnModuleInit {
     return row?.status === 'cancelled';
   }
 
+  /** No-op for synchronous MCP installs; background jobs fail closed before commit. */
+  private assertCurrentJobCanPersist(): void {
+    const jobId = this.importJobContext.getStore();
+    if (jobId && this.isJobCancelled(jobId)) throw new ImportJobCancelledError();
+  }
+
   private async runJob(jobId: string, work: () => Promise<PersistPackResult>): Promise<void> {
     if (this.isJobCancelled(jobId)) {
       this.runningJobs.delete(jobId);
@@ -749,7 +751,7 @@ export class RulesService implements OnModuleInit {
       this.runningJobs.set(jobId, { cancelled: false });
     }
     try {
-      const result = await work();
+      const result = await this.importJobContext.run(jobId, work);
       if (this.isJobCancelled(jobId)) {
         this.runningJobs.delete(jobId);
         return;
@@ -769,9 +771,12 @@ export class RulesService implements OnModuleInit {
           preview,
         },
         pack,
-        isIncremental,
       );
     } catch (err) {
+      if (err instanceof ImportJobCancelledError) {
+        this.runningJobs.delete(jobId);
+        return;
+      }
       if (this.isJobCancelled(jobId)) {
         this.runningJobs.delete(jobId);
         return;
@@ -867,6 +872,9 @@ export class RulesService implements OnModuleInit {
   enqueueInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     this.assertSectionsForSource(input.source, input.sections);
     this.assertUrlForSource(input.source, input.url);
+    if (input.source === 'osr' && input.url && !input.system) {
+      throw new BadRequestException('An OSR install from a custom URL requires an explicit "system" so the pack license and attribution cannot be inferred from another publisher.');
+    }
     switch (input.source) {
       case 'pf2e':
         return this.enqueuePf2eInstall(input, user);
@@ -906,6 +914,9 @@ export class RulesService implements OnModuleInit {
   ): Promise<PersistPackResult> {
     this.assertSectionsForSource(input.source, input.sections);
     this.assertUrlForSource(input.source, input.url);
+    if (input.source === 'osr' && input.url && !input.system) {
+      throw new BadRequestException('An OSR install from a custom URL requires an explicit "system" so the pack license and attribution cannot be inferred from another publisher.');
+    }
     switch (input.source) {
       case 'pf2e':
         return this.installFromPf2e(input, user, onSectionDone);
@@ -1431,8 +1442,7 @@ export class RulesService implements OnModuleInit {
       );
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL/CC';
+    const license = canonicalPackLicense(allEntries, 'OGL/CC');
 
     return this.persistPack(
       { slug, name: 'Open5e SRD', version: OPEN5E_PACK_VERSION, license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1475,8 +1485,7 @@ export class RulesService implements OnModuleInit {
       throw new BadRequestException('Pathfinder 2e import returned no entries for the requested sections');
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : PF2E_DEFAULT_LICENSE;
+    const license = canonicalPackLicense(allEntries, PF2E_DEFAULT_LICENSE);
 
     return this.persistPack(
       { slug: PF2E_PACK_SLUG, name: PF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1516,8 +1525,7 @@ export class RulesService implements OnModuleInit {
       throw new BadRequestException('Starfinder 2e import returned no entries for the requested sections');
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : SF2E_DEFAULT_LICENSE;
+    const license = canonicalPackLicense(allEntries, SF2E_DEFAULT_LICENSE);
 
     return this.persistPack(
       { slug: SF2E_PACK_SLUG, name: SF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1569,8 +1577,7 @@ export class RulesService implements OnModuleInit {
       );
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : OPEN_LEGEND_DEFAULT_LICENSE;
+    const license = canonicalPackLicense(allEntries, OPEN_LEGEND_DEFAULT_LICENSE);
 
     return this.persistPack(
       { slug, name: 'Open Legend SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1612,8 +1619,7 @@ export class RulesService implements OnModuleInit {
       throw new BadRequestException('Pathfinder 1e import returned no entries for the requested sections');
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : PF1E_DEFAULT_LICENSE;
+    const license = canonicalPackLicense(allEntries, PF1E_DEFAULT_LICENSE);
 
     return this.persistPack(
       { slug: PF1E_PACK_SLUG, name: PF1E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1654,8 +1660,7 @@ export class RulesService implements OnModuleInit {
       throw new BadRequestException('Starfinder import returned no entries for the requested sections');
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : RulesService.STARFINDER_DEFAULT_LICENSE;
+    const license = canonicalPackLicense(allEntries, RulesService.STARFINDER_DEFAULT_LICENSE);
 
     return this.persistPack(
       {
@@ -1703,8 +1708,7 @@ export class RulesService implements OnModuleInit {
       throw new BadRequestException('13th Age import returned no entries for the requested sections');
     }
 
-    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : ARCHMAGE_LICENSE;
+    const license = canonicalPackLicense(allEntries, ARCHMAGE_LICENSE);
 
     return this.persistPack(
       { slug: ARCHMAGE_PACK_SLUG, name: '13th Age SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
@@ -1994,6 +1998,14 @@ export class RulesService implements OnModuleInit {
     detailSuffix: string,
     options: PersistPackOptions = {},
   ): Promise<PersistPackResult> {
+    this.assertCurrentJobCanPersist();
+    this.assertOpenLicense(meta.license);
+    for (const entry of rawEntries) {
+      const license = entry.license.trim() || meta.license;
+      if (!isOpenLicense(license)) {
+        throw new BadRequestException(`Imported entry "${entry.slug}" has a non-open license "${license}".`);
+      }
+    }
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
     // only de-dupe WITHIN a section, but several sources map two sections onto one entry
     // type (PF2e feats+backgrounds→feat, OL boons+banes→condition, SF equipment/starships/
@@ -2020,6 +2032,7 @@ export class RulesService implements OnModuleInit {
     };
 
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
+    this.assertCurrentJobCanPersist();
     if (existing) {
       return this.syncExistingPack(existing, meta, entries, sourceHash, user, options);
     }
@@ -2028,6 +2041,7 @@ export class RulesService implements OnModuleInit {
     let pack: typeof rulePacks.$inferSelect;
     try {
       pack = this.db.transaction((tx) => {
+        this.assertCurrentJobCanPersist();
         const [packRow] = tx
           .insert(rulePacks)
           .values({
@@ -2151,6 +2165,7 @@ export class RulesService implements OnModuleInit {
       preview: RulePackUpdatePreview;
     } =>
       this.db.transaction((tx) => {
+        this.assertCurrentJobCanPersist();
         // Re-read the pack row INSIDE the transaction, and derive the provenance to write from
         // THAT row — never from the `packRow` snapshot the caller took before the transaction.
         // applySync is re-invoked wholesale when it loses a UNIQUE race, and the losing attempt
@@ -2166,7 +2181,7 @@ export class RulesService implements OnModuleInit {
         const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : before.sourceUrl;
         const nextLicense = options.rewritePackProvenance
           ? meta.license
-          : unionLicenseLabels(before.license, meta.license);
+          : canonicalLicense(before.license, meta.license);
 
         const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
         const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
@@ -2365,19 +2380,21 @@ export class RulesService implements OnModuleInit {
     // ruleEntryId path) would otherwise be left with a dangling rule_entry_id once the
     // entries are gone — null it out in the SAME transaction as the entries/pack delete,
     // so there's never a window where the FK-shaped reference points at nothing.
-    const entryRows = await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.packId, id));
-    const entryIds = entryRows.map((r) => r.id);
-
     this.db.transaction((tx) => {
+      const usage = tx
+        .select({ count: sql<number>`count(*)` })
+        .from(campaigns)
+        .where(eq(campaigns.ruleSystem, pack.slug))
+        .get();
+      if (Number(usage?.count ?? 0) > 0) {
+        throw new ConflictException(
+          `Rule pack "${pack.name}" is currently selected by ${usage?.count} campaign(s). Uninstall is blocked to avoid silently changing their rule system and encounter behavior. Migrate those campaigns to another installed pack or homebrew first.`,
+        );
+      }
+      const entryIds = tx.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.packId, id)).all().map((row) => row.id);
       for (const entryId of entryIds) {
         tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, entryId)).run();
       }
-      // Campaigns that selected this pack as their rule system would otherwise be left
-      // pointing at a dangling slug — GET /campaigns/:id would still report the removed
-      // pack's slug, and it would silently re-link if the pack were reinstalled (issue
-      // #147). Reset those campaigns to '' (none/homebrew, the column default) in the same
-      // transaction, matching what the uninstall dialog promises.
-      tx.update(campaigns).set({ ruleSystem: '' }).where(eq(campaigns.ruleSystem, pack.slug)).run();
       tx.delete(ruleEntries).where(eq(ruleEntries.packId, id)).run();
       tx.delete(rulePacks).where(eq(rulePacks.id, id)).run();
     });

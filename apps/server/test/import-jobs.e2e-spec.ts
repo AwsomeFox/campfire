@@ -165,7 +165,7 @@ describe('Issue #737: persistent import job state (e2e)', () => {
 
       // The job may have already completed by now (fast fake server), so accept both outcomes
       if (cancelRes.status === 200) {
-        expect(cancelRes.body.status).toBe('failed'); // 'cancelled' maps to 'failed' in mapDbStatus
+        expect(cancelRes.body.status).toBe('cancelled');
         // Verify DB record
         const db = ctx.app.get<DrizzleDb>(DB);
         const [row] = db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
