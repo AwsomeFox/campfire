@@ -4385,15 +4385,41 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it('includes NPC combatants with statblocks in difficulty and XP estimates (issue #1454)', async () => {
     const server = ctx.app.getHttpServer();
+    const hostileNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Hostile bandit', disposition: 'hostile' })
+    ).body.id;
+    const friendlyNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Friendly guide', disposition: 'friendly' })
+    ).body.id;
+    const neutralNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Neutral bystander', disposition: 'neutral' })
+    ).body.id;
     const npcOnly = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'NPC-only fight', hidden: false });
     const addNpc = await request(server)
       .post(`/api/v1/encounters/${npcOnly.body.id}/combatants`)
       .set(dm)
-      .send({ kind: 'npc', ruleEntryId: cr10EntryId });
+      .send({ kind: 'npc', npcId: hostileNpcId, ruleEntryId: cr10EntryId });
     expect(addNpc.status).toBe(201);
 
     const npcDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(npcDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+
+    const friendlyAndNeutral = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Allied NPCs', hidden: false });
+    const addFriendly = await request(server)
+      .post(`/api/v1/encounters/${friendlyAndNeutral.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: friendlyNpcId, ruleEntryId: cr10EntryId });
+    const addNeutral = await request(server)
+      .post(`/api/v1/encounters/${friendlyAndNeutral.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: neutralNpcId, ruleEntryId: cr10EntryId });
+    expect(addFriendly.status).toBe(201);
+    expect(addNeutral.status).toBe(201);
+    const alliedDifficulty = await request(server).get(`/api/v1/encounters/${friendlyAndNeutral.body.id}/difficulty`).set(dm);
+    expect(alliedDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
 
     const mixed = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Mixed fight', hidden: false });
     const addMonster = await request(server)
@@ -4403,9 +4429,19 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const addMixedNpc = await request(server)
       .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
       .set(dm)
-      .send({ kind: 'npc', ruleEntryId: cr10EntryId });
+      .send({ kind: 'npc', npcId: hostileNpcId, ruleEntryId: cr10EntryId });
+    const addMixedFriendlyNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: friendlyNpcId, ruleEntryId: cr10EntryId });
+    const addMixedNeutralNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: neutralNpcId, ruleEntryId: cr10EntryId });
     expect(addMonster.status).toBe(201);
     expect(addMixedNpc.status).toBe(201);
+    expect(addMixedFriendlyNpc.status).toBe(201);
+    expect(addMixedNeutralNpc.status).toBe(201);
 
     const mixedDifficulty = await request(server).get(`/api/v1/encounters/${mixed.body.id}/difficulty`).set(dm);
     expect(mixedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 2, totalMonsterXp: 11800, adjustedXp: 17700 });

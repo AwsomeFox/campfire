@@ -1913,10 +1913,27 @@ export class EncountersService {
     }
     const partyLevels = characterIds.map((id) => levelById.get(id) ?? 1);
 
-    // Enemy CRs: every non-character combatant's linked rule entry statblock. An enemy
-    // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
+    // Enemy CRs: monsters plus linked NPCs whose campaign disposition is hostile. NPC
+    // combatants do not carry encounter-side allegiance, so resolve it from their linked
+    // campaign NPC instead of counting friendly/neutral party allies as enemies.
+    const npcIds = combatantRows
+      .filter((c) => c.kind === 'npc' && c.npcId !== null)
+      .map((c) => c.npcId as number);
+    const hostileNpcIds = new Set<number>();
+    if (npcIds.length > 0) {
+      const npcRows = await this.db
+        .select({ id: npcs.id, disposition: npcs.disposition })
+        .from(npcs)
+        .where(and(inArray(npcs.id, npcIds), eq(npcs.campaignId, encounterRow.campaignId), notDeleted(npcs.deletedAt)));
+      for (const npc of npcRows) {
+        if (npc.disposition.trim().toLowerCase() === 'hostile') hostileNpcIds.add(npc.id);
+      }
+    }
+    const enemyCombatants = combatantRows.filter(
+      (c) => c.kind === 'monster' || (c.kind === 'npc' && c.npcId !== null && hostileNpcIds.has(c.npcId)),
+    );
+    // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
     // rather than being dropped, so missing data can surface as unknown (issue #429).
-    const enemyCombatants = combatantRows.filter((c) => c.kind !== 'character');
     const ruleEntryIds = enemyCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
     if (ruleEntryIds.length > 0) {
