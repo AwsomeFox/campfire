@@ -857,14 +857,13 @@ body {
   }
 }
 
-/* Personal "Text size" preference (Preferences page). The app's type scale is
-   specified in px throughout (inline styles + component CSS), so a root
-   font-size bump wouldn't reach it — `zoom` scales the rendered UI the same
-   way browser zoom does, which is what "Large" means here. AuthProvider sets
-   data-text-size on <html> from the logged-in user's preference. */
-:root[data-text-size='large'] body {
-  zoom: 1.15;
-}
+/* Personal "Text size" preference (Preferences page). The TextSize contract
+   (packages/schema/src/index.ts) scopes the preference to prose and other
+   reading surfaces ONLY — never controls, maps, or VTT geometry. It is driven
+   entirely by the data-reading-mode attribute and the .reading-surface token
+   rules below. A previous whole-body zoom rule contradicted that contract (it
+   scaled the entire chrome the way browser zoom does) and nothing in code ever
+   set the attribute it matched, so it has been removed (issue #1534 part 2). */
 
 /* Reading preferences alter semantic reading variables only. They do not
    change root/body scale, CSS zoom, controls, VTT canvases, maps, or tokens. */

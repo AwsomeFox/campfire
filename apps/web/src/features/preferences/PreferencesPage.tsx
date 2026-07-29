@@ -89,6 +89,12 @@ export default function PreferencesPage() {
   const [accentSaved, setAccentSaved] = useState(false);
   const savedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const accentSavedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks the most recent dice-theme selection so a stale in-flight request
+  // can't roll the control back over a newer one that already settled. Uses a
+  // monotonically increasing token rather than the theme value, so two clicks
+  // of the same theme (A → B → A) are distinguishable: the second A is a newer
+  // request than the first, and only the latest token may revert.
+  const latestDiceThemeRequest = useRef(0);
 
   useEffect(() => {
     if (!user) return;
@@ -148,12 +154,24 @@ export default function PreferencesPage() {
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
   async function selectDiceTheme(theme: DiceTheme) {
+    const previous = selectedDiceTheme;
     setSelectedDiceTheme(theme);
+    // Stamp this request as the latest with a unique token; a newer selection
+    // supersedes it and its catch must not roll the control back over the
+    // newer, settled value. The token (not the theme value) is the identity,
+    // so two clicks of the same theme are distinguishable.
+    const token = (latestDiceThemeRequest.current += 1);
     try {
       await api.patch<User>(`${API}/me/preferences`, { diceTheme: theme });
       await refresh();
     } catch {
-      // Ignore background save error
+      // Issue #1534: surface the failure rather than leaving the UI on a theme
+      // the server rejected. Revert the optimistic state — but ONLY if no later
+      // selection has superseded this one (checked by token identity), so a
+      // stale failure can never clobber a newer, successfully persisted choice.
+      if (latestDiceThemeRequest.current === token) {
+        setSelectedDiceTheme(previous);
+      }
     }
   }
 
