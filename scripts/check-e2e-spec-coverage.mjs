@@ -60,6 +60,7 @@ function main() {
   const unitStep = unitWeb.match(/^      - name: Run web unit specs\n((?:        .*\n)*)/m)?.[1] ?? '';
   if (!/^        run: npm run test:unit -w apps\/web$/m.test(unitStep) || /^        if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$/m.test(unitStep)) errors.push('CI unit-web job must run web test:unit without a statically disabled condition');
   if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
+  if (!/['"]unit-web:\$\{\{\s*needs\.unit-web\.result\s*\}\}['"]/.test(aggregateCi)) errors.push('aggregate ci must evaluate needs.unit-web.result');
   if (!browserUnitIgnore.test(browserConfig)) errors.push('browser Playwright config must retain testIgnore: /.*\\.unit\\.spec\\.m?ts/ so supported unit specs cannot run in both tiers');
 
   const onDisk = new Set(walk(testsDir));
