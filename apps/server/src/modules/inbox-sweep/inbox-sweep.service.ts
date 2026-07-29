@@ -87,6 +87,8 @@ interface SweepCounts {
   errored: number;
   /** Subset of `proposed` that was decided fresh by this call — excludes recovered rows. */
   newlyProposed: number;
+  newlySkipped: number;
+  newlyErrored: number;
 }
 
 function freshOutcome(result: InboxSweepItemResult): SweepOutcome {
@@ -106,8 +108,10 @@ function tallyOutcome(counts: SweepCounts, outcome: SweepOutcome): void {
     if (!recovered) counts.newlyProposed++;
   } else if (result.outcome === 'errored') {
     counts.errored++;
+    if (!recovered) counts.newlyErrored++;
   } else {
     counts.skipped++;
+    if (!recovered) counts.newlySkipped++;
   }
 }
 
@@ -208,9 +212,7 @@ export class InboxSweepService {
         itemsErrored: 0,
         detail: 'no open inbox items',
       });
-      // itemsNewlyProposed is set on every return path (issue #1717) — nothing here to
-      // recover from, so the client's `?? itemsProposed` fallback is genuinely dead.
-      return { job: { ...jobToDomain(job), itemsNewlyProposed: 0 }, items: [] };
+      return { job: { ...jobToDomain(job), itemsNewlyProposed: 0, itemsNewlySkipped: 0, itemsNewlyErrored: 0 }, items: [] };
     }
 
     const existing = await this.db
@@ -237,7 +239,7 @@ export class InboxSweepService {
       characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
     };
     const results: InboxSweepItemResult[] = [];
-    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0 };
+    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0, newlySkipped: 0, newlyErrored: 0 };
 
     // Placeholder job row so ledger rows have a valid job_id from the start; totals are
     // corrected with a single UPDATE once the loop below finishes (best-effort auditable
@@ -299,7 +301,15 @@ export class InboxSweepService {
             itemsErrored: counts.errored,
             detail: 'no AI provider configured for this campaign',
           });
-          return { job: { ...jobToDomain(disabledJob), itemsNewlyProposed: counts.newlyProposed }, items: results };
+          return {
+            job: {
+              ...jobToDomain(disabledJob),
+              itemsNewlyProposed: counts.newlyProposed,
+              itemsNewlySkipped: counts.newlySkipped,
+              itemsNewlyErrored: counts.newlyErrored,
+            },
+            items: results,
+          };
         }
         const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
         if (err instanceof InvalidInboxSweepClassificationError) {
@@ -344,7 +354,15 @@ export class InboxSweepService {
       itemsErrored: counts.errored,
       detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
     });
-    return { job: { ...jobToDomain(finalJob), itemsNewlyProposed: counts.newlyProposed }, items: results };
+    return {
+      job: {
+        ...jobToDomain(finalJob),
+        itemsNewlyProposed: counts.newlyProposed,
+        itemsNewlySkipped: counts.newlySkipped,
+        itemsNewlyErrored: counts.newlyErrored,
+      },
+      items: results,
+    };
   }
 
   private async applyClassification(
