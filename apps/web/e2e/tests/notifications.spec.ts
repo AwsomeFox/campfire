@@ -225,13 +225,15 @@ test.describe('shared notification controller', () => {
   test('confirms mark all read when undisplayed rows exist', async ({ page }) => {
     const { campaignId } = seed();
     const items30 = Array.from({ length: 30 }, (_, index) => notification(`Notice ${index + 1}`, 9800 + index));
-    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 35 } }));
+    let unreadCount = 35;
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: unreadCount } }));
     await page.route(LIST_URL, (route) => route.fulfill({ json: items30 }));
     await page.route('**/api/v1/notifications/mark-read', async (route) => {
       const body = route.request().postDataJSON() as { all?: boolean };
       if (body.all) {
         const undisplayedIds = [9770, 9771, 9772, 9773, 9774];
         const updatedIds = [...items30.map((item) => item.id), ...undisplayedIds];
+        unreadCount = 0;
         await route.fulfill({ json: { updated: updatedIds.length, updatedIds } });
         return;
       }
@@ -582,6 +584,8 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
 
   unreadCount = 1;
+  await first.keyboard.press('Escape');
+  await expect(first.getByRole('dialog', { name: 'Notifications' })).toHaveCount(0);
   await first.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
   await expect(second.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
