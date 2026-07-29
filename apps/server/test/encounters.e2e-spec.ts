@@ -8,6 +8,7 @@ import {
   rulePacks,
   ruleEntries,
   combatants as combatantsTable,
+  npcs,
   encounterEvents as encounterEventsTable,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
@@ -4445,6 +4446,15 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
     const mixedDifficulty = await request(server).get(`/api/v1/encounters/${mixed.body.id}/difficulty`).set(dm);
     expect(mixedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 2, totalMonsterXp: 11800, adjustedXp: 17700 });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended' }).where(eq(encountersTable.id, npcOnly.body.id));
+    await db.update(npcs).set({ disposition: 'friendly', deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
+    const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    await db.update(combatantsTable).set({ npcDispositionSnapshot: null }).where(eq(combatantsTable.encounterId, npcOnly.body.id));
+    const legacyDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
   });
 
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,
