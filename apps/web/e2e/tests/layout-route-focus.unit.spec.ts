@@ -61,6 +61,25 @@ test.describe('route focus helpers (#591)', () => {
     );
   });
 
+  // Issue #1711: giving the Dashboard a real h1 (fixing its missing-heading a11y gap)
+  // means `pageTitleFromMain` now reads the campaign name AS the page title there,
+  // since StatusHeader's h1 IS the campaign name — unlike every other route, whose h1
+  // is a distinct section label ("Party", "Quests"). Without this dedupe,
+  // `formatDocumentTitle({ page: 'Cinderhaven', campaignName: 'Cinderhaven' })` — what
+  // the Dashboard now produces — doubled the segment ("Cinderhaven · Cinderhaven ·
+  // Campfire"). Every other route's page label never equals the campaign name, so this
+  // is inert for them (see the test above, still asserting the un-deduped 'Party · Cinderhaven · Campfire').
+  test('formatDocumentTitle drops the campaign-name segment when it duplicates the page title (Dashboard)', () => {
+    expect(formatDocumentTitle({ page: 'Cinderhaven', campaignName: 'Cinderhaven' })).toBe(
+      'Cinderhaven · Campfire',
+    );
+    // Whitespace differences still count as "the same name" (both sides run through
+    // normalizePageTitle before comparing) — but this is NOT case-insensitive.
+    expect(formatDocumentTitle({ page: '  Cinderhaven  ', campaignName: 'Cinderhaven' })).toBe(
+      'Cinderhaven · Campfire',
+    );
+  });
+
   test('isNaturallyFocusable requires href on anchors unless tabbable', () => {
     const withHref = { tagName: 'A', hasAttribute: (name: string) => name === 'href' } as unknown as HTMLElement;
     const withoutHref = { tagName: 'A', hasAttribute: () => false, tabIndex: -1 } as unknown as HTMLElement;

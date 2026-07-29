@@ -129,10 +129,23 @@ export function fallbackPageTitle(pathname: string): string {
   return APP_DOCUMENT_TITLE;
 }
 
+/**
+ * Issue #1711: `page` here is usually a section label ("Party", "Quests") distinct
+ * from the campaign name, so `formatDocumentTitle` used to always append
+ * `campaignName` as its own segment. The Dashboard is the one route where that
+ * assumption breaks — its real h1 (`StatusHeader`) IS the campaign name, since
+ * `pageTitleFromMain` reads it verbatim once the Dashboard got a real h1 to fix
+ * #1711's a11y gap. Without this dedupe, `pageTitle === campaignName` there
+ * produced a doubled title ("Cinderhaven · Cinderhaven · Campfire"). Dropping the
+ * redundant segment when they match reads correctly for the Dashboard AND leaves
+ * every other route's title byte-for-byte unchanged (their page label never equals
+ * the campaign name).
+ */
 export function formatDocumentTitle(opts: { page: string; campaignName?: string | null }): string {
   const page = normalizePageTitle(opts.page) || APP_DOCUMENT_TITLE;
   const parts = [page];
-  if (opts.campaignName) parts.push(normalizePageTitle(opts.campaignName));
+  const campaignName = opts.campaignName ? normalizePageTitle(opts.campaignName) : null;
+  if (campaignName && campaignName !== page) parts.push(campaignName);
   if (page !== APP_DOCUMENT_TITLE) parts.push(APP_DOCUMENT_TITLE);
   return parts.join(' · ');
 }

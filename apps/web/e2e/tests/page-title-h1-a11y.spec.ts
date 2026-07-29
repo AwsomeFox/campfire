@@ -47,4 +47,43 @@ test.describe('Route-level page titles (#649)', () => {
       results.violations.filter((v) => v.id === 'heading-order' || v.id === 'page-has-heading-one'),
     ).toEqual([]);
   });
+
+  /**
+   * Issue #1711 — the Dashboard shipped no `<h1>` at all: `StatusHeader.tsx` rendered
+   * `<h3 className="cf-page-title" style={{ fontSize: '1.35rem' }}>`, an `<h3>` wearing
+   * `<PageTitle>`'s CSS class rather than the component itself. Filed as a sibling of
+   * #649/#1640/#1653: a rule (exactly one real `<h1>` per top-level route) enforced at
+   * most call sites and silently not at this one. The audit this issue asked for found
+   * two more: a quest's detail page (`QuestPage.tsx`) had its only real `<h1>` inside the
+   * screen-hidden `<PrintOnly>` reference sheet — the VISIBLE title was a bare `<h3>` with
+   * no size override at all (Tailwind preflight resets heading font-size to `inherit`, so
+   * it rendered at plain body size). And the AI-DM Table (`AiTablePage.tsx`) had no
+   * heading element whatsoever in any of its states (loading / gated-off / co-dm / live).
+   *
+   * These three routes are pinned individually (rather than folded into the loop above)
+   * so a future regression on any one of them fails with an unambiguous test name.
+   */
+  test('Dashboard uses PageTitle (not an <h3> wearing its class) for the campaign name', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.goto(`/c/${campaignId}`);
+    await expectOnePageH1(page, 'E2E — Cinderhaven');
+  });
+
+  test('a quest detail page has a real (non-print-only) <h1>, not a bare <h3>', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    await page.goto(`/c/${campaignId}/quests/${navigation.questId}`);
+    await expectOnePageH1(page, 'DLRNAV Grand Route');
+  });
+
+  test('the AI-DM Table has a page heading in every state (loading / gated / live)', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.goto(`/c/${campaignId}/table`);
+    // No `main.getByRole` wrapper here (unlike expectOnePageH1) — the point of this test
+    // is that a heading exists at all, in whichever state the seeded campaign's AI-DM
+    // seat happens to be in (loading / off / co-dm / live all render their own sr-only
+    // PageTitle rather than sharing one wrapper — see AiTablePage.tsx).
+    const h1 = page.getByRole('heading', { level: 1 });
+    await expect(h1).toHaveCount(1);
+    await expect(h1).toHaveAccessibleName('Table');
+  });
 });
