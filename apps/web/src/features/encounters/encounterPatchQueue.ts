@@ -2,6 +2,7 @@ export type QueuedEncounterPatch = {
   encounterId: number;
   queueId: string;
   pendingKey: string;
+  observedUpdatedAt?: string;
   patch: Record<string, unknown>;
 };
 

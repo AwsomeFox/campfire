@@ -994,6 +994,7 @@ export default function RunSessionPage() {
   const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
   const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
   const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
+  const lastLocalEncounterRevision = useRef(new Map<number, string>());
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
@@ -1964,12 +1965,16 @@ export default function RunSessionPage() {
       } else reportError(error);
     },
     onSuccess: (updated, variables) => {
+      lastLocalEncounterRevision.current.set(variables.encounterId, updated.updatedAt);
       queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), () =>
         reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.queueId, variables.encounterId),
       );
     },
     onSettled: (_data, error, variables) => {
       pendingEncounterPatches.current.delete(variables.queueId);
+      if (!Array.from(pendingEncounterPatches.current.values()).some((entry) => entry.encounterId === variables.encounterId)) {
+        lastLocalEncounterRevision.current.delete(variables.encounterId);
+      }
       const hasLaterPendingFog = Array.from(pendingEncounterPatches.current.values()).some(
         (entry) => entry.encounterId === variables.encounterId && Object.prototype.hasOwnProperty.call(entry.patch, 'fog'),
       );
@@ -2025,7 +2030,8 @@ export default function RunSessionPage() {
         return false;
       }
       const queueId = `${pendingKey}:${++encounterPatchSequence.current}`;
-      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, patch });
+      const observedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
+      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, observedUpdatedAt, patch });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
       // Make every encounter patch optimistic. Fog edits in particular need their cache value
@@ -2044,7 +2050,7 @@ export default function RunSessionPage() {
       encounterPatchQueue.current = encounterPatchQueue.current
         .catch(() => undefined)
         .then(async () => {
-          const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(queuedEncounterId))?.updatedAt;
+          const expectedUpdatedAt = lastLocalEncounterRevision.current.get(queuedEncounterId) ?? observedUpdatedAt;
           await mutateQueuedPatch({ encounterId: queuedEncounterId, queueId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
         })
         .catch(() => undefined);
