@@ -1721,6 +1721,10 @@ describe('rules / rule packs — cross-section (type,slug) collision de-dupes (i
     // Before the fix this job failed (UNIQUE constraint mid-transaction). It must complete.
     expect(job.status).toBe('completed');
     expect(job.pack.entryCount).toBe(1);
+    expect(job.added).toBe(1);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    expect(db.select().from(ruleEntries).where(eq(ruleEntries.packId, job.pack.id)).all()).toHaveLength(job.added);
 
     const cleaveRes = await request(server).get('/api/v1/rules/search').query({ q: 'Cleave', type: 'feat' }).set(dm);
     expect(cleaveRes.status).toBe(200);
