@@ -269,15 +269,27 @@ describe('characters (e2e)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('PATCH spellSlots sets maxima and clamps used to max', async () => {
+  it('PATCH spellSlots sets maxima and rejects used outside [0, max]', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .patch(`/api/v1/characters/${characterId}`)
       .set(owner)
-      .send({ spellSlots: { '1': { max: 4, used: 0 }, '2': { max: 2, used: 5 } } });
+      .send({ spellSlots: { '1': { max: 4, used: 0 }, '2': { max: 2, used: 1 } } });
     expect(res.status).toBe(200);
-    // used=5 > max=2 is clamped down, mirroring the hpCurrent/hpMax clamp.
-    expect(res.body.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 2, used: 2 } });
+    expect(res.body.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 2, used: 1 } });
+    // Mirrors the dedicated POST :id/spell-slots path and the #1039 invariant: an overspend
+    // must FAIL loudly (400), not silently clamp to a different snapshot than requested.
+    const overspend = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '2': { max: 2, used: 5 } } });
+    expect(overspend.status).toBe(400);
+    // used < 0 (over-restore) is rejected for the mirror reason.
+    const overrestore = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '2': { max: 2, used: -1 } } });
+    expect(overrestore.status).toBe(400);
   });
 
   it('PATCH spellSlots rejects a non 1-9 level key', async () => {
@@ -1126,19 +1138,26 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
     expect(rejected.status).toBe(400);
   });
 
-  it('resources persist on the general PATCH (and clamp used into [0, max])', async () => {
+  it('resources persist on the general PATCH (and reject used outside [0, max] instead of clamping)', async () => {
     const res = await dbUpdate(server, dm1492, charId, {
       resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
     });
     expect(res.status).toBe(200);
     expect(res.body.resources).toMatchObject({ ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } });
-    // Mirrors the spellSlots clamp and the dedicated POST :id/resources invariant (#1039): a pool
-    // can never be persisted as more-spent-than-it-holds.
-    const clamped = await dbUpdate(server, dm1492, charId, {
+    // Mirrors the dedicated POST :id/resources invariant (#1039: "spending a resource you do
+    // not have must fail loudly") and the spellSlots branch below — an overspend/overrestore is
+    // REJECTED (400), never silently clamped to a different pool than the caller requested.
+    const overspend = await dbUpdate(server, dm1492, charId, {
       resources: { ki: { max: 5, used: 20 } },
     });
-    expect(clamped.status).toBe(200);
-    expect(clamped.body.resources).toMatchObject({ ki: { max: 5, used: 5 } });
+    expect(overspend.status).toBe(400);
+    // The row is unchanged: the write didn't happen (re-read confirms the prior value).
+    const afterOverspend = await request(server).get(`/api/v1/characters/${charId}`).set(dm1492);
+    expect(afterOverspend.body.resources.ki.used).toBe(2);
+    const overrestore = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: -1 } },
+    });
+    expect(overrestore.status).toBe(400);
   });
 });
 
@@ -1339,6 +1358,38 @@ describe('levelUp honors the rule-system level cap (issue #535)', () => {
     // Sanity: the character row really persisted 21 (not just the response body).
     const [row] = await db.select({ level: characters.level }).from(characters).where(eq(characters.id, char.body.id)).limit(1);
     expect(row?.level).toBe(21);
+  });
+
+  it('a no-cap OSR campaign still stops at the shared schema ceiling (MAX_LEVEL, issue #1492)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'OSR Schema-Cap Camp' });
+    expect(camp.status).toBe(201);
+    // 'basic-fantasy' → OSR adapter → maxLevel Infinity. The adapter alone would never stop
+    // advancing, but the shared schema's MAX_LEVEL (99) ceiling still applies so a level-99 PC
+    // leveled to 100 doesn't write a row the schema then rejects on every subsequent save.
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Max Level Delver', hpMax: 16, hpCurrent: 16 });
+    expect(char.status).toBe(201);
+
+    // Seed to the schema ceiling (MAX_LEVEL = 99) via the PATCH path, which the widened schema
+    // bound now permits for an uncapped system.
+    const atCeiling = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 99 });
+    expect(atCeiling.status).toBe(200);
+    expect(atCeiling.body.level).toBe(99);
+
+    // levelUp at the ceiling is rejected: min(Infinity, MAX_LEVEL) = MAX_LEVEL = 99.
+    const denied = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(denied.status).toBe(400);
+
+    // A PATCH that resends the current level (99) alongside an unrelated edit still succeeds —
+    // the sheet editor resends level on every save and 99 is a legal value.
+    const reEdit = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 99, notes: 'at the ceiling' });
+    expect(reEdit.status).toBe(200);
+    expect(reEdit.body.level).toBe(99);
+    expect(reEdit.body.notes).toBe('at the ceiling');
   });
 });
 

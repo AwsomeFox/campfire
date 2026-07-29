@@ -2432,6 +2432,89 @@ describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', 
   });
 });
 
+// ---------------------------------------------------------------------------
+// Issue #1492 (review): reviving a downed character from the sheet during a
+// running encounter must mirror the death slice into the live combatant, or
+// /end's CAS write-back treats the stale combatant slice as authoritative and
+// silently reverts the revive. Before the fix, a PATCH setting
+// { hpCurrent: 1, deathState: 'none', deathSaveFailures: 0 } mirrored HP but
+// left the combatant's deathState at 'dead', and ending the fight wrote that
+// 'dead' back onto the sheet. The death/temp-HP slice now syncs alongside HP.
+// ---------------------------------------------------------------------------
+describe('encounters — issue #1492: reviving a downed PC from the sheet mirrors death state into the live combatant (e2e)', () => {
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let db: DrizzleDb;
+  let charId: number;
+  let encounterId: number;
+  let combatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Revive Sync' })).body.id;
+    charId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Cleric', hpCurrent: 20, hpMax: 20 })
+    ).body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss', hidden: false });
+    encounterId = encRes.body.id;
+    combatantId = encRes.body.combatants[0].id;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ initiative: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function combatantDeath() {
+    const [row] = await db
+      .select({ deathState: combatantsTable.deathState, hpCurrent: combatantsTable.hpCurrent, deathSaveFailures: combatantsTable.deathSaveFailures })
+      .from(combatantsTable)
+      .where(eq(combatantsTable.id, combatantId))
+      .limit(1);
+    return row!;
+  }
+
+  it('downs the character on the tracker (setup: hpCurrent 0, deathState dead)', async () => {
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ hpSet: 0, deathState: 'dead', deathSaveFailures: 3 });
+    expect(res.status).toBe(200);
+    expect(res.body.deathState).toBe('dead');
+    expect(res.body.hpCurrent).toBe(0);
+  });
+
+  it('a sheet PATCH reviving the PC mirrors both HP and deathState into the live combatant (the fix)', async () => {
+    const revived = await request(server)
+      .patch(`/api/v1/characters/${charId}`)
+      .set(dm)
+      .send({ hpCurrent: 1, deathState: 'none', deathSaveFailures: 0, deathSaveSuccesses: 0 });
+    expect(revived.status).toBe(200);
+    expect(revived.body.deathState).toBe('none');
+    expect(revived.body.hpCurrent).toBe(1);
+
+    // The combatant row must reflect the revive — not just HP, but the death slice too.
+    // Before the fix this kept deathState 'dead' while hpCurrent became 1.
+    const combatant = await combatantDeath();
+    expect(combatant.hpCurrent).toBe(1);
+    expect(combatant.deathState).toBe('none');
+    expect(combatant.deathSaveFailures).toBe(0);
+  });
+
+  it('ending the encounter does NOT revert the revive onto the sheet', async () => {
+    const endRes = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+    const charRes = await request(server).get(`/api/v1/characters/${charId}`).set(dm);
+    // Before the fix, /end wrote the stale combatant deathState 'dead' back onto the sheet.
+    expect(charRes.body.deathState).toBe('none');
+    expect(charRes.body.hpCurrent).toBe(1);
+    expect(charRes.body.deathSaveFailures).toBe(0);
+  });
+});
+
 describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
