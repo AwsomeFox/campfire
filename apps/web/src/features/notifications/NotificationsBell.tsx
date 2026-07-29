@@ -85,6 +85,11 @@ type NotificationSyncMessage =
   | { type: 'unread-bulk'; ids: number[] }
   | { type: 'read-all'; readAt: string };
 
+/** A full inbox mutation must invalidate count loads in every receiving tab. */
+export function markAllReadSyncMessage(readAt: string, _updatedIds: readonly number[]): NotificationSyncMessage {
+  return { type: 'read-all', readAt };
+}
+
 export type BulkMarkResult = {
   updated: number;
   updatedIds: number[];
@@ -761,8 +766,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       // This operation marks the entire inbox. Even when the response includes
       // affected IDs, recipients need the all-read semantic to invalidate a
       // pre-mutation unread-count request before it can republish a stale badge.
-      syncReadMessage({ type: 'read-all', readAt });
-      channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
+      const message = markAllReadSyncMessage(readAt, res.updatedIds ?? []);
+      syncReadMessage(message);
+      channelRef.current?.postMessage(message);
       // Everything just got marked read — no unread membership signal can remain.
       publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
       return true;
