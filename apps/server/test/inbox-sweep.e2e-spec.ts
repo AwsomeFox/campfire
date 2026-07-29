@@ -6,6 +6,7 @@ import { inboxSweepItems, inboxSweepJobs } from '../src/db/schema';
 import { nowIso } from '../src/common/time';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 import type { AiProviderConfig } from '../src/modules/ai-dm/providers';
+import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import {
   INBOX_SWEEP_CLASSIFIER,
   InvalidInboxSweepClassificationError,
@@ -565,7 +566,7 @@ describe('inbox sweep (e2e)', () => {
     // whatever the caller's own first page held. The bug this guards: the server used to
     // omit the item's identifying text entirely, forcing callers to rely on a client-side
     // pre-sweep snapshot that only ever covered page one.
-    const TOTAL = 51;
+    const TOTAL = NOTES_LIST_DEFAULT_LIMIT + 1;
     const noteIds: number[] = [];
     for (let i = 0; i < TOTAL; i++) {
       const body = `Bulk sweep capture ${i} — unique text so the label can't come from anywhere else`;
