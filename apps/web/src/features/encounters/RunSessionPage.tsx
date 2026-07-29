@@ -1051,6 +1051,16 @@ export default function RunSessionPage() {
   const [castFollowedEncounter, setCastFollowedEncounter] = useState<{ id: number | null; name: string | null }>({ id: null, name: null });
   const [castDisplayNotice, setCastDisplayNotice] = useState<string | null>(null);
 
+  // Navigating between campaigns reuses this component, so any display state from
+  // the previous campaign must be discarded (issue #762 review).
+  useEffect(() => {
+    castWindowRef.current = null;
+    castConnectionSequenceRef.current = 0;
+    setCastWindowState('idle');
+    setCastFollowedEncounter({ id: null, name: null });
+    setCastDisplayNotice(null);
+  }, [cid]);
+
   const receiveCastDisplayStatus = useCallback((status: CastDisplayStatus) => {
     if (status.campaignId !== cid) return;
     if (status.type === 'ready') {
@@ -1124,12 +1134,23 @@ export default function RunSessionPage() {
 
   const copyPlayerDisplayLink = useCallback(() => {
     setCastDisplayNotice(null);
-    void mintCastLink()
-      .then(async (url) => {
-        if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable; open the display and copy its address instead.');
-        await navigator.clipboard.writeText(url);
-        setCastDisplayNotice('A safe player-display link was copied. It expires in 8 hours.');
-      })
+    // Preserve the click's user activation by handing `clipboard.write` a Promise
+    // that resolves to the link text once the server mints it (Safari/WebKit).
+    const textPromise = mintCastLink().then((url) => new Blob([url], { type: 'text/plain' }));
+    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as any).ClipboardItem) as typeof ClipboardItem | undefined;
+    const writePromise =
+      ClipboardItemCtor && navigator.clipboard?.write
+        ? navigator.clipboard.write([new ClipboardItemCtor({ 'text/plain': textPromise })])
+        : textPromise
+            .then((blob) => blob.text())
+            .then((url) => {
+              if (!navigator.clipboard?.writeText) {
+                throw new Error('Clipboard access is unavailable; open the display and copy its address instead.');
+              }
+              return navigator.clipboard.writeText(url);
+            });
+    void writePromise
+      .then(() => setCastDisplayNotice('A safe player-display link was copied. It expires in 8 hours.'))
       .catch((error: unknown) => {
         setCastDisplayNotice(error instanceof Error ? error.message : t('encounters.errors.actionFailed'));
       });
@@ -2087,6 +2108,11 @@ export default function RunSessionPage() {
     else combatantRowRefs.current.delete(combatantId);
   }, []);
   const autoScrollSkipped = useRef(false);
+  // `RunSessionPage` is reused across encounters; reset the first-load latch so
+  // each new encounter starts with the header controls visible.
+  useEffect(() => {
+    autoScrollSkipped.current = false;
+  }, [eid]);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
     // The first time the current combatant resolves we are still at the top of the

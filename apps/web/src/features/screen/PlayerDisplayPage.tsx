@@ -219,6 +219,7 @@ export default function PlayerDisplayPage() {
   const announce = useAnnounce();
   const { roleIn, staleIdentity } = useAuth();
   const isCastMode = typeof castToken === 'string' && castToken.length > 0;
+  const isManagedCastWindow = typeof window !== 'undefined' && window.name === CAST_WINDOW_NAME && isCastMode;
   const role = isCastMode ? null : roleIn(cid);
 
   // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
@@ -735,8 +736,10 @@ export default function PlayerDisplayPage() {
   // On SPA exit the document remains alive, so pagehide alone cannot notify the
   // cockpit. Publish a close from the component's actual unmount path as well.
   // This effect keys only on campaign identity: normal encounter refreshes must
-  // not briefly report the display as closed.
+  // not briefly report the display as closed. Only the managed cast popup should
+  // report status; other `/screen` previews or `/cast` links must stay silent.
   useEffect(() => {
+    if (!isManagedCastWindow) return;
     return () => {
       const closed: CastDisplayStatus = { type: 'closed', campaignId: cid };
       try {
@@ -750,13 +753,14 @@ export default function PlayerDisplayPage() {
         channel.close();
       }
     };
-  }, [cid]);
+  }, [cid, isManagedCastWindow]);
 
   // The separate window reports only operational state back to the cockpit.
   // In particular, neither the cast URL nor its bearer token is ever sent over
   // postMessage/BroadcastChannel (the URL itself is the #547 credential).
+  // Only the managed cast popup publishes status; other tabs must stay silent.
   useEffect(() => {
-    if (!Number.isFinite(cid)) return;
+    if (!Number.isFinite(cid) || !isManagedCastWindow) return;
     // The encounter name has already crossed the server's player-safe projection
     // boundary. It is status metadata, not a cast credential or DM-only detail.
     const status = (): CastDisplayStatus => ({
@@ -786,7 +790,7 @@ export default function PlayerDisplayPage() {
       window.removeEventListener('pagehide', onPageHide);
       channel?.close();
     };
-  }, [cid, encounter?.id, encounter?.name]);
+  }, [cid, encounter?.id, encounter?.name, isManagedCastWindow]);
 
   // A popup opened by the DM is allowed to *ask* for fullscreen in its own
   // browsing context. Browsers that require an additional activation reject it;
