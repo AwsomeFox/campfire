@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import type { Campaign } from '@campfire/schema';
 import { measureBox } from '../lib/computedStyle';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
 
@@ -43,18 +44,38 @@ test.describe('control surface goldens (#1694)', () => {
   test.use({ storageState: stateFor('dm') });
 
   test('dashboard campaign card grid', async ({ page }) => {
-    await page.goto('/');
-    const grid = page.getByTestId('home-campaign-grid');
-    await expect(grid).toBeVisible();
-    // The seeded DM owns exactly one active campaign; anchor on its tile's Dashboard
-    // link so the screenshot never fires before the campaign card itself has painted.
-    await expect(grid.getByRole('link', { name: 'Dashboard' }).first()).toBeVisible();
-    await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
-    await expect(grid).toHaveScreenshot('home-campaign-grid.png', {
-      animations: 'disabled',
-      caret: 'hide',
-      maxDiffPixelRatio: 0.005,
-    });
+    // The serial e2e suite shares a single seeded backend; earlier specs may have
+    // created additional active campaigns. Snapshot the grid as if the DM owns only
+    // the seeded campaign by archiving any other active campaigns, then restore them.
+    const seededId = seed().campaignId;
+    const campaigns = (await (await page.request.get('/api/v1/campaigns')).json()) as Campaign[];
+    const archived: Array<{ id: number; status: Campaign['status'] }> = [];
+    for (const c of campaigns) {
+      if (c.id !== seededId && c.status === 'active') {
+        const resp = await page.request.patch(`/api/v1/campaigns/${c.id}`, { data: { status: 'completed' } });
+        expect(resp.ok()).toBe(true);
+        archived.push({ id: c.id, status: c.status });
+      }
+    }
+
+    try {
+      await page.goto('/');
+      const grid = page.getByTestId('home-campaign-grid');
+      await expect(grid).toBeVisible();
+      // The seeded DM owns exactly one active campaign; anchor on its tile's Dashboard
+      // link so the screenshot never fires before the campaign card itself has painted.
+      await expect(grid.getByRole('link', { name: 'Dashboard' }).first()).toBeVisible();
+      await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
+      await expect(grid).toHaveScreenshot('home-campaign-grid.png', {
+        animations: 'disabled',
+        caret: 'hide',
+        maxDiffPixelRatio: 0.005,
+      });
+    } finally {
+      for (const c of archived) {
+        await page.request.patch(`/api/v1/campaigns/${c.id}`, { data: { status: c.status } });
+      }
+    }
   });
 
   test('encounter runner turn workspace (dense combat toolbar)', async ({ page }) => {
