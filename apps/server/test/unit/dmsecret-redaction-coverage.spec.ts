@@ -13,8 +13,19 @@ import ts from 'typescript';
  *
  * The program is built with the server's own resolution settings so zod-inferred
  * domain types and `@campfire/schema` resolve exactly as they do in `nest build`.
+ * The `@campfire/schema` path mapping uses an ABSOLUTE path so resolution is
+ * deterministic regardless of the CI environment's `node_modules` workspace symlinks
+ * (the workspace package's `dist/` is a build artifact that may not exist when the
+ * coverage job runs `npm ci` without building).
+ *
+ * As a belt-and-suspenders fallback for environments where type inference is
+ * mangled (e.g. the babel-instrumented coverage build), each `ServiceSpec` may list
+ * `inferredDmSecretMethods` — method names known to return a dmSecret-bearing
+ * inferred type. When the checker cannot resolve the inferred type, the name list
+ * is authoritative so the method is still covered.
  */
-const SERVER_ROOT = path.join(__dirname, '../../..');
+const REPO_ROOT = path.join(__dirname, '../../..');
+const SCHEMA_SOURCE = path.join(REPO_ROOT, 'packages/schema/src/index.ts');
 function buildProgram(
   servicePath: string,
 ): { checker: ts.TypeChecker; sourceFile: ts.SourceFile } {
@@ -29,8 +40,8 @@ function buildProgram(
       emitDecoratorMetadata: true,
       esModuleInterop: true,
       skipLibCheck: true,
-      baseUrl: SERVER_ROOT,
-      paths: { '@campfire/schema': ['../../packages/schema/src/index.ts'] },
+      baseUrl: REPO_ROOT,
+      paths: { '@campfire/schema': [SCHEMA_SOURCE] },
     },
   });
   const checker = program.getTypeChecker();
