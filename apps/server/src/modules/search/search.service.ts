@@ -4,6 +4,7 @@ import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultTyp
 import type { RequestUser } from '../../common/user.types';
 import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
 import { notDeleted } from '../../common/soft-delete';
+import { anchorVisibilitySql } from '../../common/anchor-visibility';
 import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
 import {
   characters,
@@ -356,40 +357,12 @@ export class SearchService {
     const noteVisibility = role === 'dm'
       ? sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR n.visibility = 'dm_shared' OR n.visibility = 'whisper')`
       : sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR (n.visibility = 'whisper' AND n.recipient_user_id = ${user.id}))`;
-    const commentAnchorVisible = sql`(
-      (c.entity_type = 'quest' AND EXISTS (
-        SELECT 1 FROM quests cq
-        WHERE cq.id = c.entity_id AND cq.campaign_id = c.campaign_id AND cq.deleted_at IS NULL
-          ${role === 'dm' ? sql`` : sql`AND cq.hidden = 0`}
-      ))
-      OR (c.entity_type = 'npc' AND EXISTS (
-        SELECT 1 FROM npcs cn
-        WHERE cn.id = c.entity_id AND cn.campaign_id = c.campaign_id AND cn.deleted_at IS NULL
-          ${role === 'dm' ? sql`` : sql`AND cn.hidden = 0`}
-      ))
-      OR (c.entity_type = 'faction' AND EXISTS (
-        SELECT 1 FROM factions cf
-        WHERE cf.id = c.entity_id AND cf.campaign_id = c.campaign_id
-          ${role === 'dm' ? sql`` : sql`AND cf.hidden = 0`}
-      ))
-      OR (c.entity_type = 'location' AND EXISTS (
-        SELECT 1 FROM locations cl
-        WHERE cl.id = c.entity_id AND cl.campaign_id = c.campaign_id AND cl.deleted_at IS NULL
-          ${role === 'dm' ? sql`` : sql`AND cl.status <> 'unexplored'`}
-      ))
-      OR (c.entity_type = 'session' AND EXISTS (
-        SELECT 1 FROM sessions cs WHERE cs.id = c.entity_id AND cs.campaign_id = c.campaign_id AND cs.deleted_at IS NULL
-      ))
-      OR (c.entity_type = 'character' AND EXISTS (
-        SELECT 1 FROM characters cch WHERE cch.id = c.entity_id AND cch.campaign_id = c.campaign_id AND cch.deleted_at IS NULL
-      ))
-      OR (c.entity_type = 'encounter' AND EXISTS (
-        SELECT 1 FROM encounters ce WHERE ce.id = c.entity_id AND ce.campaign_id = c.campaign_id
-      ))
-      OR (c.entity_type = 'campaign' AND c.entity_id = c.campaign_id AND EXISTS (
-        SELECT 1 FROM campaigns cc WHERE cc.id = c.campaign_id AND cc.deleted_at IS NULL
-      ))
-    )`;
+    const commentAnchorVisible = anchorVisibilitySql(
+      sql.raw('c.entity_type'),
+      sql.raw('c.entity_id'),
+      sql.raw('c.campaign_id'),
+      role,
+    );
 
     return sql`(
       (campaign_search_fts.entity_type = 'quest' AND EXISTS (

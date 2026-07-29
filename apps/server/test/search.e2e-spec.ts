@@ -27,6 +27,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
   let visibleLocationId: number;
   let visibleEncounterId: number;
   let hiddenEncounterId: number;
+  let hiddenEncounterCommentId: number;
   let safelyLinkedEncounterId: number;
   let scheduledSessionId: number;
   let otherCampaignScheduleId: number;
@@ -179,6 +180,16 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
         .set(dm)
         .send({ name: 'Dragon Vault Ambush', hidden: true })
     ).body.id;
+    hiddenEncounterCommentId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(dm)
+        .send({
+          entityType: 'encounter',
+          entityId: hiddenEncounterId,
+          body: "The duke's bribed guard turns on the party in round two.",
+        })
+    ).body.id;
     const secretLinkedQuestId = (
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/quests`)
@@ -300,6 +311,28 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
         expect(res.body.results.some((r: Result) => r.type === 'encounter' && r.id === hiddenEncounterId)).toBe(false);
         expect(JSON.stringify(res.body.results).toLowerCase()).not.toContain('dragon vault ambush');
       }
+    }
+  });
+
+  it('hides comment-only matches on hidden encounters from players and viewers', async () => {
+    const query = 'bribed guard';
+    const dmRes = await request(ctx.app.getHttpServer())
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+      .set(dm);
+    expect(dmRes.status).toBe(200);
+    expect(dmRes.body.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'comment', id: hiddenEncounterCommentId }),
+    ]));
+
+    for (const headers of [player, viewer]) {
+      const res = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+        .set(headers);
+      expect(res.status).toBe(200);
+      expect(res.body.results).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'comment', id: hiddenEncounterCommentId }),
+      ]));
+      expect(JSON.stringify(res.body.results).toLowerCase()).not.toContain('bribed guard');
     }
   });
 

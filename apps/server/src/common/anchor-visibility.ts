@@ -1,5 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { EntityType, Role } from '@campfire/schema';
 import type { DrizzleDb } from '../db/db.module';
 import { campaigns, characters, encounters, factions, locations, npcs, quests, sessions } from '../db/schema';
@@ -11,10 +11,10 @@ import { isVisibleTo } from './redact';
  * (entityType, entityId) — and before editing/deleting/REPORTING a comment anchored
  * to one — the caller must be able to SEE that entity. We resolve it within THIS
  * campaign and apply the SAME rule the entity's own GET uses (issue #42): a hidden
- * quest/npc/faction or an unexplored location is 404 for a non-DM, indistinguishable
+ * quest/npc/faction/encounter or an unexplored location is 404 for a non-DM, indistinguishable
  * from a nonexistent one — so a thread can never leak that a secret entity exists (or
  * expose its comments). Types with no entity-level secrecy (session, character,
- * campaign, encounter) are visible to any member; a nonexistent, trashed, or
+ * campaign) are visible to any member; a nonexistent, trashed, or
  * foreign-campaign anchor 404s for everyone (a comment can only hang off a live entity
  * in its own campaign). The 404 message is uniform so a hidden entity is byte-for-byte
  * a missing one.
@@ -57,7 +57,7 @@ export async function assertAnchorVisible(
       const [row] = await db
         .select({ hidden: factions.hidden })
         .from(factions)
-        .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
+        .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId), notDeleted(factions.deletedAt)))
         .limit(1);
       if (!row || !isVisibleTo(row, role)) throw notFound();
       return;
@@ -92,11 +92,11 @@ export async function assertAnchorVisible(
     }
     case 'encounter': {
       const [row] = await db
-        .select({ id: encounters.id })
+        .select({ hidden: encounters.hidden })
         .from(encounters)
-        .where(and(eq(encounters.id, entityId), eq(encounters.campaignId, campaignId)))
+        .where(and(eq(encounters.id, entityId), eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)))
         .limit(1);
-      if (!row) throw notFound();
+      if (!row || !isVisibleTo(row, role)) throw notFound();
       return;
     }
     case 'campaign': {
@@ -111,4 +111,55 @@ export async function assertAnchorVisible(
       return;
     }
   }
+}
+
+/**
+ * SQL form of {@link assertAnchorVisible}. Search uses this for comments because
+ * its FTS candidate query must reject an inaccessible anchor before it can return
+ * a matching comment snippet. Keeping the predicates here with the direct-read
+ * gate prevents comment search and direct comment reads from drifting apart.
+ */
+export function anchorVisibilitySql(
+  entityType: SQL,
+  entityId: SQL,
+  campaignId: SQL,
+  role: Role,
+): SQL {
+  const questVisible = role === 'dm' ? sql`` : sql`AND cq.hidden = 0`;
+  const npcVisible = role === 'dm' ? sql`` : sql`AND cn.hidden = 0`;
+  const factionVisible = role === 'dm' ? sql`` : sql`AND cf.hidden = 0`;
+  const locationVisible = role === 'dm' ? sql`` : sql`AND cl.status <> 'unexplored'`;
+  const encounterVisible = role === 'dm' ? sql`` : sql`AND ce.hidden = 0`;
+
+  return sql`(
+    (${entityType} = 'quest' AND EXISTS (
+      SELECT 1 FROM quests cq
+      WHERE cq.id = ${entityId} AND cq.campaign_id = ${campaignId} AND cq.deleted_at IS NULL ${questVisible}
+    ))
+    OR (${entityType} = 'npc' AND EXISTS (
+      SELECT 1 FROM npcs cn
+      WHERE cn.id = ${entityId} AND cn.campaign_id = ${campaignId} AND cn.deleted_at IS NULL ${npcVisible}
+    ))
+    OR (${entityType} = 'faction' AND EXISTS (
+      SELECT 1 FROM factions cf
+      WHERE cf.id = ${entityId} AND cf.campaign_id = ${campaignId} AND cf.deleted_at IS NULL ${factionVisible}
+    ))
+    OR (${entityType} = 'location' AND EXISTS (
+      SELECT 1 FROM locations cl
+      WHERE cl.id = ${entityId} AND cl.campaign_id = ${campaignId} AND cl.deleted_at IS NULL ${locationVisible}
+    ))
+    OR (${entityType} = 'session' AND EXISTS (
+      SELECT 1 FROM sessions cs WHERE cs.id = ${entityId} AND cs.campaign_id = ${campaignId} AND cs.deleted_at IS NULL
+    ))
+    OR (${entityType} = 'character' AND EXISTS (
+      SELECT 1 FROM characters cch WHERE cch.id = ${entityId} AND cch.campaign_id = ${campaignId} AND cch.deleted_at IS NULL
+    ))
+    OR (${entityType} = 'encounter' AND EXISTS (
+      SELECT 1 FROM encounters ce
+      WHERE ce.id = ${entityId} AND ce.campaign_id = ${campaignId} AND ce.deleted_at IS NULL ${encounterVisible}
+    ))
+    OR (${entityType} = 'campaign' AND ${entityId} = ${campaignId} AND EXISTS (
+      SELECT 1 FROM campaigns cc WHERE cc.id = ${campaignId} AND cc.deleted_at IS NULL
+    ))
+  )`;
 }
