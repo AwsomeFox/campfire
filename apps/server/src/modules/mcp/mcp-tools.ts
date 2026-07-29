@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectThrottlerStorage, ThrottlerException, type ThrottlerStorage } from '@nestjs/throttler';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { zodToJsonSchema as zodToJsonSchemaRaw } from 'zod-to-json-schema';
@@ -125,6 +126,7 @@ import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { getRequestContext, getRequestId, patchRequestContext } from '../../common/request-context';
 import { logRequest } from '../../common/request-log';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
+import { AI_THROTTLE_LIMIT, AI_THROTTLE_TTL_MS, THROTTLE_AI, isThrottleDisabled } from '../../common/throttle.constants';
 import { fromJsonText } from '../../common/json';
 import { resolveSavingThrow } from './saving-throw-math';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -170,6 +172,7 @@ import { RollsService } from '../rolls/rolls.service';
 import { InvitesService } from '../membership/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BulkNotificationSchema } from '../notifications/notifications.dto';
+import { InboxSweepService } from '../inbox-sweep/inbox-sweep.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -443,6 +446,15 @@ export class McpToolsService {
     // with placeholder arguments, so inserting a parameter in the middle would silently
     // shift every dependency after it rather than failing loudly.
     private readonly sessionZeroConsent: SessionZeroConsentService,
+    // Issue #1645: the MCP surface for the inbox sweep (#1644) — calls the exact same
+    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // route uses, never a second implementation. Appended near-last for the same
+    // positional-constructor-test reason as sessionZeroConsent above.
+    private readonly inboxSweep: InboxSweepService,
+    // Issue #1645 review: MCP /mcp is one shared route, so route decorators cannot
+    // apply the strict AI bucket to a single tool. Use the same throttler storage here.
+    @InjectThrottlerStorage()
+    private readonly throttlerStorage: ThrottlerStorage,
   ) {}
 
   /**
@@ -763,6 +775,21 @@ export class McpToolsService {
       },
       true, // mutating — recorded on the DriverTool for the driver's live-play allow-list
     );
+  }
+
+  private async throttleMcpAiTool(user: RequestUser, toolName: string): Promise<void> {
+    if (isThrottleDisabled()) return;
+
+    const tracker = `user:${user.id}`;
+    const key = `mcp:${toolName}:${THROTTLE_AI}:${tracker}`;
+    const record = await this.throttlerStorage.increment(
+      key,
+      AI_THROTTLE_TTL_MS,
+      AI_THROTTLE_LIMIT,
+      AI_THROTTLE_TTL_MS,
+      THROTTLE_AI,
+    );
+    if (record.isBlocked) throw new ThrottlerException();
   }
 
   // ---------- READ ----------
@@ -3371,6 +3398,36 @@ export class McpToolsService {
           role,
         );
       },
+    );
+
+    // Issue #1645 — MCP parity for the inbox sweep (#1644). Calls the EXACT SAME
+    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // route uses — no reimplementation, so MCP/REST behavior can never drift apart.
+    // dm role required (same as the REST controller), which also enforces the
+    // archived-campaign read-only gate via requireRole. Although sweep() files PENDING
+    // PROPOSALS for canon changes, it also writes sweep job/ledger rows and resolves
+    // inbox notes, so this is direct-write-only just like the non-@Proposable REST route.
+    this.tool(
+      server,
+      'sweep_inbox',
+      'DM only: sweep the campaign inbox — reads every OPEN inbox item, infers create/update/dismiss per capture ' +
+        '(unsupported cases like objective ticks or HP/combat writes always skip with a stated reason), files each ' +
+        'inferred canon change as a PENDING PROPOSAL (never a direct canon write), records the sweep, and resolves swept ' +
+        'items. Requires direct write authority; propose-only tokens are rejected to match REST. Safe to re-run: an item ' +
+        'already swept is never re-classified or re-proposed. ' +
+        'Returns the recorded job + a per-item outcome (proposed / skipped / errored). Identical behavior to REST ' +
+        'POST /campaigns/:id/inbox/sweep and the web trigger — same orchestration path.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        assertDirectWriteAllowed(user);
+        await this.throttleMcpAiTool(user, 'sweep_inbox');
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.inboxSweep.sweep(campaignId as number, user, role);
+      },
+      true, // mutating — recorded on the DriverTool; not proposal-capable-tagged (no `propose`
+      // arg) and NOT in DRIVER_LIVE_PLAY_TOOLS, so the driver seat cannot trigger a bulk sweep
+      // mid-session — this is an administrative/out-of-session action, same posture as
+      // run_scribe.
     );
 
     this.writeTool(

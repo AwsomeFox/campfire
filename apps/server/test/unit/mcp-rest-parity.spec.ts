@@ -63,6 +63,10 @@ describe('MCP REST parity manifest (#683)', () => {
       {} as never,
       // #600: SessionZeroConsentService, appended last to the constructor.
       {} as never,
+      // #1645: InboxSweepService, appended near-last to the constructor.
+      {} as never,
+      // #1645 review: throttler storage for MCP tool-level AI throttling.
+      {} as never,
     );
     const names = new Set(service.buildToolset(user).tools.map((t) => t.name));
     const missing = MCP_REST_PARITY_ISSUE_683.flatMap((entry) =>
