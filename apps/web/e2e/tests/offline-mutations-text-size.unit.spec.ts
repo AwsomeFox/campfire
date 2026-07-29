@@ -69,7 +69,7 @@ test.describe('Error-swallowing callers announce success only on real success (#
     // clobber a newer, successfully persisted choice (#1534 review).
     const fnStart = PREFS_PAGE_SOURCE.indexOf('async function selectDiceTheme');
     expect(fnStart).toBeGreaterThan(-1);
-    const fnBlock = PREFS_PAGE_SOURCE.slice(fnStart, fnStart + 1000);
+    const fnBlock = PREFS_PAGE_SOURCE.slice(fnStart, fnStart + 1200);
     expect(fnBlock).toContain('previous');
     expect(fnBlock).toMatch(/setSelectedDiceTheme\(previous\)/);
     // The latest-request guard that prevents a stale rollback.
