@@ -3858,7 +3858,7 @@ export function BattleMap({
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
-    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
+    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || viewportPan || !mapImageUrl || !canMoveToken(c)) return;
     e.currentTarget.focus();
     setSelectedTokenId(c.id);
     e.preventDefault();
@@ -4170,7 +4170,7 @@ export function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || !canDmWrite) return;
+    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canDmWrite) return;
     e.currentTarget.focus();
     setSelectedAoeId(t.id);
     e.preventDefault();
@@ -5129,7 +5129,7 @@ export function BattleMap({
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-                  const movable = tool === 'move' && effectiveCanMoveToken(c);
+                  const movable = tool === 'move' && !viewportPan && effectiveCanMoveToken(c);
                   const isCharacter = c.kind === 'character';
                   const sizePx =
                     gridOn && gridType === 'hex' && cellPx > 0
@@ -5291,7 +5291,7 @@ export function BattleMap({
                           background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,

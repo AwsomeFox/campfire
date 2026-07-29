@@ -132,6 +132,7 @@ for (const viewport of [
 
       await page.getByTestId('map-viewport-zoom-in').click();
       await page.getByTestId('map-viewport-pan').click();
+      await surface.scrollIntoViewIfNeeded();
       const before = await viewportTransform(mapViewport);
       const box = await surface.boundingBox();
       expect(box).not.toBeNull();
