@@ -68,7 +68,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { seriesIcsUid } from './ics.util';
-import { recurrenceLocalDateFor, scheduledSessionToDomain, seriesTimezoneInTx, type SyncDb } from './scheduling.service';
+import { recurrenceLocalDateFor, reconcileScheduledSessions, seriesTimezoneInTx, type SyncDb } from './scheduling.service';
 import {
   scheduleEffectiveStatusSql,
   scheduleOrganizedPlaySql,
@@ -999,7 +999,12 @@ export class OrganizedPlayService {
     ]);
     return {
       ...seriesToDomain(row),
-      occurrences: occurrences.map(scheduledSessionToDomain),
+      // Reconcile the schedule↔recap link (issue #1601): a completed occurrence
+      // whose recap is trashed must read as `scheduled` here too, exactly as the
+      // coordinator calendar (scheduleEffectiveStatusSql) and the Schedule tab
+      // (projectLink) already show it. Mapping the raw `status` column left series
+      // detail as the one surface that disagreed.
+      occurrences: await reconcileScheduledSessions(this.db, occurrences),
       exceptions: exceptions.map(exceptionToDomain),
       // Reads never force anything; only a forced write populates this.
       conflicts: [],
@@ -2011,9 +2016,11 @@ export class OrganizedPlayService {
       rawConflicts.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
     return {
-      occurrence: scheduledSessionToDomain(
-        kind !== null ? await this.getOccurrenceRowOrThrow(id) : existing,
-      ),
+      occurrence: (
+        await reconcileScheduledSessions(this.db, [
+          kind !== null ? await this.getOccurrenceRowOrThrow(id) : existing,
+        ])
+      )[0],
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
   }
@@ -2139,7 +2146,9 @@ export class OrganizedPlayService {
       rawConflicts.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
     return {
-      occurrence: scheduledSessionToDomain(await this.getOccurrenceRowOrThrow(id)),
+      occurrence: (
+        await reconcileScheduledSessions(this.db, [await this.getOccurrenceRowOrThrow(id)])
+      )[0],
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
   }
