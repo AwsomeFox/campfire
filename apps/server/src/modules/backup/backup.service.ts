@@ -668,17 +668,32 @@ export class BackupService implements OnApplicationBootstrap {
         fs.renameSync(partialPath, filePath);
         const checksum = verification.checksum;
         if (!verification.clean) {
+          const prune = await this.pruneVerifiedScheduledBackups(
+            dir,
+            retentionPolicy,
+            previous?.lastArchiveName ?? '',
+            previous?.lastChecksum ?? '',
+            filePath,
+            verification,
+          );
           const message =
             `Scheduled backup archived but is incomplete (${filePath}); preserving the prior last-known-good archive.`;
           // A missing upload must not erase the scheduled archive or block future
           // attempts, but an incomplete archive is not a restore-complete success.
-          // Keep the prior known-good cadence record and skip retention so it cannot
-          // be displaced by the recoverable-but-partial archive.
+          // Keep the prior known-good cadence record while retention bounds older
+          // recoverable-but-partial archives without letting them displace it.
           await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes);
-          this.logger.warn(message);
+          this.logger.warn(`${message} Pruned ${prune.count} older archive(s), ${prune.bytes} bytes.`);
           return;
         }
-        const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
+        const prune = await this.pruneVerifiedScheduledBackups(
+          dir,
+          retentionPolicy,
+          archiveName,
+          checksum,
+          filePath,
+          verification,
+        );
         const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
         const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
         await this.writeCadence({
@@ -946,6 +961,7 @@ export class BackupService implements OnApplicationBootstrap {
     lastArchiveName: string,
     lastChecksum: string,
     knownVerifiedPath?: string,
+    knownVerification?: ScheduledArchiveVerification,
   ): Promise<{ count: number; bytes: number; error: string }> {
     const files = this.listScheduledBackupFiles(dir);
     const candidates: BackupRetentionCandidate[] = [];
@@ -953,8 +969,8 @@ export class BackupService implements OnApplicationBootstrap {
       // The just-published archive was comprehensively verified while it still
       // had its partial name. Reusing that result avoids another full archive
       // read/decompression pass, but only for this explicit path in this run.
-      const verification = knownVerifiedPath && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
-        ? { verified: true, checksum: lastChecksum, clean: true, error: '' }
+      const verification = knownVerifiedPath && knownVerification && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
+        ? knownVerification
         : await this.verifyScheduledArchive(file.abs);
       const markers = this.retentionMarkers(file.abs);
       candidates.push({
@@ -962,6 +978,7 @@ export class BackupService implements OnApplicationBootstrap {
         bytes: file.bytes,
         mtimeMs: file.mtimeMs,
         verified: verification.verified && verification.clean,
+        partial: verification.verified && !verification.clean,
         lastKnownGood:
           file.name === lastArchiveName ||
           (lastArchiveName.length === 0 && verification.checksum === lastChecksum),

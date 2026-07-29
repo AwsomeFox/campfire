@@ -680,12 +680,26 @@ export class SessionsService {
   async restore(id: number, user: RequestUser, role: Role): Promise<Session> {
     const existing = await this.getRowOrThrow(id, true);
     if (existing.deletedAt == null) throw new NotFoundException(`Session ${id} is not in the trash`);
-    await this.assertNumberAvailable(existing.campaignId, existing.number, id);
-    const [row] = await this.db
-      .update(sessions)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(sessions.id, id))
-      .returning();
+    const row = this.db.transaction((tx) => {
+      const [conflict] = tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(and(
+          eq(sessions.campaignId, existing.campaignId),
+          eq(sessions.number, existing.number),
+          ne(sessions.id, id),
+          notDeleted(sessions.deletedAt),
+        ))
+        .limit(1)
+        .all();
+      if (conflict) throw new ConflictException(`Session number ${existing.number} already exists in this campaign`);
+      return tx
+        .update(sessions)
+        .set({ deletedAt: null, updatedAt: nowIso() })
+        .where(eq(sessions.id, id))
+        .returning()
+        .all()[0];
+    });
     await this.recomputeSessionCount(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),
