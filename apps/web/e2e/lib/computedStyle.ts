@@ -68,7 +68,6 @@ export async function measureBox(locator: Locator): Promise<ComputedBox> {
   }).then((box) => ({ ...box, height: round2(box.height), width: round2(box.width) }));
 }
 
-<<<<<<< HEAD
 /** Default location of the built web assets, shared by every helper below. */
 function defaultDistAssetsDir(): string {
   return resolve(__dirname, '..', '..', 'dist', 'assets');
@@ -76,11 +75,6 @@ function defaultDistAssetsDir(): string {
 
 /** `dist/assets/index-*.css`'s filename, newest by mtime — shared by the two functions below. */
 function newestIndexCssFilename(dir: string): string {
-=======
-/** Locates the most recently built `dist/assets/index-*.css`, newest by mtime. */
-export function latestCompiledCss(distAssetsDir?: string): string {
-  const dir = distAssetsDir ?? resolve(__dirname, '..', '..', 'dist', 'assets');
->>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -94,7 +88,6 @@ export function latestCompiledCss(distAssetsDir?: string): string {
   if (cssFiles.length === 0) {
     throw new Error(`No index-*.css found in ${dir} — run \`npx vite build\` in apps/web first.`);
   }
-<<<<<<< HEAD
   return cssFiles.map((f) => ({ f, mtime: statSync(resolve(dir, f)).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0]!
     .f;
 }
