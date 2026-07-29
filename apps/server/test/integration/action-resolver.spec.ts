@@ -696,6 +696,22 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(service.apply(encounterId, preview.resolution, dmUser, 'dm').undoToken).toBeDefined();
   });
 
+  it('keeps a player preview valid when initiative is re-sorted during that same turn', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    // Re-sorting initiative can change the positional index without changing the active
+    // combatant or round. A preview remains tied to this actor's current turn, not its index.
+    orm.update(encounters).set({ turnIndex: 1 }).where(eq(encounters.id, encounterId)).run();
+
+    expect(service.apply(encounterId, preview.resolution, alice, 'player').undoToken).toBeDefined();
+  });
+
   it('rechecks a player turn inside the apply transaction before writing consequences or resources', () => {
     const { orm, service, encounterId, actor, drake, aliceChar } = seed();
     const preview = service.resolve(
