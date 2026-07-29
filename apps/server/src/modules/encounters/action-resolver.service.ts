@@ -1224,6 +1224,12 @@ export class ActionResolverService {
       .get();
     if (!pending || pending.encounterId !== encounterId) return null;
 
+    // A collaborative confirmation promotes an existing disposable preview into the declaration
+    // partition. That is an incoming declaration just as much as resolve() creating one is, so
+    // reserve capacity before the transition rather than letting confirmations grow past the cap.
+    if (!pending.awaitingConfirmation) {
+      this.capPendingResolutions(this.encounterRowOrThrow(encounterId), true, true);
+    }
     this.db
       .update(actionPendingResolutions)
       .set({ awaitingConfirmation: true })

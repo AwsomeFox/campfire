@@ -1552,4 +1552,40 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(declarations.some((row) => row.id === 'chain-declaration-reserve-0')).toBe(false);
     expect(declarations.some((row) => row.id === declaration.chainId)).toBe(true);
   });
+
+  it('#1451 review (Codex): promoting a preview for collaborative confirmation also reserves the declaration cap', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    const now = Date.now();
+    for (let i = 0; i < 200; i++) {
+      orm
+        .insert(actionPendingResolutions)
+        .values({
+          id: `chain-promotion-cap-${i}`,
+          encounterId,
+          campaignId,
+          actorCombatantId: actor,
+          actionName: 'Greatsword',
+          awaitingConfirmation: true,
+          resolutionJson: '{}',
+          createdAt: new Date(now - (200 - i) * 1000).toISOString(),
+        })
+        .run();
+    }
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId)?.promoted).toBe(true);
+    const declarations = orm
+      .select()
+      .from(actionPendingResolutions)
+      .where(and(eq(actionPendingResolutions.encounterId, encounterId), eq(actionPendingResolutions.awaitingConfirmation, true)))
+      .all();
+    expect(declarations).toHaveLength(200);
+    expect(declarations.some((row) => row.id === 'chain-promotion-cap-0')).toBe(false);
+    expect(declarations.some((row) => row.id === preview.chainId)).toBe(true);
+  });
 });
