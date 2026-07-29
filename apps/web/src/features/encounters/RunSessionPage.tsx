@@ -5435,7 +5435,7 @@ export function BattleMap({
                       if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
                       void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                     } catch (error) { onError(error instanceof Error ? error.message : 'Invalid saved formation'); }
-                  }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}>×</button></span>)}
+                  }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}><UIIcon name="close" size="xs" /></button></span>)}
                 </div>
               )}
               {unplaced.length > 0 && (

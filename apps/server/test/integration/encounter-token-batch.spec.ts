@@ -44,7 +44,7 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
 
   it('rejects a stale captured position without changing any planned token', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second } = seed(orm);
-    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     orm.update(combatants).set({ tokenX: 11 }).where(eq(combatants.id, first.id)).run();
     await expect(service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'stale-preview' }, dm, 'dm')).rejects.toThrow('Token positions changed');
     expect(position(orm, first.id)).toEqual({ x: 11, y: 10 });
@@ -53,7 +53,7 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
 
   it('blocks an apply when an unselected token enters a planned footprint, with zero selected writes', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second, obstacle } = seed(orm);
-    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     orm.update(combatants).set({ tokenX: 50, tokenY: 50 }).where(eq(combatants.id, obstacle.id)).run();
     await expect(service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'obstacle-apply' }, dm, 'dm')).rejects.toThrow('moved into this batch placement');
     expect(position(orm, first.id)).toEqual({ x: 10, y: 10 }); expect(position(orm, second.id)).toEqual({ x: 20, y: 10 });
@@ -61,7 +61,7 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
 
   it('replays only the same actor-bound apply key', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second } = seed(orm);
-    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     const firstApply = await service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'apply-one' }, dm, 'dm');
     await expect(service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'apply-two' }, dm, 'dm')).rejects.toThrow('Idempotency key');
     await expect(service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'apply-one' }, otherDm, 'dm')).rejects.toThrow('Token batch preview not found');
@@ -71,15 +71,15 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
 
   it('rejects reuse of an actor key on a different preview before SQLite can surface a raw constraint error', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second } = seed(orm);
-    const firstPreview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const firstPreview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     await service.applyTokenBatch(encounterId, { previewToken: firstPreview.previewToken, idempotencyKey: 'shared-key' }, dm, 'dm');
-    const secondPreview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 40, y: 40 }, { combatantId: second.id, x: 60, y: 40 }] }, dm, 'dm');
+    const secondPreview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 40, y: 40 }, { combatantId: second.id, x: 60, y: 40 }], mapAspect: 1 }, dm, 'dm');
     await expect(service.applyTokenBatch(encounterId, { previewToken: secondPreview.previewToken, idempotencyKey: 'shared-key' }, dm, 'dm')).rejects.toThrow('already used for a different token batch');
   });
 
   it('refuses undo after a token differs from the batch after-state and replays the same undo key', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second } = seed(orm);
-    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     const applied = await service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'apply' }, dm, 'dm');
     orm.update(combatants).set({ tokenX: 51 }).where(eq(combatants.id, first.id)).run();
     await expect(service.undoTokenBatch(encounterId, { undoToken: applied.undoToken, idempotencyKey: 'undo' }, dm, 'dm')).rejects.toThrow('changed after this batch');
@@ -91,7 +91,7 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
 
   it('blocks undo when an unselected token occupies a recorded before-position, with zero rollback', async () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second, obstacle } = seed(orm);
-    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }] }, dm, 'dm');
+    const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     const applied = await service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'obstacle-undo-apply' }, dm, 'dm');
     orm.update(combatants).set({ tokenX: 10, tokenY: 10 }).where(eq(combatants.id, obstacle.id)).run();
     await expect(service.undoTokenBatch(encounterId, { undoToken: applied.undoToken, idempotencyKey: 'obstacle-undo' }, dm, 'dm')).rejects.toThrow('prior position');
