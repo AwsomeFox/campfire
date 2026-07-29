@@ -1855,13 +1855,98 @@ export function wrapUntrustedPromptData(input: string): string {
 }
 
 /**
- * The exact prefix of persisted/tool data that can reach the provider through an untrusted-data
- * fence. Callers that derive authorization evidence from prompt context must use this same view:
- * an id after the cutoff was retrieved, but was never shown to the model and therefore cannot
- * legitimately support one of its citations.
+ * The size-bounded persisted/tool-data representation that reaches the provider through an
+ * untrusted-data fence. JSON is projected structurally, rather than cut mid-token, so callers
+ * that derive citation evidence can parse exactly the same visible data. An id outside this
+ * projection was retrieved but never shown to the model and cannot support a citation.
  */
 export function visibleUntrustedPromptData(input: string): string {
-  return (input ?? '').slice(0, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+  const text = input ?? '';
+  if (text.length <= MAX_UNTRUSTED_PROMPT_DATA_CHARS) return text;
+  const projected = boundedJsonProjection(text, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+  return projected ?? text.slice(0, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+}
+
+/**
+ * Keep the leading JSON values that fit in a prompt budget, recursively completing containers
+ * rather than returning an invalid raw substring. Stop at the first partial child to preserve
+ * source order: later values were not visible and must not become citeable.
+ */
+function boundedJsonProjection(text: string, maxChars: number): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return JSON.stringify(projectJsonValue(parsed, maxChars));
+}
+
+function projectJsonValue(value: unknown, maxChars: number): unknown {
+  const serialized = JSON.stringify(value);
+  if (serialized !== undefined && serialized.length <= maxChars) return value;
+  if (typeof value === 'string') {
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (JSON.stringify(value.slice(0, middle)).length <= maxChars) low = middle;
+      else high = middle - 1;
+    }
+    return value.slice(0, low);
+  }
+  if (Array.isArray(value)) {
+    const projected: unknown[] = [];
+    for (const child of value) {
+      const exact = [...projected, child];
+      if (JSON.stringify(exact).length <= maxChars) {
+        projected.push(child);
+        continue;
+      }
+      const partial = projectChildWithinBudget(child, maxChars, (candidate) => [...projected, candidate]);
+      if (partial !== undefined) projected.push(partial);
+      break;
+    }
+    return projected;
+  }
+  if (value !== null && typeof value === 'object') {
+    const projected: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      const exact = { ...projected, [key]: child };
+      if (JSON.stringify(exact).length <= maxChars) {
+        projected[key] = child;
+        continue;
+      }
+      const partial = projectChildWithinBudget(child, maxChars, (candidate) => ({ ...projected, [key]: candidate }));
+      if (partial !== undefined) projected[key] = partial;
+      break;
+    }
+    return projected;
+  }
+  return null;
+}
+
+function projectChildWithinBudget(
+  value: unknown,
+  maxChars: number,
+  container: (candidate: unknown) => unknown,
+): unknown | undefined {
+  if (typeof value !== 'string' && !Array.isArray(value) && (value === null || typeof value !== 'object')) return undefined;
+  let low = 0;
+  let high = maxChars;
+  let best: unknown | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = projectJsonValue(value, middle);
+    const rendered = JSON.stringify(container(candidate));
+    if (rendered !== undefined && rendered.length <= maxChars) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
 }
 
 function fenceUntrustedPromptText(input: string, start: string, end: string, maxChars?: number): string {
