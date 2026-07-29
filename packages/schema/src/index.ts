@@ -5864,6 +5864,7 @@ const OPEN_LICENSE_KEYWORDS = [
   'open gaming license',
   'orc', // ORC / Open RPG Creative license
   'open rpg creative',
+  'a5e open content license',
   'open legend community license',
   'cc0',
   'cc-by',

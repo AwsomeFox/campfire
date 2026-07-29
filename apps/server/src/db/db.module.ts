@@ -86,13 +86,12 @@ export const CAMPAIGN_SEARCH_FTS_AVAILABLE = Symbol('CAMPAIGN_SEARCH_FTS_AVAILAB
 function setupRuleEntriesFts(sqlite: Database.Database): boolean {
   try {
     sqlite.exec(RULE_ENTRIES_FTS_SQL);
-    // Older installs may have imported entries while the SQLite build had no
-    // FTS5 support. Creating the external-content table later installs triggers
-    // for future writes but leaves its index empty. Rebuild exactly in that
-    // populated/empty state so startup repairs it without needless work.
+    // External-content FTS tables read their content table for SELECT count(*),
+    // so that count cannot distinguish a populated-but-unindexed legacy table.
+    // Rebuild whenever a pre-existing compendium is opened with FTS5 available:
+    // the command is idempotent and repairs the historical no-FTS -> FTS upgrade.
     const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
-    const indexed = sqlite.prepare('SELECT count(*) AS count FROM rule_entries_fts').get() as { count: number };
-    if (entries.count > 0 && indexed.count === 0) {
+    if (entries.count > 0) {
       sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
       dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
     }
