@@ -184,6 +184,17 @@ interface ServiceSpec {
    * redacting return — that update IS the review gate.
    */
   knownMethods: string[];
+  /**
+   * Public methods with an INFERRED (un-annotated) dmSecret-bearing return type
+   * (e.g. QuestsService.listForCampaignWithObjectives / getWithObjectivesOrThrow,
+   * whose return is inferred `Quest & { objectives }`). The type checker resolves
+   * these structurally, but type resolution is fragile under some runners
+   * (e.g. the babel-instrumented coverage build mangles inference), so this list
+   * is the reliable fallback: a named method here is always treated as a covered
+   * dmSecret-returning method even when the checker cannot resolve its inferred
+   * type. It MUST be kept in sync with `knownMethods` for the inferred methods.
+   */
+  inferredDmSecretMethods?: string[];
 }
 
 const SERVICES_DIR = path.join(__dirname, '../../src/modules');
@@ -219,6 +230,11 @@ const SERVICES: ServiceSpec[] = [
       'restore',
       'setStatus',
     ],
+    // These two return inferred `Quest & { objectives }` (no annotation). The type
+    // checker resolves them in the normal jest run, but the babel-instrumented
+    // coverage build mangles type inference — so name them explicitly as the
+    // reliable fallback (see `inferredDmSecretMethods` on ServiceSpec).
+    inferredDmSecretMethods: ['listForCampaignWithObjectives', 'getWithObjectivesOrThrow'],
   },
   {
     name: 'NpcsService',
@@ -746,11 +762,28 @@ function loadRedactionMethods(spec: ServiceSpec): MethodInfo[] {
       return { carriesDmSecret: returnTypeCarries(typeText, spec.domainTypes), typeText };
     }
     // Inferred return type — resolve structurally via the checker.
+    const name = member.name ? member.name.getText(sourceFile) : '';
     const sym = member.name ? checker.getSymbolAtLocation(member.name) : undefined;
-    if (!sym) return { carriesDmSecret: false, typeText: '<inferred — unresolved>' };
+    if (!sym) {
+      // The checker could not resolve the symbol (this happens under the
+      // babel-instrumented coverage build, which mangles type inference). Fall back
+      // to the explicit `inferredDmSecretMethods` name list so the method is still
+      // covered — the name list is the reliable path; the checker is the bonus.
+      const fallback = spec.inferredDmSecretMethods?.includes(name) ?? false;
+      return {
+        carriesDmSecret: fallback,
+        typeText: fallback ? '<inferred — name fallback>' : '<inferred — unresolved>',
+      };
+    }
     const fnType = checker.getTypeOfSymbolAtLocation(sym, member);
     const sigs = fnType.getCallSignatures();
-    if (sigs.length === 0) return { carriesDmSecret: false, typeText: '<inferred — no signature>' };
+    if (sigs.length === 0) {
+      const fallback = spec.inferredDmSecretMethods?.includes(name) ?? false;
+      return {
+        carriesDmSecret: fallback,
+        typeText: fallback ? '<inferred — name fallback>' : '<inferred — no signature>',
+      };
+    }
     const retType = checker.getReturnTypeOfSignature(sigs[0]);
     const carriesDm = resolvedTypeCarriesDmSecret(retType, checker);
     const carriesDeletedAt = resolvedTypeCarriesDeletedAt(retType, checker);
@@ -758,9 +791,17 @@ function loadRedactionMethods(spec: ServiceSpec): MethodInfo[] {
     // A raw DB row carries both — it is the INPUT to the redaction pipeline, never
     // a domain value returned to a caller, so it is excluded.
     const carries = carriesDm && !carriesDeletedAt;
+    // If the checker resolved the type but did NOT flag it (e.g. the coverage build
+    // resolves to an overly-loose type), the explicit name list is still authoritative
+    // for the methods we know return a dmSecret-bearing inferred type.
+    const fallbackCarries = spec.inferredDmSecretMethods?.includes(name) ?? false;
     return {
-      carriesDmSecret: carries,
-      typeText: carriesDm ? '<inferred dmSecret>' : '<inferred — no dmSecret>',
+      carriesDmSecret: carries || fallbackCarries,
+      typeText: carries
+        ? '<inferred dmSecret>'
+        : fallbackCarries
+          ? '<inferred — name fallback>'
+          : '<inferred — no dmSecret>',
     };
   }
 
