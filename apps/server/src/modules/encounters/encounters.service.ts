@@ -80,6 +80,10 @@ type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 /** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
 type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number };
+type CombatantTransactionHook = (
+  tx: SyncDb,
+  fresh: typeof combatants.$inferSelect,
+) => void;
 type RollRequestInput = z.infer<typeof RollRequest>;
 type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
@@ -3133,9 +3137,30 @@ export class EncountersService {
     }
 
     const result = this.rollDeathSaveD20();
-    result.label = `${combatant.name} · death save`;
-    const updated = await this.updateCombatant(encounterId, combatantId, { deathSaveRoll: result.total }, user, role);
-    const roll = await this.rolls.record(encounter.campaignId, result, user);
+    let roll: DiceRoll | null = null;
+    const updated = await this.updateCombatant(
+      encounterId,
+      combatantId,
+      { deathSaveRoll: result.total },
+      user,
+      role,
+      (tx, fresh) => {
+        // The pre-read above authorizes the actor; this fresh, transaction-local read is
+        // the authoritative lifecycle gate. A concurrent first roll cannot leave a
+        // second request applying a face to a no-longer-dying combatant.
+        if (
+          fresh.encounterId !== encounterId ||
+          fresh.kind !== 'character' ||
+          fresh.hpCurrent !== 0 ||
+          fresh.deathState !== 'dying'
+        ) {
+          throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
+        }
+        result.label = `${fresh.name} · death save`;
+        roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
+      },
+    );
+    if (roll === null) throw new Error('Death-save dice roll was not persisted');
 
     await this.audit.log({
       actor: auditActor(user),
@@ -3161,6 +3186,7 @@ export class EncountersService {
     patch: CombatantInternalUpdateInput,
     user: RequestUser,
     role: Role,
+    beforeWriteInTransaction?: CombatantTransactionHook,
   ): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
@@ -3394,6 +3420,11 @@ export class EncountersService {
           }
         }
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        // A caller may attach a tightly-scoped transactional side effect after the
+        // fresh lifecycle read but before this mutation. A failure rolls both it and
+        // the ensuing combatant write back. Used only for #1462's mandatory dice-log
+        // evidence, which must never diverge from its death-save outcome.
+        beforeWriteInTransaction?.(tx, fresh);
         beforeHp = fresh.hpCurrent;
         beforeTemp = fresh.hpTemp;
         beforeDeath = fresh.deathState;

@@ -13,6 +13,7 @@ import {
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
+import { RollsService } from '../src/modules/rolls/rolls.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -3109,6 +3110,11 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(res.status).toBe(200);
   }
 
+  async function current(): Promise<HpShape> {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/encounters/${encounterId}`).set(player);
+    return (res.body.combatants as HpShape[]).find((combatant) => combatant.id === heroCombatantId)!;
+  }
+
   it('rejects a caller-selected deathSaveRoll on the generic PATCH', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
@@ -3116,6 +3122,27 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       .set(player)
       .send({ deathSaveRoll: 20 });
     expect(res.status).toBe(400);
+  });
+
+  it('rolls back the death-save outcome when the matching dice entry cannot persist', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const rolls = ctx.app.get(RollsService);
+    const recordSpy = jest.spyOn(rolls, 'recordInTransaction').mockImplementation(() => {
+      throw new Error('simulated dice storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({});
+      expect(res.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+      const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+      expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(0);
+    } finally {
+      recordSpy.mockRestore();
+    }
   });
 
   it('uses exactly the logged natural 1 to add two failures', async () => {

@@ -3082,6 +3082,7 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
+          deathSavePending={deathSaveRoll.isPending}
           onRollDeathSave={rollDeathSave}
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))

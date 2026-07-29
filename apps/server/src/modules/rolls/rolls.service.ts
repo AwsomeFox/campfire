@@ -88,6 +88,9 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
   };
 }
 
+/** The subset shared by the root DB handle and a synchronous Drizzle transaction. */
+type RollWriteDb = Pick<DrizzleDb, 'insert'>;
+
 /**
  * Persistence for the campaign-shared dice log (issue #35). Deliberately dumb —
  * record + list only, no push mechanics — so a later SSE stream (issue #4) can
@@ -122,7 +125,16 @@ export class RollsService implements OnApplicationBootstrap {
    * always fast and a roll is never lost to a synchronous delete race.
    */
   async record(campaignId: number, result: RollResult, user: RequestUser): Promise<DiceRoll> {
-    const [row] = await this.db
+    return this.recordInTransaction(this.db, campaignId, result, user);
+  }
+
+  /**
+   * Inserts a roll using an existing transaction. Encounter death saves use this
+   * so the state transition and its shared-tray evidence commit or roll back as
+   * one SQLite unit (issue #1462).
+   */
+  recordInTransaction(db: RollWriteDb, campaignId: number, result: RollResult, user: RequestUser): DiceRoll {
+    const [row] = db
       .insert(diceRolls)
       .values({
         campaignId,
@@ -140,7 +152,8 @@ export class RollsService implements OnApplicationBootstrap {
         natural20: result.natural20 ?? null,
         createdAt: nowIso(),
       })
-      .returning();
+      .returning()
+      .all();
     return toDomain(row);
   }
 
