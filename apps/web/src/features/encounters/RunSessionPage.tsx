@@ -2084,8 +2084,16 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
+  const autoScrollSkipped = useRef(false);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
+    // The first time the current combatant resolves we are still at the top of the
+    // encounter page; auto-scrolling now would hide the header controls on phones
+    // and tablets. Only auto-scroll on subsequent turn changes.
+    if (!autoScrollSkipped.current) {
+      autoScrollSkipped.current = true;
+      return;
+    }
     const frame = requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el =
