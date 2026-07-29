@@ -26,6 +26,7 @@ import type {
   AoeTemplate,
   Attachment,
   CampaignLibraryMonster,
+  CastSessionCreated,
   Character,
   Combatant,
   CombatantKind,
@@ -121,6 +122,16 @@ import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip'
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
+import {
+  CAST_DISPLAY_CHANNEL,
+  type CastDisplayStatus,
+  displayStatusLabel,
+  focusCastWindow,
+  isCastDisplayStatusForCampaign,
+  navigateCastWindow,
+  openCastWindow,
+  type CastWindowState,
+} from '../screen/castWindow';
 import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
@@ -1031,6 +1042,138 @@ export default function RunSessionPage() {
   const [encounterReadStale, setEncounterReadStale] = useState(false);
   const [resyncPending, setResyncPending] = useState(false);
   const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
+  // The player display is deliberately a separate browsing context: navigating this
+  // cockpit to `/screen` used to strand the DM without initiative or turn controls.
+  // Keep only the window handle and non-secret status here; cast capabilities never
+  // cross BroadcastChannel/postMessage (issue #762 / #547).
+  const castWindowRef = useRef<Window | null>(null);
+  const castConnectionSequenceRef = useRef(0);
+  const [castWindowState, setCastWindowState] = useState<CastWindowState>('idle');
+  const [castFollowedEncounter, setCastFollowedEncounter] = useState<{ id: number | null; name: string | null }>({ id: null, name: null });
+  const [castDisplayNotice, setCastDisplayNotice] = useState<string | null>(null);
+
+  // Navigating between campaigns reuses this component, so any display state from
+  // the previous campaign must be discarded (issue #762 review).
+  useEffect(() => {
+    castWindowRef.current = null;
+    castConnectionSequenceRef.current = 0;
+    setCastWindowState('idle');
+    setCastFollowedEncounter({ id: null, name: null });
+    setCastDisplayNotice(null);
+  }, [cid]);
+
+  const receiveCastDisplayStatus = useCallback((status: CastDisplayStatus) => {
+    if (status.campaignId !== cid) return;
+    if (status.type === 'ready') {
+      setCastWindowState('ready');
+      setCastFollowedEncounter({ id: status.encounterId, name: status.encounterName });
+      return;
+    }
+    setCastWindowState('window-closed');
+  }, [cid]);
+
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    const onMessage = (event: MessageEvent<unknown>) => {
+      if (event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+      if (isCastDisplayStatusForCampaign(event.data, cid)) receiveCastDisplayStatus(event.data);
+    };
+    window.addEventListener('message', onMessage);
+    // BroadcastChannel is an enhancement, not the only protocol: opener postMessage
+    // keeps named-window focus/status functional in older embedded/tablet browsers.
+    const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CAST_DISPLAY_CHANNEL);
+    if (channel) channel.onmessage = (event: MessageEvent<unknown>) => {
+      if (isCastDisplayStatusForCampaign(event.data, cid)) receiveCastDisplayStatus(event.data);
+    };
+    return () => {
+      window.removeEventListener('message', onMessage);
+      channel?.close();
+    };
+  }, [cid, receiveCastDisplayStatus]);
+
+  const mintCastLink = useCallback(async (): Promise<string> => {
+    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    const created = await api.post<CastSessionCreated>(`${API}/campaigns/${cid}/cast-sessions`, {
+      label: 'Player display',
+      expiresAt,
+    });
+    return new URL(created.url, window.location.origin).href;
+  }, [cid]);
+
+  const connectPlayerDisplay = useCallback((target: Window) => {
+    const sequence = ++castConnectionSequenceRef.current;
+    setCastWindowState('opening');
+    setCastDisplayNotice(null);
+    void mintCastLink()
+      .then((url) => {
+        if (sequence !== castConnectionSequenceRef.current) return;
+        if (!navigateCastWindow(target, url)) {
+          setCastWindowState('window-closed');
+          setCastDisplayNotice('The display window closed before it could connect. Open display to try again.');
+        }
+      })
+      .catch((error: unknown) => {
+        if (sequence !== castConnectionSequenceRef.current) return;
+        setCastWindowState('idle');
+        const prefix = t('encounters.errors.actionFailed');
+        setCastDisplayNotice(error instanceof Error ? `${prefix}: ${error.message}` : prefix);
+      });
+  }, [mintCastLink, t]);
+
+  const openPlayerDisplay = useCallback(() => {
+    // `openCastWindow` intentionally happens before any await: this is the user
+    // gesture that prevents popup blockers from stealing the display workflow.
+    const target = openCastWindow();
+    if (!target) {
+      setCastWindowState('popup-blocked');
+      setCastDisplayNotice('The browser blocked the player display. Allow popups for Campfire, then try Open display again.');
+      return;
+    }
+    castWindowRef.current = target;
+    connectPlayerDisplay(target);
+  }, [connectPlayerDisplay]);
+
+  const copyPlayerDisplayLink = useCallback(() => {
+    setCastDisplayNotice(null);
+    // Preserve the click's user activation by handing `clipboard.write` a Promise
+    // that resolves to the link text once the server mints it (Safari/WebKit).
+    const textPromise = mintCastLink().then((url) => new Blob([url], { type: 'text/plain' }));
+    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as any).ClipboardItem) as typeof ClipboardItem | undefined;
+    const writePromise =
+      ClipboardItemCtor && navigator.clipboard?.write
+        ? navigator.clipboard.write([new ClipboardItemCtor({ 'text/plain': textPromise })])
+        : textPromise
+            .then((blob) => blob.text())
+            .then((url) => {
+              if (!navigator.clipboard?.writeText) {
+                throw new Error('Clipboard access is unavailable; open the display and copy its address instead.');
+              }
+              return navigator.clipboard.writeText(url);
+            });
+    void writePromise
+      .then(() => setCastDisplayNotice('A safe player-display link was copied. It expires in 8 hours.'))
+      .catch((error: unknown) => {
+        setCastDisplayNotice(error instanceof Error ? error.message : t('encounters.errors.actionFailed'));
+      });
+  }, [mintCastLink, t]);
+
+  const reconnectPlayerDisplay = useCallback(() => {
+    const target = castWindowRef.current;
+    if (castWindowState === 'ready' && focusCastWindow(target)) {
+      setCastDisplayNotice('Focused the existing player display.');
+      return;
+    }
+    // A live blank/expired/error page cannot be healed by focus alone. Re-mint a
+    // capability and navigate that same named handle; only a truly closed handle
+    // needs a fresh popup (which happens synchronously in openPlayerDisplay).
+    if (target && !target.closed) {
+      focusCastWindow(target);
+      connectPlayerDisplay(target);
+      return;
+    }
+    setCastWindowState('window-closed');
+    openPlayerDisplay();
+  }, [castWindowState, connectPlayerDisplay, openPlayerDisplay]);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -1999,8 +2142,21 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
+  const autoScrollSkipped = useRef(false);
+  // `RunSessionPage` is reused across encounters; reset the first-load latch so
+  // each new encounter starts with the header controls visible.
+  useEffect(() => {
+    autoScrollSkipped.current = false;
+  }, [eid]);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
+    // The first time the current combatant resolves we are still at the top of the
+    // encounter page; auto-scrolling now would hide the header controls on phones
+    // and tablets. Only auto-scroll on subsequent turn changes.
+    if (!autoScrollSkipped.current) {
+      autoScrollSkipped.current = true;
+      return;
+    }
     const frame = requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el =
@@ -2213,17 +2369,42 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <>
-            {/* No aria-label / title here: the visible word "Cast" is the
-                accessible name, and the adjacent TermHelp carries the
-                explanation without a hover-only tooltip (issue #518). */}
-            <Btn density="xs"
-              ghost
-              className="text-xs"
-              onClick={() => navigate(`/c/${cid}/screen`)}
-            >
-              <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
-            </Btn>
+            <div className="order-first flex basis-full lg:order-none lg:basis-auto w-full lg:w-auto items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
+              {/* Open synchronously from this button's click stack. The newly minted
+                  #547 capability navigates only that separate window, never the DM cockpit. */}
+              <Btn density="xs" ghost className="text-xs" onClick={openPlayerDisplay}>
+                <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Open display
+              </Btn>
+              <Btn density="xs" ghost className="text-xs" onClick={copyPlayerDisplayLink}>
+                Copy link
+              </Btn>
+              <Btn density="xs" ghost className="text-xs" onClick={reconnectPlayerDisplay}>
+                Reconnect/focus
+              </Btn>
+              <span
+                className={`tag ${castWindowState === 'ready' ? 'tag-accent' : 'tag-neutral'}`}
+                role="status"
+                data-testid="player-display-status"
+                title={castDisplayNotice ?? undefined}
+              >
+                {displayStatusLabel(
+                  castWindowState,
+                  castWindowState === 'ready'
+                    ? {
+                        encounterId: castFollowedEncounter.id,
+                        encounterName: castFollowedEncounter.name,
+                        isCurrentEncounter: castFollowedEncounter.id === encounter?.id,
+                      }
+                    : null,
+                )}
+              </span>
+            </div>
             <TermHelp termId="cast" />
+            {castDisplayNotice && (
+              <p className="text-xs text-muted m-0 basis-full" role="status" data-testid="player-display-notice">
+                {castDisplayNotice}
+              </p>
+            )}
           </>
         )}
         {canDmWrite && (
@@ -3767,7 +3948,7 @@ export function BattleMap({
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
-    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
+    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || viewportPan || !mapImageUrl || !canMoveToken(c)) return;
     e.currentTarget.focus();
     setSelectedTokenId(c.id);
     // Modifier toggles exactly once on pointer-down. A plain drag of a selected
@@ -4124,7 +4305,7 @@ export function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || !canDmWrite) return;
+    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canDmWrite) return;
     e.currentTarget.focus();
     setSelectedAoeId(t.id);
     e.preventDefault();
@@ -5084,7 +5265,7 @@ export function BattleMap({
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-                  const movable = tool === 'move' && effectiveCanMoveToken(c);
+                  const movable = tool === 'move' && !viewportPan && effectiveCanMoveToken(c);
                   const isCharacter = c.kind === 'character';
                   const sizePx =
                     gridOn && gridType === 'hex' && cellPx > 0
@@ -5248,7 +5429,7 @@ export function BattleMap({
                           background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,

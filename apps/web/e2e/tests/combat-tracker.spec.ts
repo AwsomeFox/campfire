@@ -5,7 +5,7 @@ import { seed, stateFor, restoreSeedEncounter } from './seed';
 /**
  * Combat tracker cross-role checks (issue #81):
  *  - DM: exact turn/initiative + HP math renders, and the DM-only run controls
- *    (Start/Roll initiative/Next turn/End/Cast) are present.
+ *    (Start/Roll initiative/Next turn/End/player-display actions) are present.
  *  - player & viewer: a monster's exact HP is redacted to a coarse band, and the
  *    DM-only controls + per-combatant edit controls are absent (the silent
  *    permission-drift the audit called out).
@@ -52,11 +52,59 @@ test.describe('combat tracker — DM view', () => {
     // DM-only run controls exist.
     await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Cast', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reconnect/focus', exact: true })).toBeVisible();
 
     // On the RUNNING encounter the DM's per-combatant HP controls are present — this is the
     // interactive marker the ended-encounter test below asserts is gone (issue #368).
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
+  });
+
+  test('keeps keyboard-opened display lifecycle and encounter updates in the DM cockpit (#762)', async ({ page }) => {
+    await openEncounter(page);
+    const { campaignId } = seed();
+    const openDisplay = page.getByRole('button', { name: 'Open display', exact: true });
+    const popupPromise = page.waitForEvent('popup');
+    await openDisplay.focus();
+    await page.keyboard.press('Enter');
+    const popup = await popupPromise;
+
+    await expect(page).toHaveURL(encounterUrl());
+    await expect(popup).toHaveURL(/\/cast\/\d+\/cf_cast_/);
+    const status = page.getByTestId('player-display-status');
+    await expect(status).toContainText(/Display connected/i);
+    await popup.close();
+    await expect(status).toContainText(/Display window was closed/i);
+
+    // A display can follow a different encounter after its own authoritative
+    // refresh. Exercise the same-origin status protocol rather than leaking a
+    // capability URL through test messaging.
+    await page.evaluate((id) => {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'ready', campaignId: id, encounterId: 999, encounterName: 'Second encounter' },
+      }));
+    }, campaignId);
+    await expect(status).toContainText(/following another encounter \(Second encounter\)/i);
+  });
+
+  test('keeps player-display controls usable at a tablet viewport (#762)', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: stateFor('dm'),
+      hasTouch: true,
+      isMobile: true,
+      viewport: { width: 768, height: 1024 },
+    });
+    const page = await context.newPage();
+    await openEncounter(page);
+    for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
+      await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+    }
+    await expect(page.getByTestId('player-display-status')).toBeVisible();
+    await expect(page).toHaveURL(encounterUrl());
+    await context.close();
   });
 
   test('DM can clear initiative back to the unrolled state via the Clear control (issue #715)', async ({ page }) => {
