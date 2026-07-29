@@ -81,10 +81,10 @@ function findButtonTags(src: string): string[] {
  * `findButtonTags` balances the tag itself. Returns null if the attribute isn't present.
  */
 function extractAttrValue(tag: string, name: string): string | null {
-  const marker = `${name}=`;
-  const idx = tag.indexOf(marker);
-  if (idx === -1) return null;
-  let i = idx + marker.length;
+  const re = new RegExp(`(?:^|\\s)${name}\\s*=\\s*`);
+  const match = re.exec(tag);
+  if (!match) return null;
+  let i = match.index + match[0].length;
   const openChar = tag[i];
   if (openChar === '"' || openChar === "'") {
     const close = tag.indexOf(openChar, i + 1);
@@ -92,9 +92,6 @@ function extractAttrValue(tag: string, name: string): string | null {
     return tag.slice(i + 1, close);
   }
   if (openChar !== '{') return null;
-  // Balanced-brace scan so a `{...}` expression value (including a nested template
-  // literal with its own `${...}` interpolations) is captured whole, not truncated at
-  // the first inner `}`.
   let depth = 0;
   let inStr: string | null = null;
   const start = i;
@@ -121,42 +118,19 @@ function extractAttrValue(tag: string, name: string): string | null {
  * rather than a substring match over the whole opening tag — a `data-testid=` value,
  * a `title=`, or an unrelated class like `cf-btn-group` must never trip this. Handles
  * both a plain `className="cf-btn ..."` string and a `className={...}` expression
- * (ternaries / template literals) by pulling every quoted string literal out of the
- * attribute value and stripping `${...}` interpolations from template literals first,
- * since those are dynamic and can't be statically resolved to a class name anyway.
+ * (ternaries / template literals with interpolations) by pulling every quoted string
+ * literal out of the attribute value (including inside `${...}` interpolations).
  */
 function classNameTokens(tag: string): string[] {
   const raw = extractAttrValue(tag, 'className');
   if (raw == null) return [];
-  // Drop `${...}` interpolations (balanced) so they don't get swallowed into a
-  // neighboring literal token or leak unrelated `>`/quote characters into the split.
-  let stripped = '';
-  let i = 0;
-  while (i < raw.length) {
-    if (raw[i] === '$' && raw[i + 1] === '{') {
-      let depth = 1;
-      i += 2;
-      while (i < raw.length && depth > 0) {
-        if (raw[i] === '{') depth++;
-        else if (raw[i] === '}') depth--;
-        i++;
-      }
-      stripped += ' ';
-      continue;
-    }
-    stripped += raw[i];
-    i++;
-  }
-  // Pull out every quoted string literal's contents (covers both a bare
-  // className="a b" string and a className={cond ? 'a' : 'b'} expression); falls back
-  // to the stripped text itself for a bare template literal with no surrounding quotes.
   const literals: string[] = [];
   const quoteRe = /(['"`])((?:\\.|(?!\1).)*)\1/g;
   let match: RegExpExecArray | null;
-  while ((match = quoteRe.exec(stripped))) {
+  while ((match = quoteRe.exec(raw))) {
     literals.push(match[2]);
   }
-  const text = literals.length > 0 ? literals.join(' ') : stripped;
+  const text = literals.length > 0 ? literals.join(' ') : raw;
   return text.split(/\s+/).filter(Boolean);
 }
 
