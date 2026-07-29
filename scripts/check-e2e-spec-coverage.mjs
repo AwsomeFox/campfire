@@ -10,11 +10,13 @@ const root = join(fileURLToPath(import.meta.url), '../..');
 const webDir = join(root, 'apps/web');
 const testsDir = join(webDir, 'e2e/tests');
 const unitConfig = 'playwright.unit.config.ts';
+const unitSpec = /\.unit\.spec\.(?:[cm]?[jt]s)$/;
+const supportedUnitSpec = /\.unit\.spec\.m?ts$/;
 
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
-    return entry.isDirectory() ? walk(path) : /\.unit\.spec\.(?:[cm]?[jt]s)$/.test(entry.name) ? [path] : [];
+    return entry.isDirectory() ? walk(path) : unitSpec.test(entry.name) ? [path] : [];
   });
 }
 
@@ -57,9 +59,16 @@ function main() {
   if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
 
   const onDisk = new Set(walk(testsDir));
-  const listed = listedUnitFiles();
-  for (const file of onDisk) if (!listed.has(file)) errors.push(`${relative(testsDir, file)} is not collected by ${unitConfig}`);
-  for (const file of listed) if (!onDisk.has(file) && file.startsWith(`${testsDir}/`)) errors.push(`${relative(testsDir, file)} is collected but is not a unit spec`);
+  for (const file of onDisk) {
+    if (!supportedUnitSpec.test(file)) {
+      errors.push(`${relative(testsDir, file)} must use .unit.spec.ts or .unit.spec.mts; JavaScript unit specs are also collected by the browser tier`);
+    }
+  }
+  if (!errors.length) {
+    const listed = listedUnitFiles();
+    for (const file of onDisk) if (!listed.has(file)) errors.push(`${relative(testsDir, file)} is not collected by ${unitConfig}`);
+    for (const file of listed) if (!onDisk.has(file) && file.startsWith(`${testsDir}/`)) errors.push(`${relative(testsDir, file)} is collected but is not a unit spec`);
+  }
   if (errors.length) {
     console.error(`check:e2e-spec-coverage failed:\n${errors.map((e) => `- ${e}`).join('\n')}`);
     process.exit(1);
