@@ -73,12 +73,36 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, join, relative, resolve as resolvePath } from 'node:path';
+import { createRequire } from 'node:module';
+import { basename, dirname, join, relative, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(fileURLToPath(import.meta.url), '../..');
 const webDir = join(root, 'apps/web');
 const testsDir = join(webDir, 'e2e/tests');
+
+/**
+ * Path to `@playwright/test`'s own CLI script, resolved from apps/web's
+ * package.json rather than shelling out to `npx playwright`. `npx` resolves
+ * the "playwright" BIN NAME, which can silently pick up an unrelated,
+ * globally- or ancestor-directory-installed `playwright`/`@playwright/test`
+ * copy (this bit locally: a stray parent-directory install made `npx
+ * playwright` work in a dev sandbox while CI, which only ever installs the
+ * `@playwright/test` devDependency this repo actually declares, does not have
+ * a bin named exactly "playwright" resolvable the same way and failed).
+ * Reading the version this project's own `apps/web/package.json` resolves to
+ * is unambiguous and identical in both environments.
+ */
+function resolvePlaywrightCli() {
+  const req = createRequire(join(webDir, 'package.json'));
+  const pkgJsonPath = req.resolve('@playwright/test/package.json');
+  const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+  const binRel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.playwright;
+  if (!binRel) {
+    throw new Error(`@playwright/test's package.json (${pkgJsonPath}) has no "playwright" bin entry — update resolvePlaywrightCli().`);
+  }
+  return join(dirname(pkgJsonPath), binRel);
+}
 
 /**
  * The one config `--list` cannot collect in this repo without a live seeded
@@ -115,11 +139,12 @@ function discoverConfigFiles() {
  * cannot get a clean listing from must not be silently skipped.
  */
 function runPlaywrightList(configFile) {
+  const cli = resolvePlaywrightCli();
   let stdout;
   try {
     stdout = execFileSync(
-      'npx',
-      ['playwright', 'test', '--list', '--config', configFile, '--reporter', 'json'],
+      process.execPath,
+      [cli, 'test', '--list', '--config', configFile, '--reporter', 'json'],
       { cwd: webDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 },
     );
   } catch (err) {
