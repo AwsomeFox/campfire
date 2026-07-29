@@ -1087,7 +1087,7 @@ export default function RunSessionPage() {
     return new URL(created.url, window.location.origin).href;
   }, [cid]);
 
-  const connectPlayerDisplay = useCallback((target: Window, source: 'open' | 'reconnect') => {
+  const connectPlayerDisplay = useCallback((target: Window) => {
     const sequence = ++castConnectionSequenceRef.current;
     setCastWindowState('opening');
     setCastDisplayNotice(null);
@@ -1102,10 +1102,10 @@ export default function RunSessionPage() {
       .catch((error: unknown) => {
         if (sequence !== castConnectionSequenceRef.current) return;
         setCastWindowState('idle');
-        const prefix = source === 'reconnect' ? "Couldn't reconnect the safe player display" : "Couldn't create a safe display link";
-        setCastDisplayNotice(error instanceof Error ? `${prefix}: ${error.message}` : `${prefix}. Try again.`);
+        const prefix = t('encounters.errors.actionFailed');
+        setCastDisplayNotice(error instanceof Error ? `${prefix}: ${error.message}` : prefix);
       });
-  }, [mintCastLink]);
+  }, [mintCastLink, t]);
 
   const openPlayerDisplay = useCallback(() => {
     // `openCastWindow` intentionally happens before any await: this is the user
@@ -1117,7 +1117,7 @@ export default function RunSessionPage() {
       return;
     }
     castWindowRef.current = target;
-    connectPlayerDisplay(target, 'open');
+    connectPlayerDisplay(target);
   }, [connectPlayerDisplay]);
 
   const copyPlayerDisplayLink = useCallback(() => {
@@ -1129,9 +1129,9 @@ export default function RunSessionPage() {
         setCastDisplayNotice('A safe player-display link was copied. It expires in 8 hours.');
       })
       .catch((error: unknown) => {
-        setCastDisplayNotice(error instanceof Error ? error.message : "Couldn't copy a player-display link.");
+        setCastDisplayNotice(error instanceof Error ? error.message : t('encounters.errors.actionFailed'));
       });
-  }, [mintCastLink]);
+  }, [mintCastLink, t]);
 
   const reconnectPlayerDisplay = useCallback(() => {
     const target = castWindowRef.current;
@@ -1144,7 +1144,7 @@ export default function RunSessionPage() {
     // needs a fresh popup (which happens synchronously in openPlayerDisplay).
     if (target && !target.closed) {
       focusCastWindow(target);
-      connectPlayerDisplay(target, 'reconnect');
+      connectPlayerDisplay(target);
       return;
     }
     setCastWindowState('window-closed');
