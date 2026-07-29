@@ -869,6 +869,12 @@ export class CharactersService {
       input.deathSaveSuccesses !== undefined ? clampDeathSaveCount(input.deathSaveSuccesses) : 0;
     const deathSaveFailures =
       input.deathSaveFailures !== undefined ? clampDeathSaveCount(input.deathSaveFailures) : 0;
+    // Derive the lifecycle status from the death state the same way update() does: a character
+    // created with `deathState: 'dead'` and no explicit `status` is dead, not active, so it is
+    // excluded from future encounter auto-add (which selects only `active` PCs). An explicit
+    // status always wins (resolveCharacterCreateStatus already honored it above); this only
+    // adjusts the derived default.
+    const effectiveStatus = status === 'active' && deathState === 'dead' ? 'dead' : status;
     if (input.resources !== undefined) {
       for (const [key, resource] of Object.entries(input.resources)) {
         if (resource.used < 0 || resource.used > resource.max) {
@@ -891,7 +897,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        status,
+        status: effectiveStatus,
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),

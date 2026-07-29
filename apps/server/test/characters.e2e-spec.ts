@@ -1016,6 +1016,22 @@ describe('characters (e2e)', () => {
         .set(dm)
         .send({ name: 'Bad Pool', resources: { rage: { max: 3, used: 9 } } });
       expect(overspend.status).toBe(400);
+      // A character created dead (deathState: 'dead', no explicit status) derives lifecycle
+      // status 'dead' too, so it's excluded from future encounter auto-add — matching the
+      // update() and /end derivation. An explicit status still wins.
+      const deadCreate = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Already Dead', hpMax: 20, hpCurrent: 0, deathState: 'dead' });
+      expect(deadCreate.status).toBe(201);
+      expect(deadCreate.body.deathState).toBe('dead');
+      expect(deadCreate.body.status).toBe('dead');
+      const explicitStatus = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Retired Veteran', deathState: 'dead', status: 'retired' });
+      expect(explicitStatus.status).toBe(201);
+      expect(explicitStatus.body.status).toBe('retired'); // explicit choice wins
     });
   });
 });
