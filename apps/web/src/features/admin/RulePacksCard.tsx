@@ -62,7 +62,7 @@ async function pollInstallJob(jobId: string, onProgress: (job: RulePackInstallJo
   for (;;) {
     const job = await api.get<RulePackInstallJob>(`${API}/rules/packs/install-jobs/${jobId}`);
     onProgress(job);
-    if (job.status === 'completed' || job.status === 'failed') return job;
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') return job;
     if (Date.now() - started > 5 * 60_000) throw new ApiError(0, 'Install timed out — check the server logs.');
     await new Promise((r) => setTimeout(r, 750));
   }
@@ -345,6 +345,10 @@ function InstallPanel({
       const job = await pollInstallJob(enqueued.id, (j) => setProgress(j.progress));
       if (job.status === 'failed') {
         onError(job.error ?? t('admin.errors.installPack'));
+        return;
+      }
+      if (job.status === 'cancelled') {
+        onError('Install was cancelled.');
         return;
       }
       if (job.outcome === 'updated') {
