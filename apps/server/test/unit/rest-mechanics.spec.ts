@@ -11,11 +11,11 @@ import {
   restModelForAdapter,
   ruleSystemAdapter,
   UNTAGGED_RESOURCE_CADENCE,
-  type RestAdapter,
-  type RestCharacterState,
-  type RestConditionState,
-  type RestKind,
-  type RestRechargeCadence,
+  RestAdapter,
+  RestCharacterState,
+  RestConditionState,
+  RestKind,
+  RestRechargeCadence,
 } from '@campfire/schema';
 
 /**
