@@ -9,6 +9,16 @@ const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
 const nonOwner = { 'x-dev-role': 'player', 'x-dev-user': 'other-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
+/** Thin PATCH wrapper for the issue #1492 suites so each assertion reads as a one-liner. */
+async function dbUpdate(
+  server: import('http').Server,
+  auth: Record<string, string>,
+  charId: number,
+  body: Record<string, unknown>,
+) {
+  return request(server).patch(`/api/v1/characters/${charId}`).set(auth).send(body);
+}
+
 describe('characters (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
@@ -259,15 +269,27 @@ describe('characters (e2e)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('PATCH spellSlots sets maxima and clamps used to max', async () => {
+  it('PATCH spellSlots sets maxima and rejects used outside [0, max]', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .patch(`/api/v1/characters/${characterId}`)
       .set(owner)
-      .send({ spellSlots: { '1': { max: 4, used: 0 }, '2': { max: 2, used: 5 } } });
+      .send({ spellSlots: { '1': { max: 4, used: 0 }, '2': { max: 2, used: 1 } } });
     expect(res.status).toBe(200);
-    // used=5 > max=2 is clamped down, mirroring the hpCurrent/hpMax clamp.
-    expect(res.body.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 2, used: 2 } });
+    expect(res.body.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 2, used: 1 } });
+    // Mirrors the dedicated POST :id/spell-slots path and the #1039 invariant: an overspend
+    // must FAIL loudly (400), not silently clamp to a different snapshot than requested.
+    const overspend = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '2': { max: 2, used: 5 } } });
+    expect(overspend.status).toBe(400);
+    // used < 0 (over-restore) is rejected for the mirror reason.
+    const overrestore = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '2': { max: 2, used: -1 } } });
+    expect(overrestore.status).toBe(400);
   });
 
   it('PATCH spellSlots rejects a non 1-9 level key', async () => {
@@ -1043,6 +1065,65 @@ describe('characters (e2e)', () => {
       expect(res.body.status).toBe('draft');
       expect(res.body.ac).toBe(18);
     });
+
+    it('create persists death state, temp HP, death saves, and resource pools (issue #1492)', async () => {
+      // The same five fields update() now writes must also land on CREATE — CharacterCreate
+      // spreads them as valid optional keys, and MCP upsert_character's create branch routes
+      // here, so a DM/AI creating a character with a starting death state or resource pool must
+      // not get a 201 back while the row keeps schema defaults.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({
+          name: 'Pre-Wounded Hero',
+          hpMax: 20,
+          hpCurrent: 0,
+          hpTemp: 5,
+          deathState: 'dying',
+          deathSaveSuccesses: 1,
+          deathSaveFailures: 2,
+          resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.hpTemp).toBe(5);
+      expect(res.body.deathState).toBe('dying');
+      expect(res.body.deathSaveSuccesses).toBe(1);
+      expect(res.body.deathSaveFailures).toBe(2);
+      expect(res.body.resources).toMatchObject({ ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } });
+      // An overspend at create is rejected (#1039 contract), not silently clamped/stored.
+      const overspend = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Bad Pool', resources: { rage: { max: 3, used: 9 } } });
+      expect(overspend.status).toBe(400);
+      // A character created dead (deathState: 'dead', no explicit status) derives lifecycle
+      // status 'dead' too, so it's excluded from future encounter auto-add — matching the
+      // update() and /end derivation. An explicit status still wins.
+      const deadCreate = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Already Dead', hpMax: 20, hpCurrent: 0, deathState: 'dead' });
+      expect(deadCreate.status).toBe(201);
+      expect(deadCreate.body.deathState).toBe('dead');
+      expect(deadCreate.body.status).toBe('dead');
+      const explicitStatus = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Retired Veteran', deathState: 'dead', status: 'retired' });
+      expect(explicitStatus.status).toBe(201);
+      expect(explicitStatus.body.status).toBe('retired'); // explicit choice wins
+      // An EXPLICIT `status: 'active'` alongside `deathState: 'dead'` is also honored — the
+      // derivation only fires when status is omitted, so a caller who deliberately marks a dead
+      // PC active keeps active (mirrors update()'s `input.status === undefined` gate).
+      const explicitActive = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Active Corpse', deathState: 'dead', status: 'active' });
+      expect(explicitActive.status).toBe(201);
+      expect(explicitActive.body.deathState).toBe('dead');
+      expect(explicitActive.body.status).toBe('active'); // explicit active wins
+    });
   });
 });
 
@@ -1112,6 +1193,281 @@ describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {
     const dmLvl = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(dm).send({});
     expect(dmLvl.status).toBe(201);
     expect(dmLvl.body.level).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1492 (Part 1): PATCH /characters/:id accepted deathState, hpTemp,
+// deathSaveSuccesses, deathSaveFailures and resources (valid CharacterUpdate keys
+// the schema passes and MCP advertises) and then SILENTLY DROPPED them, returning
+// 200 with the unchanged values. A DM reviving a dead PC believed the write worked
+// while the row kept the old dead/dying state — the PC died instantly on their next
+// drop to 0 HP. These fields now persist, with the same clamps every other path uses.
+// ---------------------------------------------------------------------------
+describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources (issue #1492)', () => {
+  const dm1492 = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1492' };
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let campaignId: number;
+  let charId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm1492).send({ name: 'Revive Camp' });
+    expect(camp.status).toBe(201);
+    campaignId = camp.body.id;
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm1492)
+      .send({ name: 'Fallen Hero', hpMax: 32, hpCurrent: 0 });
+    expect(char.status).toBe(201);
+    charId = char.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('the death-revival scenario: clearing deathState + death-save failures persists', async () => {
+    // Seed the dead state the DM is trying to clear (simulate a PC who died).
+    const seeded = await dbUpdate(server, dm1492, charId, { deathState: 'dead', deathSaveFailures: 3, deathSaveSuccesses: 0 });
+    expect(seeded.status).toBe(200);
+    expect(seeded.body.deathState).toBe('dead');
+    expect(seeded.body.deathSaveFailures).toBe(3);
+
+    // The DM revives the PC. Before the fix this returned 200 but kept deathState:'dead'.
+    const revived = await dbUpdate(server, dm1492, charId, {
+      deathState: 'none',
+      deathSaveFailures: 0,
+      deathSaveSuccesses: 0,
+      hpCurrent: 1,
+      status: 'active',
+    });
+    expect(revived.status).toBe(200);
+    expect(revived.body.deathState).toBe('none');
+    expect(revived.body.deathSaveFailures).toBe(0);
+    expect(revived.body.deathSaveSuccesses).toBe(0);
+    expect(revived.body.status).toBe('active');
+
+    // Confirm the row truly persisted (not just the response body) — a GET reads it back.
+    const fetched = await request(server).get(`/api/v1/characters/${charId}`).set(dm1492);
+    expect(fetched.status).toBe(200);
+    expect(fetched.body.deathState).toBe('none');
+    expect(fetched.body.deathSaveFailures).toBe(0);
+  });
+
+  it('hpTemp persists', async () => {
+    const res = await dbUpdate(server, dm1492, charId, { hpTemp: 12 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpTemp).toBe(12);
+    // The schema's `.min(0)` bound rejects a negative temp pool at the DTO boundary (400),
+    // never silently storing it — the field used to be dropped entirely; now it's guarded.
+    const rejected = await dbUpdate(server, dm1492, charId, { hpTemp: -5 });
+    expect(rejected.status).toBe(400);
+  });
+
+  it('death-save tallies persist and reject out-of-range values', async () => {
+    const res = await dbUpdate(server, dm1492, charId, { deathSaveSuccesses: 2, deathSaveFailures: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body.deathSaveSuccesses).toBe(2);
+    expect(res.body.deathSaveFailures).toBe(1);
+    // The schema's [0, 3] bound rejects an out-of-range tally at the DTO boundary (400) rather
+    // than coercing it — the field used to be dropped entirely; now it's guarded.
+    const rejected = await dbUpdate(server, dm1492, charId, { deathSaveSuccesses: 9, deathSaveFailures: 9 });
+    expect(rejected.status).toBe(400);
+  });
+
+  it('resources persist on the general PATCH (reject used outside [0, max], merge over existing)', async () => {
+    const res = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.resources).toMatchObject({ ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } });
+    // Mirrors the dedicated POST :id/resources invariant (#1039: "spending a resource you do
+    // not have must fail loudly") and the spellSlots branch below — an overspend/overrestore is
+    // REJECTED (400), never silently clamped to a different pool than the caller requested.
+    const overspend = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: 20 } },
+    });
+    expect(overspend.status).toBe(400);
+    // The row is unchanged: the write didn't happen (re-read confirms the prior value).
+    const afterOverspend = await request(server).get(`/api/v1/characters/${charId}`).set(dm1492);
+    expect(afterOverspend.body.resources.ki.used).toBe(2);
+    const overrestore = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: -1 } },
+    });
+    expect(overrestore.status).toBe(400);
+    // MERGE, not wholesale replace: sending a second pool preserves the first (and its
+    // name/recharge metadata). A caller — notably MCP upsert_character, which advertises
+    // resources as optional — must not erase pools it didn't mention.
+    const merged = await dbUpdate(server, dm1492, charId, {
+      resources: { sorcery: { max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' } },
+    });
+    expect(merged.status).toBe(200);
+    expect(merged.body.resources.ki).toMatchObject({ max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' });
+    expect(merged.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
+    // PER-POOL field merge: updating only `used` on an existing pool preserves its name/recharge,
+    // so a caller adjusting a single field doesn't strip the pool's display config.
+    const spendKi = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: 3 } },
+    });
+    expect(spendKi.status).toBe(200);
+    expect(spendKi.body.resources.ki).toMatchObject({ max: 5, used: 3, name: 'Ki Points', recharge: 'short-rest' });
+    // The untouched sorcery pool survives too.
+    expect(spendKi.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
+  });
+
+  it('death-state transitions synchronize lifecycle status (dead->dead, none+hp>0->active, respects explicit status)', async () => {
+    // Mirror patchHp (issue #711) and the encounter /end reconciliation. Each transition below
+    // runs WITHOUT sending status, so the auto-flip is what's under test — except case 4, which
+    // proves an explicit status wins.
+    // 1. deathState: 'dead' (no status sent) on an active PC flips lifecycle status to 'dead'
+    //    (excludes from future encounter auto-add, which selects only active PCs).
+    const killed = await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    expect(killed.status).toBe(200);
+    expect(killed.body.deathState).toBe('dead');
+    expect(killed.body.status).toBe('dead');
+    // 2. deathState: 'none' with positive HP on a previously-dead PC flips status back to active.
+    const revived = await dbUpdate(server, dm1492, charId, { deathState: 'none', deathSaveFailures: 0, hpCurrent: 5 });
+    expect(revived.status).toBe(200);
+    expect(revived.body.deathState).toBe('none');
+    expect(revived.body.status).toBe('active');
+    expect(revived.body.hpCurrent).toBe(5);
+    // 3. deathState: 'none' at 0 HP does NOT revive the lifecycle status — a 0-HP character is
+    //    not alive (matches /end's `revived = !dead && hpCurrent > 0`). Seed dead again first.
+    await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    const clearedAtZero = await dbUpdate(server, dm1492, charId, { deathState: 'none', deathSaveFailures: 0 });
+    expect(clearedAtZero.status).toBe(200);
+    expect(clearedAtZero.body.deathState).toBe('none');
+    expect(clearedAtZero.body.status).toBe('dead'); // unchanged — not a revive
+    // 4. An explicit status is never overwritten by the auto-flip: reviving to 'retired' lands
+    //    as 'retired', not 'active'.
+    await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    const retired = await dbUpdate(server, dm1492, charId, { deathState: 'none', status: 'retired', hpCurrent: 5 });
+    expect(retired.status).toBe(200);
+    expect(retired.body.deathState).toBe('none');
+    expect(retired.body.status).toBe('retired'); // explicit choice wins
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1492 (Part 2): the schema's hard level cap of 20 conflicted with rule
+// systems whose adapter legitimately allows past 20 (Open Legend / an OSR
+// retroclone report `maxLevel: Infinity`). A legal level-up past 20 wrote 21 to
+// the row, then every subsequent "Edit sheet" save PATCHed `level: 21` and 400'd
+// against the schema bound — bricking the sheet. The schema cap now matches the
+// most permissive adapter, and create()/update() enforce the per-system
+// `adapter.maxLevel` server-side so a direct PATCH can't bypass it.
+// ---------------------------------------------------------------------------
+describe('character level cap matches the rule-system adapter (issue #1492)', () => {
+  const capDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1492-level' };
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a level-up past 20 in an uncapped system leaves the sheet editable (the Scenario-B regression)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'OSR Edit Camp' });
+    expect(camp.status).toBe(201);
+    // 'basic-fantasy' resolves to the OSR adapter (maxLevel: Infinity).
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Old School Delver', hpMax: 16, hpCurrent: 16 });
+    expect(char.status).toBe(201);
+
+    // Advance past 20 in the uncapped system.
+    const at20 = await dbUpdate(server, capDm, char.body.id, { level: 20 });
+    expect(at20.status).toBe(200);
+    const leveled = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(leveled.status).toBe(201);
+    expect(leveled.body.level).toBe(21);
+
+    // The brick: before the fix, an "Edit sheet" save carrying level:21 400'd against the schema
+    // bound. Now it succeeds — the sheet stays editable.
+    const reEdit = await dbUpdate(server, capDm, char.body.id, { level: 21, notes: 'back from the dead' });
+    expect(reEdit.status).toBe(200);
+    expect(reEdit.body.level).toBe(21);
+    expect(reEdit.body.notes).toBe('back from the dead');
+  });
+
+  it('a 5e campaign still rejects a level above 20 on PATCH (the cap moved to the service, not removed)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: '5e Cap Edit Camp' });
+    expect(camp.status).toBe(201);
+    expect(camp.body.ruleSystem).toBe(''); // default → 5e adapter → maxLevel 20
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Five E Hero', hpMax: 20, hpCurrent: 20 });
+    expect(char.status).toBe(201);
+
+    // A level above the 5e adapter cap is rejected server-side (400), even though the schema
+    // bound now permits it for uncapped systems.
+    const denied = await dbUpdate(server, capDm, char.body.id, { level: 21 });
+    expect(denied.status).toBe(400);
+    // The character's level is unchanged (the write didn't happen).
+    const fetched = await request(server).get(`/api/v1/characters/${char.body.id}`).set(capDm);
+    expect(fetched.body.level).toBe(1);
+  });
+
+  it('a level above the adapter cap is rejected on create too (not just levelUp)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: '5e Create Cap Camp' });
+    expect(camp.status).toBe(201);
+    // Default rule system is 5e (maxLevel 20).
+    const denied = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Too High', level: 25, hpMax: 10, hpCurrent: 10 });
+    expect(denied.status).toBe(400);
+    // A legal 5e level still creates fine.
+    const ok = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Just Right', level: 5, hpMax: 10, hpCurrent: 10 });
+    expect(ok.status).toBe(201);
+    expect(ok.body.level).toBe(5);
+  });
+
+  it('a character already over the cap (after a rule-system downgrade) stays editable for unrelated fields', async () => {
+    // Start in an uncapped system, level the character past 13th Age's cap of 10.
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'Downgrade Camp' });
+    expect(camp.status).toBe(201);
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'High Level', level: 15, hpMax: 40, hpCurrent: 40 });
+    expect(char.status).toBe(201);
+    expect(char.body.level).toBe(15);
+
+    // Downgrade the campaign to 13th Age (cap 10). The character is now over the new cap.
+    await db.update(campaigns).set({ ruleSystem: 'archmage' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    // A sheet edit that resends the current level (level: 15, unchanged) alongside an unrelated
+    // field must still succeed — the editor resends level on every save. Only an INCREASE above
+    // the cap is rejected.
+    const reEdit = await dbUpdate(server, capDm, char.body.id, { level: 15, notes: 'still playing' });
+    expect(reEdit.status).toBe(200);
+    expect(reEdit.body.level).toBe(15);
+    expect(reEdit.body.notes).toBe('still playing');
+
+    // Pushing the over-cap character HIGHER is still rejected.
+    const higher = await dbUpdate(server, capDm, char.body.id, { level: 16 });
+    expect(higher.status).toBe(400);
   });
 });
 
@@ -1192,6 +1548,38 @@ describe('levelUp honors the rule-system level cap (issue #535)', () => {
     // Sanity: the character row really persisted 21 (not just the response body).
     const [row] = await db.select({ level: characters.level }).from(characters).where(eq(characters.id, char.body.id)).limit(1);
     expect(row?.level).toBe(21);
+  });
+
+  it('a no-cap OSR campaign still stops at the shared schema ceiling (MAX_LEVEL, issue #1492)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'OSR Schema-Cap Camp' });
+    expect(camp.status).toBe(201);
+    // 'basic-fantasy' → OSR adapter → maxLevel Infinity. The adapter alone would never stop
+    // advancing, but the shared schema's MAX_LEVEL (99) ceiling still applies so a level-99 PC
+    // leveled to 100 doesn't write a row the schema then rejects on every subsequent save.
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Max Level Delver', hpMax: 16, hpCurrent: 16 });
+    expect(char.status).toBe(201);
+
+    // Seed to the schema ceiling (MAX_LEVEL = 99) via the PATCH path, which the widened schema
+    // bound now permits for an uncapped system.
+    const atCeiling = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 99 });
+    expect(atCeiling.status).toBe(200);
+    expect(atCeiling.body.level).toBe(99);
+
+    // levelUp at the ceiling is rejected: min(Infinity, MAX_LEVEL) = MAX_LEVEL = 99.
+    const denied = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(denied.status).toBe(400);
+
+    // A PATCH that resends the current level (99) alongside an unrelated edit still succeeds —
+    // the sheet editor resends level on every save and 99 is a legal value.
+    const reEdit = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 99, notes: 'at the ceiling' });
+    expect(reEdit.status).toBe(200);
+    expect(reEdit.body.level).toBe(99);
+    expect(reEdit.body.notes).toBe('at the ceiling');
   });
 });
 

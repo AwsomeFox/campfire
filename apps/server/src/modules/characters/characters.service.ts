@@ -11,6 +11,7 @@ import {
   XpPatch,
   XpAward,
   LevelUp,
+  MAX_LEVEL,
   normalizeStats,
   ruleSystemAdapter,
   ddbImportSupported,
@@ -115,6 +116,11 @@ export const AC_MAX = 40; // unarmored 10-ish through the highest achievable arm
 /** Clamp hpCurrent into [0, hpMax] — the invariant every HP-writing path enforces. */
 export function clampHpCurrent(hpCurrent: number, hpMax: number): number {
   return Math.max(0, Math.min(hpMax, hpCurrent));
+}
+
+/** Clamp a death-save success/failure tally into [0, 3] — the 5e death-save bound (issue #1492). */
+export function clampDeathSaveCount(count: number): number {
+  return Math.max(0, Math.min(3, count));
 }
 
 /** Bound AC into [AC_MIN, AC_MAX]; null (AC unset) passes through untouched. */
@@ -600,6 +606,24 @@ export class CharactersService {
   }
 
   /**
+   * Reject an absolute `level` above the campaign's adapter cap (issue #1492). `levelUp`
+   * already honors `adapter.maxLevel` (5e=20, 13th Age=10, an uncapped system=Infinity), but
+   * the general create()/update() PATCH paths could previously write any level that passed the
+   * (now widened) schema bound, bypassing the per-system ceiling the DM sees in `levelUp`.
+   * An `Infinity` cap (Open Legend, OSR retroclones) never rejects. Naming the cap in the
+   * message matches `levelUp`'s rejection, so the two surfaces read identically.
+   */
+  private static assertLevelWithinCap(level: number, maxLevel: number): void {
+    if (level > maxLevel) {
+      throw new BadRequestException(
+        Number.isFinite(maxLevel)
+          ? `Level ${level} is above this rule system's cap of ${maxLevel}`
+          : `Level ${level} is above this rule system's cap`,
+      );
+    }
+  }
+
+  /**
    * Mirror a character's HP into the combatant rows that link back to it in any
    * still-live (not 'ended') encounter (issue #50). Combatant HP and character HP
    * were previously dual sources of truth with only one-way sync (combatant→character
@@ -613,7 +637,17 @@ export class CharactersService {
     characterId: number,
     hpCurrent: number,
     hpMax?: number,
-    opts?: { campaignId?: number; spCurrent?: number; spMax?: number; rpCurrent?: number; rpMax?: number; deathState?: string },
+    opts?: {
+      campaignId?: number;
+      spCurrent?: number;
+      spMax?: number;
+      rpCurrent?: number;
+      rpMax?: number;
+      deathState?: string;
+      deathSaveSuccesses?: number;
+      deathSaveFailures?: number;
+      hpTemp?: number;
+    },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -643,7 +677,15 @@ export class CharactersService {
       if (opts?.spMax !== undefined) updatePayload.spMax = opts.spMax;
       if (opts?.rpCurrent !== undefined) updatePayload.rpCurrent = opts.rpCurrent;
       if (opts?.rpMax !== undefined) updatePayload.rpMax = opts.rpMax;
+      // Issue #1492: mirror the full death/temp-HP slice a sheet PATCH can now write, so
+      // reviving a downed PC mid-encounter (`deathState: 'none', deathSaveFailures: 0`)
+      // keeps the live tracker consistent. Without this, the combatant keeps the stale
+      // 'dead'/'dying' state after HP is mirrored, and /end's CAS write-back (which treats
+      // the combatant slice as authoritative) silently reverts the revive onto the sheet.
       if (opts?.deathState !== undefined) updatePayload.deathState = opts.deathState;
+      if (opts?.deathSaveSuccesses !== undefined) updatePayload.deathSaveSuccesses = opts.deathSaveSuccesses;
+      if (opts?.deathSaveFailures !== undefined) updatePayload.deathSaveFailures = opts.deathSaveFailures;
+      if (opts?.hpTemp !== undefined) updatePayload.hpTemp = opts.hpTemp;
       await this.db
         .update(combatants)
         .set(updatePayload)
@@ -836,6 +878,12 @@ export class CharactersService {
     const adapter = await this.adapterForCampaign(campaignId);
     const status = resolveCharacterCreateStatus(input, adapter);
     const isDraft = status === 'draft';
+    // Issue #1492: enforce the adapter's level cap on the create path too, not just levelUp —
+    // otherwise a direct POST bypasses the per-system ceiling (5e=20, 13th Age=10, …) that the
+    // DM sees in levelUp. An Infinity cap (Open Legend, OSR) never rejects.
+    if (input.level !== undefined) {
+      CharactersService.assertLevelWithinCap(input.level, adapter.maxLevel);
+    }
 
     // Clamp hpCurrent/ac at create time too — mirrors update/patchHp/combatant HP so an
     // out-of-range create (hpCurrent:99999, ac:-50) can't persist verbatim (issue #112).
@@ -843,6 +891,35 @@ export class CharactersService {
     // without explicit HP keep the legacy 10/10 default for API back-compat.
     const hpMax = input.hpMax ?? (isDraft ? 0 : 10);
     const hpCurrent = clampHpCurrent(input.hpCurrent ?? (isDraft ? 0 : hpMax), Math.max(0, hpMax));
+    // Issue #1492: write the death/temp-HP subsystem and bounded resources on CREATE too, not
+    // just update(). CharacterCreate spreads these as valid optional keys, and MCP
+    // upsert_character's create branch (mcp-tools.ts) parses CharacterCreate and lands here, so
+    // a DM/AI creating a character with a starting death state or resource pool must not get a
+    // 201 back while the row keeps schema defaults. Same clamps/validation as update(): hpTemp
+    // >= 0, death saves in [0, 3], resources overspend rejected (#1039).
+    const hpTemp = input.hpTemp !== undefined ? Math.max(0, input.hpTemp) : 0;
+    const deathState = input.deathState ?? 'none';
+    const deathSaveSuccesses =
+      input.deathSaveSuccesses !== undefined ? clampDeathSaveCount(input.deathSaveSuccesses) : 0;
+    const deathSaveFailures =
+      input.deathSaveFailures !== undefined ? clampDeathSaveCount(input.deathSaveFailures) : 0;
+    // Derive the lifecycle status from the death state the same way update() does: a character
+    // created with `deathState: 'dead'` and no explicit `status` is dead, not active, so it is
+    // excluded from future encounter auto-add (which selects only `active` PCs). Gated on
+    // `input.status === undefined` (mirroring update()'s gate) so an explicit status — including
+    // an explicit `active` alongside a dead death state — is never silently overridden.
+    const effectiveStatus =
+      input.status === undefined && status === 'active' && deathState === 'dead' ? 'dead' : status;
+    if (input.resources !== undefined) {
+      for (const [key, resource] of Object.entries(input.resources)) {
+        if (resource.used < 0 || resource.used > resource.max) {
+          throw new BadRequestException(
+            `Resource '${key}' overspend/overrestore: used (${resource.used}) must be in [0, max (${resource.max})]`,
+          );
+        }
+      }
+    }
+    const resources = toJsonText(input.resources ?? {});
 
     const [row] = await this.db
       .insert(characters)
@@ -855,17 +932,22 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        status,
+        status: effectiveStatus,
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),
         kac: clampAc(input.kac ?? null),
         hpCurrent,
         hpMax,
+        hpTemp,
+        deathState,
+        deathSaveSuccesses,
+        deathSaveFailures,
         spCurrent: input.spCurrent ?? 0,
         spMax: input.spMax ?? 0,
         rpCurrent: input.rpCurrent ?? 0,
         rpMax: input.rpMax ?? 0,
+        resources,
         ...sheetConditionWriteSetFromNames(input.conditions ?? [], null),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
@@ -927,6 +1009,17 @@ export class CharactersService {
     if (input.xp !== undefined || input.level !== undefined) {
       await this.assertProgressionAllowed(existing.campaignId, role);
     }
+    // Issue #1492: enforce the adapter's level cap on the PATCH path too, not just levelUp.
+    // `levelUp` already honors `adapter.maxLevel` (5e=20, 13th Age=10, …), but a direct PATCH
+    // could otherwise write any level the (widened) schema bound allows, bypassing the ceiling.
+    // Only an INCREASE above the cap is rejected: a sheet editor resends the current level on
+    // every save, so a character already over the cap after a rule-system downgrade (5e → 13th
+    // Age, cap 10) must still be editable for unrelated fields (name/notes). The character can't
+    // be pushed HIGHER past the cap, and levelUp's own cap check still applies. An Infinity cap
+    // (Open Legend, OSR) never rejects.
+    if (input.level !== undefined && input.level > existing.level) {
+      CharactersService.assertLevelWithinCap(input.level, (await this.adapterForCampaign(existing.campaignId)).maxLevel);
+    }
 
     const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
     if (input.name !== undefined) update.name = input.name;
@@ -959,21 +1052,99 @@ export class CharactersService {
       const rawHpCurrent = input.hpCurrent !== undefined ? input.hpCurrent : existing.hpCurrent;
       update.hpCurrent = clampHpCurrent(rawHpCurrent, finalHpMax);
     }
+    // Issue #1492: the death/temp-HP subsystem and bounded resources are valid CharacterUpdate
+    // keys (the schema accepts them and MCP advertises them), but the field-copy block below
+    // previously had NO references to them, so a PATCH that set them returned 200 and silently
+    // dropped the change — a DM reviving a dead PC (`deathState: 'none', deathSaveFailures: 0`)
+    // believed it worked while the row kept the old dead/dying state. Write them now, with the
+    // same clamps every other write path uses (hpTemp >= 0, death saves in [0, 3]). The
+    // encounter tracker stays the source of truth during a fight; on /end these reconcile back,
+    // so a manual sheet PATCH is the out-of-combat path that was missing.
+    if (input.hpTemp !== undefined) update.hpTemp = Math.max(0, input.hpTemp);
+    if (input.deathState !== undefined) {
+      update.deathState = input.deathState;
+      // Synchronize the lifecycle status on a definitive death transition, matching patchHp
+      // (issue #711) and the encounter /end reconciliation exactly:
+      //   - `deathState: 'dead'` -> lifecycle status `'dead'` (so a sheet declaring a PC dead
+      //     excludes them from future encounter auto-add, which selects only `active` PCs).
+      //   - `deathState: 'none'` + positive HP on a previously-`dead` PC -> `'active'` (the
+      //     revive). HP > 0 is required, matching /end's `revived = !dead && hpCurrent > 0`: a
+      //     0-HP character cleared to `none` (e.g. a death-save reset) is not "alive" and must
+      //     not become auto-addable. `dying`/`stable` carry no lifecycle flip — the death STATE
+      //     lives in deathState, not status.
+      // The auto-flip is GATED on `input.status === undefined` so an explicit caller choice
+      // (e.g. reviving to `retired`/`inactive`) is never silently overwritten.
+      if (input.status === undefined) {
+        const finalHpCurrent = update.hpCurrent !== undefined ? update.hpCurrent : existing.hpCurrent;
+        if (input.deathState === 'dead') {
+          update.status = 'dead';
+        } else if (input.deathState === 'none' && finalHpCurrent > 0 && existing.status === 'dead') {
+          update.status = 'active';
+        }
+      }
+    }
+    if (input.deathSaveSuccesses !== undefined) {
+      update.deathSaveSuccesses = clampDeathSaveCount(input.deathSaveSuccesses);
+    }
+    if (input.deathSaveFailures !== undefined) {
+      update.deathSaveFailures = clampDeathSaveCount(input.deathSaveFailures);
+    }
+    // Reject a pool whose `used` is outside [0, max] rather than silently clamping it —
+    // the dedicated POST :id/resources path throws on exactly this condition (issue #1039:
+    // "spending a resource you do not have must fail loudly"), so an AI/caller cannot report
+    // a successful spend that was never applied. The general PATCH shares that contract: a
+    // silent clamp would return 200 after persisting a different pool than requested. A
+    // negative `used` (over-restore) is rejected for the mirror reason.
+    //
+    // MERGE, not wholesale replace: the supplied pools are overlaid on the existing map AND each
+    // supplied pool is field-merged over its existing entry, so a caller (notably MCP
+    // `upsert_character`, which advertises `resources` as optional) that sends only one pool — or
+    // only some fields of one pool (e.g. just `used`) — updates it without erasing the others or
+    // the touched pool's `name`/`recharge` metadata. This matches the `stats` merge above and the
+    // dedicated POST :id/resources path's single-pool-adjust semantic; the fields that ARE genuine
+    // full-snapshot replaces (`skills`/`actions`/`spellSlots`) are documented as such, but
+    // `resources` pools carry per-pool config the caller would not want to re-send on every edit.
+    if (input.resources !== undefined) {
+      for (const [key, resource] of Object.entries(input.resources)) {
+        if (resource.used < 0 || resource.used > resource.max) {
+          throw new BadRequestException(
+            `Resource '${key}' overspend/overrestore: used (${resource.used}) must be in [0, max (${resource.max})]`,
+          );
+        }
+      }
+      const existingResources = fromJsonText<Record<string, CharacterResource>>(existing.resources, {});
+      const merged: Record<string, CharacterResource> = { ...existingResources };
+      // NOTE: `CharacterResource.used` carries a zod `.default(0)`, so a caller who omits `used`
+      // on a supplied pool (e.g. a rename-only `{ ki: { max: 5, name: 'Renamed' } }`) has it
+      // materialized to `0` by CharacterUpdate.parse BEFORE reaching this merge. The field-level
+      // spread then writes that `0` over the existing `used`. A caller changing a pool MUST
+      // therefore re-send `used` to preserve its current spend (the same "send the value you
+      // want" contract the dedicated POST :id/resources path implies). A presence-preserving
+      // partial-pool schema would fix this but is a larger schema change tracked separately.
+      for (const [key, supplied] of Object.entries(input.resources)) {
+        merged[key] = { ...(existingResources[key] ?? { max: supplied.max, used: 0 }), ...supplied };
+      }
+      update.resources = toJsonText(merged);
+    }
     if (input.conditions !== undefined) {
       Object.assign(update, sheetConditionWriteSetFromNames(input.conditions, existing.conditionInstances));
     }
     if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
     if (input.skills !== undefined) update.skills = toJsonText(input.skills);
     if (input.actions !== undefined) update.actions = toJsonText(input.actions);
-    // Clamp each level's `used` to [0, max] whenever slot maxima are rewritten —
-    // mirrors the hpCurrent/hpMax clamp above and patchSpellSlots' clamp, so a
-    // PATCH can never leave more slots spent than exist.
+    // Reject a level whose `used` is outside [0, max] rather than silently clamping it —
+    // matches the resources branch above and the dedicated POST :id/spell-slots path
+    // (issue #1039: an overspend must fail loudly, not report success for a different
+    // write than requested). The general PATCH shares that spend-honesty contract.
     if (input.spellSlots !== undefined) {
-      const clamped: Record<string, SpellSlotLevel> = {};
       for (const [level, slot] of Object.entries(input.spellSlots)) {
-        clamped[level] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used)) };
+        if (slot.used < 0 || slot.used > slot.max) {
+          throw new BadRequestException(
+            `Spell slot level ${level} overspend/overrestore: used (${slot.used}) must be in [0, max (${slot.max})]`,
+          );
+        }
       }
-      update.spellSlots = toJsonText(clamped);
+      update.spellSlots = toJsonText(input.spellSlots);
     }
     if (input.portraitUrl !== undefined) update.portraitUrl = input.portraitUrl;
     if (input.ddbId !== undefined) update.ddbId = input.ddbId;
@@ -988,9 +1159,42 @@ export class CharactersService {
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
-    // combatant row (issue #50).
-    if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
+    // combatant row (issue #50). Issue #1492: a PATCH that writes the death/temp-HP slice
+    // (a DM reviving a downed PC mid-fight) must mirror that slice into the live combatant
+    // too, or /end's CAS write-back would treat the stale combatant slice as authoritative
+    // and silently revert the revive. Thread the just-written row's slice so the tracker
+    // (and the subsequent reconciliation) sees the same death state as the sheet.
+    if (
+      input.hpCurrent !== undefined ||
+      input.hpMax !== undefined ||
+      input.deathState !== undefined ||
+      input.deathSaveSuccesses !== undefined ||
+      input.deathSaveFailures !== undefined ||
+      input.hpTemp !== undefined ||
+      input.spCurrent !== undefined ||
+      input.spMax !== undefined ||
+      input.rpCurrent !== undefined ||
+      input.rpMax !== undefined
+    ) {
+      // Only mirror hpMax when this PATCH actually supplied it; otherwise pass
+      // undefined so a death-slice edit (deathState/death-saves/hpTemp) preserves
+      // a DM-adjusted, encounter-local combatant hpMax that EncountersService
+      // deliberately never writes back to the sheet (review on #1492). Each
+      // death-slice field is threaded only when its input key was supplied too,
+      // so an HP-only edit cannot push the sheet's stale deathState/death-saves/
+      // hpTemp onto a live combatant (Devin review on #1492) — the combatant row
+      // is authoritative during a fight and only reconciled on /end.
+      await this.syncActiveCombatants(id, row.hpCurrent, input.hpMax !== undefined ? row.hpMax : undefined, {
+        campaignId: existing.campaignId,
+        ...(input.deathState !== undefined ? { deathState: row.deathState } : {}),
+        ...(input.deathSaveSuccesses !== undefined ? { deathSaveSuccesses: row.deathSaveSuccesses } : {}),
+        ...(input.deathSaveFailures !== undefined ? { deathSaveFailures: row.deathSaveFailures } : {}),
+        ...(input.hpTemp !== undefined ? { hpTemp: row.hpTemp } : {}),
+        ...(input.spCurrent !== undefined ? { spCurrent: row.spCurrent } : {}),
+        ...(input.spMax !== undefined ? { spMax: row.spMax } : {}),
+        ...(input.rpCurrent !== undefined ? { rpCurrent: row.rpCurrent } : {}),
+        ...(input.rpMax !== undefined ? { rpMax: row.rpMax } : {}),
+      });
     }
     // Issue #486: PATCH conditions must also land on the live tracker.
     if (input.conditions !== undefined) {
@@ -1338,22 +1542,23 @@ export class CharactersService {
    *
    * The cap is read from the campaign's RuleSystemAdapter (`adapter.maxLevel`, issue #535), so
    * 5e stays capped at 20, 13th Age caps at 10, and an uncapped system (Open Legend, an OSR
-   * retroclone) reports `Infinity` and never rejects on the cap. Previously the 5e `20` was
-   * hardcoded here, which wrongly capped every non-5e campaign at level 20.
+   * retroclone) reports `Infinity` and never rejects on the adapter cap. The shared schema's
+   * own `MAX_LEVEL` ceiling still applies though (issue #1492): without it, an Infinity-cap
+   * campaign leveling a level-99 PC to 100 would write a row the schema then rejects on the
+   * next save — re-bricking the sheet exactly the way the old hardcoded 20 did. The effective
+   * ceiling is therefore `min(adapter.maxLevel, MAX_LEVEL)`, so an uncapped system stops at
+   * `MAX_LEVEL` and the per-system cap (20/10/…) stays authoritative for every bounded one.
    */
   async levelUp(id: number, input: LevelUpInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
     await this.assertProgressionAllowed(existing.campaignId, role);
-    const maxLevel = (await this.adapterForCampaign(existing.campaignId)).maxLevel;
+    const adapterMaxLevel = (await this.adapterForCampaign(existing.campaignId)).maxLevel;
+    const maxLevel = Math.min(adapterMaxLevel, MAX_LEVEL);
     if (existing.level >= maxLevel) {
-      // Name the system's actual ceiling in the message (e.g. "level 20" for 5e, "level 10"
-      // for 13th Age). An Infinity cap (Open Legend, OSR retroclones) never reaches this branch.
-      throw new BadRequestException(
-        Number.isFinite(maxLevel)
-          ? `Already at level ${maxLevel} — there is no level ${maxLevel + 1}`
-          : 'Already at the maximum level for this rule system',
-      );
+      // Name the effective ceiling in the message (e.g. "level 20" for 5e, "level 10" for
+      // 13th Age, "level 99" for an uncapped system bumping the shared schema bound).
+      throw new BadRequestException(`Already at level ${maxLevel} — there is no level ${maxLevel + 1}`);
     }
 
     const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
