@@ -148,12 +148,16 @@ export default function PreferencesPage() {
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
   async function selectDiceTheme(theme: DiceTheme) {
+    const previous = selectedDiceTheme;
     setSelectedDiceTheme(theme);
     try {
       await api.patch<User>(`${API}/me/preferences`, { diceTheme: theme });
       await refresh();
     } catch {
-      // Ignore background save error
+      // Issue #1534: surface the failure rather than leaving the UI on a
+      // theme the server rejected (the write never landed). Revert the
+      // optimistic state so the control reflects reality.
+      setSelectedDiceTheme(previous);
     }
   }
 

@@ -311,6 +311,14 @@ export const queryClient = new QueryClient({
       // not expressible, which is the point: a new endpoint cannot inherit retry it has
       // not been protected for.
       retry: false,
+      // Issue #1534: fail fast offline instead of pausing. TanStack Query v5 defaults
+      // mutations to networkMode 'online', which PAUSES a mutation when the browser
+      // reports offline — the promise never settles, so onError rollback paths never
+      // run and the optimistic UI stays stuck. 'always' lets the request fail and the
+      // existing per-mutation onError/onError handlers (e.g. HP rollback in
+      // RunSessionPage, undo-state clear in UndoSnackbar) fire as intended. Reads keep
+      // their own network handling via the banners in Layout.tsx (#579 / #581).
+      networkMode: 'always',
     },
   },
 });

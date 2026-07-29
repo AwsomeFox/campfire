@@ -364,8 +364,17 @@ export default function NotificationsPage() {
     if (!pendingUndo) return;
     const { ids } = pendingUndo;
     setPendingUndo(null);
-    await markUnreadBulk({ ids });
-    announce('Restored unread status.');
+    // markUnreadBulk swallows network/server errors and returns
+    // { updated: 0, updatedIds: [] } on failure. Announcing "Restored
+    // unread status." unconditionally would lie on an offline failure
+    // (issue #1534): the rows were never restored. Announce only when the
+    // server confirms the write.
+    const res = await markUnreadBulk({ ids });
+    if (res.updated > 0) {
+      announce('Restored unread status.');
+    } else {
+      announce('Could not restore unread status.');
+    }
     await fetchNotifications();
   };
 
