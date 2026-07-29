@@ -78,6 +78,10 @@ import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
+// Issue #1479: assertCharacterWritable resolves campaign membership itself, so both the
+// REST controller and every MCP tool that rolls/writes as a character can share ONE
+// authority decision instead of hand-copying `requireMember`/`requireRole` at each site.
+import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
@@ -213,6 +217,9 @@ export class CharactersService {
     // Persistence for the shared dice log (issue #415): a catalog check roll lands in the
     // same feed as a manual /roll, so DM and players see one authoritative result.
     private readonly rolls: RollsService,
+    // Issue #1479: assertCharacterWritable's membership half — the same service the
+    // controller already uses, injected here so the seam can live in one place.
+    private readonly access: CampaignAccessService,
   ) {}
 
   /** Issue #421: id-only sheet invalidation so encounter clients refetch without an encounterId. */
@@ -271,6 +278,28 @@ export class CharactersService {
   }
 
   /**
+   * Issue #1479: the single seam for "may this caller roll/write as this character",
+   * shared by the REST controller AND both MCP tools that mutate the shared dice log on
+   * a character's behalf (`roll_check`, `saving_throw`). Each of those call sites used to
+   * hand-roll its own membership check via `requireMember(..., { write: true })` — which
+   * only asserts the CAMPAIGN accepts writes, not that the CALLER has write authority — so
+   * a viewer (or a player who does not own the target character) could roll a check for
+   * any character in the campaign and inject arbitrary text into the shared, persisted
+   * dice log under that character's name. This resolves PLAYER-OR-ABOVE campaign
+   * membership (viewers are rejected outright) and then narrows to dm-or-owner via
+   * `assertCanWrite`, so a member who does not own the target character still gets a 403.
+   */
+  async assertCharacterWritable(
+    characterId: number,
+    user: RequestUser,
+  ): Promise<{ row: typeof characters.$inferSelect; role: Role }> {
+    const row = await this.getRowOrThrow(characterId);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    this.assertCanWrite(row, user, role);
+    return { row, role };
+  }
+
+  /**
    * Resolve the campaign's RuleSystemAdapter (issue #535). `levelUp` reads the adapter's
    * `maxLevel` so the ceiling is sourced from the rule system (5e=20, 13th Age=10, an uncapped
    * OSR/Open Legend game=Infinity) instead of a hardcoded 5e `20`. Same resolution pattern as
@@ -309,6 +338,11 @@ export class CharactersService {
    */
   async rollCheck(id: number, input: CheckRollRequest, user: RequestUser, role: Role): Promise<CheckRollResponse> {
     const row = await this.getRowOrThrow(id);
+    // Issue #1479: this was the one write path in this file that skipped the dm-or-owner
+    // gate every other character mutation asserts. Kept HERE (not only at the callers'
+    // shared `assertCharacterWritable` seam) so `rollCheck` is safe against any future
+    // caller too — same defense-in-depth pattern as `resolveCheckRequest` above.
+    this.assertCanWrite(row, user, role);
     const adapter = await this.adapterForCampaign(row.campaignId);
     const character = toDomain(row);
     const def = findCheckInCatalog(adapter, character, input.checkId);

@@ -112,14 +112,74 @@ describe('character roll catalog (e2e)', () => {
     expect(feed.body.some((r: { id: number }) => r.id === res.body.roll.id)).toBe(true);
   });
 
-  it('viewer (any campaign member) may roll a check — not gated to dm/owner', async () => {
+  // Issue #1479: this endpoint used to be gated only by `requireMember(..., { write:
+  // true })`, which asserts the CAMPAIGN accepts writes, not that the CALLER has write
+  // authority over THIS character — any campaign member (including a read-only viewer)
+  // could roll as any character and inject arbitrary `consequence` text into the shared,
+  // persisted dice log under that character's name. dm-or-owner is now required, same as
+  // every other character write.
+  it('a viewer may not roll a check for a character — 403, nothing persisted to the dice log (#1479)', async () => {
     const server = ctx.app.getHttpServer();
-    const ok = await request(server)
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=50`).set(dm);
+    const res = await request(server)
       .post(`/api/v1/characters/${characterId}/checks/roll`)
       .set(viewer)
       .send({ checkId: 'skill:Stealth' });
-    expect(ok.status).toBe(201);
-    expect(ok.body.roll.rollerUserId).toBe('dev:v-1');
+    expect(res.status).toBe(403);
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=50`).set(dm);
+    expect(after.body.map((r: { id: number }) => r.id)).toEqual(before.body.map((r: { id: number }) => r.id));
+  });
+
+  it('a player who does not own the character may not roll a check for it — 403, nothing persisted (#1479)', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'other-player' };
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=50`).set(dm);
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/checks/roll`)
+      .set(otherPlayer)
+      .send({ checkId: 'skill:Stealth' });
+    expect(res.status).toBe(403);
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=50`).set(dm);
+    expect(after.body.map((r: { id: number }) => r.id)).toEqual(before.body.map((r: { id: number }) => r.id));
+  });
+
+  it('the owning player may still roll their own character — 201 regression guard (#1479)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/checks/roll`)
+      .set(owner)
+      .send({ checkId: 'skill:Stealth' });
+    expect(res.status).toBe(201);
+    expect(res.body.roll.rollerUserId).toBe('dev:owner-1');
+  });
+
+  it('the dm may roll a check for any character, including one they do not own — 201 (#1479)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'skill:Stealth' });
+    expect(res.status).toBe(201);
+    expect(res.body.roll.rollerUserId).toBe('dev:dm-1');
+  });
+
+  it('consequence text is attributed to the acting user, not silently under the character name (#1479)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'skill:Stealth', consequence: 'A guard turns toward the noise.' });
+    expect(res.status).toBe(201);
+    // The label still carries the character's name (public, transparent breakdown) and
+    // the consequence text rides along on it (issue #415's documented contract)...
+    expect(res.body.roll.label).toContain('Aldra · Stealth');
+    expect(res.body.roll.label).toContain('A guard turns toward the noise.');
+    // ...but the PERSISTED ROW records the real acting user distinctly from the
+    // character, so the table can always tell who actually supplied that text — it is
+    // never silently attributed to the character itself.
+    expect(res.body.roll.rollerUserId).toBe('dev:dm-1');
+    expect(res.body.roll.rollerName).toBe('dm-1');
+    expect(res.body.roll.rollerName).not.toBe('Aldra');
   });
 
   it('an unknown check id is a 404', async () => {

@@ -15,6 +15,8 @@ import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.ser
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
+import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
 
@@ -48,7 +50,8 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
-    const charactersService = new CharactersService(orm, audit, revisions, events, rolls);
+    const access = new CampaignAccessService(orm, new RoleResolver(orm));
+    const charactersService = new CharactersService(orm, audit, revisions, events, rolls, access);
     return { orm, encountersService, charactersService, audit };
   }
 

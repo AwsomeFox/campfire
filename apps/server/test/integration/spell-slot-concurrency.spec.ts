@@ -8,6 +8,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
+import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
 import { fromJsonText } from '../../src/common/json';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -45,7 +47,8 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
-    const service = new CharactersService(orm, audit, revisions, events, rolls);
+    const access = new CampaignAccessService(orm, new RoleResolver(orm));
+    const service = new CharactersService(orm, audit, revisions, events, rolls, access);
     return { orm, service };
   }
 
