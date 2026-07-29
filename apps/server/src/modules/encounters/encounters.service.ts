@@ -5833,7 +5833,7 @@ export class EncountersService {
     if (!row) throw new NotFoundException('Formation not found'); return { ok: true };
   }
 
-  async previewTokenBatch(encounterId: number, input: { placements: Array<{ combatantId: number; x: number; y: number }> }, user: RequestUser, role: Role) {
+  async previewTokenBatch(encounterId: number, input: { placements: Array<{ combatantId: number; x: number; y: number }>; mapAspect: number }, user: RequestUser, role: Role) {
     if (role !== 'dm') throw new ForbiddenException('Only dm may batch-place tokens');
     const encounter = await this.getRowOrThrow(encounterId); this.assertMutable(encounter);
     // Abandoned previews are never replayable after a short operator window.
@@ -5848,7 +5848,7 @@ export class EncountersService {
     // never turn "Place all" into overlapping tokens by bypassing the UI planner.
     const sizeCells: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
     const cellPercent = Math.max(1, encounter.gridSize ?? 5);
-    const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+    const aspect = input.mapAspect;
     const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
     const radius = (row: { tokenSize: string | null }) => (sizeCells[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
     const requested = input.placements.map(p => ({ ...p, radius: radius(byId.get(p.combatantId)!) }));
@@ -5866,7 +5866,7 @@ export class EncountersService {
     const before = input.placements.map(p => { const r = byId.get(p.combatantId)!; return { id: r.id, tokenX: r.tokenX, tokenY: r.tokenY, tokenSize: r.tokenSize }; });
     const fingerprint = encounterOpFingerprint(input);
     const previewToken = randomUUID();
-    this.db.insert(encounterTokenBatches).values({ encounterId, campaignId: encounter.campaignId, actorId: user.id, previewToken, fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(input.placements), createdAt: nowIso() }).run();
+    this.db.insert(encounterTokenBatches).values({ encounterId, campaignId: encounter.campaignId, actorId: user.id, previewToken, fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText({ placements: input.placements, mapAspect: input.mapAspect }), createdAt: nowIso() }).run();
     return { previewToken, included: input.placements, omitted: [], conflicts: [], expiresAt: null };
   }
 
@@ -5884,7 +5884,8 @@ export class EncountersService {
     }
     if (batch.status !== 'previewed') throw new ConflictException('Token batch is no longer applicable');
     const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []);
-    const plan = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.planJson, []);
+    const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });
+    const plan = batchPlan.placements;
     const result = { batchId: batch.id, undoToken: batch.previewToken, placements: plan };
     this.db.transaction(tx => {
       for (const slice of before) { const r = tx.select().from(combatants).where(eq(combatants.id, slice.id)).get(); if (!r || r.tokenX !== slice.tokenX || r.tokenY !== slice.tokenY || r.tokenSize !== slice.tokenSize) throw new ConflictException('Token positions changed; refresh preview'); }
@@ -5895,7 +5896,7 @@ export class EncountersService {
       const selected = new Set(plan.map(p => p.combatantId));
       const liveById = new Map(live.map(row => [row.id, row]));
       const cellPercent = Math.max(1, encounter.gridSize ?? 5);
-      const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+      const aspect = batchPlan.mapAspect;
       const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
       const batchSizes: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
       const radius = (row: { tokenSize: string | null }) => (batchSizes[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
@@ -5932,7 +5933,7 @@ export class EncountersService {
       return { ok: true, idempotent: true };
     }
     if (batch.status !== 'applied') throw new ConflictException('Token batch cannot be undone');
-    const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []); const after = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.afterJson, []);
+    const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []); const after = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.afterJson, []); const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });
     this.db.transaction(tx => {
       for (const p of after) {
         const row = tx.select().from(combatants).where(eq(combatants.id, p.combatantId)).get();
@@ -5942,7 +5943,7 @@ export class EncountersService {
       const live = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const byId = new Map(live.map(row => [row.id, row]));
       const cellPercent = Math.max(1, encounter.gridSize ?? 5);
-      const aspect = encounter.gridCellHeight && encounter.gridSize ? encounter.gridCellHeight / encounter.gridSize : 1;
+      const aspect = batchPlan.mapAspect;
       const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
       const radius = (size: string | null) => ({ tiny:.5, small:1, medium:1, large:2, huge:3, gargantuan:4 }[size ?? 'medium'] ?? 1) * cellPercent / 2;
       for (let i = 0; i < before.length; i++) {

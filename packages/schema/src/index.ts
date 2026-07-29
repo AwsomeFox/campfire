@@ -9824,6 +9824,10 @@ export const TokenBatchPlacement = z.object({
 export type TokenBatchPlacement = z.infer<typeof TokenBatchPlacement>;
 export const TokenBatchPreviewRequest = z.object({
   placements: z.array(TokenBatchPlacement).min(1).max(100),
+  // Percent token coordinates use independent map width/height axes. The client
+  // supplies the currently rendered map height / width so the server can persist
+  // and replay the same physical geometry for apply and undo.
+  mapAspect: z.number().finite().positive().max(100),
 });
 export type TokenBatchPreviewRequest = z.infer<typeof TokenBatchPreviewRequest>;
 export const TokenBatchApply = z.object({

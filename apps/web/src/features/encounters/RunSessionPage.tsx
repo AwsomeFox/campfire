@@ -1917,11 +1917,11 @@ export default function RunSessionPage() {
   const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
   // individual PATCHes: either every token lands or the roster remains unchanged.
-  const batchMoveTokens = useCallback(async (placements: Array<{ combatantId: number; x: number; y: number }>) => {
-    const intentKey = JSON.stringify(placements);
+  const batchMoveTokens = useCallback(async (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => {
+    const intentKey = JSON.stringify({ placements, mapAspect });
     let intent = tokenBatchApplyIntents.current.get(intentKey);
     if (!intent) {
-      const preview = await api.post<{ previewToken: string }>(`${API}/encounters/${eid}/token-batches/preview`, { placements });
+      const preview = await api.post<{ previewToken: string }>(`${API}/encounters/${eid}/token-batches/preview`, { placements, mapAspect });
       intent = { previewToken: preview.previewToken, idempotencyKey: newOperationId() };
       tokenBatchApplyIntents.current.set(intentKey, intent);
     }
@@ -3114,7 +3114,7 @@ export function BattleMap({
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
-  onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>) => Promise<{ undoToken: string }>;
+  onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
   onUndoTokenBatch?: (undoToken: string) => Promise<void>;
   onUnplaceToken: (combatantId: number) => void;
   onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
@@ -3383,11 +3383,10 @@ export function BattleMap({
     () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
     [surfaceW, surfaceH, imgNatural],
   );
-  // Percent coordinates are normalized to map width. Calibrated cells carry the
-  // authoritative height/width ratio; otherwise use the actual rendered map.
-  const tokenPlanningAspect = (gridOn && encounter.gridCellHeight && gridSize)
-    ? encounter.gridCellHeight / gridSize
-    : mapRect && mapRect.width > 0 ? mapRect.height / mapRect.width : 1;
+  // Percent coordinates use independent map-width/map-height axes. This actual
+  // rendered height/width ratio is persisted with every batch preview so server
+  // preview, apply, and undo validate the same physical footprint geometry.
+  const tokenPlanningAspect = mapRect && mapRect.width > 0 ? mapRect.height / mapRect.width : 1;
 
   // Grid calibration (issue #417): resolve the persisted grid fields into ONE normalized
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
@@ -3996,7 +3995,7 @@ export function BattleMap({
         const group = translateGroup(encounter.combatants, selectedTokenIds, gesture.tokenId, pt, gridOn ? Math.max(1, gridSize ?? 5) : 5, tokenPlanningAspect);
         // Player movement remains a single permitted token. A DM multi-drag is one
         // server-authoritative atomic batch, never a partial PATCH loop.
-        if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y }))).then(result => {
+        if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
           setTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
         }).catch(error => onError(error instanceof Error ? error.message : 'Unable to move selected tokens'));
         else onMoveToken(gesture.tokenId, pt.x, pt.y);
@@ -5406,7 +5405,7 @@ export function BattleMap({
                     catch (error) { onError(error instanceof Error ? error.message : 'Unable to plan formation'); return; }
                     if (!onBatchTokens) return;
                     if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
-                    void onBatchTokens(plan).then(result => { setTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                    void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                   }}>{kind === 'sides' ? 'Party / enemy sides' : `${kind[0].toUpperCase()}${kind.slice(1)}`}</button>)}
                   <details>
                     <summary className="cf-chip" style={{ cursor: 'pointer' }}>Selected tokens</summary>
@@ -5434,7 +5433,7 @@ export function BattleMap({
                       if (!plan.length) throw new Error('No selected tokens match this formation');
                       if (!onBatchTokens) return;
                       if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
-                      void onBatchTokens(plan).then(result => { setTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                      void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                     } catch (error) { onError(error instanceof Error ? error.message : 'Invalid saved formation'); }
                   }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}>×</button></span>)}
                 </div>
@@ -5454,7 +5453,7 @@ export function BattleMap({
                           // never quietly places only a prefix of the tray.
                           const plan = planCollisionFreePlacement(encounter.combatants, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect);
                           if (!onBatchTokens) return;
-                          void onBatchTokens(plan.map(item => ({ combatantId: item.id, x: item.x, y: item.y }))).then(result => {
+                          void onBatchTokens(plan.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
                             setTokenBatchUndo(result.undoToken); announce(`${plan.length} tokens placed with collision-free spacing`);
                           }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place all tokens'));
                         } catch (error) {
