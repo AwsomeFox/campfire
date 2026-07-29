@@ -191,6 +191,24 @@ describe('allowlist projection (#586)', () => {
     expect((out.data.timelineCalendar as Record<string, unknown>).currentDate).toBe('');
   });
 
+  it('withholds encounter-time NPC allegiance from a pristine publish module', () => {
+    const raw = rawPayload();
+    raw.encounters = [{
+      id: 1,
+      campaignId: 1,
+      name: 'Ended fight',
+      status: 'ended',
+      combatants: [{ id: 1, encounterId: 1, kind: 'npc', npcId: 1, npcDispositionSnapshot: 'hostile', name: 'Bandit', hpMax: 10 }],
+    }];
+
+    const publish = projectExport(raw, resolveExportPolicy('publish')).data.encounters as Array<Record<string, unknown>>;
+    expect(publish[0].status).toBe('preparing');
+    expect((publish[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBeUndefined();
+
+    const handoff = projectExport(raw, resolveExportPolicy('handoff')).data.encounters as Array<Record<string, unknown>>;
+    expect((handoff[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBe('hostile');
+  });
+
   it("session-zero lines/veils are participant-authored and follow the player-content option", () => {
     const withheld = projectExport(rawPayload(), resolveExportPolicy('publish')).data.sessionZero as Record<string, unknown>;
     expect(withheld.lines).toBeUndefined();
