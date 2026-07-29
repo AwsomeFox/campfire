@@ -220,7 +220,78 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
       actionName: 'Fireball',
       actorCombatantId: 42,
     });
+
+    // The trusted labels stay on the confirmation for the DM, but must not be forwarded to the
+    // strict apply_action MCP schema when that confirmation is approved.
+    const approved = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'approve', confirmationId: queue.body[0].id });
+    expect(approved.status).toBe(201);
+    expect(approved.body.result.isError).toBe(true); // the intentionally synthetic chain is unknown
+    expect(approved.body.result.text).not.toContain('Unrecognized key');
     retain.mockRestore();
+  });
+
+  it('#1451 review: a DM approval executes an enriched apply_action confirmation with only its strict tool args', async () => {
+    const campaignId = await armed('Approve Enriched Action Confirmation');
+    const driver = h.ctx.app.get(AiDriverService);
+    const action = {
+      name: 'Practice Strike',
+      kind: 'melee',
+      toHit: '',
+      damage: '1 bludgeoning',
+      notes: '',
+      spec: {
+        mode: 'save',
+        save: { ability: 'DEX', dc: { kind: 'fixed', dc: 1 } },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'any' },
+        outcomes: { failure: { damage: [{ flat: 1, type: 'bludgeoning' }] }, success: { halfDamage: true } },
+      },
+    };
+    const actor = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Actor', stats: { DEX: 10 }, ac: 12, hpCurrent: 10, hpMax: 10, ownerUserId: 'ai-eval-player', actions: [action] });
+    const target = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Target', stats: { DEX: 10 }, ac: 12, hpCurrent: 10, hpMax: 10, ownerUserId: 'other-player' });
+    expect(actor.status).toBe(201);
+    expect(target.status).toBe(201);
+    const encounter = await request(h.server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Practice', hidden: false });
+    expect(encounter.status).toBe(201);
+    const actorCombatantId = encounter.body.combatants.find((combatant: { characterId: number }) => combatant.characterId === actor.body.id).id;
+    const targetCombatantId = encounter.body.combatants.find((combatant: { characterId: number }) => combatant.characterId === target.body.id).id;
+    const preview = await request(h.server)
+      .post(`/api/v1/encounters/${encounter.body.id}/actions/resolve`)
+      .set(dm)
+      .send({ actorCombatantId, actionIndex: 0, targetIds: [targetCombatantId], commit: false });
+    expect(preview.status).toBe(200);
+
+    driver.setCollaborative(campaignId, true);
+    h.script({
+      text: 'Hold the practice strike for review.',
+      toolCalls: [{ id: 'c-approve', name: 'apply_action', arguments: { encounterId: encounter.body.id, chainId: preview.body.chainId } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'hold that strike' });
+
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queue.body[0].args).toMatchObject({
+      encounterId: encounter.body.id,
+      chainId: preview.body.chainId,
+      actionName: 'Practice Strike',
+      actorCombatantId,
+    });
+    const approved = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'approve', confirmationId: queue.body[0].id });
+    expect(approved.status).toBe(201);
+    expect(approved.body.result.isError).toBe(false);
   });
 
   it('#1451: rejecting a collaborative apply_action confirmation releases its temporary chain retention', async () => {

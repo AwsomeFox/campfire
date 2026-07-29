@@ -6090,7 +6090,14 @@ export class AiDriverService {
 
     const seatPrincipal = this.seatPrincipal(campaignId);
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
-    const res = await seatToolset.call(pending.tool, pending.args);
+    // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
+    // labels are not part of the executable MCP schema. Keep this boundary explicit instead
+    // of relying on the action resolver to ignore surplus caller-facing fields.
+    const executionArgs =
+      pending.tool === 'apply_action'
+        ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
+        : pending.args;
+    const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
     if (res.isError) this.releaseRetainedActionChain(session, pending);
