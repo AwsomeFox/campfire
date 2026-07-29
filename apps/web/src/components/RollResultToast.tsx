@@ -94,7 +94,6 @@ export function RollResultToast({
       <Btn
         type="button"
         ghost
-        density="xs"
         aria-label={t('dice.dismissRollToast')}
         onClick={dismiss}
         className="cf-dismiss-target cf-roll-result-toast__dismiss"
