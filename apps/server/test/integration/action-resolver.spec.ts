@@ -1553,7 +1553,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(declarations.some((row) => row.id === declaration.chainId)).toBe(true);
   });
 
-  it('#1451 review (Codex): promoting a preview for collaborative confirmation also reserves the declaration cap', () => {
+  it('#1451 review (Codex): promoting a preview for collaborative confirmation also reserves and audits the declaration cap', async () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed();
     const now = Date.now();
     for (let i = 0; i < 200; i++) {
@@ -1587,5 +1587,12 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(declarations).toHaveLength(200);
     expect(declarations.some((row) => row.id === 'chain-promotion-cap-0')).toBe(false);
     expect(declarations.some((row) => row.id === preview.chainId)).toBe(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    const evicted = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.declaration_evicted')))
+      .all();
+    expect(evicted.some((entry) => String(entry.detail).includes('chain-promotion-cap-0'))).toBe(true);
   });
 });
