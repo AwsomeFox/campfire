@@ -19,6 +19,7 @@ import { AiTransparencyNote } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { TermHelp } from '../../components/TermHelp';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const POPOVER_GAP = 8;
 const VIEWPORT_MARGIN = 12;
@@ -82,7 +83,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
           style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
           aria-label={t('aiOnboarding.badge.driverAria')}
         >
-          <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.driver')}
+          <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.driver')}
         </Link>
         <TermHelp termId="driver" />
       </span>
@@ -103,7 +104,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
         aria-label={t('aiOnboarding.badge.coDmAria')}
         onClick={() => setOpen((v) => !v)}
       >
-        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.coDm')}
+        <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.coDm')}
       </button>
       <TermHelp termId="coDm" />
       {open && (

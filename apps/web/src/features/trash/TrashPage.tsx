@@ -19,7 +19,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
-import { ENTITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Restore route base + display label per trashed entity type. Route is `/<base>/:id/restore`. */
 const TYPE_META: Record<TrashedEntityType, { label: string; route: string; icon: string }> = {
@@ -136,7 +136,7 @@ export default function TrashPage() {
                   style={{ borderBottom: '1px solid var(--color-accent-900, rgba(255,255,255,0.06))' }}
                 >
                   <span aria-hidden className="flex text-[var(--color-neutral-400)]">
-                    <GameIcon slug={meta.icon} size={20} />
+                    <GameIcon slug={meta.icon} size={UI_ICON_SIZE.md} />
                   </span>
                   <span className="flex-1 min-w-0">
                     <span className="flex items-baseline gap-2 flex-wrap">
@@ -146,9 +146,9 @@ export default function TrashPage() {
                     <span className="text-muted text-[11.5px] block mt-0.5">Deleted {formatDate(item.deletedAt)}</span>
                   </span>
                   {canDmWrite && (
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs shrink-0"
+                    className="text-xs shrink-0"
                     onClick={() => void restore(item)}
                     disabled={restoringId === key}
                   >

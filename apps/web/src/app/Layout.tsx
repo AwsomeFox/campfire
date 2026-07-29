@@ -53,6 +53,7 @@ import {
 } from '../lib/connectionSync';
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import { SafetyHoldBar } from '../components/SafetyHoldBar';
+import { onPendingProposalsBadgeBump, onPendingProposalsBadgeSet, onInboxCountBadgeSet } from '../lib/proposalsBadgeBus';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -60,6 +61,7 @@ import {
   type NavGroup,
   type NavItem,
 } from './campaignNav';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
   if (campaignId === undefined) return <>{children}</>;
@@ -524,13 +526,16 @@ function LayoutContent() {
   // Issue #437: live promote/demote — refresh /me when this user's campaign role
   // changes over SSE (and fan out to other tabs). Keeps the current route.
   // Issue #637: reuse the same stream for live-encounter chrome refresh.
-  // Issue #1640: live revocation — this campaign's stream just 403'd, which happens the
-  // moment this user is removed (or the campaign is trashed, #867). Unlike a role change,
-  // there is no membership left to re-render chrome from — show the SAME "lost access"
-  // screen the stale-access effect below already renders for "navigated into a campaign
-  // you don't have access to", rather than leaving this tab live on a page whose every
-  // subsequent request would now 403. refreshAuth/refreshCampaigns also run so the
-  // dashboard and nav are correct the moment "Back to your campaigns" is used.
+  // Issue #1640 (widened by #1707): live loss of access — this campaign's stream just
+  // terminated with a proven, non-retryable connect failure: 403 the moment this user is
+  // removed, or 404 the moment the campaign itself is trashed (a still-intact membership row
+  // resolves a role, so `assertLifecycleAccess` 404s rather than 403s a member — see
+  // `useMembershipLiveSync.ts`'s `onRevoked` doc for why both land on this same callback).
+  // Unlike a role change, there is no membership left to re-render chrome from — show the
+  // SAME "lost access" screen the stale-access effect below already renders for "navigated
+  // into a campaign you don't have access to", rather than leaving this tab live on a page
+  // whose every subsequent request would now fail the same way. refreshAuth/refreshCampaigns
+  // also run so the dashboard and nav are correct the moment "Back to your campaigns" is used.
   useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined, {
     onEncounterChange: () => void refreshLiveEncounter(),
     onReconnect: () => void refreshLiveEncounter(),
@@ -654,6 +659,38 @@ function LayoutContent() {
     prevProposalFiledCountRef.current = liveActivity.proposalFiledCount;
     if (delta > 0 && isDm) setPendingProposals((n) => n + delta);
   }, [liveActivity.proposalFiledCount, isDm]);
+
+  // Same immediate-bump idea (issue #1646), for a producer with no SSE channel: the
+  // inbox sweep control files proposals via a plain REST POST and stays on /inbox, so
+  // without this the badge would only catch up on the next route change.
+  // Two channels: an immediate delta for mocked/legacy responses, and an absolute
+  // count re-fetched after real sweeps so concurrent races don't over/under-count.
+  useEffect(() => {
+    if (!isDm) return;
+    return onPendingProposalsBadgeBump((delta, bumpCampaignId) => {
+      if (bumpCampaignId !== campaignId) return;
+      setPendingProposals((n) => n + delta);
+    });
+  }, [isDm, campaignId]);
+
+  useEffect(() => {
+    if (!isDm) return;
+    return onPendingProposalsBadgeSet((total, sourceCampaignId) => {
+      if (sourceCampaignId !== campaignId) return;
+      setPendingProposals(total);
+    });
+  }, [isDm, campaignId]);
+
+  // Same staleness problem as the proposals badge above, for the inbox count itself
+  // (issue #1679 review): a sweep resolves items while the DM stays on /inbox, which
+  // changes none of this badge's own re-fetch dependencies (campaignId/isDm/pathname).
+  useEffect(() => {
+    if (!isDm) return;
+    return onInboxCountBadgeSet((total, sourceCampaignId) => {
+      if (sourceCampaignId !== campaignId) return;
+      setInboxCount(total);
+    });
+  }, [isDm, campaignId]);
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign
@@ -1057,16 +1094,16 @@ function LayoutContent() {
       {campaignId !== undefined && (
         <nav className="cf-tabbar">
           <NavLink to={`/c/${campaignId}`} end className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="campfire" size={20} /></span>Home
+            <span className="ico"><GameIcon slug="campfire" size={UI_ICON_SIZE.md} /></span>Home
           </NavLink>
           <NavLink to={`/c/${campaignId}/quests`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="scroll-unfurled" size={20} /></span>Quests
+            <span className="ico"><GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.md} /></span>Quests
           </NavLink>
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="shield" size={20} /></span>Party
+            <span className="ico"><GameIcon slug="shield" size={UI_ICON_SIZE.md} /></span>Party
           </NavLink>
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="quill-ink" size={20} /></span>{t('nav.notes')}
+            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
           </NavLink>
           {liveEncounter ? (
             <NavLink
@@ -1076,7 +1113,7 @@ function LayoutContent() {
               aria-label={t('nav.liveEncounterTab', { round: liveEncounter.round })}
             >
               <span className="ico cf-tabbar-live-indicator">
-                <GameIcon slug="crossed-swords" size={20} />
+                <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.md} />
               </span>
               {t('nav.live')}
             </NavLink>

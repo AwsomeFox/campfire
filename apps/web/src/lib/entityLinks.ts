@@ -303,10 +303,13 @@ export function notificationHref(notification: Notification): string {
       return notification.entityType === 'character' && validId(notification.entityId)
         ? entityHref(campaignId, { type: 'character', id: notification.entityId })
         : `/c/${campaignId}/characters`;
-    // Issue #1640: unlike every other case here, the campaign this notification names is
-    // one the recipient no longer belongs to — routing there would just bounce them straight
-    // back off it (the Layout "lost access" screen). Send them home directly instead.
+    // Issue #1640 (also #1707 — campaign_trashed): unlike every other case here, the
+    // campaign this notification names is one the recipient no longer belongs to — routing
+    // there would just bounce them straight back off it (the Layout "lost access" screen).
+    // Send them home directly instead. campaign_trashed shares the same reasoning: the
+    // campaign itself is gone, not just this member's seat.
     case 'removed_from_campaign':
+    case 'campaign_trashed':
       return '/';
     case 'added_to_campaign':
     default:

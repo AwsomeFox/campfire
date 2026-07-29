@@ -2753,6 +2753,7 @@ export const InboxSweepItemResult = z.object({
   entityId: Id.nullable(),
   proposalId: Id.nullable(),
   reason: z.string().min(1),
+  body: z.string().optional(),
 });
 export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
 
@@ -2768,6 +2769,8 @@ export const InboxSweepJob = z.object({
   itemsProposed: z.number().int().nonnegative(),
   itemsSkipped: z.number().int().nonnegative(),
   itemsErrored: z.number().int().nonnegative(),
+  /** Number of proposals actually created in this sweep (excludes recovered prior rows). */
+  itemsNewlyProposed: z.number().int().nonnegative().optional(),
   detail: z.string(),
   createdBy: z.string(),
   createdAt: z.string(),
@@ -3040,6 +3043,16 @@ export const NotificationType = z.enum([
   // the client reaction differs: a role change re-renders chrome in place, a revocation must
   // move the user off any page scoped to that campaign (see MEMBERSHIP_NOTIFICATION_TYPES).
   'removed_from_campaign',
+  // Issue #1707: the CAMPAIGN itself was trashed (not one member's role or seat) — the sibling
+  // gap #1653/#1640 didn't reach. `removed_from_campaign` fires per-user; this fires once for
+  // every member (via notifyCampaign), because trash removes everyone's access at once, not
+  // one member's. Its own type rather than reusing `removed_from_campaign` for the same reason
+  // that one has its own type rather than reusing `added_to_campaign`: the client already
+  // branches on `NotificationType` for icon/copy/routing (see NotificationsBell.tsx,
+  // entityLinks.ts), and "your campaign was deleted" is a different fact from "you personally
+  // were removed" even though both end at the same redirect. See MEMBERSHIP_NOTIFICATION_TYPES
+  // for why it still drives the same `membershipChanged` discriminator.
+  'campaign_trashed',
   // Issue #819: exclusive character seat transferred away from (or onto) this member.
   'character_reassigned',
   'session_scheduled',
@@ -3089,10 +3102,36 @@ export type NotificationType = z.infer<typeof NotificationType>;
  * route scoped to that campaign must navigate away, not just re-render. Both still belong in
  * this same list because the account-wide `membershipChanged` discriminator below only needs
  * to answer "is `/me` possibly stale", not which of the two happened.
+ *
+ * `campaign_trashed` (issue #1707) belongs here for the same reason `removed_from_campaign`
+ * does: `/me`'s memberships list already excludes trashed campaigns (`auth.service.ts`'s
+ * `isNull(campaigns.deletedAt)` join), so trashing a campaign makes `/me` stale for every one
+ * of its members at once, not just the actor who trashed it.
  */
 export const MEMBERSHIP_NOTIFICATION_TYPES = [
   'added_to_campaign',
   'removed_from_campaign',
+  'campaign_trashed',
+] as const satisfies readonly NotificationType[];
+
+/**
+ * Notification types that must stay visible/actionable even after their `campaignId` is
+ * trashed (issue #1707). Every notification READ path (`listForUser`, `unreadSummary`,
+ * `markRead`, `markUnread`, `markReadBulk`, `markUnreadBulk` — see notifications.service.ts)
+ * joins against `campaigns` and drops rows whose campaign is trashed, so old activity about a
+ * now-dead campaign (a stale `recap_posted`, say) doesn't clutter the bell with dead links.
+ * That rule is correct for ordinary activity, but `campaign_trashed` IS the announcement that
+ * the campaign just died — hiding it the instant it's written (which happens after the SAME
+ * request stamps `deletedAt`, so by the time anyone polls, the campaign is already trashed)
+ * would silently defeat the exact backstop this type exists to drive: the account-wide
+ * `membershipChanged` poll would never see it, and a row nobody can ever list or mark read
+ * would inflate the unread badge forever with no way to clear it. A single canonical list
+ * (mirroring MEMBERSHIP_NOTIFICATION_TYPES's own reasoning) so a query added later doesn't
+ * silently reintroduce the hidden-forever failure mode at one call site while the others stay
+ * fixed.
+ */
+export const CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES = [
+  'campaign_trashed',
 ] as const satisfies readonly NotificationType[];
 
 export const Notification = z.object({
@@ -3155,7 +3194,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, removed_from_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
+  'access', // added_to_campaign, removed_from_campaign, campaign_trashed, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -3192,6 +3231,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   comment_reply: 'comments',
   added_to_campaign: 'access',
   removed_from_campaign: 'access',
+  campaign_trashed: 'access',
   character_reassigned: 'access',
   session_scheduled: 'schedule',
   session_rsvp: 'schedule',

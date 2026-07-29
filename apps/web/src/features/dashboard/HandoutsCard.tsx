@@ -19,6 +19,7 @@ import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 // Kept local until every consumer has rebuilt its generated schema declaration.
 type MetadataDraft = Pick<Attachment, 'title' | 'caption' | 'altText' | 'creator' | 'sourceUrl' | 'license' | 'rights' | 'attribution'>;
@@ -194,7 +195,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                     </div>
                   )}
                   <div style={{ marginTop: 2 }}>
-                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
+                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
                   <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
                     <a
@@ -232,12 +233,12 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                   </div>
                 </div>
                 {canDmWrite && (
-                  <Btn ghost className="!min-h-0 !py-1 text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
+                  <Btn density="xs" ghost className="text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
                 )}
                 {canDmWrite && (
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 text-[11px]"
+                    className="text-[11px]"
                     disabled={busyId === a.id}
                     onClick={() => void toggleReveal(a)}
                     title={a.hidden ? 'Warn before revealing the raw handout file' : undefined}

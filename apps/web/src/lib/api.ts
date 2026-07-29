@@ -153,7 +153,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     headers,
     body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
   };
-  const budgetKind = apiBudgetKind(method, fetchInit);
+  const budgetKind = apiBudgetKind(method, path, fetchInit);
   const isRead = budgetKind === 'read';
   if (isRead) noteReadConnecting();
 

@@ -39,6 +39,7 @@ import {
   timerArmed,
   type UndoSnapshot,
 } from './undoSnackbarState';
+import { UIIcon } from './UIIcon';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
 export function UndoSnackbar({
@@ -212,7 +213,7 @@ export function UndoSnackbar({
           onClick={() => onExpire()}
           disabled={busy}
         >
-          ✕
+          <UIIcon name="close" size="sm" />
         </button>
       </div>
     </div>

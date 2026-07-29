@@ -24,6 +24,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, API } from '../../lib/api';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { useAnnounce } from '../../components/Announcer';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
@@ -37,6 +38,7 @@ import {
   scheduleNotificationDisplayBody,
   scheduleNotificationDisplayTitle,
 } from '../../lib/scheduleNotificationCopy';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /**
  * Reports whether the viewport is below the desktop breakpoint (768px), so the
@@ -193,7 +195,11 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    // Issue #1707: campaign_trashed shares the same "you lost access to this campaign"
+    // concept as removed_from_campaign, so it reuses its icon (matches the padlock the
+    // Layout lost-access screen already uses).
     case 'removed_from_campaign':
+    case 'campaign_trashed':
       return 'padlock';
     case 'character_reassigned':
       return 'meeple';
@@ -830,12 +836,11 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
         width: 36,
         height: 36,
         color: 'var(--color-text)',
-        fontSize: 18,
         lineHeight: 1,
         border: '1px solid var(--color-divider)',
       }}
     >
-      ✕
+      <UIIcon name="close" size="sm" />
     </button>
   );
 }
@@ -1156,7 +1161,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
               }}
             >
               <span className="flex leading-none pt-0.5 text-[var(--color-neutral-300)]">
-                <GameIcon slug={typeIcon(notification.type)} size={16} />
+                <GameIcon slug={typeIcon(notification.type)} size={UI_ICON_SIZE.sm} />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5 flex-wrap">

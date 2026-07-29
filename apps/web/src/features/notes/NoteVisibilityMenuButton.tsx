@@ -10,7 +10,7 @@ import { Chip, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
 import { useAnnounce } from '../../components/Announcer';
-import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
+import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import {
   NOTE_VISIBILITY_GROUP_LABEL,
   NOTE_VISIBILITY_HELP,
@@ -55,7 +55,7 @@ export function NoteVisibilityMenuButton({
     label: (
       <span className="flex flex-col gap-0.5 min-w-0">
         <span className="inline-flex items-center gap-1.5 font-medium">
-          <GameIcon slug={visMeta[value].slug} size={12} /> {visMeta[value].label}
+          <GameIcon slug={visMeta[value].slug} size={UI_ICON_SIZE.xs} /> {visMeta[value].label}
         </span>
         <span className="text-[10px] text-slate-400 font-normal leading-snug">
           {NOTE_VISIBILITY_HELP[value]}
@@ -80,7 +80,7 @@ export function NoteVisibilityMenuButton({
         triggerText={
           <Chip variant={meta.chip}>
             <span className="inline-flex items-center gap-1">
-              <GameIcon slug={meta.slug} size={12} /> {meta.label}
+              <GameIcon slug={meta.slug} size={UI_ICON_SIZE.xs} /> {meta.label}
             </span>
           </Chip>
         }

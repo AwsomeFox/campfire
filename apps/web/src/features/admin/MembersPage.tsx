@@ -837,7 +837,7 @@ function GuestDmGrantsCard({
           </p>
         </div>
 
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={createGrant} disabled={creating || selectedUserId === ''}>
+        <Btn density="xs" className="text-xs" onClick={createGrant} disabled={creating || selectedUserId === ''}>
           {creating ? 'Granting…' : 'Grant temporary DM'}
         </Btn>
       </div>
@@ -1114,7 +1114,7 @@ function MembersCard({
     <Card className="space-y-2.5" data-testid="members-card">
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Members</p>
-        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" {...addMemberButtonProps}>
+        <Btn density="xs" className="text-xs ml-auto" {...addMemberButtonProps}>
           + Add member
         </Btn>
       </div>
@@ -1367,7 +1367,7 @@ function MemberRow({
       </div>
       <div className="flex-1" />
       <select
-        className="cf-select !min-h-0 !py-1 text-xs"
+        className="cf-select text-xs cf-density-xs"
         style={{ width: 96 }}
         value={member.role}
         disabled={savingRole || member.primaryOwner}
@@ -1399,7 +1399,7 @@ function MemberRow({
         </label>
       )}
       <select
-        className="cf-select !min-h-0 !py-1 text-xs"
+        className="cf-select text-xs cf-density-xs"
         style={{ width: 130 }}
         value={character?.id ?? ''}
         disabled={savingChar || charactersLoading || charactersUnavailable || !!pendingTransfer}
@@ -1573,9 +1573,9 @@ function AddMemberForm({
           <label htmlFor={searchId} className="block text-[10px] font-bold uppercase tracking-wide text-secondary">
             {ADD_MEMBER_SEARCH_LABEL}
           </label>
-          <TextInput
+          <TextInput density="xs"
             id={searchId}
-            className="!min-h-0 !py-2 text-sm"
+            className="text-sm"
             placeholder="Search by username or display name…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -1608,7 +1608,7 @@ function AddMemberForm({
           </label>
           <select
             id={roleId}
-            className="cf-select !min-h-0 !py-2 text-sm"
+            className="cf-select text-sm cf-density-compact"
             value={role}
             aria-describedby={roleHelpId}
             onChange={(e) => setRole(e.target.value as Role)}
@@ -1623,17 +1623,17 @@ function AddMemberForm({
         </div>
       </div>
       <div className="flex gap-2 justify-end">
-        <Btn
+        <Btn density="xs"
           ref={cancelRef}
           ghost
-          className="!min-h-0 !py-1.5 text-xs"
+          className="text-xs"
           onClick={onCancel}
           disabled={saving}
           aria-label={ADD_MEMBER_CANCEL_LABEL}
         >
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={add} disabled={saving || !selected}>
+        <Btn density="xs" className="text-xs" onClick={add} disabled={saving || !selected}>
           Add
         </Btn>
       </div>

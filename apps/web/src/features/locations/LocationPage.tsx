@@ -52,6 +52,7 @@ import {
   mutationsEnabledForRoute,
   RouteBoundLoadSequencer,
 } from '../../lib/routeBoundRecord';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -573,7 +574,7 @@ export default function LocationPage() {
                 allowSecrets={isDm && Boolean(location.dmSecret)}
               />
               {isDm && location.status === 'unexplored' && (
-                <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
+                <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players</span></Chip>
               )}
               {canDmWrite && (
                 <div className="cf-print-hide"><EntitySecrecyControls
@@ -590,7 +591,7 @@ export default function LocationPage() {
                 /></div>
               )}
               {canDmWrite && nextStatus && location.status !== 'unexplored' && (
-                <Btn className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+                <Btn density="xs" className="cf-print-hide text-xs"
                   disabled={statusSaving}
                   onClick={() => setStatus(nextStatus)}
                   title={NEXT_STATUS_LABEL[location.status]}
@@ -600,9 +601,9 @@ export default function LocationPage() {
               )}
               {!isDm && role !== null && (
                 <div className="cf-print-hide flex gap-2 shrink-0">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     onClick={startPropose}
                     title="Suggest a change to the DM for approval"
                   >
@@ -612,7 +613,7 @@ export default function LocationPage() {
               )}
               {canDmWrite && (
                 <div className="cf-print-hide flex gap-2 shrink-0">
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                  <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                     ✎ Edit
                   </Btn>
                   <StatusMenuButton
@@ -663,7 +664,7 @@ export default function LocationPage() {
                     {location.name}
                   </span>
                   {canDmWrite && !movingPin && (
-                    <Btn ghost className="absolute bottom-2 right-2 !min-h-0 !py-1 text-[10px]" onClick={startMovePin}>
+                    <Btn density="xs" ghost className="absolute bottom-2 right-2 text-[10px]" onClick={startMovePin}>
                       Move pin (DM)
                     </Btn>
                   )}
@@ -773,7 +774,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-purple-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-purple-400"><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.xs} /> {npc.name}</p>
                         <p className="text-xs text-slate-400">{npc.role || 'NPC'}</p>
                       </a>
                     ))}
@@ -787,7 +788,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} /> {q.title}</p>
                         <QuestStatusBadge status={q.status} className="mt-1" />
                       </a>
                     ))}
@@ -809,7 +810,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="treasure-map" size={13} /> {child.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} /> {child.name}</p>
                         <p className="text-xs text-slate-400">{child.kind || 'Location'}</p>
                       </a>
                     ))}
@@ -849,7 +850,7 @@ export default function LocationPage() {
         <Card className="cf-print-editor space-y-3" data-testid="location-editor-fields">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
-              <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+              <GameIcon slug="light-bulb" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
             </p>
           )}
           {saveError && <ErrorNote message={saveError} />}
@@ -910,7 +911,7 @@ export default function LocationPage() {
               as="textarea"
               label={
                 <span className="inline-flex items-center gap-1">
-                  <GameIcon slug="padlock" size={11} /> {LOCATION_DM_SECRET_LABEL}
+                  <GameIcon slug="padlock" size={UI_ICON_SIZE.xs} /> {LOCATION_DM_SECRET_LABEL}
                 </span>
               }
               labelClassName="text-[10px] text-amber-400 font-bold uppercase tracking-wide"
@@ -923,7 +924,7 @@ export default function LocationPage() {
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
-              <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+              <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
                 {deleting ? 'Deleting…' : 'Delete location'}
               </Btn>
             ) : (
@@ -931,14 +932,14 @@ export default function LocationPage() {
             )}
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
+              <Btn density="xs" ghost className="text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

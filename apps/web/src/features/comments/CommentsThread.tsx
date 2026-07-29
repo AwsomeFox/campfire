@@ -304,9 +304,9 @@ export function CommentsThread({
               )}
               {replyHasMore && (
                 <div className="ml-5 pl-4">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 text-xs"
+                    className="text-xs"
                     onClick={() => void loadMoreReplies(root.id)}
                     disabled={loadingMoreReplies}
                   >
@@ -338,9 +338,9 @@ export function CommentsThread({
         </ul>
         {hasMoreThreads && (
           <div className="pt-1">
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1 text-xs"
+              className="text-xs"
               onClick={() => void loadMoreThreads()}
               disabled={loadingMoreThreads}
             >
@@ -490,10 +490,10 @@ function CommentCard({
             required
           />
           <div className="flex gap-2 justify-end">
-            <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(false)}>
+            <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)}>
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1 text-xs" onClick={save} disabled={saving}>
+            <Btn density="xs" className="text-xs" onClick={save} disabled={saving}>
               {saving ? 'Saving…' : conflict ? 'Save resolution' : 'Save'}
             </Btn>
           </div>
@@ -716,7 +716,7 @@ function ComposeBox({
             label={COMMENT_SPEAKER_LABEL}
             labelClassName="text-xs text-slate-400"
             className="field min-w-0 sm:max-w-[18rem]"
-            selectClassName="cf-select !min-h-0 !py-1.5 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={selectedCharacterId != null ? String(selectedCharacterId) : ''}
             onChange={(e) => {
               const next = Number(e.target.value);
@@ -741,12 +741,12 @@ function ComposeBox({
           </Field>
         )}
         {onCancel && (
-          <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={onCancel}>
+          <Btn density="xs" ghost className="text-xs" onClick={onCancel}>
             Cancel
           </Btn>
         )}
-        <Btn
-          className="!min-h-0 !py-1 text-xs self-end sm:self-auto"
+        <Btn density="xs"
+          className="text-xs self-end sm:self-auto"
           onClick={post}
           disabled={posting || !body.trim() || (inCharacter && selectedCharacterId == null)}
         >

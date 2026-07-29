@@ -28,6 +28,7 @@ import { MetricsCard } from './MetricsCard';
 import { RequireServerAdmin } from './RequireServerAdmin';
 import { GameIcon } from '../../components/GameIcon';
 import { ActorRoleBadge } from './ActorRoleBadge';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -165,7 +166,7 @@ function QuickLinksCard() {
             to={l.to}
             className="cf-inset cf-card-hover p-3 flex items-start gap-2.5"
           >
-            <span className="leading-none text-[var(--color-accent)]"><GameIcon slug={l.icon} size={20} /></span>
+            <span className="leading-none text-[var(--color-accent)]"><GameIcon slug={l.icon} size={UI_ICON_SIZE.md} /></span>
             <span>
               <span className="block text-sm font-semibold text-white">{l.label}</span>
               <span className="block text-[11px] text-secondary">{l.hint}</span>
@@ -180,7 +181,7 @@ function QuickLinksCard() {
 function AdminOverview() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="cog" size={20} /> Server admin</h1>
+      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="cog" size={UI_ICON_SIZE.md} /> Server admin</h1>
       <MetricsCard />
       <div className="grid md:grid-cols-2 gap-5">
         <StorageSummaryCard />

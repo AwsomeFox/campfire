@@ -6,12 +6,13 @@ import { useTranslation } from 'react-i18next';
  */
 import { TokensCard } from './TokensCard';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function TokensPage() {
   useTranslation();
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="key" size={20} /> API tokens</h1>
+      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="key" size={UI_ICON_SIZE.md} /> API tokens</h1>
       <TokensCard />
     </div>
   );

@@ -19,6 +19,7 @@ import {
   AuditEntryRow,
   auditEntryToCsvRow,
 } from './campaignAuditDisplay';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type AuditFilters = {
   action: string;
@@ -253,7 +254,7 @@ export default function CampaignAuditPage() {
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       <div className="flex flex-wrap items-center gap-3 justify-between">
         <h1 className="flex items-center gap-2 text-xl font-extrabold text-white m-0">
-          <GameIcon slug="scroll-unfurled" size={20} /> Audit log
+          <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.md} /> Audit log
         </h1>
         <Link to={`/c/${cid}/members`} className="text-[11px] text-secondary hover:text-white">
           ← Members
@@ -389,10 +390,10 @@ export default function CampaignAuditPage() {
             </VirtualList>
             </div>
             {hasMore && (
-              <Btn
+              <Btn density="xs"
                 ghost
                 type="button"
-                className="!min-h-0 !py-1.5 text-xs w-full"
+                className="text-xs w-full"
                 onClick={() => void loadPage(filters, nextCursor, true)}
                 disabled={loadingMore}
               >

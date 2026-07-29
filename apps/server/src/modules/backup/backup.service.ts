@@ -1488,7 +1488,7 @@ export class BackupService implements OnApplicationBootstrap {
         // The earlier integrity probe intentionally accepts any SQLite database
         // with a users table. A missing/older attachments schema is still an
         // invalid v3 archive, not an internal server failure.
-        if (err instanceof Database.SqliteError) {
+        if (err instanceof Database.SqliteError || (err as any)?.code?.startsWith('SQLITE_') || (err as any)?.name === 'SqliteError') {
           throw new BadRequestException('Invalid backup archive — database attachment schema could not be read');
         }
         throw err;

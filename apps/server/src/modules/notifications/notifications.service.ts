@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
+  CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
   MEMBERSHIP_NOTIFICATION_TYPES,
   NOTIFICATION_CATEGORIES,
   QuietHours,
@@ -212,8 +213,25 @@ export class NotificationsService implements OnApplicationBootstrap {
     await this.dispatch([recipient], campaignId, event, actor?.id ?? null);
   }
 
-  /** Notify every campaign member except the actor (e.g. "recap posted"). */
-  async notifyCampaign(campaignId: number, actor: RequestUser | null, event: NotificationEvent): Promise<void> {
+  /**
+   * Notify every campaign member except the actor (e.g. "recap posted").
+   *
+   * `opts.bypassBlockFilter` (issue #1707) mirrors the `notifyUser(..., null, ...)` pattern
+   * `MembersService.remove()` already uses for `removed_from_campaign` (hardened after Codex
+   * review on #1653): this is an access-control signal, not sender-authored content, so a
+   * recipient who has blocked the acting DM must still learn their campaign just vanished —
+   * the #597 "a block stops a notification" rule exists to stop a sender's own content from
+   * reaching someone who blocked them, not to hide the fact that access itself changed. The
+   * actor is still excluded from the RECIPIENT list as normal (they already know synchronously
+   * from their own request); only the block-filter step of `dispatch` is skipped, by passing a
+   * null `actorUserId` there while still passing the real `actor` above for exclusion.
+   */
+  async notifyCampaign(
+    campaignId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+    opts?: { bypassBlockFilter?: boolean },
+  ): Promise<void> {
     try {
       const members = await this.db
         .select({ userId: campaignMembers.userId })
@@ -221,7 +239,8 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((m) => m.userId).filter((id) => actorId === null || id !== actorId);
-      await this.dispatch(recipients, campaignId, event, actor?.id ?? null);
+      const dispatchActorId = opts?.bypassBlockFilter ? null : (actor?.id ?? null);
+      await this.dispatch(recipients, campaignId, event, dispatchActorId);
     } catch (err) {
       this.logger.warn(`notifyCampaign failed for campaign ${campaignId}: ${String(err)}`);
     }
@@ -710,6 +729,24 @@ export class NotificationsService implements OnApplicationBootstrap {
     return or(isNull(notifications.actorUserId), notInArray(notifications.actorUserId, blockedActorIds))!;
   }
 
+  /**
+   * Issue #1707 — the trashed-campaign hiding rule every read path below applies (a stale
+   * `recap_posted` about a now-dead campaign shouldn't clutter the bell) must NOT also hide
+   * {@link CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES}: that type IS the announcement that the
+   * campaign just died, written in the same request that stamps `deletedAt`, so a plain
+   * `isNull(campaigns.deletedAt)` filter would make it invisible to every reader from the
+   * moment it is created — silently defeating the account-wide backstop it exists to drive
+   * (see that constant's doc comment for the full "stuck badge" failure mode this avoids).
+   * One helper, applied everywhere `campaigns.deletedAt` gates notification visibility, so a
+   * query added later can't reintroduce the hidden-forever bug at just one call site.
+   */
+  private static campaignVisibleForNotifications(): SQL {
+    return or(
+      isNull(campaigns.deletedAt),
+      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES]),
+    )!;
+  }
+
   async listForUser(
     user: RequestUser,
     opts: ListNotificationsOptions = {},
@@ -722,7 +759,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 
     const conditions = [
       eq(notifications.userId, userId),
-      isNull(campaigns.deletedAt),
+      NotificationsService.campaignVisibleForNotifications(),
       NotificationsService.quarantinedCommentFilter(),
     ];
     const blocked = await blockedTargetsOf(this.db, user.id, null);
@@ -795,7 +832,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const conditions: SQL[] = [
       eq(notifications.userId, userId),
       isNull(notifications.readAt),
-      isNull(campaigns.deletedAt),
+      NotificationsService.campaignVisibleForNotifications(),
       NotificationsService.quarantinedCommentFilter(),
     ];
     if (blocked.size > 0) conditions.push(NotificationsService.blockedActorFilter([...blocked]));
@@ -821,7 +858,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       .select({ notification: notifications })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), isNull(campaigns.deletedAt)))
+      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
       .limit(1);
     const row = joined?.notification;
     if (!row || userId === null || row.userId !== userId) {
@@ -842,7 +879,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       .select({ notification: notifications })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), isNull(campaigns.deletedAt)))
+      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
       .limit(1);
     const row = joined?.notification;
     if (!row || userId === null || row.userId !== userId) {
@@ -871,12 +908,15 @@ export class NotificationsService implements OnApplicationBootstrap {
     const conditions = [
       eq(notifications.userId, userId),
       isNull(notifications.readAt),
-      exists(
-        this.db
-          .select({ one: sql`1` })
-          .from(campaigns)
-          .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
-      ),
+      or(
+        inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES]),
+        exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(campaigns)
+            .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
+        ),
+      )!,
     ];
 
     if (opts.ids && opts.ids.length > 0) {
@@ -910,12 +950,15 @@ export class NotificationsService implements OnApplicationBootstrap {
     const conditions = [
       eq(notifications.userId, userId),
       isNotNull(notifications.readAt),
-      exists(
-        this.db
-          .select({ one: sql`1` })
-          .from(campaigns)
-          .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
-      ),
+      or(
+        inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES]),
+        exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(campaigns)
+            .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
+        ),
+      )!,
     ];
 
     if (opts.ids && opts.ids.length > 0) {

@@ -330,19 +330,19 @@ export function GenerateMapPanel({
                 style={{ ...selectStyle, width: '100%' }}
               />
             </label>
-            <Btn
+            <Btn density="xs"
               ghost
               data-testid="generate-map-copy-seed"
-              className="!min-h-0 !py-1.5 text-[11px]"
+              className="text-[11px]"
               disabled={!preview}
               onClick={() => void copySeed()}
               title="Copy the seed to reproduce this map later"
             >
               {copied ? 'Copied' : 'Copy seed'}
             </Btn>
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1.5 text-[11px]"
+              className="text-[11px]"
               disabled={busy}
               onClick={() => void runPreview()}
               title="Re-render the preview with the seed above"
@@ -431,10 +431,10 @@ export function GenerateMapPanel({
         >
           {previewing ? 'Generating…' : 'Regenerate'}
         </Btn>
-        <Btn
+        <Btn density="xs"
           ghost
           data-testid="generate-map-download"
-          className="!min-h-0 !py-1.5 text-[12px]"
+          className="text-[12px]"
           disabled={!preview || busy}
           onClick={downloadSvg}
           title="Download the previewed SVG"
@@ -443,7 +443,7 @@ export function GenerateMapPanel({
         </Btn>
         <span style={{ flex: 1 }} />
         {onCancel && (
-          <Btn ghost className="!min-h-0 !py-1.5 text-[12px]" disabled={using} onClick={onCancel}>
+          <Btn density="xs" ghost className="text-[12px]" disabled={using} onClick={onCancel}>
             Cancel
           </Btn>
         )}

@@ -18,11 +18,14 @@ import { Link } from 'react-router-dom';
 import type { CoDmDraftResult, CoDmDraftTarget } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, TextArea } from '../../components/ui';
+import type { UiDensity } from '../../components/density';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
+import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useDraftWithAiAvailable } from './useDraftWithAiAvailable';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
 const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
@@ -83,7 +86,14 @@ export function DraftWithAiButton({
   campaignId,
   target,
   label = 'Draft with AI',
-  className = '!min-h-0 !py-1.5 text-xs',
+  className = 'text-xs',
+  // Issue #1692 review (Codex): this trigger is shared across both dense per-row
+  // contexts (an arc card's own "Draft beat with AI") AND header/page-level triggers
+  // that are sometimes someone's SOLE way to reach the function (StorylinesPage's
+  // empty-state header button) — the UiDensity contract explicitly forbids xs for
+  // the latter. Default to compact (safe everywhere); callers in a genuinely dense
+  // row opt into xs explicitly instead of it being baked in for everyone.
+  density = 'compact',
   arcId,
   disabled = false,
   disabledTitle,
@@ -96,6 +106,7 @@ export function DraftWithAiButton({
   target: CoDmDraftTarget;
   label?: string;
   className?: string;
+  density?: UiDensity;
   /** When target is `beat`, pin drafted beat(s) to this arc (#1307). */
   arcId?: number;
   disabled?: boolean;
@@ -122,6 +133,7 @@ export function DraftWithAiButton({
       {showTrigger && (
         <Btn
           ghost
+          density={density}
           className={`${className}${disabled ? ' opacity-50 cursor-not-allowed' : ''}`}
           onClick={() => {
             if (disabled) return;
@@ -133,7 +145,7 @@ export function DraftWithAiButton({
           aria-disabled={disabled || undefined}
           title={disabled ? disabledTitle : undefined}
         >
-          <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
+          <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
         </Btn>
       )}
       {open && (
@@ -232,7 +244,7 @@ function DraftWithAiModal({
         <div className="flex items-start justify-between gap-2">
           <div>
             <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
-              <GameIcon slug="sparkles" size={16} /> {TARGET_TITLE[target]}
+              <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> {TARGET_TITLE[target]}
             </h2>
             <p id={descriptionId} className="text-muted text-xs m-0 mt-1">
               Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for
@@ -241,12 +253,12 @@ function DraftWithAiModal({
           </div>
           <button
             type="button"
-            className="text-secondary hover:text-white text-lg leading-none disabled:opacity-50"
+            className="text-secondary hover:text-white leading-none disabled:opacity-50"
             onClick={onClose}
             aria-label="Close AI drafting dialog"
             disabled={busy}
           >
-            ×
+            <UIIcon name="close" size="sm" />
           </button>
         </div>
 
@@ -278,9 +290,9 @@ function DraftWithAiModal({
               <div className="flex items-center gap-2.5" role="group" aria-labelledby={quantityLabelId}>
                 <span id={quantityLabelId} className="text-xs text-slate-400">Number of {plural}</span>
                 <div className="flex items-center gap-1.5">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 !px-2.5 text-xs"
+                    className="!px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.max(1, n - 1))}
                     disabled={busy || count <= 1}
                     aria-label={`Decrease number of ${plural}`}
@@ -297,9 +309,9 @@ function DraftWithAiModal({
                   >
                     {count}<span className="sr-only"> {count === 1 ? noun : plural}</span>
                   </output>
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 !px-2.5 text-xs"
+                    className="!px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.min(10, n + 1))}
                     disabled={busy || count >= 10}
                     aria-label={`Increase number of ${plural}`}
@@ -327,11 +339,13 @@ function DraftWithAiModal({
               </div>
             )}
 
+            {/* compact, not xs (issue #1692 review — Codex): this dialog's Cancel/
+                Draft pair is its only submission control, not a dense inline row. */}
             <div className="flex items-center justify-end gap-2">
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose} disabled={busy}>
+              <Btn density="compact" ghost className="text-xs" onClick={onClose} disabled={busy}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
+              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
                 {busy ? 'Drafting…' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
               </Btn>
             </div>
@@ -375,7 +389,7 @@ function DraftResultCard({
         </ul>
       )}
       <div className="flex items-center justify-end gap-2">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
+        <Btn density="xs" ghost className="text-xs" onClick={onClose}>
           Close
         </Btn>
         <Link to={`/c/${campaignId}/proposals`} className="cf-btn cf-density-compact text-xs no-underline">

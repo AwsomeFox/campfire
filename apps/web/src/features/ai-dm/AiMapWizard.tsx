@@ -16,8 +16,10 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, TextArea } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useAuth } from '../../app/auth';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** DM-only entry button; opens the wizard modal. Renders nothing for non-DMs. */
 export function AiMapButton({
@@ -46,7 +48,7 @@ export function AiMapButton({
         aria-expanded={open}
         aria-controls={dialogId}
       >
-        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />AI map
+        <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />AI map
       </button>
       {open && (
         <AiMapModal
@@ -202,16 +204,16 @@ function AiMapModal({
       >
         <div className="flex items-start justify-between gap-2">
           <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
-            <GameIcon slug="sparkles" size={16} /> Generate a map with AI
+            <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> Generate a map with AI
           </h2>
           <button
             type="button"
-            className="text-secondary hover:text-white text-lg leading-none disabled:opacity-50"
+            className="text-secondary hover:text-white leading-none disabled:opacity-50"
             onClick={onClose}
             aria-label="Close AI map dialog"
             disabled={busy !== 'idle'}
           >
-            ×
+            <UIIcon name="close" size="sm" />
           </button>
         </div>
 
@@ -252,9 +254,9 @@ function AiMapModal({
 
         <div className="flex items-center gap-2.5">
           <span className="text-xs text-slate-400">Previews</span>
-          <Btn ghost className="!min-h-0 !py-1 !px-2.5 text-xs" onClick={() => setCount((n) => Math.max(1, n - 1))} disabled={busy !== 'idle' || count <= 1} aria-label="Fewer previews">−</Btn>
+          <Btn density="xs" ghost className="!px-2.5 text-xs" onClick={() => setCount((n) => Math.max(1, n - 1))} disabled={busy !== 'idle' || count <= 1} aria-label="Fewer previews">−</Btn>
           <output className="text-sm text-white min-w-6 text-center tabular-nums">{count}</output>
-          <Btn ghost className="!min-h-0 !py-1 !px-2.5 text-xs" onClick={() => setCount((n) => Math.min(4, n + 1))} disabled={busy !== 'idle' || count >= 4} aria-label="More previews">+</Btn>
+          <Btn density="xs" ghost className="!px-2.5 text-xs" onClick={() => setCount((n) => Math.min(4, n + 1))} disabled={busy !== 'idle' || count >= 4} aria-label="More previews">+</Btn>
         </div>
 
         {/* Cost / readiness before generating */}
@@ -290,7 +292,7 @@ function AiMapModal({
                 {p.warnings.map((w, i) => (
                   <p key={i} className="text-[10px] text-amber-300 m-0">⚠ {w}</p>
                 ))}
-                <Btn className="!min-h-0 !py-1 text-[11px] w-full" onClick={() => void attach(p)} disabled={busy !== 'idle'}>
+                <Btn density="xs" className="text-[11px] w-full" onClick={() => void attach(p)} disabled={busy !== 'idle'}>
                   {busy === 'attaching' ? 'Attaching…' : 'Attach (hidden)'}
                 </Btn>
               </div>
@@ -307,18 +309,18 @@ function AiMapModal({
         )}
 
         <div className="flex items-center justify-end gap-2 pt-1">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose} disabled={busy !== 'idle'}>
+          <Btn density="xs" ghost className="text-xs" onClick={onClose} disabled={busy !== 'idle'}>
             Cancel
           </Btn>
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => void checkReadiness()} disabled={busy !== 'idle' || !prompt.trim()}>
+          <Btn density="xs" ghost className="text-xs" onClick={() => void checkReadiness()} disabled={busy !== 'idle' || !prompt.trim()}>
             {busy === 'readiness' ? 'Checking…' : 'Check cost/readiness'}
           </Btn>
           {job ? (
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void regenerate()} disabled={busy !== 'idle'}>
+            <Btn density="xs" className="text-xs" onClick={() => void regenerate()} disabled={busy !== 'idle'}>
               {busy === 'generating' ? 'Working…' : 'Regenerate'}
             </Btn>
           ) : (
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void generate()} disabled={busy !== 'idle' || !prompt.trim()}>
+            <Btn density="xs" className="text-xs" onClick={() => void generate()} disabled={busy !== 'idle' || !prompt.trim()}>
               {busy === 'generating' ? 'Generating…' : `Generate ${count}`}
             </Btn>
           )}

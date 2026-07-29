@@ -172,7 +172,7 @@ export function GetAMapPanel({
             candidates with cost/readiness + honest provenance. Available to any DM (falls
             back to the offline procedural renderer when no image provider is configured). */}
         {isDm && <AiMapButton campaignId={campaignId} onAttached={onImported} />}
-        {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
+        {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" density="xs" />}
       </div>
 
       {showPurposeControls && (
@@ -268,7 +268,7 @@ export function GetAMapPanel({
                   onError={onError}
                 />
               ) : (
-                <Btn ghost className="!min-h-0 !py-1 text-[11px]" onClick={() => setImportSource(s)}>
+                <Btn density="xs" ghost className="text-[11px]" onClick={() => setImportSource(s)}>
                   Import a downloaded map…
                 </Btn>
               )}
@@ -369,15 +369,15 @@ function ImportForm({
         required
       />
       <div style={{ display: 'flex', gap: 6 }}>
-        <Btn
-          className="!min-h-0 !py-1 text-[11px]"
+        <Btn density="xs"
+          className="text-[11px]"
           disabled={!canSubmit}
           onClick={() => void submit()}
           title={submitDisabledReason ?? undefined}
         >
           {busy ? 'Importing…' : 'Import map'}
         </Btn>
-        <Btn ghost className="!min-h-0 !py-1 text-[11px]" disabled={busy} onClick={onCancel}>
+        <Btn density="xs" ghost className="text-[11px]" disabled={busy} onClick={onCancel}>
           Cancel
         </Btn>
       </div>

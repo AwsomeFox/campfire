@@ -11,13 +11,14 @@ import { RequireServerAdmin } from './RequireServerAdmin';
 import { OidcCard } from './OidcCard';
 import { TokensCard } from './TokensCard';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function AdminAuthPage() {
   useTranslation();
   return (
     <RequireServerAdmin>
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="padlock" size={20} /> Auth</h1>
+        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="padlock" size={UI_ICON_SIZE.md} /> Auth</h1>
         <OidcCard />
         <TokensCard />
       </div>

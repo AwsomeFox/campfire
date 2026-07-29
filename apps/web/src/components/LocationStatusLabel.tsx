@@ -5,6 +5,7 @@
  */
 import type { Location } from '@campfire/schema';
 import { GameIcon } from './GameIcon';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 /** Display text per location exploration status. */
 export const LOCATION_STATUS_LABEL: Record<Location['status'], string> = {
@@ -20,7 +21,7 @@ export const LOCATION_STATUS_LABEL: Record<Location['status'], string> = {
 export function LocationStatusLabel({ status }: { status: Location['status'] }) {
   return (
     <span className="inline-flex items-center gap-1">
-      {status === 'current' && <GameIcon slug="position-marker" size={11} reserveSpace />}
+      {status === 'current' && <GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} reserveSpace />}
       {LOCATION_STATUS_LABEL[status]}
     </span>
   );

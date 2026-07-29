@@ -52,6 +52,7 @@ import {
   validateTimelineEventDraft,
   type TimelineEventFieldErrors,
 } from './timelineFormA11y';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 interface EventDraft {
   title: string;
@@ -669,7 +670,7 @@ export default function TimelinePage() {
                       )}
                       {e.era && <span className="tag tag-outline" style={{ fontSize: 10 }}>{e.era}</span>}
                       {isDm && e.hidden && (
-                        <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players"><GameIcon slug="sight-disabled" size={11} className="inline align-text-bottom mr-1" />Hidden</span>
+                        <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Hidden</span>
                       )}
                     </div>
                     <h2

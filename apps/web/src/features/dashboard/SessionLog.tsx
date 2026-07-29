@@ -9,6 +9,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { Markdown } from '../../components/Markdown';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
 function firstLinePlain(text: string): string {
@@ -89,7 +90,7 @@ function ScheduleCard({
               color: happeningNow ? 'var(--color-accent-2-200, #f0e9ff)' : 'var(--color-accent-2-300)',
             }}
           >
-            <GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />
+            <GameIcon slug="calendar" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
             {happeningNow ? 'Happening now' : 'Next session'}
           </span>
           <span style={{ display: 'block', fontSize: happeningNow ? 14 : 13, fontWeight: happeningNow ? 600 : 400 }}>
@@ -112,7 +113,7 @@ function ScheduleCard({
           )}
           {schedule.location && (
             <span className="text-muted" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
-              <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />
+              <GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
               {schedule.location}
             </span>
           )}

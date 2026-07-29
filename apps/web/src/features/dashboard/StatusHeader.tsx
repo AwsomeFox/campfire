@@ -11,8 +11,10 @@ import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../component
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
 import { CampaignCover } from '../../components/CampaignCover';
+import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import { useSaveFeedback } from '../../components/SaveFeedback';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -151,7 +153,12 @@ export function StatusHeader({
         showMonogram={false}
       />
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px', marginTop: 12 }}>
-      <h3 className="cf-page-title" style={{ margin: 0, fontSize: '1.35rem' }}>{campaign.name}</h3>
+      {/* Issue #1711: this was an <h3> wearing PageTitle's CSS class with a hand-set
+          fontSize — the Dashboard route shipped no real <h1> at all. `size="compact"`
+          is the documented variant that preserves the same 1.35rem this inline row
+          has always used (a title sharing space with session/danger/location chips,
+          not standing alone atop the page) — see PageTitle.tsx and index.css. */}
+      <PageTitle size="compact" style={{ margin: 0 }}>{campaign.name}</PageTitle>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         {liveEncounter && (
           <Link
@@ -192,7 +199,7 @@ export function StatusHeader({
               className="btn btn-ghost"
               style={{ fontSize: 12, textDecoration: 'none' }}
             >
-              <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
+              <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
             </Link>
             <TermHelp termId="cast" />
             {canDmWrite && (

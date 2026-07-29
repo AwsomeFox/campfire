@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, count, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
@@ -90,6 +90,7 @@ import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { InvitesService } from '../membership/invites.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
@@ -352,6 +353,9 @@ export class CampaignsService {
     // module a nudge afterwards — see syncProactiveWatcher. AiDmModule imports nothing that
     // leads back to CampaignsModule, so this edge is acyclic.
     private readonly aiDm: AiDmService,
+    // Issue #1707: trash() sends the account-wide `campaign_trashed` signal. NotificationsModule
+    // is a leaf module (only DbModule), so importing it here creates no cycle.
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -3188,25 +3192,63 @@ export class CampaignsService {
         campaignId: id,
         detail: 'soft-delete (trashed)',
       });
-      return;
+    } else {
+      // Suspend invites before stamping deletedAt so a concurrent preview/accept
+      // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
+      await this.invites.suspendForCampaign(id, user, 'trash');
+      const res = await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(and(eq(campaigns.id, id), isNull(campaigns.deletedAt)));
+      if (res.changes === 0) return;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.delete',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: 'soft-delete (trashed)',
+      });
     }
-
-    // Suspend invites before stamping deletedAt so a concurrent preview/accept
-    // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
-    await this.invites.suspendForCampaign(id, user, 'trash');
-    await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(eq(campaigns.id, id));
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.delete',
-      entityType: 'campaign',
-      entityId: id,
-      campaignId: id,
-      detail: 'soft-delete (trashed)',
-    });
+    // Issue #1707: this used to live ONLY in the branch above (the `else`), so trashing a
+    // campaign with `revokeInvites: true` (its own atomic transaction, returning early) never
+    // reached either the SSE teardown or the notification below — an open tab on that
+    // campaign kept a live-looking stream (no `campaign.trashed` control frame ever sent) and
+    // no member ever got the account-wide signal either. Found while fixing the sibling gap
+    // this issue is actually about; both trash paths now share this single tail so they can't
+    // diverge again.
+    //
     // Issue #867: tear down open SSE / AI narration streams so a stale tab cannot
     // keep receiving ticks for a frozen campaign. Control signal only.
     this.events.emit({ type: 'campaign.trashed', campaignId: id });
+
+    // Issue #1707: the SSE teardown above only reaches a browser that already has THIS
+    // campaign's stream open, and even then only a tab that reconnects and observes the
+    // resulting 403/404 (see useCampaignEvents.ts for why trash specifically yields 404 for a
+    // member, not 403, and how the client now treats that as terminal for this endpoint only).
+    // A tab on the dashboard, a different campaign, or /admin gets nothing from that path at
+    // all. This is the exact gap #1590/#1634/#1653 closed for role changes and membership
+    // revocation, reusing the same account-wide notification backstop — see
+    // CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES for why the usual "hide notifications about a
+    // trashed campaign" read-side rule has to make an exception for this one type, and
+    // notifyCampaign's `bypassBlockFilter` doc for why a member who has blocked the acting DM
+    // still needs this signal (it is access-control, not sender content).
+    //
+    // `existing.name` deliberately NOT interpolated into the title (matches the #1653/Codex
+    // hardening of `removed_from_campaign`, `members.service.ts#remove`): campaign names are
+    // DM-editable, and this signal bypasses the #597 block filter by design, so including
+    // actor-controlled text here would hand a blocked DM one unblockable channel to put
+    // abusive content in front of a member who specifically blocked them to avoid it. The
+    // notice stays generic; the cache invalidation is what matters.
+    await this.notifications.notifyCampaign(
+      id,
+      user,
+      {
+        type: 'campaign_trashed',
+        title: 'A campaign you were in was deleted',
+        entityType: 'campaign',
+        entityId: id,
+      },
+      { bypassBlockFilter: true },
+    );
   }
 
   /**

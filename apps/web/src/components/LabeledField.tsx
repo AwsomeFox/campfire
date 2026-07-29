@@ -21,6 +21,7 @@ import {
 } from 'react';
 import { GameIcon } from './GameIcon';
 import { TextArea, TextInput } from './ui';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 export const NPC_EDITOR_ID_PREFIX = 'npc-editor';
 export const FACTION_EDITOR_ID_PREFIX = 'faction-editor';
@@ -264,7 +265,7 @@ export function DmPrivacyGroup({
     >
       <legend id={legendId} className="text-[10px] text-amber-400 font-bold uppercase tracking-wide px-1">
         <span className="inline-flex items-center gap-1">
-          <GameIcon slug="padlock" size={11} /> DM-only privacy
+          <GameIcon slug="padlock" size={UI_ICON_SIZE.xs} /> DM-only privacy
         </span>
       </legend>
       <p id={helpId} className="m-0 text-xs text-slate-300">
@@ -301,7 +302,7 @@ export function DmPrivacyGroup({
             aria-describedby={hiddenDescribedBy}
           />
           <span className="inline-flex items-center gap-1">
-            <GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole {entityLabel}, not just the
+            <GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players (whole {entityLabel}, not just the
             secret)
           </span>
         </label>

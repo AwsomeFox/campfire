@@ -17,6 +17,7 @@ import { PageHeader, type PageHeaderSecondaryAction } from '../../components/Pag
 import { GameIcon } from '../../components/GameIcon';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { initials } from '../../lib/avatarText';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function NpcListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -146,7 +147,7 @@ export default function NpcListPage() {
       <Card className="space-y-4">
         <PageHeader
           variant="card"
-          icon={<GameIcon slug="hooded-figure" size={18} />}
+          icon={<GameIcon slug="hooded-figure" size={UI_ICON_SIZE.md} />}
           title="NPCs"
           secondaryActions={secondaryActions}
           primaryAction={
@@ -166,9 +167,9 @@ export default function NpcListPage() {
             <TextInput aria-label="NPC role" placeholder="Role (e.g. Townmaster)" value={newRole} onChange={(e) => setNewRole(e.target.value)} />
             <AudienceField value={audience} onChange={setAudience} entityLabel="NPC" name="npc-audience" />
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   closeCreating();
                   setNewName('');
@@ -179,7 +180,7 @@ export default function NpcListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createNpc}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createNpc}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>
@@ -207,7 +208,7 @@ export default function NpcListPage() {
                     <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">
                       <GameIcon
                         slug={npc.iconSlug}
-                        size={22}
+                        size={UI_ICON_SIZE.lg}
                         title={npc.name}
                         className="text-[var(--color-accent)]"
                         fallback={initials(npc.name)}
@@ -221,7 +222,7 @@ export default function NpcListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <NpcDispositionBadge disposition={npc.disposition} />
-                  {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
+                  {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
                   {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   {locationName(npc.locationId) && (
                     <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>

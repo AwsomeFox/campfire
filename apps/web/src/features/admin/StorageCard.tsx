@@ -176,7 +176,7 @@ export function StorageCard() {
           </p>
         )}
         <div className="flex gap-2 justify-end">
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void retryFsCleanup()} disabled={busy || fsPending === 0}>
+          <Btn density="xs" className="text-xs" onClick={() => void retryFsCleanup()} disabled={busy || fsPending === 0}>
             {busy ? 'Working…' : 'Retry cleanup'}
           </Btn>
         </div>
@@ -198,11 +198,11 @@ export function StorageCard() {
           </p>
         )}
         <div className="flex gap-2 justify-end">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => runCleanup(true)} disabled={busy}>
+          <Btn density="xs" ghost className="text-xs" onClick={() => runCleanup(true)} disabled={busy}>
             Preview
           </Btn>
-          <Btn
-            className="!min-h-0 !py-1.5 text-xs"
+          <Btn density="xs"
+            className="text-xs"
             onClick={() => runCleanup(false)}
             disabled={busy || orphanCount === 0}
           >
@@ -269,8 +269,8 @@ function QuotaRow({
       <td className="pr-4 text-slate-400">
         {editing ? (
           <div className="flex items-center gap-1">
-            <TextInput
-              className="!min-h-0 !py-1 text-xs w-24"
+            <TextInput density="xs"
+              className="text-xs w-24"
               placeholder="e.g. 50MB"
               value={input}
               onChange={(e) => setInput(e.target.value)}

@@ -31,6 +31,7 @@ import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
+import { UIIcon } from '../../components/UIIcon';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
@@ -44,6 +45,7 @@ import {
   type StorylineContentDraft,
 } from './StorylineContentEditor';
 import type { ConflictField } from '../../components/StaleWriteConflict';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -794,7 +796,7 @@ function ArcCard({
             target="beat"
             arcId={arc.id}
             label="Draft beat with AI"
-            className="!min-h-0 !py-1 text-xs"
+            density="xs"
           />
         )}
       </div>
@@ -1333,7 +1335,7 @@ function BeatRow({
             aria-label={`Delete beat ${beat.title}`}
             onClick={() => setConfirmingDelete(true)}
           >
-            ✕
+            <UIIcon name="close" size="xs" />
           </button>
         )}
       </div>
@@ -1388,17 +1390,17 @@ function BeatRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 22, flexWrap: 'wrap', fontSize: 12 }}>
           {beat.sessionId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'session', id: beat.sessionId })}>
-              <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
+              <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
             </Link>
           )}
           {beat.questId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'quest', id: beat.questId })}>
-              <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
+              <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
             </Link>
           )}
           {beat.encounterId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'encounter', id: beat.encounterId })}>
-              <GameIcon slug="crossed-swords" size={11} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
+              <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
             </Link>
           )}
         </div>
@@ -1477,7 +1479,7 @@ function BeatRow({
             disabled={busy}
             onClick={() => setEditingLinks(true)}
           >
-            <GameIcon slug="linked-rings" size={11} className="inline align-text-bottom mr-1" />{hasLinks ? 'Edit links' : 'Link to play'}
+            <GameIcon slug="linked-rings" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{hasLinks ? 'Edit links' : 'Link to play'}
           </button>
         ))}
 
@@ -1610,7 +1612,7 @@ function BeatRow({
                 aria-label={`Delete branch ${branch.label} from ${beat.title}`}
                 onClick={() => void removeBranch(branch)}
               >
-                ✕
+                <UIIcon name="close" size="xs" />
               </button>
             )}
             {branchErr && (

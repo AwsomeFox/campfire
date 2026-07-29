@@ -29,6 +29,7 @@ import {
   scheduleNotificationDisplayTitle,
 } from '../../lib/scheduleNotificationCopy';
 import { useNotifications } from './NotificationsBell';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 function typeIcon(type: Notification['type']): string {
   switch (type) {
@@ -44,7 +45,11 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    // Issue #1707: campaign_trashed shares the same "you lost access to this campaign"
+    // concept as removed_from_campaign, so it reuses its icon (matches the padlock the
+    // Layout lost-access screen already uses).
     case 'removed_from_campaign':
+    case 'campaign_trashed':
       return 'padlock';
     case 'character_reassigned':
       return 'meeple';
@@ -105,6 +110,7 @@ const NOTIFICATION_TYPES: { type: NotificationType; label: string }[] = [
   { type: 'note_shared', label: 'Note Shared' },
   { type: 'added_to_campaign', label: 'Added to Campaign' },
   { type: 'removed_from_campaign', label: 'Removed from Campaign' },
+  { type: 'campaign_trashed', label: 'Campaign Deleted' },
   { type: 'session_scheduled', label: 'Session Scheduled' },
   { type: 'session_rsvp', label: 'Session RSVP' },
   { type: 'quest_updated', label: 'Quest Updated' },
@@ -590,7 +596,7 @@ export default function NotificationsPage() {
             >
               {/* Type Icon */}
               <span className="flex leading-none pt-1 text-[var(--color-neutral-300)] shrink-0">
-                <GameIcon slug={typeIcon(notification.type)} size={18} />
+                <GameIcon slug={typeIcon(notification.type)} size={UI_ICON_SIZE.md} />
               </span>
 
               {/* Main Info */}

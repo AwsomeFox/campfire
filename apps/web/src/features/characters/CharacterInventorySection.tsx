@@ -100,7 +100,7 @@ export function CharacterInventorySection({
       ) : (
         <>
           {canManageCharacter && !adding && (
-            <Btn type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setAdding(true)}>
+            <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
               {t('inventory.addItem')}
             </Btn>
           )}

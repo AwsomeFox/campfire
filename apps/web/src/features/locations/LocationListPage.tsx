@@ -15,6 +15,7 @@ import { LocationStatusLabel } from '../../components/LocationStatusLabel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 function firstLine(body: string): string {
   const line = body.split('\n').find((l) => l.trim().length > 0);
@@ -175,7 +176,7 @@ export default function LocationListPage() {
       <Card className="space-y-4">
         <PageHeader
           variant="card"
-          icon={<GameIcon slug="world" size={18} />}
+          icon={<GameIcon slug="world" size={UI_ICON_SIZE.md} />}
           title="World"
           subtitle="· Locations"
           secondaryActions={secondaryActions}
@@ -208,9 +209,9 @@ export default function LocationListPage() {
               ))}
             </select>
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   closeCreating();
                   setNewName('');
@@ -221,7 +222,7 @@ export default function LocationListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>
@@ -248,7 +249,7 @@ export default function LocationListPage() {
                   />
                 ) : (
                   <div className="h-9 w-9 shrink-0 rounded-md bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center" aria-hidden>
-                    <GameIcon slug="position-marker" size={16} className="text-[var(--color-accent)]" />
+                    <GameIcon slug="position-marker" size={UI_ICON_SIZE.sm} className="text-[var(--color-accent)]" />
                   </div>
                 )}
                 <div className="flex-1 min-w-0">
@@ -256,7 +257,7 @@ export default function LocationListPage() {
                     <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={loc.name} aria-label={`Location: ${loc.name}`}>{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}><LocationStatusLabel status={loc.status} /></Chip>
                     {isDm && loc.status === 'unexplored' && (
-                      <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
+                      <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players</span></Chip>
                     )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
@@ -264,7 +265,7 @@ export default function LocationListPage() {
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
                   <span className="text-[11px] text-secondary shrink-0">
-                    <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
+                    <GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
                   </span>
                 )}
               </ListDetailLink>

@@ -7,7 +7,7 @@
     "dmOnlyHint": "The scribe inbox is only visible to the DM.",
     "noAccess": "You don't have access to this campaign",
     "inboxTitle": "Scribe inbox",
-    "inboxIntro": "Raw notes from the table. Resolve each one into the entity it belongs to — or let Claude sweep them for you.",
+    "inboxIntro": "Raw notes from the table. Resolve each one into the entity it belongs to.",
     "tabOpen": "✉️ Open",
     "tabHistory": "✅ History",
     "inboxClearTitle": "Inbox clear",
@@ -114,6 +114,23 @@
     "attachTypeAria": "Attach note to entity type",
     "noEntity": "🔗 No entity",
     "attachEntityAria": "Attach note to entity",
-    "nothingToAttach": "Nothing to attach"
+    "nothingToAttach": "Nothing to attach",
+    "inboxMcpNote": "Use Sweep inbox below to let AI review them for you, or connect your own MCP-capable assistant (like Claude) with an API token for more control — set one up in",
+    "inboxMcpNoteLinkLabel": "API tokens",
+    "sweepButton": "Sweep inbox with AI",
+    "sweepButtonBusy": "Sweeping…",
+    "sweepHint": "AI reviews every open item and either proposes a create/update or skips it with a stated reason. Nothing is written directly — every result lands as a pending proposal for you to approve.",
+    "sweepInProgress": "Sweeping the inbox — this can take a while for a lot of open items. Stay on this page until it finishes.",
+    "sweepNothingToSweep": "Nothing to sweep — the inbox is empty.",
+    "sweepFailed": "Couldn't sweep the inbox.",
+    "sweepSummary": "Swept {{total}} item(s): {{proposed}} proposed, {{skipped}} skipped, {{errored}} errored.",
+    "sweepReviewProposals": "Review filed proposals",
+    "sweepDismiss": "Dismiss",
+    "sweepNoProvider": "No AI provider is configured for this campaign.",
+    "sweepOpenAiSettings": "Open AI settings",
+    "sweepOutcomeProposed": "Proposed",
+    "sweepOutcomeSkipped": "Skipped",
+    "sweepOutcomeErrored": "Error",
+    "sweepItemFallbackLabel": "Note #{{noteId}}"
   }
 }

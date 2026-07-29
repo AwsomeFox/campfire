@@ -14,7 +14,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
 import { TermHelp } from '../../components/TermHelp';
-import { ENTITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { proposalTargetHref } from '../../lib/entityLinks';
 import {
   deriveProposalSelectionScope,
@@ -46,7 +46,7 @@ function iconFor(entityType: EntityType): string {
 function EntityTitle({ slug, children }: { slug: string; children: ReactNode }) {
   return (
     <>
-      <GameIcon slug={slug} size={15} className="inline align-text-bottom mr-1.5 text-[var(--color-accent)]" /> {children}
+      <GameIcon slug={slug} size={UI_ICON_SIZE.sm} className="inline align-text-bottom mr-1.5 text-[var(--color-accent)]" /> {children}
     </>
   );
 }
@@ -254,7 +254,7 @@ export default function ProposalsPage() {
                 onChange={(event) => setAiFilter(event.target.checked)}
                 disabled={batchBusy}
               />
-              <GameIcon slug="robot-golem" size={13} className="inline align-text-bottom mr-1" /> AI drafts only ({aiPendingCount})
+              <GameIcon slug="robot-golem" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" /> AI drafts only ({aiPendingCount})
             </label>
           )}
           {canDmWrite && (
@@ -369,10 +369,10 @@ function BatchBar({
       </label>
       {selectedCount > 0 && (
         <div className="flex items-center gap-2 ml-auto">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onReject} disabled={busy}>
+          <Btn density="xs" ghost className="text-xs" onClick={onReject} disabled={busy}>
             Reject {selectedCount}
           </Btn>
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onApprove} disabled={busy}>
+          <Btn density="xs" className="text-xs" onClick={onApprove} disabled={busy}>
             Approve {selectedCount}
           </Btn>
         </div>
@@ -515,7 +515,7 @@ function ProposalCard({
               <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>
             </p>
             {isDelete && <Chip variant="proposal">delete</Chip>}
-            {isAi && <Chip variant="ai"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> drafted by AI</span></Chip>}
+            {isAi && <Chip variant="ai"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={UI_ICON_SIZE.xs} /> drafted by AI</span></Chip>}
             <Chip variant="proposal">{proposal.proposer}</Chip>
           </div>
           <p className="text-muted text-xs m-0 mt-0.5">
@@ -558,8 +558,8 @@ function ProposalCard({
       )}
 
       {canResolve && expanded && (
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
+        <TextInput density="compact"
+          className="text-sm"
           placeholder="Optional note…"
           value={note}
           onChange={(e) => setNote(e.target.value)}
@@ -583,10 +583,10 @@ function ProposalCard({
             {editing ? 'Cancel edit' : 'Edit payload'}
           </button>
         )}
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject, false)} disabled={busy}>
+        <Btn density="xs" ghost className="text-xs" onClick={() => act(onReject, false)} disabled={busy}>
           Reject
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
+        <Btn density="xs" className="text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
           {editing ? 'Approve edited' : 'Approve'}
         </Btn>
         </>
@@ -820,7 +820,7 @@ function MyProposalCard({
       </p>
       {isDelete ? <DeleteView snapshot={proposal.snapshot} /> : <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />}
       <div className="flex items-center justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onWithdraw} disabled={busy}>
+        <Btn density="xs" ghost className="text-xs" onClick={onWithdraw} disabled={busy}>
           Withdraw
         </Btn>
       </div>
@@ -842,7 +842,7 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
     <Card density="compact" className="flex items-center justify-between gap-2 opacity-70">
       <p className="text-sm text-slate-400 m-0">
         <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>{' '}
-        {isAiProposal(proposal) && <Chip variant="ai" className="mx-1"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> AI</span></Chip>}
+        {isAiProposal(proposal) && <Chip variant="ai" className="mx-1"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={UI_ICON_SIZE.xs} /> AI</span></Chip>}
         <span className="text-secondary">· {proposal.proposer}</span>
       </p>
       <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>

@@ -18,6 +18,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
+import { UIIcon } from '../../components/UIIcon';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -216,6 +217,7 @@ import {
   type PinchGesture,
 } from './mapViewport';
 import { tokenDiameterPx } from './tokenFootprint';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -440,7 +442,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
     >
       <div className="inline-flex items-center gap-1">
         <span className="tag" style={style}>
-          <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {difficulty.label}
         </span>
         <button
@@ -452,7 +454,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
           {...detailsButtonProps}
           onClick={(e) => toggleDetails?.(e)}
         >
-          <GameIcon slug="info" size={12} aria-hidden="true" />
+          <GameIcon slug="info" size={UI_ICON_SIZE.xs} aria-hidden="true" />
         </button>
       </div>
       {open && (
@@ -589,10 +591,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {locDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Location #{encounter.locationId} (unavailable)
         </span>
       )}
@@ -601,10 +603,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {questDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Quest #{encounter.questId} (unavailable)
         </span>
       )}
@@ -613,10 +615,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {sessDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Session #{encounter.sessionId} (unavailable)
         </span>
       )}
@@ -635,7 +637,7 @@ function EncounterLinks({
       {editing && canEdit && (
         <div {...regionProps} className="flex gap-2 flex-wrap w-full mt-1">
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Location"
             value={encounter.locationId ?? ''}
             disabled={saving}
@@ -649,7 +651,7 @@ function EncounterLinks({
             ))}
           </select>
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Quest"
             value={encounter.questId ?? ''}
             disabled={saving}
@@ -663,7 +665,7 @@ function EncounterLinks({
             ))}
           </select>
           <select
-            className="cf-select !min-h-0 !py-1.5 text-xs"
+            className="cf-select text-xs cf-density-xs"
             aria-label="Session"
             value={encounter.sessionId ?? ''}
             disabled={saving}
@@ -2309,13 +2311,13 @@ export default function RunSessionPage() {
             <div className="order-first flex basis-full lg:order-none lg:basis-auto w-full lg:w-auto items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
               {/* Open synchronously from this button's click stack. The newly minted
                   #547 capability navigates only that separate window, never the DM cockpit. */}
-              <Btn ghost className="cf-target-44 text-xs" onClick={openPlayerDisplay}>
-                <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Open display
+              <Btn density="xs" ghost className="text-xs" onClick={openPlayerDisplay}>
+                <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Open display
               </Btn>
-              <Btn ghost className="cf-target-44 text-xs" onClick={copyPlayerDisplayLink}>
+              <Btn density="xs" ghost className="text-xs" onClick={copyPlayerDisplayLink}>
                 Copy link
               </Btn>
-              <Btn ghost className="cf-target-44 text-xs" onClick={reconnectPlayerDisplay}>
+              <Btn density="xs" ghost className="text-xs" onClick={reconnectPlayerDisplay}>
                 Reconnect/focus
               </Btn>
               <span
@@ -2468,9 +2470,9 @@ export default function RunSessionPage() {
             </span>
             {canDmWrite && (
               <div className="flex items-center gap-2 flex-wrap ml-auto">
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   disabled={headerBusy || riskyBlocked}
                   onClick={() => toggleEscalationHold(!encounter.escalationDieHeld)}
                 >
@@ -2484,18 +2486,18 @@ export default function RunSessionPage() {
                   placeholder="0–6"
                   style={{ width: 72, minHeight: 30, fontSize: 12 }}
                 />
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   disabled={headerBusy || riskyBlocked || escalationOverrideDraft.trim() === ''}
                   onClick={applyEscalationOverride}
                 >
                   Override
                 </Btn>
                 {encounter.escalationDieOverride != null && (
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     disabled={headerBusy || riskyBlocked}
                     onClick={clearEscalationOverride}
                   >
@@ -4423,9 +4425,9 @@ export function BattleMap({
                   aria-label="Dismiss map setup guidance"
                   onClick={onDismissGuidance}
                   className="btn btn-ghost"
-                  style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
+                  style={{ minHeight: 20, padding: '0 6px' }}
                 >
-                  <span aria-hidden="true">✕</span>
+                  <UIIcon name="close" size="xs" />
                 </button>
               </div>
               <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
@@ -5214,13 +5216,12 @@ export function BattleMap({
                             border: '1px solid rgba(15,23,42,.85)',
                             background: 'var(--color-danger, #b91c1c)',
                             color: '#fff',
-                            fontSize: 11,
                             lineHeight: 1,
                             cursor: busy ? 'default' : 'pointer',
                             zIndex: 3,
                           }}
                         >
-                          <span aria-hidden="true">×</span>
+                          <UIIcon name="close" size="xs" />
                         </button>
                       )}
                     </div>
@@ -5740,7 +5741,7 @@ function ApplyDamageBar({
         style={{ marginLeft: 'auto' }}
         data-testid="apply-damage-dismiss"
       >
-        <span aria-hidden="true">✕</span>
+        <UIIcon name="close" size="sm" />
       </button>
     </div>
   );
@@ -6023,11 +6024,10 @@ function CombatantRow({
                 background: 'transparent',
                 cursor: busy ? 'default' : 'pointer',
                 color: 'var(--color-neutral-500)',
-                fontSize: 13,
                 lineHeight: 1,
               }}
             >
-              ×
+              <UIIcon name="close" size="xs" />
             </button>
           )}
         </div>
@@ -6101,7 +6101,7 @@ function CombatantRow({
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
-              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom mr-1.5" />}
+              {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
             </span>
             <span className={kindTagClass}>
@@ -6121,7 +6121,7 @@ function CombatantRow({
                 {onUseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    className="btn btn-ghost text-[11px] cf-density-xs"
                     disabled={busy || legendaryActions.used >= legendaryActions.max}
                     onClick={onUseLegendary}
                   >
@@ -6131,7 +6131,7 @@ function CombatantRow({
                 {onReleaseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    className="btn btn-ghost text-[11px] cf-density-xs"
                     disabled={busy}
                     onClick={onReleaseLegendary}
                   >
@@ -6340,8 +6340,8 @@ function CombatantRow({
                       color: 'inherit',
                     }}
                   >
-                    <span aria-hidden="true">✕</span>
-                    </button>
+                    <UIIcon name="close" size="xs" />
+                  </button>
                 )}
               </span>
             ))}
@@ -6769,7 +6769,7 @@ function CombatantRow({
             {combatant.hpTemp != null && combatant.hpTemp > 0 && (
               <div style={{ textAlign: 'right', marginBottom: 2 }}>
                 <span className="tag tag-accent" title="Temporary HP — absorbs damage first">
-                  <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
+                  <GameIcon slug="shield" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
               </div>
             )}
@@ -6814,7 +6814,7 @@ function CombatantRow({
                   <span style={{ display: 'inline-flex', gap: 2, marginLeft: 2 }}>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
                       disabled={busy || (combatant.rpCurrent ?? 0) <= 0}
                       title="Decrease Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: -1 })}
@@ -6823,7 +6823,7 @@ function CombatantRow({
                     </button>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
                       disabled={busy || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
                       title="Increase Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: 1 })}
@@ -6897,12 +6897,12 @@ function CombatantRow({
       {canRemove && (
         <button
           className="btn btn-icon btn-ghost cf-target-44"
-          style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
+          style={{ width: 44, height: 44, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
           aria-label={`Remove ${combatant.name}`}
         >
-          <span aria-hidden="true">✕</span>
+          <UIIcon name="close" size="xs" />
         </button>
       )}
     </div>
@@ -7062,7 +7062,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
                 <li key={chainKey} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                     <span aria-hidden="true" style={{ flex: 'none' }}>
-                      {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={13} /> : '•'}
+                      {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={UI_ICON_SIZE.xs} /> : '•'}
                     </span>
                     {head.round > 0 && (
                       <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>

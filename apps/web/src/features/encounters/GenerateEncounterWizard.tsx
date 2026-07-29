@@ -25,9 +25,11 @@ import type {
 } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, Chip, ErrorNote } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { Field } from '../../components/Field';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
 
@@ -201,7 +203,7 @@ export function GenerateEncounterWizard({
     <Card className="space-y-4" data-testid="generate-encounter-wizard">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="font-bold text-white text-sm inline-flex items-center gap-2">
-          <GameIcon slug="dice-twenty-faces-twenty" size={16} /> Generate encounter
+          <GameIcon slug="dice-twenty-faces-twenty" size={UI_ICON_SIZE.sm} /> Generate encounter
         </h2>
         <Btn ghost type="button" onClick={onCancel}>
           Close
@@ -221,7 +223,7 @@ export function GenerateEncounterWizard({
             as="select"
             label="Target difficulty"
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={difficulty}
             onChange={(e) => setDifficulty(e.target.value as DifficultyBand)}
           >
@@ -237,7 +239,7 @@ export function GenerateEncounterWizard({
             as="select"
             label="Duration / shape"
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={shape}
             onChange={(e) => setShape(e.target.value as '' | EncounterShape)}
           >
@@ -360,7 +362,7 @@ export function GenerateEncounterWizard({
               optional
             />
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-              <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
@@ -368,7 +370,7 @@ export function GenerateEncounterWizard({
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {quests.map((q) => (
                   <option key={q.id} value={q.id}>
@@ -376,7 +378,7 @@ export function GenerateEncounterWizard({
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -445,7 +447,7 @@ function WarningsPanel({ preview }: { preview: EncounterPreview }) {
       {preview.warnings.map((w, i) => (
         <li key={i} className="text-xs flex items-start gap-2">
           <span className={w.severity === 'warn' ? 'text-rose-400' : 'text-slate-400'}>
-            <GameIcon slug={w.severity === 'warn' ? 'hazard-sign' : 'info'} size={12} />
+            <GameIcon slug={w.severity === 'warn' ? 'hazard-sign' : 'info'} size={UI_ICON_SIZE.xs} />
           </span>
           <span className={w.severity === 'warn' ? 'text-rose-300' : 'text-slate-400'}>{w.message}</span>
         </li>
@@ -483,13 +485,13 @@ function RosterSlotRow({
           onClick={onToggleExpand}
           aria-expanded={expanded}
         >
-          <GameIcon slug={expanded ? 'up-card' : 'card-random'} size={12} />
+          <GameIcon slug={expanded ? 'up-card' : 'card-random'} size={UI_ICON_SIZE.xs} />
           {slot.name}
         </button>
         {slot.pinned && (
           <Chip variant="active">
             <span className="inline-flex items-center gap-1">
-              <GameIcon slug="pin" size={10} /> Pinned
+              <GameIcon slug="pin" size={UI_ICON_SIZE.xs} /> Pinned
             </span>
           </Chip>
         )}
@@ -509,7 +511,7 @@ function RosterSlotRow({
                 const n = Number(ev.target.value);
                 if (Number.isFinite(n) && n >= 1) onCount(n);
               }}
-              className="cf-input !min-h-0 !py-1 !w-14 text-xs"
+              className="cf-input !w-14 text-xs cf-density-xs"
               aria-label={`Count of ${slot.name}`}
             />
           </label>
@@ -520,7 +522,7 @@ function RosterSlotRow({
             {slot.pinned ? 'Unpin' : 'Pin'}
           </Btn>
           <Btn ghost type="button" onClick={onRemove} disabled={disabled} title="Remove this slot" aria-label={`Remove ${slot.name}`}>
-            <span aria-hidden="true">✕</span>
+            <UIIcon name="close" size="xs" />
           </Btn>
         </div>
       </div>

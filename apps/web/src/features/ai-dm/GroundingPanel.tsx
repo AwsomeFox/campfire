@@ -25,6 +25,7 @@ import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys } from '../../lib/query';
 import { Btn, TextArea } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** One validated source reference as the server returns it. */
 export interface GroundingCitation {
@@ -117,7 +118,7 @@ export function GroundingPanel({ campaignId, isDm }: GroundingPanelProps) {
       aria-label={t('table.grounding.title')}
     >
       <div className="flex items-start gap-2">
-        <span className="flex text-lg"><GameIcon slug="magnifying-glass" size={18} /></span>
+        <span className="flex text-lg"><GameIcon slug="magnifying-glass" size={UI_ICON_SIZE.md} /></span>
         <div className="min-w-0">
           <p className="text-sm font-semibold text-[var(--color-text)]">
             {unverifiedCount > 0

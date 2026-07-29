@@ -18,6 +18,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
 import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function FactionListPage() {
   const { t } = useTranslation();
@@ -111,7 +112,7 @@ export default function FactionListPage() {
       <Card className="space-y-4">
         <PageHeader
           variant="card"
-          icon={<GameIcon slug="black-flag" size={18} />}
+          icon={<GameIcon slug="black-flag" size={UI_ICON_SIZE.md} />}
           title="Factions"
           primaryAction={
             canDmWrite && !creating ? (
@@ -129,9 +130,9 @@ export default function FactionListPage() {
             <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
             <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   setCreating(false);
                   setNewName('');
@@ -142,7 +143,7 @@ export default function FactionListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>
@@ -180,7 +181,7 @@ export default function FactionListPage() {
                   <Chip variant={standingVariant(faction.standing)}>
                     {formatStandingChip(faction.standing, faction.reputation, t)}
                   </Chip>
-                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
+                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                 </div>
               </ListDetailLink>

@@ -11,6 +11,7 @@ import { EntityRevealDialog, type RevealEntityKind } from './EntityRevealDialog'
 import { UndoSnackbar } from './UndoSnackbar';
 import type { RevealPreviewItem } from './entityRevealPreview';
 import { useAnnounce } from './Announcer';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 export function EntitySecrecyControls({
   entityKind,
@@ -82,9 +83,9 @@ export function EntitySecrecyControls({
           className={className ?? 'flex items-center gap-2'}
         >
           {error && <span className="text-xs text-rose-300">{error}</span>}
-          <Btn
+          <Btn density="xs"
             ghost
-            className="!min-h-0 !py-1.5 text-xs"
+            className="text-xs"
             disabled={busy}
             onClick={() => setConfirming(true)}
             title={t('secrecy.revealButton')}
@@ -94,7 +95,7 @@ export function EntitySecrecyControls({
               t('secrecy.revealButtonBusy')
             ) : (
               <>
-                <GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> {t('secrecy.revealButton')}
+                <GameIcon slug="eyeball" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> {t('secrecy.revealButton')}
               </>
             )}
           </Btn>

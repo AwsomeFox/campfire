@@ -39,6 +39,7 @@ import {
 } from '../../components/LabeledField';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { initials } from '../../lib/avatarText';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function NpcPage() {
   const { campaignId, npcId } = useParams<{ campaignId: string; npcId: string }>();
@@ -411,7 +412,7 @@ export default function NpcPage() {
                 resetKey={npc.id}
                 allowSecrets={isDm && Boolean(npc.dmSecret)}
               />
-              {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
+              {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players</span></Chip>}
               {canDmWrite && (
                 <div className="cf-print-hide flex gap-2">
                   <EntitySecrecyControls
@@ -428,16 +429,16 @@ export default function NpcPage() {
                       setNpc(updated);
                     }}
                   />
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                  <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                     ✎ Edit
                   </Btn>
                 </div>
               )}
               {!isDm && role !== null && (
                 <div className="cf-print-hide flex gap-2">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     onClick={startPropose}
                     title="Suggest a change to the DM for approval"
                   >
@@ -494,7 +495,7 @@ export default function NpcPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} /> {q.title}</p>
                         <QuestStatusBadge status={q.status} className="mt-1" />
                       </a>
                     ))}
@@ -565,7 +566,7 @@ export default function NpcPage() {
         >
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
-              <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+              <GameIcon slug="light-bulb" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
             </p>
           )}
           {saveError && (
@@ -663,11 +664,11 @@ export default function NpcPage() {
                   fallback={initials(form.name || npc.name)}
                 />
               </div>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
+              <Btn density="xs" ghost className="text-xs" onClick={() => setPickingIcon(true)}>
                 {form.iconSlug ? 'Change icon' : 'Choose icon'}
               </Btn>
               {form.iconSlug && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setForm({ ...form, iconSlug: '' })}>
+                <Btn density="xs" ghost className="text-xs" onClick={() => setForm({ ...form, iconSlug: '' })}>
                   Remove
                 </Btn>
               )}
@@ -700,7 +701,7 @@ export default function NpcPage() {
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
-              <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+              <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
                 {deleting ? 'Deleting…' : 'Delete NPC'}
               </Btn>
             ) : (
@@ -708,14 +709,14 @@ export default function NpcPage() {
             )}
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
+              <Btn density="xs" ghost className="text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

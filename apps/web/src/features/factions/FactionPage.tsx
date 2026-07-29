@@ -39,6 +39,7 @@ import {
   formatStandingChip,
   standingVariant,
 } from './standing';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function FactionPage() {
   const { t } = useTranslation();
@@ -322,7 +323,7 @@ export default function FactionPage() {
             <Chip variant={standingVariant(faction.standing)}>
               {formatStandingChip(faction.standing, faction.reputation, t)}
             </Chip>
-            {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
+            {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players</span></Chip>}
             {canDmWrite && (
               <div className="flex gap-2 ml-auto">
                 <EntitySecrecyControls
@@ -339,7 +340,7 @@ export default function FactionPage() {
                     setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
                   }}
                 />
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>
               </div>
@@ -354,7 +355,7 @@ export default function FactionPage() {
 
               {faction.goals && (
                 <Card className="space-y-2">
-                  <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="target-arrows" size={16} /> Goals</h2>
+                  <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="target-arrows" size={UI_ICON_SIZE.sm} /> Goals</h2>
                   <Markdown>{faction.goals}</Markdown>
                 </Card>
               )}
@@ -393,7 +394,7 @@ export default function FactionPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.xs} /> {npc.name}</p>
                         {npc.role && <p className="text-[11.5px] text-secondary truncate">{npc.role}</p>}
                       </a>
                     ))}
@@ -418,10 +419,10 @@ export default function FactionPage() {
                 {canDmWrite && (
                   <div className="space-y-2 pt-1">
                     <div className="flex items-center gap-2">
-                      <Btn ghost className="!min-h-0 !py-1 text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: -10 })}>
+                      <Btn density="xs" ghost className="text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: -10 })}>
                         −10
                       </Btn>
-                      <Btn ghost className="!min-h-0 !py-1 text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: 10 })}>
+                      <Btn density="xs" ghost className="text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: 10 })}>
                         +10
                       </Btn>
                     </div>
@@ -541,7 +542,7 @@ export default function FactionPage() {
             as="textarea"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug="target-arrows" size={11} /> Goals (markdown)
+                <GameIcon slug="target-arrows" size={UI_ICON_SIZE.xs} /> Goals (markdown)
               </span>
             }
             value={form.goals}
@@ -563,19 +564,19 @@ export default function FactionPage() {
             describedBy={saveError ? `${FACTION_EDITOR_ID_PREFIX}-form-error` : undefined}
           />
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+            <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete faction'}
             </Btn>
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+              <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

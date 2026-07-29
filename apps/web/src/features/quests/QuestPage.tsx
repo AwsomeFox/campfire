@@ -30,6 +30,7 @@ import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
+import { PageTitle } from '../../components/PageTitle';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -500,7 +501,14 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       </PrintOnly>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
+        {/* Issue #1711 (sibling audit off the Dashboard <h1> gap): this route's only real
+            <h1> was inside the screen-hidden PrintOnly reference sheet above — the visible
+            title here was a bare <h3> with no font-size override at all (Tailwind preflight
+            resets heading sizes to inherit), so it rendered at plain body size. `size="compact"`
+            gives it PageTitle's real semantics while keeping it visually modest enough to sit
+            inline with the status badge/print control row, matching the Dashboard's identical
+            title-plus-chips shape. */}
+        <PageTitle size="compact" className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</PageTitle>
         <QuestStatusBadge status={quest.status} />
         <PrintControl
           resetKey={quest.id}
@@ -525,9 +533,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               }}
             />
             <div style={{ flex: 1 }} />
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1.5 text-xs"
+              className="text-xs"
               onClick={() => {
                 setBodyDraft(quest.body);
                 setEditingBody((v) => !v);
@@ -550,7 +558,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               announceFailure={announce}
               failureMessage={t('quests.updateStatusFailed')}
             />
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
+            <Btn density="xs" danger className="text-xs" onClick={() => setConfirmingDelete(true)}>
               {t('quests.delete')}
             </Btn>
           </div>
@@ -558,9 +566,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         {!isDm && role !== null && (
           <div className="cf-print-hide flex items-center gap-2">
             <div style={{ flex: 1 }} />
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1.5 text-xs"
+              className="text-xs"
               onClick={startPropose}
               title={t('quests.suggestEditTitle')}
             >
@@ -598,19 +606,19 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 {proposalError && <p className="text-xs text-red-400 m-0">{proposalError}</p>}
                 <div className="flex gap-2 justify-end">
                   {bodyConflict && (
-                    <Btn ghost onClick={reloadBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
+                    <Btn density="xs" ghost onClick={reloadBody} disabled={savingBody} className="text-xs">
                       {t('quests.reloadLatest')}
                     </Btn>
                   )}
-                  <Btn ghost onClick={proposeMode ? cancelBodyEdit : () => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
+                  <Btn density="xs" ghost onClick={proposeMode ? cancelBodyEdit : () => setEditingBody(false)} className="text-xs">
                     {t('quests.cancel')}
                   </Btn>
                   {proposeMode ? (
-                    <Btn onClick={submitBodyProposal} disabled={submittingProposal} className="!min-h-0 !py-1.5 text-xs">
+                    <Btn density="xs" onClick={submitBodyProposal} disabled={submittingProposal} className="text-xs">
                       {submittingProposal ? t('quests.suggesting') : t('quests.suggestSubmit')}
                     </Btn>
                   ) : (
-                    <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
+                    <Btn density="xs" onClick={saveBody} disabled={savingBody} className="text-xs">
                       {savingBody ? t('quests.saving') : t('quests.save')}
                     </Btn>
                   )}
@@ -636,10 +644,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 />
                 {editingObjectiveId === o.id ? (
                   <div className="flex-1 flex items-center gap-2">
-                    <TextInput
+                    <TextInput density="xs"
                       value={objectiveDraft}
                       onChange={(e) => setObjectiveDraft(e.target.value)}
-                      className="!py-1 text-sm"
+                      className="text-sm"
                       autoFocus
                     />
                     <button onClick={() => saveObjectiveText(o)} className="text-xs text-[var(--color-accent)] hover:underline shrink-0">
@@ -698,11 +706,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   void addObjective();
                 })}
               >
-                <TextInput
+                <TextInput density="xs"
                   value={newObjective}
                   onChange={(e) => setNewObjective(e.target.value)}
                   placeholder={t('quests.newObjectivePlaceholder')}
-                  className="!py-1.5 text-xs max-w-xs"
+                  className="text-xs max-w-xs"
                   {...objectiveCompositionGate.inputProps}
                 />
                 <button
@@ -775,10 +783,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 <div className="space-y-2">
                   <TextArea style={{ minHeight: 100 }} value={dmSecretDraft} onChange={(e) => setDmSecretDraft(e.target.value)} />
                   <div className="flex gap-2 justify-end">
-                    <Btn ghost onClick={() => setEditingDmSecret(false)} className="!min-h-0 !py-1.5 text-xs">
+                    <Btn density="xs" ghost onClick={() => setEditingDmSecret(false)} className="text-xs">
                       {t('quests.cancel')}
                     </Btn>
-                    <Btn onClick={saveDmSecret} disabled={savingDmSecret} className="!min-h-0 !py-1.5 text-xs">
+                    <Btn density="xs" onClick={saveDmSecret} disabled={savingDmSecret} className="text-xs">
                       {savingDmSecret ? t('quests.saving') : t('quests.save')}
                     </Btn>
                   </div>

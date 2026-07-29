@@ -18,6 +18,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
 import { useAuth } from '../../app/auth';
 import { loginHrefWithReturn } from '../../lib/safeInternalPath';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function SharedRecapPage() {
   const { t } = useTranslation();
@@ -70,7 +71,7 @@ export default function SharedRecapPage() {
     <main className="max-w-3xl mx-auto px-4 py-8 space-y-4">
       <header className="flex items-baseline gap-2.5 flex-wrap">
         <span className="font-heading text-lg" style={{ color: 'var(--color-accent)' }}>
-          <GameIcon slug="campfire" size={18} className="inline align-text-bottom mr-1" />Campfire
+          <GameIcon slug="campfire" size={UI_ICON_SIZE.md} className="inline align-text-bottom mr-1" />Campfire
         </span>
         {recap && <span className="text-muted text-sm">{recap.campaignName}</span>}
         <span className="tag ml-auto">Read-only recap</span>

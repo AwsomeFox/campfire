@@ -8,6 +8,7 @@ import { RequireServerAdmin } from './RequireServerAdmin';
 import { RulePacksCard } from './RulePacksCard';
 import { GameIcon } from '../../components/GameIcon';
 import { NEW_CAMPAIGN_SETUP_PATH, safeAdminRulesReturnPath } from '../../lib/adminNavigation';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function AdminRulesPage() {
   const { t } = useTranslation();
@@ -31,7 +32,7 @@ export default function AdminRulesPage() {
             ← {returnLabel}
           </Link>
         )}
-        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="spell-book" size={20} /> Rule packs</h1>
+        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="spell-book" size={UI_ICON_SIZE.md} /> Rule packs</h1>
         <RulePacksCard />
       </div>
     </RequireServerAdmin>

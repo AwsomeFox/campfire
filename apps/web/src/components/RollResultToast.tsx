@@ -10,6 +10,7 @@ import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
+import { UIIcon } from './UIIcon';
 
 const AUTO_DISMISS_MS = 15000;
 
@@ -95,7 +96,7 @@ export function RollResultToast({
         className="cf-dismiss-target cf-roll-result-toast__dismiss"
         data-testid="roll-result-toast-dismiss"
       >
-        ✕
+        <UIIcon name="close" size="sm" />
       </button>
     </div>
   );
