@@ -1,6 +1,6 @@
 import { join } from 'path';
 import { Module, type DynamicModule } from '@nestjs/common';
-import { APP_GUARD, APP_PIPE } from '@nestjs/core';
+import { APP_GUARD, APP_PIPE, Reflector } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ZodValidationPipe } from 'nestjs-zod';
@@ -206,6 +206,7 @@ function serveStaticImports(): DynamicModule[] {
     CastModule,
   ],
   providers: [
+    Reflector,
     { provide: APP_PIPE, useClass: ZodValidationPipe },
     // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so
     // unauthenticated floods are rejected (429) before route work. The custom subclass keeps

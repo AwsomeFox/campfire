@@ -223,11 +223,11 @@ describe('rest mechanics (#1041, e2e)', () => {
   it('#759: preview/apply/undo preserves structured condition stacks and linked combatant-only metadata', async () => {
     const id = await batteredCharacter('Structured batch');
     const sheetExhaustion = {
-      id: 'sheet-exhaustion', name: 'Exhaustion', ruleEntryId: 'exhaustion', source: 'fatigue', sourceCombatantId: null,
+      id: 'sheet-exhaustion', name: 'Exhaustion', ruleEntryId: null, source: 'fatigue', sourceCombatantId: null,
       durationRounds: null, roundsRemaining: null, timing: 'none', saveTiming: 'none', saveDc: null, saveAbility: null,
       isConcentration: false, stacks: 5, notes: 'keep sheet note', custom: false,
     };
-    const combatantExhaustion = { ...sheetExhaustion, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, durationRounds: 4, roundsRemaining: 3, timing: 'end', saveTiming: 'end', saveDc: 14, saveAbility: 'con', notes: 'keep combat note' };
+    const combatantExhaustion = { ...sheetExhaustion, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, durationRounds: 4, roundsRemaining: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn', saveDc: 14, saveAbility: 'con', notes: 'keep combat note' };
     await db.update(charactersTable).set({ hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([sheetExhaustion]) }).where(eq(charactersTable.id, id));
     const now = new Date().toISOString();
     const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Structured recovery', status: 'running', createdAt: now, updatedAt: now }).returning();
