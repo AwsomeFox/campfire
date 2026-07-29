@@ -1095,7 +1095,11 @@ export class CharactersService {
       input.deathSaveFailures !== undefined ||
       input.hpTemp !== undefined
     ) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, {
+      // Only mirror hpMax when this PATCH actually supplied it; otherwise pass
+      // undefined so a death-slice edit (deathState/death-saves/hpTemp) preserves
+      // a DM-adjusted, encounter-local combatant hpMax that EncountersService
+      // deliberately never writes back to the sheet (review on #1492).
+      await this.syncActiveCombatants(id, row.hpCurrent, input.hpMax !== undefined ? row.hpMax : undefined, {
         campaignId: existing.campaignId,
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
