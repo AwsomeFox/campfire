@@ -204,6 +204,7 @@ export default function InboxPage() {
   // busy flag: an in-flight sweep's finally block intentionally skips state updates
   // once cidRef.current has moved on, but that leaves sweepBusy stuck true.
   useEffect(() => {
+    sweepTokenRef.current++;
     setSweepBusy(false);
     setSweepResult(null);
     setSweepItemBodies({});
@@ -249,14 +250,16 @@ export default function InboxPage() {
             inject((a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '') || b.id - a.id),
           );
         } else {
-          // Open items are ordered newest-first by id.
+          // Open is ordered by newest-first creation (createdAt desc, id desc).
           setView('open');
-          setOpenList(inject((a, b) => b.id - a.id));
-          setExpandedId(note.id);
+          setOpenList(
+            inject((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '') || b.id - a.id),
+          );
         }
+        setExpandedId(deepInboxId);
       })
       .catch(() => {
-        /* not accessible / not found — leave the loaded lists as-is */
+        // Deep-linked note no longer exists or read forbidden — ignore.
       });
     return () => {
       cancelled = true;
@@ -282,10 +285,10 @@ export default function InboxPage() {
   // to a "working" state — see the render below — rather than the page looking inert.
   async function sweepInbox() {
     if (sweepBusy) return;
-    // Captured so a completion that lands after the DM has switched campaigns (the
-    // campaign switcher reuses this component — issue #1679 review) can be told apart
-    // from one that's still for the currently-viewed campaign, and ignored.
+    // Captured so a completion that lands after the DM has switched campaigns or started
+    // a new sweep (issue #1679 review) can be told apart from the latest active sweep run.
     const sweepCid = cid;
+    const sweepToken = ++sweepTokenRef.current;
     setSweepBusy(true);
     setSweepError(null);
     setSweepResult(null);
@@ -296,7 +299,7 @@ export default function InboxPage() {
     setSweepItemBodies(Object.fromEntries(openList.items.map((n) => [n.id, n.body])));
     try {
       const result = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
-      if (sweepCid !== cidRef.current) return;
+      if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
@@ -305,28 +308,33 @@ export default function InboxPage() {
       const newlyProposed = result.job.itemsNewlyProposed;
       if (newlyProposed === undefined) {
         const delta = result.job.itemsProposed;
-        if (delta > 0) bumpPendingProposalsBadge(delta, sweepCid);
+        if (delta > 0 && sweepToken === sweepTokenRef.current) bumpPendingProposalsBadge(delta, sweepCid);
       }
       const freshOpenTotal = await load();
-      if (sweepCid === cidRef.current && freshOpenTotal !== undefined) {
+      if (sweepCid === cidRef.current && sweepToken === sweepTokenRef.current && freshOpenTotal !== undefined) {
         setInboxCountBadge(freshOpenTotal, sweepCid);
       }
       // After a real sweep, re-fetch the authoritative pending count so concurrent
       // sweeps (where the losing side gets a recovered outcome with itemsNewlyProposed 0)
       // don't leave the badge stale or double-counted.
-      if (sweepCid === cidRef.current && newlyProposed !== undefined) {
+      if (sweepCid === cidRef.current && sweepToken === sweepTokenRef.current && newlyProposed !== undefined) {
         try {
           const pending = await api.get<unknown[]>(`${API}/campaigns/${sweepCid}/proposals?status=pending`);
-          if (sweepCid === cidRef.current) setPendingProposalsBadge(pending.length, sweepCid);
-        } catch {
-          // Badge will reconcile on the next route change; don't surface here.
+          if (sweepCid === cidRef.current && sweepToken === sweepTokenRef.current) {
+            setPendingProposalsBadge(pending.length, sweepCid);
+          }
+        } catch (err) {
+          console.warn('[InboxPage] Failed to reconcile proposals badge after sweep', err);
+          if (newlyProposed > 0 && sweepCid === cidRef.current && sweepToken === sweepTokenRef.current) {
+            bumpPendingProposalsBadge(newlyProposed, sweepCid);
+          }
         }
       }
     } catch (e) {
-      if (sweepCid !== cidRef.current) return;
+      if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
       setSweepError(translateApiError(e, t, { fallbackKey: 'notes.sweepFailed' }));
     } finally {
-      if (sweepCid === cidRef.current) setSweepBusy(false);
+      if (sweepCid === cidRef.current && sweepToken === sweepTokenRef.current) setSweepBusy(false);
     }
   }
 
