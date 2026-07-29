@@ -529,7 +529,14 @@ export const Character = z.object({
   name: z.string().min(1).max(120),
   species: z.string().max(80).default(''),
   className: z.string().max(80).default(''),
-  level: z.number().int().min(1).max(20).default(1),
+  // Issue #1492: the schema cap must not conflict with a rule system whose adapter allows
+  // past 20 (Open Legend / an OSR retroclone report `maxLevel: Infinity`). The per-system
+  // ceiling stays authoritative — `CharactersService.create`/`update`/`levelUp` reject a level
+  // above `adapter.maxLevel` (5e=20, 13th Age=10, …) — so this bound is a generous DB-sanity
+  // ceiling that the most permissive adapter can never exceed in practice. It mirrors the web
+  // form's `Infinity ? 99` convention (`NewCharacterForm.tsx`), so REST, MCP and the sheet all
+  // agree on what an uncapped system may reach, without re-bricking the sheet on the next edit.
+  level: z.number().int().min(1).max(99).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
   // Lifecycle state (issue #115, #719). `active` is the only status auto-added as a combatant

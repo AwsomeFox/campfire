@@ -113,6 +113,11 @@ export function clampHpCurrent(hpCurrent: number, hpMax: number): number {
   return Math.max(0, Math.min(hpMax, hpCurrent));
 }
 
+/** Clamp a death-save success/failure tally into [0, 3] — the 5e death-save bound (issue #1492). */
+export function clampDeathSaveCount(count: number): number {
+  return Math.max(0, Math.min(3, count));
+}
+
 /** Bound AC into [AC_MIN, AC_MAX]; null (AC unset) passes through untouched. */
 export function clampAc(ac: number | null | undefined): number | null {
   if (ac === null || ac === undefined) return null;
@@ -566,6 +571,24 @@ export class CharactersService {
   }
 
   /**
+   * Reject an absolute `level` above the campaign's adapter cap (issue #1492). `levelUp`
+   * already honors `adapter.maxLevel` (5e=20, 13th Age=10, an uncapped system=Infinity), but
+   * the general create()/update() PATCH paths could previously write any level that passed the
+   * (now widened) schema bound, bypassing the per-system ceiling the DM sees in `levelUp`.
+   * An `Infinity` cap (Open Legend, OSR retroclones) never rejects. Naming the cap in the
+   * message matches `levelUp`'s rejection, so the two surfaces read identically.
+   */
+  private static assertLevelWithinCap(level: number, maxLevel: number): void {
+    if (level > maxLevel) {
+      throw new BadRequestException(
+        Number.isFinite(maxLevel)
+          ? `Level ${level} is above this rule system's cap of ${maxLevel}`
+          : `Level ${level} is above this rule system's cap`,
+      );
+    }
+  }
+
+  /**
    * Mirror a character's HP into the combatant rows that link back to it in any
    * still-live (not 'ended') encounter (issue #50). Combatant HP and character HP
    * were previously dual sources of truth with only one-way sync (combatant→character
@@ -802,6 +825,12 @@ export class CharactersService {
     const adapter = await this.adapterForCampaign(campaignId);
     const status = resolveCharacterCreateStatus(input, adapter);
     const isDraft = status === 'draft';
+    // Issue #1492: enforce the adapter's level cap on the create path too, not just levelUp —
+    // otherwise a direct POST bypasses the per-system ceiling (5e=20, 13th Age=10, …) that the
+    // DM sees in levelUp. An Infinity cap (Open Legend, OSR) never rejects.
+    if (input.level !== undefined) {
+      CharactersService.assertLevelWithinCap(input.level, adapter.maxLevel);
+    }
 
     // Clamp hpCurrent/ac at create time too — mirrors update/patchHp/combatant HP so an
     // out-of-range create (hpCurrent:99999, ac:-50) can't persist verbatim (issue #112).
@@ -893,6 +922,13 @@ export class CharactersService {
     if (input.xp !== undefined || input.level !== undefined) {
       await this.assertProgressionAllowed(existing.campaignId, role);
     }
+    // Issue #1492: enforce the adapter's level cap on the PATCH path too, not just levelUp.
+    // `levelUp` already honors `adapter.maxLevel` (5e=20, 13th Age=10, …), but a direct PATCH
+    // could otherwise write any level the (widened) schema bound allows, bypassing the ceiling.
+    // An Infinity cap (Open Legend, OSR) never rejects.
+    if (input.level !== undefined) {
+      CharactersService.assertLevelWithinCap(input.level, (await this.adapterForCampaign(existing.campaignId)).maxLevel);
+    }
 
     const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
     if (input.name !== undefined) update.name = input.name;
@@ -925,6 +961,23 @@ export class CharactersService {
       const rawHpCurrent = input.hpCurrent !== undefined ? input.hpCurrent : existing.hpCurrent;
       update.hpCurrent = clampHpCurrent(rawHpCurrent, finalHpMax);
     }
+    // Issue #1492: the death/temp-HP subsystem and bounded resources are valid CharacterUpdate
+    // keys (the schema accepts them and MCP advertises them), but the field-copy block below
+    // previously had NO references to them, so a PATCH that set them returned 200 and silently
+    // dropped the change — a DM reviving a dead PC (`deathState: 'none', deathSaveFailures: 0`)
+    // believed it worked while the row kept the old dead/dying state. Write them now, with the
+    // same clamps every other write path uses (hpTemp >= 0, death saves in [0, 3]). The
+    // encounter tracker stays the source of truth during a fight; on /end these reconcile back,
+    // so a manual sheet PATCH is the out-of-combat path that was missing.
+    if (input.hpTemp !== undefined) update.hpTemp = Math.max(0, input.hpTemp);
+    if (input.deathState !== undefined) update.deathState = input.deathState;
+    if (input.deathSaveSuccesses !== undefined) {
+      update.deathSaveSuccesses = clampDeathSaveCount(input.deathSaveSuccesses);
+    }
+    if (input.deathSaveFailures !== undefined) {
+      update.deathSaveFailures = clampDeathSaveCount(input.deathSaveFailures);
+    }
+    if (input.resources !== undefined) update.resources = toJsonText(input.resources);
     if (input.conditions !== undefined) {
       Object.assign(update, sheetConditionWriteSetFromNames(input.conditions, existing.conditionInstances));
     }
