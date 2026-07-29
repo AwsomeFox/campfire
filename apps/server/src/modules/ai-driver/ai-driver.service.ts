@@ -1854,6 +1854,15 @@ export function wrapUntrustedPromptData(input: string): string {
   return fenceUntrustedPromptText(input, UNTRUSTED_DATA_START, UNTRUSTED_DATA_END, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
 }
 
+/** Append a synthetic execution result through the same untrusted-data boundary as tool output. */
+export function appendUntrustedToolResult(
+  messages: AiMessage[],
+  call: Pick<AiToolCall, 'id' | 'name'>,
+  text: string,
+): void {
+  messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+}
+
 /**
  * The size-bounded persisted/tool-data representation that reaches the provider through an
  * untrusted-data fence. JSON is projected structurally, rather than cut mid-token, so callers
@@ -1965,8 +1974,12 @@ function fenceUntrustedPromptText(input: string, start: string, end: string, max
     // Escape heading tokens even when a JSON/tool representation has made a newline literal,
     // or a name is embedded in a markdown list. The enclosing fence remains the primary
     // boundary; this prevents the value from visually forging a peer `##` prompt section too.
-    .replace(/(#{1,6})(?=\s|$)/g, '\\$1')
-    .replace(/^(\s{0,3})(`{3,}|~{3,})/gm, '$1\\$2')
+    // Replace the first structural character with an equal-width fullwidth equivalent. This
+    // preserves the data budget (and hence the ledger's visible projection) while preventing
+    // markdown headings or code fences from visually impersonating prompt structure.
+    .replace(/#{1,6}(?=\s|$)/g, (marker) => `＃${marker.slice(1)}`)
+    .replace(/^(\s{0,3})(`{3,}|~{3,})/gm, (_match, indent: string, marker: string) =>
+      `${indent}${marker[0] === '`' ? '｀' : '～'}${marker.slice(1)}`)
     // Defuse common model-control-token syntax while retaining the human-readable words.
     .replace(/<\|([^|>]{1,80})\|>/g, '‹$1›');
   return `${start}\n${neutralized}\n${end}`;
@@ -5073,7 +5086,7 @@ export class AiDriverService {
         const text = JSON.stringify(
           buildMcpEnvelope(new ForbiddenException({ code: rateLimit.code, message: rateLimit.message })),
         );
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+        appendUntrustedToolResult(messages, call, text);
         const rateIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, call.arguments ?? {}, undefined, true);
         this.emitToolEvent(campaignId, call.name, true, false, rateIdentity);
         executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(rateIdentity) });
@@ -5103,7 +5116,7 @@ export class AiDriverService {
           : (policyDecision?.reason ??
             `The AI DM seat is not permitted to call ${call.name} during ${sessionProfile} play.`);
         const text = JSON.stringify(buildMcpEnvelope(new ForbiddenException({ code, message })));
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+        appendUntrustedToolResult(messages, call, text);
         const blockedIdentity = await this.resolveToolResourceIdentity(
           campaignId,
           call.name,
@@ -5145,7 +5158,7 @@ export class AiDriverService {
             new ForbiddenException(`This AI DM seat is scoped to campaign ${campaignId}.`),
           ),
         );
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+        appendUntrustedToolResult(messages, call, text);
         const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
         this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
         executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(crossIdentity) });
@@ -5163,7 +5176,7 @@ export class AiDriverService {
               new ForbiddenException({ code: liveGuard.code, message: liveGuard.message }),
             ),
           );
-          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+          appendUntrustedToolResult(messages, call, text);
           const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
           this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
           executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
@@ -5213,7 +5226,7 @@ export class AiDriverService {
           undoable: policyDecision.undoable || DRIVER_UNDOABLE_TOOLS.has(call.name),
           message: policyDecision.reason ?? `${call.name} requires DM confirmation before it executes.`,
         });
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(pendingText) });
+        appendUntrustedToolResult(messages, call, pendingText);
         const pendingIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, false);
         this.emitToolEvent(campaignId, call.name, false, false, pendingIdentity, true);
         executed.push({
@@ -5270,7 +5283,7 @@ export class AiDriverService {
               message: `${call.name} exposes DM-only material and is not available to the autonomous AI DM seat.`,
             },
           });
-          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
+          appendUntrustedToolResult(messages, call, text);
           const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
           this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
           executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
@@ -6659,8 +6672,12 @@ export class AiDriverService {
       parts.push(`## Players at the table\n${wrapUntrustedPromptData(playerLines.join('\n'))}`);
     }
 
-    const locationEnv = formatLocationEnvironmentFromSummary(visibleSummary);
-    if (locationEnv) parts.push(`## Current location / environment\n${wrapUntrustedPromptData(locationEnv)}`);
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) {
+      const visibleLocationEnv = visibleUntrustedPromptData(locationEnv);
+      parts.push(`## Current location / environment\n${wrapUntrustedPromptData(locationEnv)}`);
+      if (ledger) harvestRetrievals(ledger, 'get_campaign_summary', undefined, visibleLocationEnv);
+    }
 
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
