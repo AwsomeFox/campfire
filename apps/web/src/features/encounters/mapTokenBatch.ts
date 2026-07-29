@@ -1,3 +1,5 @@
+import { snapMapPercentCalibrated, type GridCalibration, type Rect } from './mapRenderedBounds';
+
 /**
  * Pure planning helpers for battle-map multi-selection and placement.  Coordinates
  * are percentages so a plan remains valid while the rendered image letterboxes.
@@ -56,7 +58,10 @@ export function tokensInLasso(tokens: readonly BatchToken[], polygon: readonly B
   return selectBy(tokens, t => t.tokenX != null && t.tokenY != null && inside({ x: t.tokenX, y: t.tokenY }));
 }
 
-export function snapBatchPoint(point: BatchPoint, cell = 5, aspect = 1): BatchPoint {
+export function snapBatchPoint(point: BatchPoint, cell = 5, aspect = 1, calibration?: GridCalibration | null, mapRect?: Rect | null): BatchPoint {
+  if (calibration && mapRect && mapRect.width > 0 && mapRect.height > 0) {
+    return snapMapPercentCalibrated(point, calibration, mapRect, true);
+  }
   return { x: clamp(Math.round(point.x / cell) * cell), y: clamp(Math.round(point.y / (cell / aspect)) * (cell / aspect)) };
 }
 
@@ -66,20 +71,22 @@ function overlaps(a: BatchPoint, ar: number, b: BatchPoint, br: number, aspect =
 }
 
 /** Finds a deterministic nearest free grid position. Existing placed tokens are obstacles. */
-export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
-  const occupied = tokens.filter(t => t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cell) }));
+export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1, calibration?: GridCalibration | null, mapRect?: Rect | null): Array<{ id: number; x: number; y: number }> {
+  const cellW = calibration?.cellW ?? cell;
+  const cellH = calibration?.cellH ?? cell;
+  const occupied = tokens.filter(t => t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cellW) }));
   const plan: Array<{ id: number; x: number; y: number }> = [];
   for (const token of tokens.filter(isTrulyUnplaced)) {
-    const radius = tokenRadiusPercent(token, cell);
+    const radius = tokenRadiusPercent(token, cellW);
     let chosen: BatchPoint | undefined;
     for (let ring = 0; ring <= 40 && !chosen; ring++) for (let dx = -ring; dx <= ring && !chosen; dx++) for (let dy = -ring; dy <= ring && !chosen; dy++) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
       const raw = gridType === 'hex'
-        ? { x: anchor.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: anchor.y + dy * cell * .8660254 / aspect }
-        : { x: anchor.x + dx * cell, y: anchor.y + dy * cell / aspect };
+        ? { x: anchor.x + dx * cellW + (Math.abs(dy) % 2 ? cellW / 2 : 0), y: anchor.y + dy * cellW * .8660254 / aspect }
+        : { x: anchor.x + dx * cellW, y: anchor.y + dy * cellH / aspect };
       const point = gridType === 'hex'
         ? { x: clamp(Math.round(raw.x * 1000) / 1000), y: clamp(Math.round(raw.y * 1000) / 1000) }
-        : snapBatchPoint(raw, cell, aspect);
+        : snapBatchPoint(raw, cellW, aspect, calibration, mapRect);
       if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius / aspect < 0 || point.y + radius / aspect > 100) continue;
       if (!occupied.some(o => overlaps(point, radius, o.point, o.radius, aspect))) chosen = point;
     }
@@ -89,37 +96,41 @@ export function planCollisionFreePlacement(tokens: readonly BatchToken[], anchor
   return plan;
 }
 
-export function formationOffsets(tokens: readonly BatchToken[], kind: FormationKind, spacing = 5): BatchPoint[] {
+export function formationOffsets(tokens: readonly BatchToken[], kind: FormationKind, spacingX = 5, spacingY = spacingX): BatchPoint[] {
   const cols = Math.max(1, Math.ceil(Math.sqrt(tokens.length)));
   return tokens.map((token, index) => {
-    if (kind === 'line') return { x: index * spacing, y: 0 };
-    if (kind === 'sides') return { x: (token.kind === 'character' ? -1 : 1) * Math.ceil(index / 2) * spacing, y: (index % 2) * spacing };
-    return { x: (index % cols) * spacing, y: Math.floor(index / cols) * spacing };
+    if (kind === 'line') return { x: index * spacingX, y: 0 };
+    if (kind === 'sides') return { x: (token.kind === 'character' ? -1 : 1) * Math.ceil(index / 2) * spacingX, y: (index % 2) * spacingY };
+    return { x: (index % cols) * spacingX, y: Math.floor(index / cols) * spacingY };
   });
 }
 
 /** Size-aware formation placement. Desired offsets keep the formation's character,
  * then the same deterministic free-cell search used by Place all prevents a large
  * footprint from overlapping a neighbour or clipping an edge. */
-export function planFormationPlacement(tokens: readonly BatchToken[], selected: ReadonlySet<number>, kind: Exclude<FormationKind, 'saved'>, anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
+export function planFormationPlacement(tokens: readonly BatchToken[], selected: ReadonlySet<number>, kind: Exclude<FormationKind, 'saved'>, anchor: BatchPoint, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1, calibration?: GridCalibration | null, mapRect?: Rect | null): Array<{ id: number; x: number; y: number }> {
+  const cellW = calibration?.cellW ?? cell;
+  const cellH = calibration?.cellH ?? cell;
   const members = tokens.filter(t => selected.has(t.id));
-  const offsets = formationOffsets(members, kind, cell);
-  return resolveDesiredFormation(tokens, members.map((token, i) => ({ token, desired: { x: anchor.x + offsets[i].x, y: anchor.y + offsets[i].y / aspect } })), cell, gridType, aspect);
+  const offsets = formationOffsets(members, kind, cellW, cellH);
+  return resolveDesiredFormation(tokens, members.map((token, i) => ({ token, desired: { x: anchor.x + offsets[i].x, y: anchor.y + offsets[i].y / aspect } })), cell, gridType, aspect, calibration, mapRect);
 }
 
 /** Resolves saved formation slot offsets without ever clamping a centre independently:
  * each desired point is nudged to the nearest valid footprint-aware grid position. */
-export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: ReadonlyArray<{ token: BatchToken; desired: BatchPoint }>, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1): Array<{ id: number; x: number; y: number }> {
+export function resolveDesiredFormation(tokens: readonly BatchToken[], desired: ReadonlyArray<{ token: BatchToken; desired: BatchPoint }>, cell = 5, gridType: 'square' | 'hex' = 'square', aspect = 1, calibration?: GridCalibration | null, mapRect?: Rect | null): Array<{ id: number; x: number; y: number }> {
+  const cellW = calibration?.cellW ?? cell;
+  const cellH = calibration?.cellH ?? cell;
   const selected = new Set(desired.map(item => item.token.id));
-  const occupied = tokens.filter(t => !selected.has(t.id) && t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cell) }));
+  const occupied = tokens.filter(t => !selected.has(t.id) && t.tokenX != null && t.tokenY != null).map(t => ({ point: { x: t.tokenX!, y: t.tokenY! }, radius: tokenRadiusPercent(t, cellW) }));
   const output: Array<{ id: number; x: number; y: number }> = [];
   for (const item of desired) {
-    const token = item.token, radius = tokenRadiusPercent(token, cell), desiredPoint = item.desired;
+    const token = item.token, radius = tokenRadiusPercent(token, cellW), desiredPoint = item.desired;
     let chosen: BatchPoint | undefined;
     for (let ring = 0; ring <= 40 && !chosen; ring++) for (let dx = -ring; dx <= ring && !chosen; dx++) for (let dy = -ring; dy <= ring && !chosen; dy++) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
-      const raw = gridType === 'hex' ? { x: desiredPoint.x + dx * cell + (Math.abs(dy) % 2 ? cell / 2 : 0), y: desiredPoint.y + dy * cell * .8660254 / aspect } : { x: desiredPoint.x + dx * cell, y: desiredPoint.y + dy * cell / aspect };
-      const point = gridType === 'hex' ? { x: Math.round(raw.x * 1000) / 1000, y: Math.round(raw.y * 1000) / 1000 } : snapBatchPoint(raw, cell, aspect);
+      const raw = gridType === 'hex' ? { x: desiredPoint.x + dx * cellW + (Math.abs(dy) % 2 ? cellW / 2 : 0), y: desiredPoint.y + dy * cellW * .8660254 / aspect } : { x: desiredPoint.x + dx * cellW, y: desiredPoint.y + dy * cellH / aspect };
+      const point = gridType === 'hex' ? { x: Math.round(raw.x * 1000) / 1000, y: Math.round(raw.y * 1000) / 1000 } : snapBatchPoint(raw, cellW, aspect, calibration, mapRect);
       if (point.x - radius < 0 || point.x + radius > 100 || point.y - radius / aspect < 0 || point.y + radius / aspect > 100) continue;
       if (!occupied.some(o => overlaps(point, radius, o.point, o.radius, aspect))) chosen = point;
     }
