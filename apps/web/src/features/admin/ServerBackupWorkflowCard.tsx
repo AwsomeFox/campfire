@@ -397,9 +397,9 @@ export function ServerBackupWorkflowCard() {
           placeholder={`≥ ${KEY_ENVELOPE_MIN_PASSPHRASE_LEN} characters when set`}
         />
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <Btn
+          <Btn density="xs"
             type="button"
-            className="!min-h-0 !py-2 text-xs sm:w-auto"
+            className="text-xs sm:w-auto"
             onClick={() => void runDownload()}
             busy={downloadBusy}
             disabled={downloadBusy}
@@ -407,7 +407,7 @@ export function ServerBackupWorkflowCard() {
             {downloadBusy ? 'Creating backup…' : 'Create & download backup'}
           </Btn>
           {downloadBusy && (
-            <Btn ghost type="button" className="!min-h-0 !py-2 text-xs sm:w-auto" onClick={cancelDownload}>
+            <Btn density="xs" ghost type="button" className="text-xs sm:w-auto" onClick={cancelDownload}>
               Cancel
             </Btn>
           )}
@@ -583,18 +583,18 @@ export function ServerBackupWorkflowCard() {
           onChange={onPickFile}
         />
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <Btn
+          <Btn density="xs"
             ghost
             type="button"
-            className="!min-h-0 !py-2 text-xs sm:w-auto"
+            className="text-xs sm:w-auto"
             onClick={() => fileInputRef.current?.click()}
             aria-controls={fileInputId}
           >
             Choose archive…
           </Btn>
-          <Btn
+          <Btn density="xs"
             type="button"
-            className="!min-h-0 !py-2 text-xs sm:w-auto"
+            className="text-xs sm:w-auto"
             onClick={() => void runInspect()}
             disabled={inspectBusy || !pendingFile}
             busy={inspectBusy}
@@ -602,14 +602,14 @@ export function ServerBackupWorkflowCard() {
             {inspectBusy ? 'Inspecting…' : 'Inspect (dry-run)'}
           </Btn>
           {inspectBusy && (
-            <Btn ghost type="button" className="!min-h-0 !py-2 text-xs sm:w-auto" onClick={cancelInspect}>
+            <Btn density="xs" ghost type="button" className="text-xs sm:w-auto" onClick={cancelInspect}>
               Cancel
             </Btn>
           )}
-          <Btn
+          <Btn density="xs"
             danger
             type="button"
-            className="!min-h-0 !py-2 text-xs sm:w-auto"
+            className="text-xs sm:w-auto"
             disabled={!canRestore}
             onClick={() => {
               setRestoreError(null);

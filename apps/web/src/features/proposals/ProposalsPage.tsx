@@ -369,10 +369,10 @@ function BatchBar({
       </label>
       {selectedCount > 0 && (
         <div className="flex items-center gap-2 ml-auto">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onReject} disabled={busy}>
+          <Btn density="xs" ghost className="text-xs" onClick={onReject} disabled={busy}>
             Reject {selectedCount}
           </Btn>
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onApprove} disabled={busy}>
+          <Btn density="xs" className="text-xs" onClick={onApprove} disabled={busy}>
             Approve {selectedCount}
           </Btn>
         </div>
@@ -558,8 +558,8 @@ function ProposalCard({
       )}
 
       {canResolve && expanded && (
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
+        <TextInput density="compact"
+          className="text-sm"
           placeholder="Optional note…"
           value={note}
           onChange={(e) => setNote(e.target.value)}
@@ -583,10 +583,10 @@ function ProposalCard({
             {editing ? 'Cancel edit' : 'Edit payload'}
           </button>
         )}
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject, false)} disabled={busy}>
+        <Btn density="xs" ghost className="text-xs" onClick={() => act(onReject, false)} disabled={busy}>
           Reject
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
+        <Btn density="xs" className="text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
           {editing ? 'Approve edited' : 'Approve'}
         </Btn>
         </>
@@ -820,7 +820,7 @@ function MyProposalCard({
       </p>
       {isDelete ? <DeleteView snapshot={proposal.snapshot} /> : <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />}
       <div className="flex items-center justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onWithdraw} disabled={busy}>
+        <Btn density="xs" ghost className="text-xs" onClick={onWithdraw} disabled={busy}>
           Withdraw
         </Btn>
       </div>

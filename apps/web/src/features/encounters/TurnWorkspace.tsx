@@ -73,10 +73,10 @@ function SlotChip({
       </div>
       <p className="text-[11px] text-muted m-0 leading-tight">{slot.help}</p>
       <div className="flex gap-1">
-        <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]" disabled={disabled} onClick={onUse}>
+        <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={disabled} onClick={onUse}>
           {isMovement ? '+5 ft' : 'Use'}
         </button>
-        <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]" disabled={disabled || slot.used <= 0} onClick={onRelease}>
+        <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={disabled || slot.used <= 0} onClick={onRelease}>
           {isMovement ? '-5 ft' : 'Undo'}
         </button>
       </div>
@@ -274,7 +274,7 @@ export function TurnWorkspace({
           Concentration:{' '}
           <span className="text-white">{turn.concentration ?? 'none'}</span>
           {turn.concentration && (
-            <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px] ml-1" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
+            <button type="button" className="btn btn-ghost text-[11px] ml-1 cf-density-xs" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
               clear
             </button>
           )}
@@ -356,7 +356,7 @@ export function TurnWorkspace({
                 <span className="text-white">{e.name}</span>
                 {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} rd</span>}
                 {e.saveAbility && <span className="text-[11px]">save: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
-                <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
+                <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
                   remove
                 </button>
               </li>

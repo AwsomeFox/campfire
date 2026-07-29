@@ -568,10 +568,10 @@ export default function SessionsPage() {
               </VirtualList>
               </div>
               {hasMoreSessions && (
-                <Btn
+                <Btn density="xs"
                   ghost
                   type="button"
-                  className="!min-h-0 !py-1.5 text-xs w-full"
+                  className="text-xs w-full"
                   onClick={() => void loadMoreSessions()}
                   disabled={loadingMoreSessions}
                 >
@@ -1073,14 +1073,14 @@ function SessionDetail({
                 </span>
               ) : null}
               {conflict && (
-                <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
+                <Btn density="xs" ghost type="button" className="text-xs" onClick={reloadLatest} disabled={saving}>
                   Reload latest
                 </Btn>
               )}
-              <Btn
+              <Btn density="compact"
                 ghost
                 type="button"
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   protectedRecap.clearPersistedDraft();
                   setTitleDraft(effectiveRecapBaseline.title);
@@ -1095,7 +1095,7 @@ function SessionDetail({
               >
                 Cancel
               </Btn>
-              <Btn type="submit" className="!min-h-0 !py-1.5 text-xs" disabled={saving || !detailReady}>
+              <Btn density="compact" type="submit" className="text-xs" disabled={saving || !detailReady}>
                 {saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>
@@ -1134,10 +1134,10 @@ function SessionDetail({
 
       {canDmWrite && !editing && (
         <div className="cf-print-hide flex gap-2">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
+          <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} busy={deleting}>
+          <Btn density="xs" danger ghost className="text-xs" onClick={() => setConfirmingDelete(true)} busy={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
@@ -1310,7 +1310,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
         <span className="text-xs font-bold text-secondary uppercase tracking-wide">Who played</span>
         <div className="flex-1" />
         {canDmWrite && !editing && (
-          <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEditing}>
+          <Btn density="xs" ghost className="text-xs" onClick={startEditing}>
             {attendees.length ? 'Edit' : 'Set attendance'}
           </Btn>
         )}
@@ -1343,10 +1343,10 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
             </div>
           )}
           <div className="flex gap-2 justify-end">
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
+            <Btn density="compact" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || !attendanceReady}>
+            <Btn density="compact" className="text-xs" onClick={save} disabled={saving || !attendanceReady}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -1468,8 +1468,8 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
               <option value="never">Never</option>
             </select>
           </div>
-          <Btn
-            className="!min-h-0 !py-2 text-xs !bg-violet-700 !border-violet-700 !text-white"
+          <Btn density="xs"
+            className="text-xs !bg-violet-700 !border-violet-700 !text-white"
             onClick={create}
             busy={creating}
             disabled={lifetime === 'never' && !acknowledgedNever}
@@ -1498,13 +1498,13 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
           >
             {newLink.url}
           </code>
-          <CopyControl
+          <CopyControl density="xs"
             text={newLink.url}
             selectTargetId={newLinkId}
             label="Copy link"
             copiedLabel="Copied ✓"
             ghost
-            className="!min-h-0 !py-1.5 text-xs shrink-0"
+            className="text-xs shrink-0"
             successAnnouncement="Share link copied to clipboard."
             failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
           />
@@ -1591,22 +1591,22 @@ function ShareRow({
       {canDmWrite && (
         <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
           <label className="sr-only" htmlFor={`share-row-label-${share.id}`}>Edit share label</label>
-          <TextInput
+          <TextInput density="xs"
             id={`share-row-label-${share.id}`}
-            className="!min-h-0 !py-1.5 text-xs flex-1"
+            className="text-xs flex-1"
             maxLength={120}
             value={draftLabel}
             onChange={(event) => setDraftLabel(event.target.value)}
           />
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'label'} disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
+          <Btn density="xs" ghost className="text-xs" busy={busy === 'label'} disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
             {busy === 'label' ? 'Saving…' : 'Save label'}
           </Btn>
           {share.expiresAt && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'extend'} disabled={busy !== null} onClick={() => void mutate('extend')}>
+            <Btn density="xs" ghost className="text-xs" busy={busy === 'extend'} disabled={busy !== null} onClick={() => void mutate('extend')}>
               {busy === 'extend' ? 'Extending…' : 'Extend 7 days'}
             </Btn>
           )}
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'revoke'} disabled={busy !== null} onClick={() => void mutate('revoke')}>
+          <Btn density="xs" danger ghost className="text-xs" busy={busy === 'revoke'} disabled={busy !== null} onClick={() => void mutate('revoke')}>
             {busy === 'revoke' ? 'Revoking…' : 'Revoke'}
           </Btn>
         </div>
@@ -1874,12 +1874,18 @@ function AddRecapForm({
               </>
             )}
           </p>
+          {/* compact, not xs (issue #1692 review — Codex + repo owner): "Publish recap"
+              is this form's primary submit action, not a dense inline row/toolbar
+              control — the UiDensity contract this PR adds explicitly reserves xs
+              for the latter. compact also better matches the original !py-2 sizing
+              here, which was already more generous than the !py-1/!py-1.5 sites
+              that became xs elsewhere in this codemod. */}
           <div className="flex flex-wrap gap-2 sm:shrink-0">
             {onCancel && (
-              <Btn
+              <Btn density="compact"
                 ghost
                 type="button"
-                className="!min-h-0 !py-2 text-sm"
+                className="text-sm"
                 onClick={() => {
                   protectedNewRecap.clearPersistedDraft();
                   onCancel();
@@ -1888,7 +1894,7 @@ function AddRecapForm({
                 Cancel
               </Btn>
             )}
-            <Btn type="submit" className="!min-h-0 !py-2 text-sm" disabled={saving}>
+            <Btn density="compact" type="submit" className="text-sm" disabled={saving}>
               {saving ? 'Publishing…' : 'Publish recap'}
             </Btn>
           </div>
@@ -1915,10 +1921,10 @@ function TemplateButton({ value, onInsert }: { value: string; onInsert: (next: s
     else onInsert(`${RECAP_TEMPLATE}\n${value}`);
   }
   return (
-    <Btn
+    <Btn density="xs"
       ghost
       type="button"
-      className="!min-h-0 !py-1 text-xs"
+      className="text-xs"
       onClick={insert}
       disabled={alreadyScaffolded}
       title="Insert the Recap / Loot / NPCs met / Cliffhanger headings"

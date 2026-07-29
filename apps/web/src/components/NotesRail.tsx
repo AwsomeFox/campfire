@@ -199,10 +199,10 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
       ))}
       {hasMore && (
         <div className="flex justify-center">
-          <Btn
+          <Btn density="xs"
             type="button"
             ghost
-            className="!min-h-0 !py-1 text-xs"
+            className="text-xs"
             disabled={loadingMore}
             onClick={() => void loadMore()}
           >
@@ -276,7 +276,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
               </span>
             }
             labelClassName="text-[11px] text-slate-400"
-            selectClassName="cf-input !min-h-0 !py-1 text-xs w-full"
+            selectClassName="cf-input text-xs w-full cf-density-xs"
             value={whisperTo}
             onChange={(e) => setWhisperTo(e.target.value)}
             disabled={saving}

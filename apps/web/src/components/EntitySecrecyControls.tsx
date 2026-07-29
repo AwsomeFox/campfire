@@ -82,9 +82,9 @@ export function EntitySecrecyControls({
           className={className ?? 'flex items-center gap-2'}
         >
           {error && <span className="text-xs text-rose-300">{error}</span>}
-          <Btn
+          <Btn density="xs"
             ghost
-            className="!min-h-0 !py-1.5 text-xs"
+            className="text-xs"
             disabled={busy}
             onClick={() => setConfirming(true)}
             title={t('secrecy.revealButton')}

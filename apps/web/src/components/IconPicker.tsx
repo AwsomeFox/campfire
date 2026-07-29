@@ -327,16 +327,16 @@ export function IconPicker({
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5 ml-auto">
-                <Btn ghost className="!min-h-0 !py-1 !px-2 text-xs" type="button" onClick={focusSearch}>
+                <Btn density="xs" ghost className="!px-2 text-xs" type="button" onClick={focusSearch}>
                   {ICON_PICKER_REPLACE_LABEL}
                 </Btn>
                 {shouldShowIconPickerAutoAction(value, autoSlug) && (
-                  <Btn ghost className="!min-h-0 !py-1 !px-2 text-xs" type="button" onClick={() => selectSlug('')}>
+                  <Btn density="xs" ghost className="!px-2 text-xs" type="button" onClick={() => selectSlug('')}>
                     {ICON_PICKER_AUTO_LABEL}
                   </Btn>
                 )}
                 {shouldShowIconPickerClearAction(value, autoSlug) && (
-                  <Btn ghost className="!min-h-0 !py-1 !px-2 text-xs" type="button" onClick={() => selectSlug('')}>
+                  <Btn density="xs" ghost className="!px-2 text-xs" type="button" onClick={() => selectSlug('')}>
                     {ICON_PICKER_CLEAR_LABEL}
                   </Btn>
                 )}

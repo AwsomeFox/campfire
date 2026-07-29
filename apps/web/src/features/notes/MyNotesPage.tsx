@@ -402,8 +402,8 @@ export default function MyNotesPage() {
         <h1 className="text-xl font-extrabold text-white m-0">My notes</h1>
         <div className="flex-1" />
         {canMemberWrite && (
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs"
+        <Btn density="xs"
+          className="text-xs"
           onClick={() => document.getElementById('note-quick-capture')?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })}
         >
           + New note
@@ -476,7 +476,7 @@ export default function MyNotesPage() {
               onChange={(e) => setWhisperTo(e.target.value)}
               disabled={saving}
               aria-label="Whisper to a specific player"
-              className="cf-input !min-h-0 !py-1 text-xs"
+              className="cf-input text-xs cf-density-xs"
             >
               <option value="">No one (private)</option>
               {members
@@ -562,10 +562,10 @@ export default function MyNotesPage() {
 
           {hasMore && (
             <div className="flex justify-center pt-1">
-              <Btn
+              <Btn density="xs"
                 type="button"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 disabled={loadingMore || loading}
                 onClick={() => void loadMore()}
               >
@@ -1042,7 +1042,7 @@ function NoteEditor({
               </span>
             }
             labelClassName="text-[11px] text-slate-400"
-            selectClassName="cf-input !min-h-0 !py-1 text-xs w-full"
+            selectClassName="cf-input text-xs w-full cf-density-xs"
             value={draft.recipientUserId}
             onChange={(e) => patchDraft({ recipientUserId: e.target.value })}
             disabled={saving}
@@ -1122,19 +1122,19 @@ function NoteEditor({
         )}
         {conflict && serverTip && (
           <>
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+            <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
               Reload latest
             </Btn>
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={keepDraftAndRebase}>
+            <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={keepDraftAndRebase}>
               Keep my draft
             </Btn>
           </>
         )}
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={onCancel}>
+        <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={onCancel}>
           Cancel
         </Btn>
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs"
+        <Btn density="xs"
+          className="text-xs"
           disabled={saving || !canSave || conflict}
           onClick={() => void save()}
         >

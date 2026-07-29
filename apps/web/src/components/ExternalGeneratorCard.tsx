@@ -249,8 +249,8 @@ export function ExternalGeneratorCard({
 
       {!acquisitionActive ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <Btn
-            className="!min-h-0 !py-1 text-[11px]"
+          <Btn density="xs"
+            className="text-[11px]"
             data-testid={`open-generator-${source.id}`}
             onClick={() => {
               onOpenGenerator();
@@ -384,8 +384,8 @@ export function ExternalGeneratorCard({
           </p>
 
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <Btn
-              className="!min-h-0 !py-1 text-[11px]"
+            <Btn density="xs"
+              className="text-[11px]"
               data-testid={`generator-import-${source.id}`}
               disabled={!canImport}
               onClick={() => void submit()}
@@ -394,14 +394,14 @@ export function ExternalGeneratorCard({
               {busy ? 'Importing…' : 'Import map'}
             </Btn>
             {file && (
-              <Btn ghost className="!min-h-0 !py-1 text-[11px]" disabled={busy} onClick={clearStaged}>
+              <Btn density="xs" ghost className="text-[11px]" disabled={busy} onClick={clearStaged}>
                 Choose a different file
               </Btn>
             )}
             <span style={{ flex: 1 }} />
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1 text-[11px]"
+              className="text-[11px]"
               data-testid={`generator-later-${source.id}`}
               disabled={busy}
               onClick={() => {

@@ -65,7 +65,7 @@ export function BackupCard() {
       {error && <ErrorNote message={error} onRetry={() => void loadCampaigns()} />}
       <select
         id={CAMPAIGN_SELECT_ID}
-        className="cf-select !min-h-0 !py-2 text-sm"
+        className="cf-select text-sm cf-density-compact"
         value={campaignId}
         onChange={(e) => setCampaignId(e.target.value)}
         disabled={isLoading || Boolean(error) || campaigns.length === 0}

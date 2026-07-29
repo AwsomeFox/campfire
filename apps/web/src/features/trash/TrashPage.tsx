@@ -146,9 +146,9 @@ export default function TrashPage() {
                     <span className="text-muted text-[11.5px] block mt-0.5">Deleted {formatDate(item.deletedAt)}</span>
                   </span>
                   {canDmWrite && (
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs shrink-0"
+                    className="text-xs shrink-0"
                     onClick={() => void restore(item)}
                     disabled={restoringId === key}
                   >

@@ -428,16 +428,16 @@ export default function NpcPage() {
                       setNpc(updated);
                     }}
                   />
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                  <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                     ✎ Edit
                   </Btn>
                 </div>
               )}
               {!isDm && role !== null && (
                 <div className="cf-print-hide flex gap-2">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     onClick={startPropose}
                     title="Suggest a change to the DM for approval"
                   >
@@ -663,11 +663,11 @@ export default function NpcPage() {
                   fallback={initials(form.name || npc.name)}
                 />
               </div>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
+              <Btn density="xs" ghost className="text-xs" onClick={() => setPickingIcon(true)}>
                 {form.iconSlug ? 'Change icon' : 'Choose icon'}
               </Btn>
               {form.iconSlug && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setForm({ ...form, iconSlug: '' })}>
+                <Btn density="xs" ghost className="text-xs" onClick={() => setForm({ ...form, iconSlug: '' })}>
                   Remove
                 </Btn>
               )}
@@ -700,7 +700,7 @@ export default function NpcPage() {
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
-              <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+              <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
                 {deleting ? 'Deleting…' : 'Delete NPC'}
               </Btn>
             ) : (
@@ -708,14 +708,14 @@ export default function NpcPage() {
             )}
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
+              <Btn density="xs" ghost className="text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

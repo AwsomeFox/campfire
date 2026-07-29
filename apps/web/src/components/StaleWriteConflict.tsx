@@ -91,9 +91,9 @@ export function StaleWriteConflict<T extends object>({
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1 text-xs"
+                className="text-xs"
                 aria-label={`${field.label}: Reload latest`}
                 onClick={() => {
                   onResolve(field.key, theirs[field.key]);
@@ -102,18 +102,18 @@ export function StaleWriteConflict<T extends object>({
               >
                 Reload
               </Btn>
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1 text-xs"
+                className="text-xs"
                 aria-label={`${field.label}: Keep mine`}
                 onClick={() => setChoices((value) => ({ ...value, [key]: 'Keeping your draft' }))}
               >
                 Keep mine
               </Btn>
               {mergeable && (
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1 text-xs"
+                  className="text-xs"
                   aria-label={`${field.label}: Merge edits`}
                   onClick={() => {
                     onResolve(field.key, mergeConflictValue(base[field.key], mine[field.key], theirs[field.key]) as T[keyof T]);
@@ -128,7 +128,7 @@ export function StaleWriteConflict<T extends object>({
           </fieldset>
         );
       })}
-      <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={onReloadAll}>Reload all fields</Btn>
+      <Btn density="xs" ghost className="text-xs" onClick={onReloadAll}>Reload all fields</Btn>
     </section>
   );
 }

@@ -339,7 +339,7 @@ export default function FactionPage() {
                     setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
                   }}
                 />
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>
               </div>
@@ -418,10 +418,10 @@ export default function FactionPage() {
                 {canDmWrite && (
                   <div className="space-y-2 pt-1">
                     <div className="flex items-center gap-2">
-                      <Btn ghost className="!min-h-0 !py-1 text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: -10 })}>
+                      <Btn density="xs" ghost className="text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: -10 })}>
                         −10
                       </Btn>
-                      <Btn ghost className="!min-h-0 !py-1 text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: 10 })}>
+                      <Btn density="xs" ghost className="text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: 10 })}>
                         +10
                       </Btn>
                     </div>
@@ -563,19 +563,19 @@ export default function FactionPage() {
             describedBy={saveError ? `${FACTION_EDITOR_ID_PREFIX}-form-error` : undefined}
           />
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
+            <Btn density="xs" danger className="text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete faction'}
             </Btn>
             <div className="flex gap-2">
               {conflict && (
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                <Btn density="xs" ghost className="text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+              <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+              <Btn density="xs" className="text-xs" disabled={saving || !form.name.trim()} onClick={save}>
                 {saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>

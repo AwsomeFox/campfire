@@ -262,7 +262,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           </span>
         )}
         <div className="flex-1" />
-        <Btn ghost className="!min-h-0 !py-1 text-xs" {...panelDisclosure.buttonProps}>
+        <Btn density="xs" ghost className="text-xs" {...panelDisclosure.buttonProps}>
           {expanded ? 'Hide' : 'Show'}
         </Btn>
       </div>
@@ -289,13 +289,13 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
           {canDmWrite && (
             <div className="flex items-center gap-2 flex-wrap">
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: false })} disabled={busy !== null}>
+              <Btn density="xs" className="text-xs" onClick={() => setConfirmingRun({ dryRun: false })} disabled={busy !== null}>
                 {busy === 'run' ? 'Drafting…' : 'Draft recap with AI'}
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: true })} disabled={busy !== null}>
+              <Btn density="xs" ghost className="text-xs" onClick={() => setConfirmingRun({ dryRun: true })} disabled={busy !== null}>
                 {busy === 'preview' ? 'Generating preview…' : 'Preview first'}
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" {...configDisclosure.buttonProps}>
+              <Btn density="xs" ghost className="text-xs" {...configDisclosure.buttonProps}>
                 {configOpen ? 'Hide config' : 'Configure'}
               </Btn>
             </div>
@@ -492,10 +492,10 @@ function ConfigForm({
       </div>
       {error && <ErrorNote message={error} />}
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn density="xs" ghost className="text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void save()} disabled={saving}>
+        <Btn density="xs" className="text-xs" onClick={() => void save()} disabled={saving}>
           {saving ? 'Saving…' : 'Save config'}
         </Btn>
       </div>

@@ -208,9 +208,9 @@ export default function LocationListPage() {
               ))}
             </select>
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   closeCreating();
                   setNewName('');
@@ -221,7 +221,7 @@ export default function LocationListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>
