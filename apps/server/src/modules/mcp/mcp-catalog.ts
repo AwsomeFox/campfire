@@ -196,6 +196,7 @@ export const MCP_TOOL_NAMES = [
   'update_combatant',
   'roll_death_save',
   'remove_combatant',
+  'undo_remove_combatant',
   'roll_initiative',
   'begin_encounter',
   'next_turn',

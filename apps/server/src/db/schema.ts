@@ -2056,6 +2056,19 @@ export const combatants = sqliteTable('combatants', {
   statblockJson: text('statblock_json'),
 });
 
+/** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */
+export const combatantRemovalUndos = sqliteTable('combatant_removal_undos', {
+  token: text('token').primaryKey(),
+  encounterId: integer('encounter_id').notNull(),
+  combatantId: integer('combatant_id').notNull(),
+  snapshotJson: text('snapshot_json').notNull(),
+  beforeEncounterJson: text('before_encounter_json').notNull(),
+  afterEncounterJson: text('after_encounter_json').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  consumedAt: text('consumed_at'),
+  createdAt: text('created_at').notNull(),
+});
+
 /** Campaign-scoped homebrew monster library (issue #425). */
 export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', {
   id: integer('id').primaryKey({ autoIncrement: true }),

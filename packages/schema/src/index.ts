@@ -10018,6 +10018,8 @@ export const CombatantCreate = z.object({
   // Add from a saved campaign-library monster (snapshot copied server-side).
   libraryMonsterId: Id.optional(),
 });
+export const CombatantRemoveUndo = z.object({ undoToken: z.string().uuid() });
+export type CombatantRemoveUndo = z.infer<typeof CombatantRemoveUndo>;
 /** How a target's saving throw changes a manually-applied damage roll. */
 export const DamageSaveOutcome = z.enum(['full', 'half']);
 export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;

@@ -1337,6 +1337,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_combatant',
   'update_combatant',
   'remove_combatant',
+  'undo_remove_combatant',
   // #414: structured action resolver — the driver resolves an action end-to-end
   // (roll → classify → preview → apply atomically) instead of chaining raw HP/condition
   // mutations, and can reverse it with undo_action.

@@ -4487,6 +4487,17 @@ function migrateActionPendingTurnVersion1316(sqlite: Database.Database): void {
   }
 }
 
+function migrateCombatantRemoveUndo1469(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS combatant_removal_undos (
+      token TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE, combatant_id INTEGER NOT NULL,
+      snapshot_json TEXT NOT NULL, before_encounter_json TEXT NOT NULL, after_encounter_json TEXT NOT NULL,
+      expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -4789,6 +4800,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
   // #701 soft-delete schema safety check: guarantees all 14 entity tables carry `deleted_at`.
   { name: '0149_ensure_soft_delete_columns_701', run: migrateEnsureSoftDeleteColumns701 },
+  // #1469 originally used 0147, which main now owns. This never-shipped migration
+  // gets the next free ordinal after main's 0149 to preserve upgrade compatibility.
+  { name: '0150_combatant_remove_undo_1469', run: migrateCombatantRemoveUndo1469 },
 ];
 
 /**

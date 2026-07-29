@@ -33,6 +33,7 @@ import {
   CharacterCreate,
   CharacterUpdate,
   CombatantCreate,
+  CombatantRemoveUndo,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
@@ -4379,8 +4380,20 @@ export class McpToolsService {
       async ({ encounterId, combatantId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        await this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role);
-        return { ok: true, encounterId, combatantId };
+        return this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'undo_remove_combatant',
+      'DM only: restore an exactly-once combatant removal using its short-lived undo token.',
+      { encounterId: Id.describe('Encounter id'), ...CombatantRemoveUndo.shape },
+      async ({ encounterId, undoToken }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.undoRemoveCombatant(encounterId as number, undoToken as string, user, role);
       },
     );
 

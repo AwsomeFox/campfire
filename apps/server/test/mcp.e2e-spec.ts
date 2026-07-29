@@ -2309,7 +2309,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(deniedInstall.isError).toBe(true);
   });
 
-  it('list_encounters, monster combatant gets DEX-derived initMod from its statblock, update_combatant and remove_combatant', async () => {
+  it('list_encounters, monster combatant gets DEX-derived initMod, and removal undo stays REST/MCP-compatible', async () => {
     const client = await mcpClient(dmToken);
 
     const createResult = await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ambush' } });
@@ -2342,15 +2342,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(damaged.hpCurrent).toBe(4);
     expect(damaged.conditions).toContain('prone');
 
-    const removeResult = await client.callTool({
-      name: 'remove_combatant',
-      arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id },
-    });
+    const removedViaRest = await dmAgent.delete(`/api/v1/encounters/${encounter.id}/combatants/${goblinCombatant.id}`);
+    expect(removedViaRest.status).toBe(200);
+    const restoredByMcp = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: encounter.id, undoToken: removedViaRest.body.undoToken } });
+    expect(restoredByMcp.isError).toBeFalsy();
+    expect(parseResult(restoredByMcp)).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });
+
+    const removeResult = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id } });
     expect(removeResult.isError).toBeFalsy();
+    const removedByMcp = parseResult(removeResult) as { undoToken: string };
+    expect(typeof removedByMcp.undoToken).toBe('string');
+    const restoredViaRest = await dmAgent.post(`/api/v1/encounters/${encounter.id}/combatants/undo-remove`).send({ undoToken: removedByMcp.undoToken });
+    expect(restoredViaRest.status).toBe(201);
+    expect(restoredViaRest.body).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });
 
     const getAfter = await client.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } });
     const afterRemoval = parseResult(getAfter) as { combatants: Array<{ id: number }> };
-    expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
+    expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(true);
   });
 
   // Issue #495: update_combatant addConditions is vocabulary-gated for non-DMs (same

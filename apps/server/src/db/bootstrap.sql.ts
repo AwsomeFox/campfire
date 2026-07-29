@@ -1775,6 +1775,19 @@ CREATE TABLE IF NOT EXISTS combatants (
   statblock_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS combatant_removal_undos (
+  token TEXT PRIMARY KEY,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  combatant_id INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  before_encounter_json TEXT NOT NULL,
+  after_encounter_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
+
 -- Campaign-scoped homebrew monster library (issue #425).
 CREATE TABLE IF NOT EXISTS campaign_library_monsters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

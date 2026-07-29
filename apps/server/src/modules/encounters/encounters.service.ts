@@ -1,13 +1,13 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveUndo, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
@@ -613,7 +613,7 @@ export class EncountersService {
   }
 
   /**
-   * Reject a write against a trashed or 'ended' encounter (issues #163, #470). Combatant mutations
+   * Reject a write against an ended or trashed encounter (issues #163, #470). Combatant mutations
    * were the first gap: per-combatant writes never checked status, so after a fight any
    * owning player or DM could keep editing the historical record and every combatant HP
    * patch rewrote the linked character's live sheet HP through write-through in
@@ -624,11 +624,30 @@ export class EncountersService {
    * the supported path back to a mutable 'running' encounter.
    */
   private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
-    if (encounterRow.deletedAt !== null) {
+    if (encounterRow.deletedAt != null) {
       throw new NotFoundException(`Encounter ${encounterRow.id} not found`);
     }
     if (encounterRow.status === 'ended') {
       throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
+    }
+  }
+
+  /**
+   * Recheck campaign lifecycle inside encounter-write transactions. The controller's
+   * access gate runs before an awaited rule-system lookup, so an archive or trash
+   * can otherwise land between that gate and the transactional mutation.
+   */
+  private assertCampaignWritableInTx(db: SyncDb, campaignId: number): void {
+    const campaign = db.select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    if (!campaign) return;
+    if (campaign.deletedAt != null) throw new NotFoundException('Campaign not found');
+    if (campaign.status !== 'active') {
+      throw new ForbiddenException(
+        `Campaign is ${campaign.status} (read-only) — set its status back to 'active' to make changes`,
+      );
     }
   }
 
@@ -4137,96 +4156,195 @@ export class EncountersService {
     return combatantToDomain(row);
   }
 
-  async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role): Promise<void> {
-    const encounterRow = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounterRow);
-    const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
+  async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role): Promise<CombatantRemoveUndo> {
+    const initialEncounter = await this.getRowOrThrow(encounterId);
+    const adapter = await this.adapterForCampaign(initialEncounter.campaignId);
+    const undoToken = randomUUID();
+    const now = nowIso();
+    // UI offers Undo for seven seconds; retain the opaque server token longer so a
+    // click at the end of that window survives ordinary network latency.
+    const expiresAt = new Date(Date.now() + 30_000).toISOString();
+    let emittedEncounter!: typeof encounters.$inferSelect;
 
-    // Decide the new turn pointer BEFORE deleting (issue #49). Removing a combatant
-    // whose initiative sorts above the current actor used to shift every later row up
-    // a slot, so the positional index silently pointed at the wrong creature; and
-    // removing the current combatant itself left the index dangling. With an identity
-    // pointer we only need to react when the CURRENT combatant is the one leaving:
-    // advance to the next in the sorted order (wrapping to the top if it was last).
-    let newCurrentId = encounterRow.currentCombatantId;
-    // Round only changes when the removed actor was the LAST in initiative order —
-    // removing it wraps the pointer to the top of the NEXT round, exactly as
-    // advanceTurn does (issue #528). We track the wrap here and apply it below so the
-    // round counter can never desync from the turn pointer mid-combat.
-    let wrappedToNextRound = false;
-    const runningAdapter =
-      encounterRow.status === 'running' ? await this.adapterForCampaign(encounterRow.campaignId) : null;
-    if (runningAdapter && encounterRow.currentCombatantId === combatantId) {
-      const sorted = this.sortCombatantsWithAdapter(
-        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
-        'running',
-        runningAdapter,
-      );
-      const idx = sorted.findIndex((c) => c.id === combatantId);
-      const remaining = sorted.filter((c) => c.id !== combatantId);
-      if (remaining.length === 0) {
-        newCurrentId = null;
-      } else {
-        const next = sorted[idx + 1];
-        if (next) {
-          newCurrentId = next.id;
-        } else {
-          // The current actor was last in the (pre-removal) sorted order, so stepping
-          // past it wraps to the top of the next round — mirror advanceTurn's wrap+round
-          // increment (idx + 1 >= count => round + 1).
+    this.db.transaction((tx) => {
+      // Both the transition and its undo snapshots must use one current encounter and
+      // roster view; an earlier device must never overwrite a newer turn transition.
+      const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMutable(freshEncounter);
+      this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+      const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const snapshot = roster.find((row) => row.id === combatantId);
+      if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+
+      const runningAdapter = freshEncounter.status === 'running' ? adapter : null;
+      let newCurrentId = freshEncounter.currentCombatantId;
+      let wrappedToNextRound = false;
+      if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
+        const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
+        const idx = sorted.findIndex((combatant) => combatant.id === combatantId);
+        const remaining = sorted.filter((combatant) => combatant.id !== combatantId);
+        if (remaining.length === 0) newCurrentId = null;
+        else if (sorted[idx + 1]) newCurrentId = sorted[idx + 1].id;
+        else {
           newCurrentId = remaining[0].id;
           wrappedToNextRound = true;
         }
       }
-    }
 
-    await this.db.delete(combatants).where(eq(combatants.id, combatantId));
-
-    // Re-derive turnIndex against the post-removal sorted order so it stays in lockstep
-    // with the (possibly advanced) identity pointer. The round is bumped in the same
-    // UPDATE when the removal wrapped the pointer past the end (issue #528).
-    if (runningAdapter) {
-      const sortedAfter = this.sortCombatantsWithAdapter(
-        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
-        'running',
-        runningAdapter,
-      );
-      const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
-      const round = wrappedToNextRound ? encounterRow.round + 1 : encounterRow.round;
-      const escalation = this.nextEscalationState(runningAdapter, encounterRow, round, 'round');
-      await this.db
-        .update(encounters)
-        .set({
+      const lairResumeCombatantId = freshEncounter.lairResumeCombatantId === combatantId
+        ? null
+        : freshEncounter.lairResumeCombatantId;
+      let afterEncounter = {
+        currentCombatantId: newCurrentId,
+        turnIndex: freshEncounter.turnIndex,
+        round: freshEncounter.round,
+        escalationDie: freshEncounter.escalationDie,
+        escalationDieHistory: freshEncounter.escalationDieHistory,
+        lairResumeCombatantId,
+      };
+      // Persist a scalar expected version with the undo snapshot. The database
+      // update below still uses an expression for the actual increment.
+      const afterTurnVersion = freshEncounter.turnVersion + (runningAdapter && freshEncounter.currentCombatantId === combatantId ? 1 : 0);
+      let turnVersionUpdate: { turnVersion?: SQL } = {};
+      let escalation: ReturnType<EncountersService['nextEscalationState']> | null = null;
+      if (runningAdapter) {
+        const sortedAfter = this.sortCombatantsWithAdapter(
+          roster.filter((row) => row.id !== combatantId).map(combatantToDomain),
+          'running',
+          runningAdapter,
+        );
+        const round = wrappedToNextRound ? freshEncounter.round + 1 : freshEncounter.round;
+        escalation = this.nextEscalationState(runningAdapter, freshEncounter, round, 'round');
+        afterEncounter = {
           currentCombatantId: newCurrentId,
-          turnIndex,
+          turnIndex: turnIndexFor(sortedAfter, newCurrentId),
           round,
-          // Only removal of the active combatant changes the logical turn. Removing
-          // someone else and initiative re-sorts keep active player previews valid.
-          ...(encounterRow.currentCombatantId === combatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
           escalationDie: escalation.escalationDie,
-          escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
-          updatedAt: nowIso(),
-        })
-        .where(eq(encounters.id, encounterId));
-      if (wrappedToNextRound && escalation.logDetail) {
-        await this.appendEvent(encounterId, round, 'override', {
-          detail: escalation.logDetail,
-          metadata: { escalationDie: escalation.escalationDie },
-        });
+          escalationDieHistory: escalation.escalationDieHistory ?? freshEncounter.escalationDieHistory,
+          lairResumeCombatantId,
+        };
+        // Only removal of the active combatant changes the logical turn. Removing
+        // someone else and initiative re-sorts keep active player previews valid.
+        // Keep this SQL expression out of the persisted undo snapshot.
+        if (freshEncounter.currentCombatantId === combatantId) {
+          turnVersionUpdate = { turnVersion: sql`${encounters.turnVersion} + 1` };
+        }
       }
-    }
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'encounter.combatant.remove',
-      entityType: 'combatant',
-      entityId: combatantId,
-      campaignId: encounterRow.campaignId,
-      detail: existing.name,
+      tx.delete(combatantRemovalUndos).where(or(lt(combatantRemovalUndos.expiresAt, now), isNotNull(combatantRemovalUndos.consumedAt))).run();
+      tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
+      tx.update(encounters).set({
+        ...afterEncounter,
+        ...turnVersionUpdate,
+        updatedAt: now,
+      }).where(eq(encounters.id, encounterId)).run();
+      const escalationEventId = wrappedToNextRound && escalation?.logDetail
+        ? Number(tx.insert(encounterEvents).values({ encounterId, round: afterEncounter.round, type: 'override', actor: null, target: null, actorId: null, targetId: null, detail: escalation.logDetail, chainId: null, parentEventId: null, phase: null, performedByJson: null, metadataJson: JSON.stringify({ escalationDie: escalation.escalationDie }), createdAt: now }).run().lastInsertRowid)
+        : null;
+      tx.insert(combatantRemovalUndos).values({
+        token: undoToken,
+        encounterId,
+        combatantId,
+        snapshotJson: toJsonText(snapshot),
+        beforeEncounterJson: toJsonText({
+          currentCombatantId: freshEncounter.currentCombatantId,
+          turnIndex: freshEncounter.turnIndex,
+          round: freshEncounter.round,
+          escalationDie: freshEncounter.escalationDie,
+          escalationDieHistory: freshEncounter.escalationDieHistory,
+          lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
+        }),
+        afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, escalationEventId }),
+        expiresAt,
+        createdAt: now,
+      }).run();
+      this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.remove', entityType: 'combatant', entityId: combatantId, campaignId: freshEncounter.campaignId, detail: snapshot.name });
+      emittedEncounter = freshEncounter;
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    return { undoToken };
+  }
+
+  async undoRemoveCombatant(encounterId: number, undoToken: string, user: RequestUser, role: Role): Promise<Combatant> {
+    let restored!: typeof combatants.$inferSelect;
+    let restoredCharacterId: number | null = null;
+    let restoredNpcId: number | null = null;
+    let emittedEncounter!: typeof encounters.$inferSelect;
+    try {
+      this.db.transaction((tx) => {
+        const current = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+        if (!current) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        this.assertMutable(current);
+        this.assertCampaignWritableInTx(tx, current.campaignId);
+        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
+        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+        const undo = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
+        if (!undo || undo.consumedAt != null || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
+        const snapshot = fromJsonText<typeof combatants.$inferSelect | null>(undo.snapshotJson, null);
+        if (!snapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
+        // A rule-pack uninstall nulls live combatants before deleting its entries, but
+        // a removed combatant only exists in this snapshot during the undo window.
+        // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
+        if (snapshot.ruleEntryId != null && !tx.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.id, snapshot.ruleEntryId)).get()) {
+          snapshot.ruleEntryId = null;
+        }
+        if (snapshot.characterId != null && !tx.select({ id: characters.id }).from(characters).where(eq(characters.id, snapshot.characterId)).get()) {
+          snapshot.characterId = null;
+        }
+        if (snapshot.npcId != null && !tx.select({ id: npcs.id }).from(npcs).where(eq(npcs.id, snapshot.npcId)).get()) {
+          snapshot.npcId = null;
+        }
+        restoredCharacterId = snapshot.characterId;
+        restoredNpcId = snapshot.npcId;
+        tx.insert(combatants).values(snapshot).run();
+        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
+        const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
+        const runningAdapter = current.status === 'running' ? adapter : null;
+        if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && after.turnVersion === current.turnVersion) {
+          const restoredRoster = runningAdapter
+            ? tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain)
+            : null;
+          const restoredTurnIndex = restoredRoster
+            ? turnIndexFor(this.sortCombatantsWithAdapter(restoredRoster, 'running', runningAdapter!), before.currentCombatantId)
+            : before.turnIndex;
+          tx.update(encounters).set({
+            currentCombatantId: before.currentCombatantId,
+            turnIndex: restoredTurnIndex,
+            round: before.round,
+            escalationDie: before.escalationDie,
+            escalationDieHistory: before.escalationDieHistory,
+            lairResumeCombatantId: before.lairResumeCombatantId,
+            ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
+            updatedAt: nowIso(),
+          }).where(eq(encounters.id, encounterId)).run();
+          if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
+        } else if (runningAdapter) {
+          const restoredRoster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain);
+          const turnIndex = turnIndexFor(this.sortCombatantsWithAdapter(restoredRoster, 'running', runningAdapter), current.currentCombatantId);
+          tx.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
+        }
+        tx.update(combatantRemovalUndos).set({ consumedAt: nowIso() }).where(eq(combatantRemovalUndos.token, undoToken)).run();
+        this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.restore', entityType: 'combatant', entityId: snapshot.id, campaignId: current.campaignId, detail: snapshot.name });
+        restored = snapshot;
+        emittedEncounter = current;
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err) && (restoredCharacterId !== null || restoredNpcId !== null)) {
+        const winner = await this.findExistingIdentityCombatant(encounterId, restoredCharacterId, restoredNpcId);
+        if (winner) {
+          throw new ConflictException({
+            code: 'COMBATANT_IDENTITY_CONFLICT',
+            message: `${restoredCharacterId !== null ? `Character ${restoredCharacterId}` : `NPC ${restoredNpcId}`} is already a combatant in encounter ${encounterId}`,
+            combatantId: winner.id,
+          });
+        }
+      }
+      throw err;
+    }
+    this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    return combatantToDomain(restored);
   }
 
   /** Rolls initiative for every combatant that doesn't already have one (issue #765: group mode rolls one d6 per side). */
