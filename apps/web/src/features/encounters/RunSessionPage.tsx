@@ -1904,6 +1904,7 @@ export default function RunSessionPage() {
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
   const pendingEncounterPatchKeys = useRef(new Set<string>());
+  const encounterPatchQueue = useRef<Promise<void>>(Promise.resolve());
   const gridDefaultAttempts = useRef(new Set<string>());
   // #1589 — a default-normalization attempt that DEDUPES against another in-flight PATCH
   // owning the same pending key (see `queueEncounterPatch` below) registers a wake-up here,
@@ -1941,6 +1942,9 @@ export default function RunSessionPage() {
         setEncounterPatchConflict('Another device saved a newer encounter version. Your edit was not applied; the latest encounter has been reloaded.');
       } else reportError(error);
     },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(queryKeys.encounter(eid), updated);
+    },
     onSettled: (_data, error, variables) => {
       pendingEncounterPatchKeys.current.delete(variables.pendingKey);
       // #1589 — wake a default attempt that deduped against this exact pending key, but ONLY
@@ -1976,8 +1980,8 @@ export default function RunSessionPage() {
       if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, eid);
     },
   });
-  const mutateMapRef = useRef(setMap.mutate);
-  mutateMapRef.current = setMap.mutate;
+  const mutateMapRef = useRef(setMap.mutateAsync);
+  mutateMapRef.current = setMap.mutateAsync;
 
   const attemptGridDefaultsRef = useRef<() => void>(() => {});
 
@@ -1997,7 +2001,6 @@ export default function RunSessionPage() {
       pendingEncounterPatchKeys.current.add(pendingKey);
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
-      const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
       // Make every encounter patch optimistic. Fog edits in particular need their cache value
       // to survive the next poll while the write is in flight; the version token below turns a
       // real remote collision into an explicit conflict rather than last-writer-wins.
@@ -2005,7 +2008,16 @@ export default function RunSessionPage() {
         current ? { ...current, ...patch } : current,
       );
 
-      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
+      // Serialize local writes. Each queued patch reads the version only when it is about
+      // to dispatch, after the preceding success has installed its returned revision in
+      // the cache. Different fog bodies therefore cannot race each other with the same CAS
+      // token and discard the later local edit as a false stale-write conflict.
+      encounterPatchQueue.current = encounterPatchQueue.current
+        .catch(() => undefined)
+        .then(async () => {
+          const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
+          await mutateMapRef.current({ patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
+        });
       return true;
     },
     [eid, queryClient],
@@ -3354,7 +3366,7 @@ export function BattleMap({
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   /** A fog write is optimistic until the server settles; polls must not discard its local undo history. */
-  pendingFog: FogState | null | undefined;
+  pendingFog?: FogState | null;
   onSetAoe: (aoe: AoeTemplate[]) => void;
   /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
@@ -3681,7 +3693,9 @@ export function BattleMap({
     if (effectiveIsDm) return all;
     return filterAoeTemplatesForViewer(all, encounter.fog, { viewerUserId });
   }, [encounter.aoe, encounter.fog, effectiveIsDm, viewerUserId]);
-  const fog = encounter.fog;
+  // Keep the optimistic fog as both the rendered and editable source until its PATCH
+  // settles; a stale poll must not make the map appear to revert mid-gesture.
+  const fog = pendingFog === undefined ? encounter.fog : pendingFog;
   const fogOn = !!fog?.enabled;
 
   const commitFogEdit = useCallback(
