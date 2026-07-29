@@ -598,13 +598,13 @@ export class ScribeService implements OnApplicationBootstrap {
         .from(aiScribeJobs)
         .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.status, 'succeeded')))
         .orderBy(desc(aiScribeJobs.id));
-      const newestSucceeded = priorSucceeded[0];
-      if (newestSucceeded?.proposalId !== null && newestSucceeded?.proposalId !== undefined) {
-        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, newestSucceeded.proposalId)).limit(1);
+      const newestSucceededWithProposal = priorSucceeded.find((job) => job.proposalId !== null);
+      if (newestSucceededWithProposal?.proposalId !== null && newestSucceededWithProposal?.proposalId !== undefined) {
+        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, newestSucceededWithProposal.proposalId)).limit(1);
         if (prop?.status === 'pending') {
           return this.record(campaignId, trigger, user, 'skipped', {
             detail: 'a scribe recap proposal is already pending review',
-            proposalId: newestSucceeded.proposalId,
+            proposalId: newestSucceededWithProposal.proposalId,
             sourceHash,
             scope,
             sourceStats: stats,

@@ -536,8 +536,22 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   });
   let unreadCount = 2;
   const item = notification('A newly arrived recap', 9911);
+  let holdNextCount = false;
+  let staleCountStarted = false;
+  let releaseStaleCount: () => void = () => {};
+  const staleCount = new Promise<void>((resolve) => {
+    releaseStaleCount = resolve;
+  });
 
-  await context.route(COUNT_URL, (route: Route) => route.fulfill({ json: { count: unreadCount } }));
+  await context.route(COUNT_URL, async (route: Route) => {
+    const countAtRequest = unreadCount;
+    if (holdNextCount) {
+      holdNextCount = false;
+      staleCountStarted = true;
+      await staleCount;
+    }
+    await route.fulfill({ json: { count: countAtRequest } });
+  });
   await context.route(LIST_URL, (route) => route.fulfill({ json: [item] }));
   await context.route('**/api/v1/notifications/mark-read', async (route: Route) => {
     const body = route.request().postDataJSON() as { all?: boolean };
@@ -552,11 +566,19 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   await expect(first.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
   await expect(second.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
 
+  // Start a count load before read-all in the other tab, then release its stale
+  // positive response after the read-all broadcast arrives.
+  holdNextCount = true;
+  void second.getByRole('link', { name: 'Quests', exact: true }).click();
+  await expect.poll(() => staleCountStarted).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
   await first.getByRole('button', { name: 'Mark all (2) read' }).click();
   const confirm = first.getByRole('dialog').filter({ hasText: 'Mark all 2 notifications as read?' });
   await confirm.getByRole('button', { name: 'Mark all 2 read' }).click();
   await expect(first.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+
+  releaseStaleCount();
   await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
 
   unreadCount = 1;

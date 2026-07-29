@@ -680,6 +680,7 @@ export class SessionsService {
   async restore(id: number, user: RequestUser, role: Role): Promise<Session> {
     const existing = await this.getRowOrThrow(id, true);
     if (existing.deletedAt == null) throw new NotFoundException(`Session ${id} is not in the trash`);
+    await this.assertNumberAvailable(existing.campaignId, existing.number, id);
     const [row] = await this.db
       .update(sessions)
       .set({ deletedAt: null, updatedAt: nowIso() })

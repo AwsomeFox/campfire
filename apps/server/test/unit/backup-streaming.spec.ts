@@ -625,6 +625,8 @@ describe('backup streaming writer (#603)', () => {
     const previous = process.env.BACKUP_DIR;
     process.env.BACKUP_DIR = backupDir;
     const svc = service();
+    await (svc as any).runScheduledBackup(60 * 60 * 1000);
+    const before = await (svc as any).readCadence();
     const verify = jest.spyOn(svc as any, 'verifyScheduledArchive').mockResolvedValue({
       verified: false,
       checksum: null,
@@ -635,6 +637,31 @@ describe('backup streaming writer (#603)', () => {
       expect(verify).toHaveBeenCalledTimes(1);
       expect(fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.zip')) : []).toEqual([]);
       expect(fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.partial')) : []).toEqual([]);
+    } finally {
+      verify.mockRestore();
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
+  it('does not promote an incomplete scheduled archive over the last known good backup', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    const verify = jest.spyOn(svc as any, 'verifyScheduledArchive').mockResolvedValue({
+      verified: true,
+      checksum: 'a'.repeat(64),
+      clean: false,
+      error: '',
+    });
+    try {
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      const cadence = await (svc as any).readCadence();
+      expect(fs.readdirSync(backupDir).filter((name) => name.endsWith('.zip'))).toHaveLength(2);
+      expect(cadence.lastSuccessAt).toBe(before.lastSuccessAt);
+      expect(cadence.lastArchiveName).toBe(before.lastArchiveName);
+      expect(cadence.lastError).toMatch(/incomplete/i);
     } finally {
       verify.mockRestore();
       if (previous === undefined) delete process.env.BACKUP_DIR;

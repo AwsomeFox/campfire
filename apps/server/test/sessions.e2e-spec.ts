@@ -136,7 +136,9 @@ describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
     const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 });
     expect(first.status).toBe(201);
     expect((await request(server).delete(`/api/v1/sessions/${first.body.id}`).set(dm)).status).toBe(200);
-    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 })).status).toBe(201);
+    const replacement = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 });
+    expect(replacement.status).toBe(201);
+    expect((await request(server).post(`/api/v1/sessions/${first.body.id}/restore`).set(dm)).status).toBe(409);
   });
 });
 

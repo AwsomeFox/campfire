@@ -310,6 +310,29 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     expect(seat.body.lastTurnAt).not.toBeNull();
   });
 
+  it('keeps an earlier pending proposal blocked after a newer successful dry run (#1491)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe Pending Before Dry Run');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party found the sealed observatory.');
+
+    harness.script({ text: 'The party found the sealed observatory.' });
+    const first = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(first.body.job.status).toBe('succeeded');
+    const proposalId = first.body.proposalIds[0] as number;
+
+    await seedResolvedInbox(harness, campaignId, 'The party mapped the observatory dome.');
+    harness.script({ text: 'A dry-run preview of the observatory dome.' });
+    const preview = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({ dryRun: true });
+    expect(preview.body.job.status).toBe('succeeded');
+    expect(preview.body.job.proposalId).toBeNull();
+
+    await seedResolvedInbox(harness, campaignId, 'The party heard machinery beneath the floor.');
+    const blocked = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(blocked.body.job.status).toBe('skipped');
+    expect(blocked.body.proposalIds).toEqual([proposalId]);
+  });
+
   it('is gated: with the experimental flag off, a run is disabled and files nothing', async () => {
     // Flag off for this campaign's run: disable it server-wide first.
     await request(harness.server).patch(`${API}/settings`).set(dm).send({ experimentalAiDm: false });

@@ -134,7 +134,7 @@ export interface BackupDiskStatus {
 }
 
 type ScheduledArchiveVerification =
-  | { verified: true; checksum: string; error: '' }
+  | { verified: true; checksum: string; clean: boolean; error: '' }
   | { verified: false; checksum: string | null; error: string };
 
 export interface BackupRetentionStatus {
@@ -667,6 +667,17 @@ export class BackupService implements OnApplicationBootstrap {
         }
         fs.renameSync(partialPath, filePath);
         const checksum = verification.checksum;
+        if (!verification.clean) {
+          const message =
+            `Scheduled backup archived but is incomplete (${filePath}); preserving the prior last-known-good archive.`;
+          // A missing upload must not erase the scheduled archive or block future
+          // attempts, but an incomplete archive is not a restore-complete success.
+          // Keep the prior known-good cadence record and skip retention so it cannot
+          // be displaced by the recoverable-but-partial archive.
+          await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes);
+          this.logger.warn(message);
+          return;
+        }
         const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
         const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
         const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
@@ -915,8 +926,8 @@ export class BackupService implements OnApplicationBootstrap {
       return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
     }
     try {
-      await this.inspectFile(filePath);
-      return { verified: true, checksum, error: '' };
+      const inspection = await this.inspectFile(filePath);
+      return { verified: true, checksum, clean: inspection.reconciliation.clean, error: '' };
     } catch (err) {
       return { verified: false, checksum, error: err instanceof Error ? err.message : String(err) };
     }
@@ -943,14 +954,14 @@ export class BackupService implements OnApplicationBootstrap {
       // had its partial name. Reusing that result avoids another full archive
       // read/decompression pass, but only for this explicit path in this run.
       const verification = knownVerifiedPath && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
-        ? { verified: true, checksum: lastChecksum, error: '' }
+        ? { verified: true, checksum: lastChecksum, clean: true, error: '' }
         : await this.verifyScheduledArchive(file.abs);
       const markers = this.retentionMarkers(file.abs);
       candidates.push({
         name: file.name,
         bytes: file.bytes,
         mtimeMs: file.mtimeMs,
-        verified: verification.verified,
+        verified: verification.verified && verification.clean,
         lastKnownGood:
           file.name === lastArchiveName ||
           (lastArchiveName.length === 0 && verification.checksum === lastChecksum),

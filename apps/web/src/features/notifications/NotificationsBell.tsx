@@ -400,6 +400,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
     const controller = new AbortController();
     const generation = ++countGenerationRef.current;
+    const requestedAt = Date.now();
 
     const load = async () => {
       if (!isDocumentActive()) return;
@@ -409,10 +410,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       if (countGenerationRef.current !== generation) {
         return;
       }
-      // "Mark all read" only suppresses the count that was already in flight.
-      // A positive server count proves a new notification arrived afterwards, so
-      // clear the local suppression before publishing it to every open tab.
-      if (res.count > 0) allReadAtRef.current = null;
+      // A pre-read-all request can return an old positive count after another tab
+      // broadcasts the mutation. Only a request started after read-all proves the
+      // positive count is fresh enough to release the local suppression.
+      const allReadAt = allReadAtRef.current;
+      if (res.count > 0 && (allReadAt === null || requestedAt >= Date.parse(allReadAt))) {
+        allReadAtRef.current = null;
+      }
       if (allReadAtRef.current !== null) {
         publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
         return;
