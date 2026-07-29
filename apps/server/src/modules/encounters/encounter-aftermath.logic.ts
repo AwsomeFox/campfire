@@ -126,7 +126,7 @@ export function suggestedXpFromDifficulty(
     if (characterCombatantCount === 0) warnings.push('No player characters were in this fight — adjust XP manually.');
     return {
       supported: difficulty.status === 'ok',
-      suggestedPartyTotal: difficulty.status === 'ok' ? difficulty.totalMonsterXp : null,
+      suggestedPartyTotal: null,
       suggestedPerCharacter: null,
       undistributedXp: null,
       difficultyLabel: difficulty.label,

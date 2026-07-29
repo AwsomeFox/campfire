@@ -116,6 +116,15 @@ describe('encounter aftermath logic (issue #473)', () => {
     expect(xp.warnings.some((warning) => /award manually/i.test(warning))).toBe(true);
   });
 
+  it('does not suggest a party award when no characters participated', () => {
+    const xp = suggestedXpFromDifficulty(
+      computeDnd5eEncounterDifficulty({ partyLevels: [3], monsterChallengeRatings: [2] }),
+      0,
+    );
+    expect(xp).toMatchObject({ supported: true, suggestedPartyTotal: null, suggestedPerCharacter: null, undistributedXp: null });
+    expect(xp.warnings.some((warning) => /no player characters/i.test(warning))).toBe(true);
+  });
+
   it('leaves a single-monster award unchanged and declines unsupported rulesets (issue #1454)', () => {
     const loneMonster = suggestedXpFromDifficulty(
       computeDnd5eEncounterDifficulty({ partyLevels: [3], monsterChallengeRatings: [2] }),

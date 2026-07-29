@@ -1916,21 +1916,21 @@ export class EncountersService {
     // Enemy CRs: monsters plus linked NPCs whose campaign disposition is hostile. NPC
     // combatants do not carry encounter-side allegiance, so resolve it from their linked
     // campaign NPC instead of counting friendly/neutral party allies as enemies.
-    const npcIds = combatantRows
-      .filter((c) => c.kind === 'npc' && c.npcId !== null)
-      .map((c) => c.npcId as number);
+    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
+    const npcIds = npcCombatants.map((c) => c.npcId as number);
     const hostileNpcIds = new Set<number>();
     if (npcIds.length > 0) {
       const npcRows = await this.db
         .select({ id: npcs.id, disposition: npcs.disposition })
         .from(npcs)
-        .where(and(inArray(npcs.id, npcIds), eq(npcs.campaignId, encounterRow.campaignId), notDeleted(npcs.deletedAt)));
+        .where(and(inArray(npcs.id, npcIds), eq(npcs.campaignId, encounterRow.campaignId)));
       for (const npc of npcRows) {
         if (npc.disposition.trim().toLowerCase() === 'hostile') hostileNpcIds.add(npc.id);
       }
     }
-    const enemyCombatants = combatantRows.filter(
-      (c) => c.kind === 'monster' || (c.kind === 'npc' && c.npcId !== null && hostileNpcIds.has(c.npcId)),
+    const enemyCombatants = combatantRows.filter((c) =>
+      c.kind === 'monster' || (c.kind === 'npc' && c.npcId !== null && ((c.npcDispositionSnapshot ?? (hostileNpcIds.has(c.npcId) ? 'hostile' : ''))
+        .trim().toLowerCase() === 'hostile')),
     );
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
     // rather than being dropped, so missing data can surface as unknown (issue #429).
@@ -2773,6 +2773,7 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let npcDispositionSnapshot: string | null = null;
     let spCurrent = 0;
     let spMax = 0;
     let rpCurrent = 0;
@@ -2816,6 +2817,7 @@ export class EncountersService {
         });
       }
       npcId = npc.id;
+      npcDispositionSnapshot = npc.disposition;
       name = name ?? npc.name;
     }
 
@@ -2994,6 +2996,7 @@ export class EncountersService {
             kind: input.kind,
             characterId,
             npcId,
+            npcDispositionSnapshot,
             name: n,
             initiative: null,
             initMod,
