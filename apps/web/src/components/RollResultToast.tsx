@@ -11,6 +11,7 @@ import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
 import { UIIcon } from './UIIcon';
+import { Btn } from './ui';
 
 const AUTO_DISMISS_MS = 15000;
 
@@ -80,14 +81,15 @@ export function RollResultToast({
         {roll.total}
       </span>
       {onApply && (
-        <button
+        <Btn
           type="button"
-          className="cf-btn cf-btn-ghost cf-roll-result-toast__apply"
+          ghost
+          className="cf-roll-result-toast__apply"
           onClick={apply}
           data-testid="roll-result-apply"
         >
           {t('dice.applyDamage')}
-        </button>
+        </Btn>
       )}
       <button
         type="button"

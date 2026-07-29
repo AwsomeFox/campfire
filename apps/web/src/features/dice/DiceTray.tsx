@@ -456,30 +456,30 @@ export function DiceTray({
             <div className="field" style={{ flex: '0 0 auto' }}>
               <span>{t('dice.actionScore')}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <button
+                <Btn
                   type="button"
+                  ghost
                   onClick={() => setActionScore((s) => Math.max(0, s - 1))}
                   aria-label={t('dice.decreaseActionScore')}
-                  className="cf-btn cf-btn-ghost"
                   style={{ minHeight: 36, minWidth: 36, padding: 0, fontSize: 18 }}
                 >
                   −
-                </button>
+                </Btn>
                 <span
                   aria-live="polite"
                   style={{ fontFamily: 'var(--font-heading)', fontSize: 16, minWidth: 24, textAlign: 'center' }}
                 >
                   {actionScore}
                 </span>
-                <button
+                <Btn
                   type="button"
+                  ghost
                   onClick={() => setActionScore((s) => Math.min(MAX_ACTION_SCORE, s + 1))}
                   aria-label={t('dice.increaseActionScore')}
-                  className="cf-btn cf-btn-ghost"
                   style={{ minHeight: 36, minWidth: 36, padding: 0, fontSize: 18 }}
                 >
                   +
-                </button>
+                </Btn>
               </div>
             </div>
             <Btn
@@ -504,12 +504,11 @@ export function DiceTray({
       {/* Die buttons */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {DICE_FACES.map((sides) => (
-          <button
+          <Btn
             key={sides}
             type="button"
             onClick={() => addDie(sides)}
             aria-label={t('dice.addDie', { sides })}
-            className="cf-btn"
             style={{
               minHeight: dieBtnSize,
               minWidth: dieBtnSize,
@@ -519,18 +518,18 @@ export function DiceTray({
             }}
           >
             d{sides}
-          </button>
+          </Btn>
         ))}
       </div>
 
       {/* Advantage / Disadvantage (d20) */}
       {!supportsActionDice && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button
+        <Btn
           type="button"
+          ghost
           onClick={() => toggleAdv('adv')}
           disabled={!advAvailable && advMode !== 'adv'}
           aria-pressed={advMode === 'adv'}
-          className="cf-btn cf-btn-ghost"
           style={{
             minHeight: compact ? 32 : 38,
             fontSize: 12,
@@ -540,13 +539,13 @@ export function DiceTray({
           }}
         >
           {t('dice.advantage')}
-        </button>
-        <button
+        </Btn>
+        <Btn
           type="button"
+          ghost
           onClick={() => toggleAdv('dis')}
           disabled={!advAvailable && advMode !== 'dis'}
           aria-pressed={advMode === 'dis'}
-          className="cf-btn cf-btn-ghost"
           style={{
             minHeight: compact ? 32 : 38,
             fontSize: 12,
@@ -556,7 +555,7 @@ export function DiceTray({
           }}
         >
           {t('dice.disadvantage')}
-        </button>
+        </Btn>
       </div>}
 
       {/* Modifier stepper */}
@@ -564,30 +563,30 @@ export function DiceTray({
         <span className="text-muted" style={{ fontSize: 12, minWidth: 52 }}>
           {t('dice.modifier')}
         </span>
-        <button
+        <Btn
           type="button"
+          ghost
           onClick={() => setModifier((m) => Math.max(m - 1, -MAX_MOD))}
           aria-label={t('dice.decreaseModifier')}
-          className="cf-btn cf-btn-ghost"
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
           −
-        </button>
+        </Btn>
         <span
           aria-live="polite"
           style={{ fontFamily: 'var(--font-heading)', fontSize: 16, minWidth: 34, textAlign: 'center' }}
         >
           {modifier > 0 ? `+${modifier}` : modifier}
         </span>
-        <button
+        <Btn
           type="button"
+          ghost
           onClick={() => setModifier((m) => Math.min(m + 1, MAX_MOD))}
           aria-label={t('dice.increaseModifier')}
-          className="cf-btn cf-btn-ghost"
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
           +
-        </button>
+        </Btn>
       </div>
 
       {/* Live pool — tap a group to remove */}
@@ -690,15 +689,15 @@ export function DiceTray({
       {/* Presets */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         {!supportsActionDice && STATIC_PRESETS.map((p) => (
-          <button
+          <Btn
             key={p.labelKey}
             type="button"
+            ghost
             onClick={() => applyPreset(p)}
-            className="cf-btn cf-btn-ghost"
             style={{ minHeight: 32, fontSize: 11.5, padding: '0 10px' }}
           >
             {t(`dice.${p.labelKey}`)}
-          </button>
+          </Btn>
         ))}
         {savedPresets.map((p) => (
           <span
@@ -844,14 +843,14 @@ export function DiceTray({
           }}
         >
           <span aria-hidden>{t('dice.deleteUndo', { label: pendingDelete.preset.label })}</span>
-          <button
+          <Btn
             type="button"
+            ghost
             style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
-            className="cf-btn cf-btn-ghost"
             onClick={() => void undoDelete()}
           >
             {t('dice.undo')}
-          </button>
+          </Btn>
           <button
             type="button"
             aria-label="Dismiss"

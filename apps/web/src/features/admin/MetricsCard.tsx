@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useState } from 'react';
 import type { AdminMetrics } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
-import { Card, Skeleton, ErrorNote } from '../../components/ui';
+import { Btn, Card, Skeleton, ErrorNote } from '../../components/ui';
 
 const REFRESH_MS = 30_000;
 
@@ -131,8 +131,8 @@ export function MetricsCard() {
         <p className="text-xs text-amber-300">Storage diagnostics: {metrics.storage.status}. Quick check: {metrics.storage.quickCheck.status}.</p>
       )}
       <div className="flex items-center gap-2">
-        <button className="cf-btn text-xs" disabled={scanning} onClick={() => void runCheck('quick-check')}>Run quick check</button>
-        <button className="cf-btn text-xs" disabled={scanning} onClick={() => void runCheck('integrity-check')}>Run full integrity check</button>
+        <Btn className="text-xs" disabled={scanning} onClick={() => void runCheck('quick-check')}>Run quick check</Btn>
+        <Btn className="text-xs" disabled={scanning} onClick={() => void runCheck('integrity-check')}>Run full integrity check</Btn>
         <span className="text-[11px] text-secondary">Last quick check: {metrics.storage.quickCheck.checkedAt ? new Date(metrics.storage.quickCheck.checkedAt).toLocaleString() : 'never'}</span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
