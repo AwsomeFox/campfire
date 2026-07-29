@@ -1066,7 +1066,36 @@ describe('rules / rule packs — authoritative server-wide usage count (issue #3
     const after = await request(server).get('/api/v1/rules/packs').set(dmA);
     expect(after.body.find((p: { id: number }) => p.id === packId).usageCount).toBe(1);
 
-    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmA);
+    // Clear the remaining live reference before cleanup; live usage is intentionally a
+    // server-enforced uninstall conflict rather than an implicit campaign reset.
+    await request(server).patch(`/api/v1/campaigns/${campA.body.id}`).set(dmA).send({ ruleSystem: '' });
+    expect((await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmA)).status).toBe(200);
+  });
+
+  it('ignores trashed campaigns for usage and uninstall, while live campaigns still block it', async () => {
+    const server = ctx.app.getHttpServer();
+
+    let job = await installOpen5e(server, dmA, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    const trashedPackId = job.pack.id;
+    const trashedCampaign = await request(server).post('/api/v1/campaigns').set(dmA).send({ name: 'Trashed pack user' });
+    await request(server).patch(`/api/v1/campaigns/${trashedCampaign.body.id}`).set(dmA).send({ ruleSystem: 'open5e-srd' });
+    expect((await request(server).delete(`/api/v1/campaigns/${trashedCampaign.body.id}`).set(dmA)).status).toBe(200);
+
+    const afterTrash = await request(server).get('/api/v1/rules/packs').set(dmA);
+    expect(afterTrash.body.find((p: { id: number }) => p.id === trashedPackId).usageCount).toBe(0);
+    expect((await request(server).delete(`/api/v1/rules/packs/${trashedPackId}`).set(dmA)).status).toBe(200);
+
+    job = await installOpen5e(server, dmA, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    const livePackId = job.pack.id;
+    const liveCampaign = await request(server).post('/api/v1/campaigns').set(dmA).send({ name: 'Live pack user' });
+    await request(server).patch(`/api/v1/campaigns/${liveCampaign.body.id}`).set(dmA).send({ ruleSystem: 'open5e-srd' });
+
+    const withLiveCampaign = await request(server).get('/api/v1/rules/packs').set(dmA);
+    expect(withLiveCampaign.body.find((p: { id: number }) => p.id === livePackId).usageCount).toBe(1);
+    expect((await request(server).delete(`/api/v1/rules/packs/${livePackId}`).set(dmA)).status).toBe(409);
+
+    await request(server).delete(`/api/v1/campaigns/${liveCampaign.body.id}`).set(dmA);
+    expect((await request(server).delete(`/api/v1/rules/packs/${livePackId}`).set(dmA)).status).toBe(200);
   });
 });
 

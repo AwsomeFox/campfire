@@ -1182,17 +1182,17 @@ export class RulesService implements OnModuleInit {
   }
 
   /**
-   * Authoritative, server-wide count of campaigns per `ruleSystem` slug (issue #385). Uninstall
-   * is a server-admin action that resets `ruleSystem=''` on EVERY campaign using the pack, but
-   * the admin is usually a member of few/no campaigns — so a client-side count from GET
-   * /campaigns (only the caller's visible campaigns) under-reports and the uninstall-safety
-   * acknowledgement silently disengages. This grouped `count(*)` sees all campaigns and feeds
-   * each pack's `usageCount`, so the confirm dialog gates on the real blast radius.
+   * Authoritative, server-wide count of live campaigns per `ruleSystem` slug (issue #385).
+   * The admin is usually a member of few/no campaigns, so a client-side count from GET
+   * /campaigns (only the caller's visible campaigns) under-reports. This grouped count sees
+   * every live campaign and feeds each pack's `usageCount`; trashed campaigns no longer use
+   * live rules and must not block a pack uninstall.
    */
   private async countCampaignsByRuleSystem(): Promise<Map<string, number>> {
     const rows = await this.db
       .select({ ruleSystem: campaigns.ruleSystem, count: sql<number>`count(*)` })
       .from(campaigns)
+      .where(isNull(campaigns.deletedAt))
       .groupBy(campaigns.ruleSystem);
     const map = new Map<string, number>();
     for (const r of rows) {
@@ -2383,7 +2383,7 @@ export class RulesService implements OnModuleInit {
       const usage = tx
         .select({ count: sql<number>`count(*)` })
         .from(campaigns)
-        .where(eq(campaigns.ruleSystem, pack.slug))
+        .where(and(eq(campaigns.ruleSystem, pack.slug), isNull(campaigns.deletedAt)))
         .get();
       if (Number(usage?.count ?? 0) > 0) {
         throw new ConflictException(
