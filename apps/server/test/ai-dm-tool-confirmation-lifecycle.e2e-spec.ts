@@ -4,6 +4,7 @@ import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, notifications as notificationsTable } from '../src/db/schema';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { ActionResolverService } from '../src/modules/encounters/action-resolver.service';
 import { MAX_PENDING_TOOL_CONFIRMATIONS } from '../src/modules/ai-driver/driver-tool-policy';
 
 /**
@@ -185,6 +186,36 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     // no server-derived display fields are added either — an unknown chain gets a generic label,
     // never a caller-supplied one.
     expect(queue.body[0].args).toEqual({ encounterId: 1, chainId: 'chain-does-not-exist' });
+  });
+
+  it('#1451: collaborative handoff marks the persisted apply_action chain as awaiting the queued human confirmation', async () => {
+    const campaignId = await armed('Retain Delayed Action Approval');
+    const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    driver.setCollaborative(campaignId, true);
+    const retain = jest
+      .spyOn(resolver, 'retainPendingChainForConfirmation')
+      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42 });
+
+    h.script({
+      text: 'Holding the spell for approval.',
+      toolCalls: [{ id: 'c-retain', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-delayed-approval' } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+
+    const res = await h.sendMessage(campaignId, { input: 'cast it' });
+    expect(res.status).toBe(201);
+    expect(retain).toHaveBeenCalledWith(1, 'chain-delayed-approval');
+
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queue.body[0].args).toEqual({
+      encounterId: 1,
+      chainId: 'chain-delayed-approval',
+      actionName: 'Fireball',
+      actorCombatantId: 42,
+    });
+    retain.mockRestore();
   });
 
   it('approving through the endpoint the UI now calls actually resolves the queue', async () => {

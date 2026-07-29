@@ -2191,10 +2191,10 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
 // `ActionResolverService.sweepStalePendingResolutions` on a TTL + per-encounter cap, so growth
 // is bounded even for a preview nobody ever applies.
 //
-// `awaitingConfirmation` (review, second pass): true when this resolution was minted under a
-// dm-confirmed/player-declares policy (`!canApply` at resolve time) — the ONLY way it is ever
-// applied is a LATER, separate DM `apply()` call, which may legitimately take a long time. Such
-// a row is exempt from the age-based TTL entirely (a DM reviewing a queue must never have a
+// `awaitingConfirmation` (review, second pass): true when this resolution needs a later human
+// decision — either because it was minted under a dm-confirmed/player-declares policy
+// (`!canApply` at resolve time), or because collaborative AI handoff queued its `apply_action`.
+// Such a row is exempt from the age-based TTL entirely (a DM reviewing a queue must never have a
 // legitimate declaration vanish out from under them), though it is still subject to the
 // per-encounter cap — evicting one is audited and never silent, unlike an ordinary abandoned
 // preview. See `sweepStalePendingResolutions`'s doc comment for the full reasoning.

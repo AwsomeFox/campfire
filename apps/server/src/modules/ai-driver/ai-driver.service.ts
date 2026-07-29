@@ -2138,8 +2138,8 @@ export class AiDriverService {
      */
     @Optional() private readonly safety?: TableSafetyService,
     /**
-     * Issue #1451 review — DISPLAY-ONLY lookup for a queued `apply_action` DM confirmation
-     * (see `describePendingChain`'s doc comment). Appended last, same reasoning as `safety`
+     * Issue #1451 review — marks a queued `apply_action` chain as awaiting human confirmation
+     * and derives its display label from the persisted chain. Appended last, same reasoning as `safety`
      * above: several specs construct this service positionally, and this dependency is not
      * needed for any of them to still exercise the paths they test — `?.` guards its one use.
      */
@@ -5295,15 +5295,16 @@ export class AiDriverService {
         // identifies is a confirmation-spoofing vector (approve a label, not the call). Rebuild
         // this tool's queued args from scratch: only `encounterId`/`chainId` survive from the
         // model's own call, and the display fields come exclusively from the persisted
-        // resolution that same chainId will make `apply()` read (`describePendingChain` is a
-        // read-only lookup of that same row — never a source of authorization).
+        // resolution that same chainId will make `apply()` read. That lookup also marks the
+        // persisted chain as awaiting this human decision, so its preview TTL cannot race the
+        // delayed confirmation; it is never a source of authorization.
         let queuedArgs = args;
         if (call.name === 'apply_action') {
           const argEncounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
           const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
           const described =
             argChainId && Number.isFinite(argEncounterId)
-              ? (this.actionResolver?.describePendingChain(argEncounterId, argChainId) ?? null)
+              ? (this.actionResolver?.retainPendingChainForConfirmation(argEncounterId, argChainId) ?? null)
               : null;
           queuedArgs = {
             encounterId: args.encounterId,

@@ -1318,6 +1318,37 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()).toBeUndefined();
   });
 
+  it('#1451 review (collaborative AI): an automatic-policy chain queued for delayed human approval is retained past the preview TTL', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.canApply).toBe(true); // automatic policy: it starts as a disposable preview
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()?.awaitingConfirmation).toBe(false);
+
+    // Collaborative handoff queues apply_action even though its AI seat can apply automatically.
+    // The queue transition, not the original caller's policy, must pin this exact server-owned
+    // chain until the human DM has a chance to approve it.
+    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId)).toMatchObject({
+      actionName: 'Greatsword',
+      actorCombatantId: actor,
+    });
+    orm
+      .update(actionPendingResolutions)
+      .set({ createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString() })
+      .where(eq(actionPendingResolutions.id, preview.chainId))
+      .run();
+
+    // A later resolution performs the ordinary sweep. The delayed confirmation's chain survives
+    // and the DM can still apply exactly the original server-computed result.
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()).toBeTruthy();
+    expect(service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), dmUser, 'dm').undoToken).toBeTruthy();
+  });
+
   it('#1451 review (Devin, corrected): the per-encounter cap still bounds declarations, but eviction is audited — never silent', async () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed({ requireDmTurnConfirmation: true });
     const now = Date.now();

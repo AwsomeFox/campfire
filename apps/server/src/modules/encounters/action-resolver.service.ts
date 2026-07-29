@@ -553,11 +553,11 @@ export class ActionResolverService {
     // client-edited `totalDamage` (or an injected condition/effect never in the action spec)
     // in the request body is simply never consulted.
     //
-    // `awaitingConfirmation = !canApply`: when the campaign policy prevents THIS caller from
-    // applying immediately, the only way this resolution is ever consumed is a later, separate
-    // DM `apply()` call — a genuine declaration, exempt from the TTL (see the sweep's doc
-    // comment). When canApply is true (automatic policy, or the DM), an unconsumed row is an
-    // ordinary, disposable preview.
+    // When the campaign policy prevents THIS caller from applying immediately, the only way this
+    // resolution is ever consumed is a later, separate DM `apply()` call — a genuine declaration,
+    // exempt from the TTL (see the sweep's doc comment). A collaborative AI handoff can turn an
+    // initially automatic preview into that same kind of pending human decision; the driver marks
+    // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
     this.persistPendingResolution(encounter, actor, chainId, resolution, !canApply);
 
@@ -1156,21 +1156,16 @@ export class ActionResolverService {
   }
 
   /**
-   * Issue #1451 review (Codex P1, second pass): a READ-ONLY, DISPLAY-ONLY lookup for a DM
-   * confirmation prompt under collaborative handoff (#1051) — resolves the human-readable
-   * `actionName`/`actorCombatantId` for a pending chain STRICTLY from the same persisted
-   * `action_pending_resolutions` row `apply()` itself reads, never from anything a caller
-   * supplies. `ActionApplyRequest` deliberately carries no display fields of its own (an earlier
-   * revision added optional caller-supplied ones and that was the vulnerability: the confirmation
-   * prompt is what a human approves, and `apply()` executes whatever `chainId` identifies
-   * regardless of what a caller-controlled label said). `AiDriverService` calls this when queuing
-   * an `apply_action` confirmation so the prompt can say "Apply Fireball by Ember" instead of an
-   * opaque chain id, using ONLY server-derived truth. Returns `null` for an unknown chain or one
-   * scoped to a different encounter — the confirmation then falls back to a generic label rather
-   * than guessing. Must never be used to authorize or determine WHAT gets applied — that remains
-   * exclusively `apply()`'s own re-read of this same row.
+   * Transition an otherwise-disposable preview into a pending human decision when the AI driver
+   * queues `apply_action` for collaborative confirmation. This is deliberately a transition on
+   * the persisted chain, rather than a guess based on the AI seat's `canApply`: collaborative
+   * handoff defers the write even when that seat has automatic-policy authority. Returns the
+   * server-derived `actionName`/`actorCombatantId` used by the confirmation prompt, never any
+   * caller-provided display fields. Returns null for an unknown or cross-encounter chain. This
+   * cannot authorize or determine WHAT gets applied: `apply()` exclusively re-reads this same
+   * row for that purpose.
    */
-  describePendingChain(encounterId: number, chainId: string): { actionName: string; actorCombatantId: number } | null {
+  retainPendingChainForConfirmation(encounterId: number, chainId: string): { actionName: string; actorCombatantId: number } | null {
     const pending = this.db
       .select({
         encounterId: actionPendingResolutions.encounterId,
@@ -1181,6 +1176,12 @@ export class ActionResolverService {
       .where(eq(actionPendingResolutions.id, chainId))
       .get();
     if (!pending || pending.encounterId !== encounterId) return null;
+
+    this.db
+      .update(actionPendingResolutions)
+      .set({ awaitingConfirmation: true })
+      .where(and(eq(actionPendingResolutions.id, chainId), eq(actionPendingResolutions.encounterId, encounterId)))
+      .run();
     return { actionName: pending.actionName, actorCombatantId: pending.actorCombatantId };
   }
 
@@ -1201,7 +1202,7 @@ export class ActionResolverService {
    * prompt under collaborative handoff (#1051), but that let a caller label a damaging chain
    * with a harmless-looking action/actor and obtain approval under a false summary; the
    * confirmation now derives its label server-side instead — see
-   * {@link ActionResolverService.describePendingChain}.
+   * {@link ActionResolverService.retainPendingChainForConfirmation}.
    *
    * Issue #1451 review: the actual single-use claim happens inside `applyInternal`'s
    * transaction (a conditional delete, mirroring `undo()`'s `action_apply_chains.undone_at`

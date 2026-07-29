@@ -2225,9 +2225,10 @@ CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_cha
 -- this table exists to prevent. No targets_allow (apply always re-validates against the
 -- CURRENT spec) and no consumed_at (a row is DELETED, not flagged, the instant it is claimed —
 -- both the replay guard and how this table's growth stays bounded). awaiting_confirmation marks
--- a resolution minted under dm-confirmed/player-declares policy: exempt from the age-based TTL
--- (a DM's review queue must not silently lose a legitimate declaration), still subject to the
--- per-encounter cap but evicted loudly (audited), unlike an ordinary abandoned preview. See
+-- a resolution needing a later human decision — dm-confirmed/player-declares policy or a queued
+-- collaborative-AI apply_action — exempt from the age-based TTL (a DM's review queue must not
+-- silently lose a legitimate declaration), still subject to the per-encounter cap but evicted
+-- loudly (audited), unlike an ordinary abandoned preview. See
 -- ActionResolverService.sweepStalePendingResolutions for the full reasoning.
 CREATE TABLE IF NOT EXISTS action_pending_resolutions (
   id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
