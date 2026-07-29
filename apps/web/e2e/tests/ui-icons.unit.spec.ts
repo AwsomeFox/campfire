@@ -141,20 +141,20 @@ test.describe('chrome-icon sizing (issue #1715 Part 1)', () => {
   // OUT OF SCOPE and deliberately absent from this set. They need their own
   // canonical scale, which does not exist yet and is not built here — see the
   // PR for #1715 Part 1 for the full accounting.
-  const NON_CANONICAL_CHROME_SIZES = [10, 11, 12, 13, 15, 18, 19, 22];
-
   test('no <GameIcon> call site uses a non-canonical chrome-range literal size', () => {
+    const CANONICAL = new Set([14, 16, 20, 24]);
     const offenders: string[] = [];
-    const pattern = new RegExp(
-      `<GameIcon\\b[^>]*\\bsize=\\{(${NON_CANONICAL_CHROME_SIZES.join('|')})\\}`,
-    );
+    const pattern = /<GameIcon\b[^>]*\bsize=\{([0-9]+)\}/g;
     for (const file of collectTsx(ROOT)) {
       const text = readFileSync(file, 'utf8');
-      // Strip block comments so a doc-comment mentioning `<GameIcon size={12}>`
-      // as an example doesn't false-positive.
       const stripped = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-      const m = stripped.match(pattern);
-      if (m) offenders.push(`${file.replace(ROOT + '/', '')}: size={${m[1]}}`);
+      let m: RegExpExecArray | null;
+      while ((m = pattern.exec(stripped)) !== null) {
+        const val = Number(m[1]);
+        if (val < 26 && !CANONICAL.has(val)) {
+          offenders.push(`${file.replace(ROOT + '/', '')}: size={${val}}`);
+        }
+      }
     }
     expect(offenders, offenders.join('\n')).toEqual([]);
   });
