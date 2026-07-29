@@ -86,17 +86,51 @@ function splitCommands(text) {
 }
 
 /**
- * Basenames of every Playwright config actually invoked by a `playwright test`
- * command found in `sources` — a `--config`/`-c <path>` flag names that config;
- * its absence means the invocation runs Playwright's default config.
+ * Basenames of every Playwright config actually invoked BROADLY (i.e. with no
+ * spec-file filter, so it would run everything the config's own `testMatch`
+ * selects) by a `playwright test` command found in `sources`.
+ *
+ * A `--config`/`-c <path>` flag names the config; its absence means the
+ * invocation targets Playwright's default config. Positional (non-flag)
+ * arguments after `playwright test` are Playwright's file/pattern filter —
+ * `playwright test e2e/tests/pwa-install-offline.spec.ts` (this repo's
+ * `test:pwa:e2e` script) runs exactly ONE spec under the default config, not
+ * every spec `playwright.config.ts` matches. Crediting that as "the default
+ * config is invoked" would let the guard stay green even if the broad
+ * `test:e2e` script and the `e2e-web` workflow step (the only UNFILTERED
+ * invocations of the default config) were both deleted — the exact
+ * silent-orphaning failure #1453 exists to catch, just one level up. So only
+ * unfiltered invocations count as "covering" a config; filtered ones are
+ * ignored here (they still run fine, they just don't prove the CONFIG's full
+ * spec set executes anywhere).
+ *
+ * GitHub Actions `${{ ... }}` expressions are normalized to one token first so
+ * an internal space (e.g. `${{ matrix.shard }}`) isn't mistaken for a
+ * filter argument when scanning raw workflow YAML.
  */
 function invokedConfigBasenames(sources) {
   const invoked = new Set();
-  for (const text of sources) {
+  for (const rawText of sources) {
+    const text = rawText.replace(/\$\{\{[^}]*\}\}/g, 'GH_EXPR');
     for (const cmd of splitCommands(text)) {
-      if (!/\bplaywright\s+test\b/.test(cmd)) continue;
-      const m = cmd.match(/(?:--config|-c)\s+(\S+)/);
-      invoked.add(m ? basename(m[1]) : DEFAULT_CONFIG);
+      const m = cmd.match(/playwright\s+test\b(.*)$/);
+      if (!m) continue;
+      const tokens = m[1].trim().length ? m[1].trim().split(/\s+/) : [];
+      let configFile = DEFAULT_CONFIG;
+      let hasFilterArg = false;
+      for (let i = 0; i < tokens.length; i++) {
+        const tok = tokens[i];
+        if (tok === '--config' || tok === '-c') {
+          configFile = basename(tokens[++i] ?? '');
+        } else if (tok.startsWith('--config=')) {
+          configFile = basename(tok.slice('--config='.length));
+        } else if (tok.startsWith('-')) {
+          // Some other flag (--shard=1/4, --workers=1, …) — not a spec filter.
+        } else {
+          hasFilterArg = true; // positional arg = Playwright file/pattern filter
+        }
+      }
+      if (!hasFilterArg) invoked.add(configFile);
     }
   }
   return invoked;
