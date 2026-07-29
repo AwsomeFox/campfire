@@ -181,7 +181,10 @@ function licenseOf(row: Record<string, unknown>): string {
   const doc = row.document as Record<string, unknown> | undefined;
   const licenses = doc?.licenses as Array<Record<string, unknown>> | undefined;
   if (Array.isArray(licenses) && licenses.length > 0) {
-    return licenses.map((l) => asString(l.name)).filter(Boolean).join(', ');
+    // A reader must receive one license it can reason about, never a synthetic
+    // comma-joined list of alternatives. Open5e orders document licenses by its
+    // canonical preference, so retain the first declared term.
+    return licenses.map((l) => asString(l.name)).find(Boolean) ?? '';
   }
   return '';
 }

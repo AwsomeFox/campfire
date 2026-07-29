@@ -152,7 +152,7 @@ function licenseOf(row: Record<string, unknown>): string {
   const doc = row.document as Record<string, unknown> | undefined;
   const licenses = doc?.licenses as Array<Record<string, unknown>> | undefined;
   if (Array.isArray(licenses) && licenses.length > 0) {
-    return licenses.map((l) => asString(l.name)).filter(Boolean).join(', ');
+    return licenses.map((l) => asString(l.name)).find(Boolean) ?? '';
   }
   // Starfinder open content is OGL 1.0a across the board; fall back to it when a row's
   // document sub-object omits an explicit license list (the pack-level default still applies).

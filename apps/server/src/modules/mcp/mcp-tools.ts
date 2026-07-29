@@ -3784,8 +3784,8 @@ export class McpToolsService {
       server,
       user,
       'uninstall_rule_pack',
-      'Server admin only: uninstall a rule pack by id — removes the pack and ALL of its entries, nulls any ' +
-        'combatant references to those entries, and resets campaigns that had selected it back to no rule system. ' +
+      'Server admin only: uninstall an unused rule pack by id — removes the pack and ALL of its entries and nulls any ' +
+        'combatant references. Packs selected by campaigns are blocked to avoid silently changing live rules. ' +
         'Ids come from list_rule_packs. Irreversible.',
       { packId: Id.describe('Rule pack id — from list_rule_packs') },
       async ({ packId }) => {

@@ -5864,6 +5864,8 @@ const OPEN_LICENSE_KEYWORDS = [
   'open gaming license',
   'orc', // ORC / Open RPG Creative license
   'open rpg creative',
+  'a5e open content license',
+  'open legend community license',
   'cc0',
   'cc-by',
   'cc by',
@@ -5942,7 +5944,7 @@ export const RulePackUpload = z.object({
 export type RulePackUpload = z.infer<typeof RulePackUpload>;
 
 // ---------- non-blocking install jobs (issue #20) ----------
-export const RulePackInstallJobStatus = z.enum(['pending', 'running', 'completed', 'failed']);
+export const RulePackInstallJobStatus = z.enum(['pending', 'running', 'completed', 'failed', 'cancelled']);
 export type RulePackInstallJobStatus = z.infer<typeof RulePackInstallJobStatus>;
 
 export const RulePackSectionProgress = z.object({

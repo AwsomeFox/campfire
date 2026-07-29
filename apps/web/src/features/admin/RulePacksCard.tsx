@@ -34,8 +34,8 @@ import { useTranslation } from 'react-i18next';
  * to no campaigns still sees the true blast radius. Uninstalling a pack resets
  * every campaign pointing at it to none/homebrew server-side (the DELETE clears
  * `campaign.ruleSystem` to '' in the same transaction, so no dangling slug is
- * left behind); the confirm names the visible campaigns, notes any it can't, and
- * requires an explicit acknowledgement when the count is non-zero.
+ * left behind). Packs with any usage are therefore locked here; a campaign DM
+ * must migrate the campaign before the server will permit removal.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
@@ -62,7 +62,7 @@ async function pollInstallJob(jobId: string, onProgress: (job: RulePackInstallJo
   for (;;) {
     const job = await api.get<RulePackInstallJob>(`${API}/rules/packs/install-jobs/${jobId}`);
     onProgress(job);
-    if (job.status === 'completed' || job.status === 'failed') return job;
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') return job;
     if (Date.now() - started > 5 * 60_000) throw new ApiError(0, 'Install timed out — check the server logs.');
     await new Promise((r) => setTimeout(r, 750));
   }
@@ -194,7 +194,6 @@ function PackRow({
   const { t } = useTranslation();
   const [uninstalling, setUninstalling] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function uninstall() {
@@ -212,13 +211,12 @@ function PackRow({
   }
 
   // Authoritative, server-wide usage (issue #385): GET /rules/packs reports how many campaigns
-  // reference this pack across the whole server. Uninstall resets ruleSystem on ALL of them, and
+  // reference this pack across the whole server. Uninstall is blocked while any campaign uses it, and
   // a server admin (the only role that can uninstall) is usually a member of few/no campaigns —
   // so the old client-side count from visible campaigns under-reported and the acknowledgement
   // gate disengaged exactly when it mattered. Fall back to the visible count only if the server
   // didn't supply the field. `usedBy` still names the campaigns the caller CAN see.
   const usageCount = pack.usageCount ?? usedBy.length;
-  const unnamedCount = Math.max(0, usageCount - usedBy.length);
 
   return (
     <tr>
@@ -241,9 +239,9 @@ function PackRow({
         <button
           type="button"
           className="text-[11px] text-rose-500/80 hover:text-rose-400 disabled:opacity-40"
-          disabled={installing || uninstalling}
+          disabled={installing || uninstalling || usageCount > 0}
+          title={usageCount > 0 ? 'Migrate every campaign using this rule system before uninstalling it.' : undefined}
           onClick={() => {
-            setAcknowledged(false);
             setConfirming(true);
           }}
         >
@@ -256,41 +254,12 @@ function PackRow({
               <div className="space-y-2 text-left">
                 <p>
                   This removes {pack.entryCount} entries and cannot be undone.
-                  {usageCount === 0
-                    ? ' No campaign visible to you has it selected.'
-                    : ` The following ${usageCount === 1 ? 'campaign is' : usageCount + ' campaigns are'} using it and will be reset to None / homebrew (existing sheets keep their numbers; combat math falls back to D&D 5e defaults):`}
+                  No campaign has it selected, so removal will not change campaign rules.
                 </p>
-                {usedBy.length > 0 && (
-                  <ul className="list-disc pl-5 text-slate-300 max-h-40 overflow-y-auto">
-                    {usedBy.map((c) => (
-                      <li key={c.id}>{c.name}</li>
-                    ))}
-                  </ul>
-                )}
-                {unnamedCount > 0 && (
-                  <p className="text-slate-400">
-                    {usedBy.length > 0 ? `…and ${unnamedCount} more ` : `${unnamedCount} `}
-                    {unnamedCount === 1 ? 'campaign' : 'campaigns'} you can't see (server-wide count).
-                  </p>
-                )}
-                {usageCount > 0 && (
-                  <label className="flex items-start gap-2 pt-1 text-slate-200">
-                    <input
-                      type="checkbox"
-                      checked={acknowledged}
-                      onChange={(e) => setAcknowledged(e.target.checked)}
-                    />
-                    <span>
-                      I understand {usageCount === 1 ? 'this campaign' : `these ${usageCount} campaigns`} will lose this
-                      rule system.
-                    </span>
-                  </label>
-                )}
               </div>
             }
             confirmLabel="Uninstall"
             busy={uninstalling}
-            confirmDisabled={usageCount > 0 && !acknowledged}
             onConfirm={uninstall}
             onCancel={() => setConfirming(false)}
           />
@@ -376,6 +345,10 @@ function InstallPanel({
       const job = await pollInstallJob(enqueued.id, (j) => setProgress(j.progress));
       if (job.status === 'failed') {
         onError(job.error ?? t('admin.errors.installPack'));
+        return;
+      }
+      if (job.status === 'cancelled') {
+        onError('Install was cancelled.');
         return;
       }
       if (job.outcome === 'updated') {

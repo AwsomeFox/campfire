@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { importJobs } from '../src/db/schema';
+import { importJobs, ruleEntries, rulePacks } from '../src/db/schema';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { RulesService } from '../src/modules/rules/rules.service';
@@ -10,7 +10,7 @@ import { RulesService } from '../src/modules/rules/rules.service';
 const admin = { 'x-dev-role': 'dm', 'x-dev-user': 'admin-1' };
 
 /**
- * Poll an install job to a terminal state (completed or failed).
+ * Poll an install job to a terminal state.
  */
 async function pollJob(
   server: Server,
@@ -22,7 +22,7 @@ async function pollJob(
   for (;;) {
     const res = await request(server).get(`/api/v1/rules/packs/install-jobs/${jobId}`).set(headers);
     expect(res.status).toBe(200);
-    if (res.body.status === 'completed' || res.body.status === 'failed') return res.body;
+    if (res.body.status === 'completed' || res.body.status === 'failed' || res.body.status === 'cancelled') return res.body;
     if (Date.now() - start > timeoutMs) {
       throw new Error(`install job ${jobId} did not finish within ${timeoutMs}ms (last status ${res.body.status})`);
     }
@@ -147,32 +147,57 @@ describe('Issue #737: persistent import job state (e2e)', () => {
   });
 
   describe('cancel stops processing', () => {
-    it('cancelling a queued job sets status to cancelled', async () => {
+    it('cancelling an in-flight upload commits neither its pack nor its entries', async () => {
       const server = ctx.app.getHttpServer();
+      const rules = ctx.app.get(RulesService);
+      const slug = 'cancelled-upload-pack';
+      let releaseImport!: () => void;
+      let importerStarted!: () => void;
+      let importerFinished!: () => void;
+      const importReleased = new Promise<void>((resolve) => { releaseImport = resolve; });
+      const importStarted = new Promise<void>((resolve) => { importerStarted = resolve; });
+      const importFinished = new Promise<void>((resolve) => { importerFinished = resolve; });
+      const installFromUpload = rules.installFromUpload.bind(rules);
+      const delayedInstall = jest.spyOn(rules, 'installFromUpload').mockImplementation(async (...args) => {
+        importerStarted();
+        await importReleased;
+        try {
+          return await installFromUpload(...args);
+        } finally {
+          importerFinished();
+        }
+      });
 
-      // Create a job (it may already be running by the time we cancel, but that's fine)
-      const res = await request(server)
-        .post('/api/v1/rules/packs/install')
-        .set(admin)
-        .send({ source: 'open5e', url: fake.baseUrl });
-      expect(res.status).toBe(202);
-      const jobId = res.body.id;
+      try {
+        const res = await request(server)
+          .post('/api/v1/rules/packs/upload')
+          .set(admin)
+          .send({
+            source: 'upload',
+            pack: { slug, name: 'Cancelled upload', version: '1', license: 'ORC License' },
+            entries: [{ slug: 'never-persisted', name: 'Never Persisted', type: 'spell' }],
+          });
+        expect(res.status).toBe(202);
+        const jobId = res.body.id;
 
-      // Attempt to cancel immediately
-      const cancelRes = await request(server)
-        .post(`/api/v1/rules/packs/install-jobs/${jobId}/cancel`)
-        .set(admin);
+        // The importer has begun but cannot reach persistPack until the test releases it.
+        await importStarted;
+        const cancelRes = await request(server)
+          .post(`/api/v1/rules/packs/install-jobs/${jobId}/cancel`)
+          .set(admin);
+        expect(cancelRes.status).toBe(200);
+        expect(cancelRes.body.status).toBe('cancelled');
 
-      // The job may have already completed by now (fast fake server), so accept both outcomes
-      if (cancelRes.status === 200) {
-        expect(cancelRes.body.status).toBe('failed'); // 'cancelled' maps to 'failed' in mapDbStatus
-        // Verify DB record
+        releaseImport();
+        await importFinished;
+
         const db = ctx.app.get<DrizzleDb>(DB);
         const [row] = db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
         expect(row.status).toBe('cancelled');
-      } else {
-        // Job already completed — that's fine for a fast fake server
-        expect(cancelRes.status).toBe(400);
+        expect(db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).all()).toEqual([]);
+        expect(db.select().from(ruleEntries).where(eq(ruleEntries.slug, 'never-persisted')).all()).toEqual([]);
+      } finally {
+        delayedInstall.mockRestore();
       }
     });
 

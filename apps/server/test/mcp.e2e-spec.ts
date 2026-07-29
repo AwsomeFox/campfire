@@ -2724,9 +2724,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((parseResult(res) as { ddbId: string }).ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
   });
 
-  // Runs late on purpose: it uninstalls the shared open5e-srd pack, so it must come
-  // after every pack-dependent test (lookup_rule, monster combatants) above.
-  it('uninstall_rule_pack removes a pack (adminEnabled token only); a plain dm PAT is denied (issue #76)', async () => {
+  it('uninstall_rule_pack blocks an in-use pack even for an adminEnabled token; a plain dm PAT is denied (issue #76)', async () => {
     const dmClient = await mcpClient(dmToken);
     const packs = parseResult(
       await dmClient.callTool({ name: 'list_rule_packs', arguments: {} }),
@@ -2746,7 +2744,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       ),
     ).toBe(true);
 
-    // An adminEnabled token minted by the server admin DOES carry server-admin power.
+    // An adminEnabled token minted by the server admin DOES carry server-admin power, but
+    // it must not silently detach campaigns that currently select this live ruleset.
     // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
     // token uninstalls a rule pack, a direct-only admin write with no proposal
     // path, which a propose-mode token cannot drive.
@@ -2755,14 +2754,13 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(adminTokenRes.body.apiToken.adminEnabled).toBe(true);
     const adminClient = await mcpClient(adminTokenRes.body.token);
 
-    const removed = await adminClient.callTool({ name: 'uninstall_rule_pack', arguments: { packId } });
-    expect(removed.isError).toBeFalsy();
-    expect(parseResult(removed)).toMatchObject({ ok: true, packId });
+    const blocked = await adminClient.callTool({ name: 'uninstall_rule_pack', arguments: { packId } });
+    expect(blocked.isError).toBe(true);
 
     const after = parseResult(
       await adminClient.callTool({ name: 'list_rule_packs', arguments: {} }),
     ) as Array<{ id: number }>;
-    expect(after.some((p) => p.id === packId)).toBe(false);
+    expect(after.some((p) => p.id === packId)).toBe(true);
   });
 
   it('#867 MCP tools treat a trashed campaign as nonexistent and resume only after authorized restore', async () => {
