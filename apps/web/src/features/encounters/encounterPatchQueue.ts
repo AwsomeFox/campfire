@@ -18,6 +18,25 @@ export function isAdjacentDuplicateEncounterPatch(
 }
 
 /**
+ * A later optimistic whole-value edit is composed over every earlier queued edit. It must
+ * retain that queue's original CAS base rather than adopting a remote poll's revision while
+ * its predecessor may still fail. A successful predecessor supplies its newer revision at
+ * dispatch time; a failed one leaves this original token to produce STALE_WRITE safely.
+ */
+export function observedEncounterPatchRevision(
+  pending: Iterable<QueuedEncounterPatch>,
+  encounterId: number,
+  currentRevision?: string,
+): string | undefined {
+  const entries = Array.from(pending);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.encounterId === encounterId && entry.observedUpdatedAt !== undefined) return entry.observedUpdatedAt;
+  }
+  return currentRevision;
+}
+
+/**
  * A successful PATCH returns the server's full snapshot, which predates any locally queued
  * PATCHes. Retain those later optimistic values while adopting the returned revision token.
  */

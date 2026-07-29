@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { test, expect } from '@playwright/test';
 import {
   isAdjacentDuplicateEncounterPatch,
+  observedEncounterPatchRevision,
   reconcileEncounterPatchResponse,
 } from '../../src/features/encounters/encounterPatchQueue';
 import { pendingFogForEncounter, reconcileFogSyncState } from '../../src/features/encounters/fogSyncState';
@@ -74,6 +75,23 @@ test.describe('fog editor (issue #472)', () => {
     const f0 = { encounterId: 1, queueId: 'f0', pendingKey: 'fog:f0', patch: { fog: null } };
     expect(isAdjacentDuplicateEncounterPatch([f1], 1, f1.pendingKey)).toBe(true);
     expect(isAdjacentDuplicateEncounterPatch([f1, f0], 1, f1.pendingKey)).toBe(false);
+  });
+
+  test('a queued successor retains the predecessor CAS base after a remote poll', () => {
+    const pending = [
+      {
+        encounterId: 1,
+        queueId: 'fog:a',
+        pendingKey: 'fog:a',
+        observedUpdatedAt: 'R0',
+        patch: { fog: { enabled: true, revealed: [{ id: 'a' }] } },
+      },
+    ];
+
+    // A remote poll may have installed R1 while A is pending. B was composed over A, so it
+    // must still use R0 if A later loses its stale-write race; otherwise B would overwrite
+    // the remote fog with A+B.
+    expect(observedEncounterPatchRevision(pending, 1, 'R1')).toBe('R0');
   });
 
   test('RunSessionPage binds deferred writes to their source encounter and absorbs a failed queue link', () => {

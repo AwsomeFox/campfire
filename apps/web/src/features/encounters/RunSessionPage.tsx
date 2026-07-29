@@ -92,6 +92,7 @@ import {
 import { isDown } from './encounterEndedSummary';
 import {
   isAdjacentDuplicateEncounterPatch,
+  observedEncounterPatchRevision,
   reconcileEncounterPatchResponse,
   type QueuedEncounterPatch,
 } from './encounterPatchQueue';
@@ -2030,7 +2031,11 @@ export default function RunSessionPage() {
         return false;
       }
       const queueId = `${pendingKey}:${++encounterPatchSequence.current}`;
-      const observedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt;
+      const observedUpdatedAt = observedEncounterPatchRevision(
+        pendingEncounterPatches.current.values(),
+        eid,
+        queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt,
+      );
       pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, observedUpdatedAt, patch });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
