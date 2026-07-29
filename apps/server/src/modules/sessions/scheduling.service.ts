@@ -188,6 +188,87 @@ export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSel
 
 const toDomain = scheduledSessionToDomain;
 
+/**
+ * Which of these rows' linked recaps are still readable (not trashed)?
+ * One batched query; skipped entirely when nothing is linked.
+ *
+ * Exported (issue #1601) so the organized-play layer's set reads reconcile the
+ * schedule↔recap link through the SAME query the Schedule tab uses — a second
+ * hand-written "is this recap live?" check is how series detail started
+ * disagreeing with the calendar and the Schedule tab.
+ */
+export async function liveLinkedSessionIds(
+  db: DrizzleDb,
+  rows: Array<typeof scheduledSessions.$inferSelect>,
+): Promise<Set<number>> {
+  const linkedIds = [...new Set(rows.map((r) => r.sessionId).filter((id): id is number => id != null))];
+  if (linkedIds.length === 0) return new Set();
+  const live = await db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(inArray(sessions.id, linkedIds), notDeleted(sessions.deletedAt)));
+  return new Set(live.map((r) => r.id));
+}
+
+/**
+ * Read-time reconciliation of the schedule↔recap link (#504) — the single
+ * definition of "effective status" and "effective sessionId" for one row.
+ *
+ * Exported (issue #1601) so every surface that answers "what is this night?"
+ * can share it. See projectLinkOnService() below for the full reasoning; this
+ * module-level copy is what set-based reads (getSeries, occurrence write
+ * results) must project through, exactly as attachRsvps already does.
+ */
+export function projectLink(
+  row: typeof scheduledSessions.$inferSelect,
+  liveLinkedIds: Set<number>,
+): ScheduledSession {
+  const domain = toDomain(row);
+  // A cancelled night is not a played night, so it must not render a "Recap" link.
+  //
+  // Reachable since remove() started using the EFFECTIVE status (#504): a future
+  // `completed` row whose recap is trashed reads as `scheduled`, so the DM can cancel
+  // it — and cancel deliberately leaves `session_id` alone. Untrash the recap later
+  // and the raw row is `cancelled` WITH a live link, which the Schedule tab would
+  // render as a "Cancelled" tag beside a working "Recap" link.
+  //
+  // Fixed at READ time rather than by clearing the link on cancel. Clearing it would
+  // have to clear the recap's reciprocal `scheduled_session_id` too (otherwise it is
+  // the one-directional dangling link this file works hard to avoid), which means
+  // cancelling a night would silently and permanently destroy a recap↔night
+  // association nobody asked to remove — trading a cosmetic contradiction for real
+  // data loss, and breaking the invariant the whole fix rests on: the stored link
+  // survives so untrashing heals the row with no repair write. Restoring the
+  // SCHEDULE brings the link straight back, because nothing was thrown away.
+  if (domain.status === 'cancelled') return { ...domain, sessionId: null };
+  if (domain.sessionId == null || liveLinkedIds.has(domain.sessionId)) return domain;
+  return {
+    ...domain,
+    sessionId: null,
+    status: domain.status === 'completed' ? 'scheduled' : domain.status,
+  };
+}
+
+/**
+ * Reconcile a set of scheduled rows to their API shapes in ONE batched query
+ * (issue #1601). getSeries and the occurrence write-result paths used to copy
+ * the RAW `status` column, so a completed night whose recap was trashed showed
+ * `completed` in series detail while the coordinator calendar
+ * (scheduleEffectiveStatusSql) and the Schedule tab (projectLink) both showed
+ * `scheduled`. This is the set read's way onto the same projection those two
+ * already share: the live-linked recap ids are fetched once, then each row is
+ * projected through projectLink — status AND sessionId reconciled — so series
+ * detail can no longer be the one surface that disagrees.
+ */
+export async function reconcileScheduledSessions(
+  db: DrizzleDb,
+  rows: Array<typeof scheduledSessions.$inferSelect>,
+): Promise<ScheduledSession[]> {
+  if (rows.length === 0) return [];
+  const liveLinks = await liveLinkedSessionIds(db, rows);
+  return rows.map((row) => projectLink(row, liveLinks));
+}
+
 function rsvpToDomain(row: typeof sessionRsvps.$inferSelect): SessionRsvp {
   return {
     id: row.id,
@@ -307,57 +388,23 @@ export class SchedulingService {
   /**
    * Which of these rows' linked recaps are still readable (not trashed)?
    * One batched query; skipped entirely when nothing is linked.
+   *
+   * Delegates to the exported twin (issue #1601) so the set-based organized-play
+   * reads share one query and cannot drift from the Schedule tab's notion of
+   * "is this recap live?".
    */
   private async liveLinkedSessionIds(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<Set<number>> {
-    const linkedIds = [...new Set(rows.map((r) => r.sessionId).filter((id): id is number => id != null))];
-    if (linkedIds.length === 0) return new Set();
-    const live = await this.db
-      .select({ id: sessions.id })
-      .from(sessions)
-      .where(and(inArray(sessions.id, linkedIds), notDeleted(sessions.deletedAt)));
-    return new Set(live.map((r) => r.id));
+    return liveLinkedSessionIds(this.db, rows);
   }
 
   /**
-   * Read-time reconciliation of the schedule↔recap link (#504).
-   *
-   * A recap is soft-deleted (trashed), never hard-deleted, so `ON DELETE SET NULL`
-   * never fires and the stored link survives — deliberately. Tearing the link down on
-   * trash would mean restoring the session silently fails to restore the link, trading
-   * a visible bug for silent data loss. But a trashed recap is invisible to every
-   * session read, so surfacing `sessionId` renders a "Recap" link that 404s, and
-   * reporting `completed` claims a night was played by a recap nobody can open.
-   *
-   * So both are hidden at READ time only. SQLite still holds `status='completed'` and
-   * `session_id`, so restoring the session reconciles the row with no write at all.
-   * `cancelled` is never link-derived, so its STATUS is passed through untouched — but
-   * a cancelled night never advertises a recap link either (see below).
+   * Read-time reconciliation of the schedule↔recap link (#504) — the service's
+   * thin delegate to the exported twin (issue #1601). See projectLink()'s
+   * docblock for the full reasoning; this exists only so this class's private
+   * call sites keep a `this.` shape, with no second copy of the rules.
    */
   private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>): ScheduledSession {
-    const domain = toDomain(row);
-    // A cancelled night is not a played night, so it must not render a "Recap" link.
-    //
-    // Reachable since remove() started using the EFFECTIVE status (#504): a future
-    // `completed` row whose recap is trashed reads as `scheduled`, so the DM can cancel
-    // it — and cancel deliberately leaves `session_id` alone. Untrash the recap later
-    // and the raw row is `cancelled` WITH a live link, which the Schedule tab would
-    // render as a "Cancelled" tag beside a working "Recap" link.
-    //
-    // Fixed at READ time rather than by clearing the link on cancel. Clearing it would
-    // have to clear the recap's reciprocal `scheduled_session_id` too (otherwise it is
-    // the one-directional dangling link this file works hard to avoid), which means
-    // cancelling a night would silently and permanently destroy a recap↔night
-    // association nobody asked to remove — trading a cosmetic contradiction for real
-    // data loss, and breaking the invariant the whole fix rests on: the stored link
-    // survives so untrashing heals the row with no repair write. Restoring the
-    // SCHEDULE brings the link straight back, because nothing was thrown away.
-    if (domain.status === 'cancelled') return { ...domain, sessionId: null };
-    if (domain.sessionId == null || liveLinkedIds.has(domain.sessionId)) return domain;
-    return {
-      ...domain,
-      sessionId: null,
-      status: domain.status === 'completed' ? 'scheduled' : domain.status,
-    };
+    return projectLink(row, liveLinkedIds);
   }
 
   /**

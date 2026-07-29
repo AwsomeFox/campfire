@@ -1780,6 +1780,58 @@ describe('organized play (e2e)', () => {
     expect(rival.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
   });
 
+  // Issue #1601 Part 2: getSeries used to copy the RAW `status` column, so a
+  // completed occurrence whose recap was trashed read as `completed` in series
+  // detail while the coordinator calendar (scheduleEffectiveStatusSql) and the
+  // Schedule tab (projectLink) both showed `scheduled`. Series detail must project
+  // through the same derived status as those two surfaces.
+  it('a trashed-recap occurrence reads as scheduled in series detail (matches the Schedule tab and calendar)', async () => {
+    // Hold a shared room so the occurrence is a member of the organized-play
+    // pool (scheduleOrganizedPlaySql) and surfaces in the cross-campaign
+    // calendar — otherwise the calendar check below would be vacuous.
+    const driftRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Drift Room' })).body;
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Series Status Drift', timezone: 'UTC', startDate: '2099-06-09', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: driftRoom.id });
+    expect(mine.status).toBe(201);
+    const occ = mine.body.occurrences[0];
+
+    // Link a real recap, then trash it: the schedule row still stores
+    // `completed` + the link, but every read-time projection must show `scheduled`.
+    const session = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Recap' });
+    expect(session.status).toBe(201);
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${session.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    expect((await api().delete(`/api/v1/sessions/${session.body.id}`).set(dm)).status).toBe(200);
+
+    // The Schedule tab read (projectLink) is the reference projection.
+    const scheduleRead = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(scheduleRead.status).toBe(200);
+    expect(scheduleRead.body.status).toBe('scheduled');
+    expect(scheduleRead.body.sessionId).toBeNull();
+
+    // The cross-campaign calendar (scheduleEffectiveStatusSql) agrees: the
+    // occurrence holds a shared room, so it surfaces here with the derived
+    // status, never the raw `completed` column.
+    const calendar = await api()
+      .get('/api/v1/organized-play/calendar')
+      .set(dm)
+      .query({ from: '2099-06-09T00:00:00Z', to: '2099-06-10T00:00:00Z', roomId: String(driftRoom.id) });
+    expect(calendar.status).toBe(200);
+    expect(calendar.body.entries.some((e: { status: string }) => e.status === 'completed')).toBe(false);
+
+    // BEFORE the fix this read `completed` with a dangling sessionId — the one
+    // surface that disagreed. It must now match the two above.
+    const series = await api().get(`/api/v1/campaigns/${campaignId}/series/${mine.body.id}`).set(dm);
+    expect(series.status).toBe(200);
+    const projected = series.body.occurrences.find((o: { id: number }) => o.id === occ.id);
+    expect(projected.status).toBe('scheduled');
+    expect(projected.sessionId).toBeNull();
+  });
+
   it('re-probes the room a cancelled night was MOVED to, not the one it held when restore began', async () => {
     const scheduling = ctx.app.get(SchedulingService);
     const opService = ctx.app.get(OrganizedPlayService);
