@@ -53,7 +53,21 @@ test.describe('inline character cards — live sheet refresh', () => {
         await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Sheet sync drill', hidden: false } })
       ).json();
       encounterId = enc.id;
-      await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      const rosterRes = await dm.get(`/api/v1/encounters/${enc.id}`);
+      expect(rosterRes.ok(), `get encounter roster: ${await rosterRes.text()}`).toBeTruthy();
+      const roster = (await rosterRes.json()) as { combatants: Array<{ id: number; characterId: number | null }> };
+      // Encounter creation auto-adds campaign characters; pin this owner to the first turn.
+      const combatantId = roster.combatants.find((combatant) => combatant.characterId === characterId)?.id;
+      expect(combatantId, 'owner character combatant').toEqual(expect.any(Number));
+      const rollInitiativeRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
+      expect(rollInitiativeRes.ok(), `roll initiative: ${await rollInitiativeRes.text()}`).toBeTruthy();
+      const initiativeRes = await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${combatantId}`, {
+        data: { initiative: 100 },
+      });
+      expect(initiativeRes.ok(), `set character initiative: ${await initiativeRes.text()}`).toBeTruthy();
+      const started = await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      expect(started.ok(), `start encounter: ${await started.text()}`).toBeTruthy();
+      expect((await started.json()).currentCombatantId).toBe(combatantId);
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       await expect(page.getByText('Sheet Sync PC', { exact: false }).first()).toBeVisible();
