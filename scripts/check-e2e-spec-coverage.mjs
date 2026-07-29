@@ -31,7 +31,7 @@ function listedUnitFiles() {
   const output = execFileSync(
     process.execPath,
     [playwrightCli(), 'test', '--list', '--config', unitConfig, '--reporter', 'json'],
-    { cwd: webDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: webDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const data = JSON.parse(output);
   if (data.errors?.length) throw new Error(`Playwright collection failed: ${data.errors.map((e) => e.message).join('; ')}`);
