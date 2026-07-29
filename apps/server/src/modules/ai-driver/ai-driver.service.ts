@@ -1854,10 +1854,21 @@ export function wrapUntrustedPromptData(input: string): string {
   return fenceUntrustedPromptText(input, UNTRUSTED_DATA_START, UNTRUSTED_DATA_END, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
 }
 
+/**
+ * The exact prefix of persisted/tool data that can reach the provider through an untrusted-data
+ * fence. Callers that derive authorization evidence from prompt context must use this same view:
+ * an id after the cutoff was retrieved, but was never shown to the model and therefore cannot
+ * legitimately support one of its citations.
+ */
+export function visibleUntrustedPromptData(input: string): string {
+  return (input ?? '').slice(0, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+}
+
 function fenceUntrustedPromptText(input: string, start: string, end: string, maxChars?: number): string {
-  let bounded = input ?? '';
-  if (maxChars !== undefined && bounded.length > maxChars) {
-    bounded = `${bounded.slice(0, maxChars)}\n[TRUNCATED_UNTRUSTED_DATA]`;
+  const original = input ?? '';
+  let bounded = original;
+  if (maxChars !== undefined && original.length > maxChars) {
+    bounded = `${visibleUntrustedPromptData(original)}\n[TRUNCATED_UNTRUSTED_DATA]`;
   }
   const neutralized = bounded
     // Drop control chars (keep normal whitespace) that could scramble the framing.
@@ -4977,7 +4988,7 @@ export class AiDriverService {
         const text = JSON.stringify(
           buildMcpEnvelope(new ForbiddenException({ code: rateLimit.code, message: rateLimit.message })),
         );
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
         const rateIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, call.arguments ?? {}, undefined, true);
         this.emitToolEvent(campaignId, call.name, true, false, rateIdentity);
         executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(rateIdentity) });
@@ -5007,7 +5018,7 @@ export class AiDriverService {
           : (policyDecision?.reason ??
             `The AI DM seat is not permitted to call ${call.name} during ${sessionProfile} play.`);
         const text = JSON.stringify(buildMcpEnvelope(new ForbiddenException({ code, message })));
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
         const blockedIdentity = await this.resolveToolResourceIdentity(
           campaignId,
           call.name,
@@ -5049,7 +5060,7 @@ export class AiDriverService {
             new ForbiddenException(`This AI DM seat is scoped to campaign ${campaignId}.`),
           ),
         );
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
         const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
         this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
         executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(crossIdentity) });
@@ -5067,7 +5078,7 @@ export class AiDriverService {
               new ForbiddenException({ code: liveGuard.code, message: liveGuard.message }),
             ),
           );
-          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
           const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
           this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
           executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
@@ -5117,7 +5128,7 @@ export class AiDriverService {
           undoable: policyDecision.undoable || DRIVER_UNDOABLE_TOOLS.has(call.name),
           message: policyDecision.reason ?? `${call.name} requires DM confirmation before it executes.`,
         });
-        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: pendingText });
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(pendingText) });
         const pendingIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, false);
         this.emitToolEvent(campaignId, call.name, false, false, pendingIdentity, true);
         executed.push({
@@ -5174,7 +5185,7 @@ export class AiDriverService {
               message: `${call.name} exposes DM-only material and is not available to the autonomous AI DM seat.`,
             },
           });
-          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: wrapUntrustedPromptData(text) });
           const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
           this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
           executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
@@ -5264,6 +5275,7 @@ export class AiDriverService {
       // it would defeat the entire purpose of the approval gate. The narration-side defense for
       // an approved read is the DM_APPROVED_SECRET_REMINDER tagged onto its result below.
       const cleanedText = tool && !tool.mutating && !approvedSecret ? redactSecretsFromToolResult(res.text) : res.text;
+      const visibleCleanedText = visibleUntrustedPromptData(cleanedText);
       // When a DM-approved secret read returned real DM material, prepend a system reminder so
       // the model treats it as private reasoning and does not narrate it to the table.
       // Tool payloads can contain player-authored notes, comments, names, and entity bodies —
@@ -5277,13 +5289,14 @@ export class AiDriverService {
       // guard above (scope, policy, secrecy, confirmation), so an id can only become citeable by
       // having survived the permission-checked tool layer for THIS campaign. `ok` is false for an
       // errored call, which makes a citation of it resolve to `retrieval_failed` rather than
-      // silently passing. Harvested from `cleanedText` — what the model was actually shown.
+      // silently passing. Harvested from the bounded prefix of `cleanedText` — the data the
+      // model was actually shown before its enclosing fence and truncation marker.
       //
       // `useSeatPrincipal` marks the id DM-only: this call ran under the DM-scoped seat rather
       // than the player-scoped context principal, so it can return a hidden encounter or an
       // entity behind a narrow secret-read approval (#557). Such an id stays citeable — the
       // model genuinely read it — but is projected out of every non-DM view (#825).
-      harvestRetrievals(ledger, call.name, args, cleanedText, !res.isError, useSeatPrincipal);
+      harvestRetrievals(ledger, call.name, args, visibleCleanedText, !res.isError, useSeatPrincipal);
       const identity = await this.resolveToolResourceIdentity(
         campaignId,
         call.name,
@@ -6445,8 +6458,9 @@ export class AiDriverService {
     const contextToolset = this.mcpTools.buildToolset(this.contextPrincipal(campaignId));
 
     const summary = await safeRead(contextToolset, 'get_campaign_summary', { campaignId });
+    const visibleSummary = summary ? visibleUntrustedPromptData(summary) : null;
     if (summary) parts.push(`## Campaign context\n${wrapUntrustedPromptData(summary)}`);
-    if (ledger && summary) harvestRetrievals(ledger, 'get_campaign_summary', { campaignId }, summary);
+    if (ledger && visibleSummary) harvestRetrievals(ledger, 'get_campaign_summary', undefined, visibleSummary);
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
@@ -6475,7 +6489,7 @@ export class AiDriverService {
         parts.push(
           `## Previous session recap (the DM-approved record — use THIS, do not invent)\n${wrapUntrustedPromptData(recapText)}`,
         );
-        if (ledger) harvestRetrievals(ledger, 'get_session_recaps', { campaignId }, recaps ?? undefined);
+        if (ledger) harvestRetrievals(ledger, 'get_session_recaps', undefined, visibleUntrustedPromptData(recapText));
       } else {
         parts.push(
           '## Previous session recap\nNone on record. Say so plainly instead of inventing what happened last time.',
@@ -6522,13 +6536,6 @@ export class AiDriverService {
       safeRead(contextToolset, 'get_party', { campaignId }),
     ]);
 
-    if (ledger) {
-      // Same rationale as the summary above: these ids were handed to the model by an
-      // authorized read this turn, so citing them is legitimate.
-      harvestRetrievals(ledger, 'list_encounters', { campaignId }, activeEncountersRaw ?? undefined);
-      harvestRetrievals(ledger, 'get_party', { campaignId }, partyRaw ?? undefined);
-    }
-
     const calendar = formatCalendarForPrompt(calendarRaw);
     if (calendar) parts.push(`## In-world calendar / time\n${wrapUntrustedPromptData(calendar)}`);
 
@@ -6537,6 +6544,13 @@ export class AiDriverService {
 
     const party = formatListForPrompt(partyRaw);
     if (party) parts.push(`## Party status\n${wrapUntrustedPromptData(party)}`);
+
+    if (ledger) {
+      // These are the formatted values actually handed to the model, bounded to the same
+      // prefix as their fences. An id outside that prefix cannot validate a citation.
+      harvestRetrievals(ledger, 'list_encounters', undefined, activeEncounters ? visibleUntrustedPromptData(activeEncounters) : undefined);
+      harvestRetrievals(ledger, 'get_party', undefined, party ? visibleUntrustedPromptData(party) : undefined);
+    }
 
     const members = await this.members.listForCampaign(campaignId);
     const playerLines: string[] = [];
@@ -6560,7 +6574,7 @@ export class AiDriverService {
       parts.push(`## Players at the table\n${wrapUntrustedPromptData(playerLines.join('\n'))}`);
     }
 
-    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    const locationEnv = formatLocationEnvironmentFromSummary(visibleSummary);
     if (locationEnv) parts.push(`## Current location / environment\n${wrapUntrustedPromptData(locationEnv)}`);
 
     // This tool is model-specific by design: it ignores facilitator authority and
