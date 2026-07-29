@@ -4449,9 +4449,17 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
     const db = ctx.app.get<DrizzleDb>(DB);
     await db.update(encountersTable).set({ status: 'ended' }).where(eq(encountersTable.id, npcOnly.body.id));
-    await db.update(npcs).set({ disposition: 'friendly', deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
+    await db.update(npcs).set({ disposition: 'friendly' }).where(eq(npcs.id, hostileNpcId));
     const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
+    const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
+    expect(imported.status).toBe(201);
+    const importedEncounters = await request(server).get(`/api/v1/campaigns/${imported.body.id}/encounters`).set(dm);
+    const importedNpcOnly = importedEncounters.body.find((encounter: { name: string }) => encounter.name === 'NPC-only fight');
+    const importedDifficulty = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}/difficulty`).set(dm);
+    expect(importedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
     await db.update(combatantsTable).set({ npcDispositionSnapshot: null }).where(eq(combatantsTable.encounterId, npcOnly.body.id));
     const legacyDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
