@@ -115,8 +115,9 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(hpBtn, 'HP +1 stepper');
         await assertStepperSpacing(page);
 
-        // Attack / damage roll controls — DM cards stay collapsed until expanded.
-        await page.getByRole('button', { name: new RegExp(`Expand ${charName}'s character sheet`) }).click();
+        // The active actor auto-opens; otherwise expand the DM card before measuring controls.
+        const expandSheet = page.getByRole('button', { name: new RegExp(`Expand ${charName}'s character sheet`) });
+        if (await expandSheet.count()) await expandSheet.click();
         await assertMinTarget(page.getByTestId('attack-roll-control').first(), 'attack roll');
         await assertMinTarget(page.getByTestId('damage-roll-control').first(), 'damage roll');
 
