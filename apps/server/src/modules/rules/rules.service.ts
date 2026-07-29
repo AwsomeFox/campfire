@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -2390,6 +2390,14 @@ export class RulesService implements OnModuleInit {
           `Rule pack "${pack.name}" is currently selected by ${usage?.count} campaign(s). Uninstall is blocked to avoid silently changing their rule system and encounter behavior. Migrate those campaigns to another installed pack or homebrew first.`,
         );
       }
+      // Trashed campaigns do not use live rules and cannot block the uninstall, but clear
+      // their dormant slug before deleting the pack so a later restore cannot retain a
+      // dangling reference or silently link to a different reinstalled pack.
+      tx
+        .update(campaigns)
+        .set({ ruleSystem: '' })
+        .where(and(eq(campaigns.ruleSystem, pack.slug), isNotNull(campaigns.deletedAt)))
+        .run();
       const entryIds = tx.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.packId, id)).all().map((row) => row.id);
       for (const entryId of entryIds) {
         tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, entryId)).run();

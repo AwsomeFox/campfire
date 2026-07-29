@@ -1084,6 +1084,10 @@ describe('rules / rule packs — authoritative server-wide usage count (issue #3
     const afterTrash = await request(server).get('/api/v1/rules/packs').set(dmA);
     expect(afterTrash.body.find((p: { id: number }) => p.id === trashedPackId).usageCount).toBe(0);
     expect((await request(server).delete(`/api/v1/rules/packs/${trashedPackId}`).set(dmA)).status).toBe(200);
+    const restored = await request(server).post(`/api/v1/campaigns/${trashedCampaign.body.id}/restore`).set(dmA);
+    expect(restored.status).toBe(201);
+    expect(restored.body.ruleSystem).toBe('');
+    await request(server).delete(`/api/v1/campaigns/${trashedCampaign.body.id}`).set(dmA);
 
     job = await installOpen5e(server, dmA, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
     const livePackId = job.pack.id;
