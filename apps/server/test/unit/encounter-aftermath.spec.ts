@@ -111,7 +111,7 @@ describe('encounter aftermath logic (issue #473)', () => {
     expect(xp).toMatchObject({
       suggestedPartyTotal: 10,
       suggestedPerCharacter: null,
-      undistributedXp: 10,
+      undistributedXp: null,
     });
     expect(xp.warnings.some((warning) => /award manually/i.test(warning))).toBe(true);
   });

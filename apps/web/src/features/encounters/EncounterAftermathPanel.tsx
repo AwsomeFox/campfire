@@ -159,6 +159,11 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
             {t('encounters.aftermath.xpRemainder', { remainder: xp.undistributedXp })}
           </p>
         )}
+        {xp.supported && xp.suggestedPerCharacter == null && xp.suggestedPartyTotal != null && (
+          <p className="text-xs text-slate-400 m-0">
+            {t('encounters.aftermath.xpSplitManual', { total: xp.suggestedPartyTotal })}
+          </p>
+        )}
         {!xp.supported && (
           <p className="text-xs text-slate-400 m-0">
             {t('encounters.aftermath.xpManual', { label: xp.difficultyLabel })}

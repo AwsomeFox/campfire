@@ -144,7 +144,7 @@ export function suggestedXpFromDifficulty(
       supported: true,
       suggestedPartyTotal: difficulty.totalMonsterXp,
       suggestedPerCharacter: null,
-      undistributedXp,
+      undistributedXp: null,
       difficultyLabel: difficulty.label,
       warnings,
     };

@@ -88,6 +88,7 @@
       "openSessionHint": "Review session details and recap.",
       "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} total).",
       "xpRemainder": "{{remainder}} XP remains undistributed after the even split.",
+      "xpSplitManual": "Suggested award: {{total}} XP total — divide it manually among the party.",
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
     },
     "driver": {
