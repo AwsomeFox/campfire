@@ -9,7 +9,7 @@
  *   - Escape during composition must not dismiss the editor;
  *   - mobile / assistive composition uses the same compositionstart/end path.
  *
- * Pure unit test — no backend, no browser — runs under pw-unit.config.ts.
+ * Pure unit test — no backend, no browser — runs under playwright.unit.config.ts.
  */
 import { expect, test } from '@playwright/test';
 import {

@@ -2,7 +2,7 @@
  * Dashboard summary load policy — #581 follow-up for stuck Home skeletons.
  *
  * Run with:
- *   npx playwright test --config pw-unit.config.ts e2e/tests/dashboard-load-policy.unit.spec.ts
+ *   npx playwright test --config playwright.unit.config.ts e2e/tests/dashboard-load-policy.unit.spec.ts
  */
 import { expect, test } from '@playwright/test';
 import {

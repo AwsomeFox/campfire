@@ -28,7 +28,7 @@
  *      plus matching `hover:UTIL` / `focus-visible:UTIL` (or `focus:UTIL`) pairs using the
  *      identical utility suffix.
  *
- * Pure source scan — no browser, no server — runs under pw-unit.config.ts.
+ * Pure source scan — no browser, no server — runs under playwright.unit.config.ts.
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

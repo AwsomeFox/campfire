@@ -10,7 +10,7 @@ import {
  *
  * Label resolution is a pure helper so RunSessionPage's four confirm actions
  * (and the grammatical fallback for other callers) can be pinned without a
- * browser. Run via `pw-unit.config.ts` (no browser project matrix) — not the
+ * browser. Run via `playwright.unit.config.ts` (no browser project matrix) — not the
  * seeded e2e config — so this file executes once. The companion Playwright
  * spec holds slow network requests to assert the rendered busy label,
  * aria-busy, and one-shot live announcement.
