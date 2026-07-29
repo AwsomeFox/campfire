@@ -25,7 +25,7 @@ This is the "what would I actually need?" pass, grounded in what's really built.
 | Award XP / level the party | ✅ | XP tracking with 5e thresholds, party-wide DM awards, and a guided level-up (level +1, new max HP, damage carried over) |
 | Hand out loot / track the party's gold | ✅ | Party treasury (coin) and per-character inventory items |
 | Write the session recap | ✅ | Manually, or ask an AI to draft it; record per-session **attendance** (which characters played) |
-| Sweep the scribe inbox into canon | ✅ | Player notes → quests/NPCs, or let an AI propose the edits |
+| Sweep the scribe inbox into canon | ✅ | Player notes → quests/NPCs manually, or click **Sweep inbox** for AI-proposed edits (needs a campaign AI provider) |
 | Schedule the next session | ✅ | Set a date with player **RSVPs** and a public **ICS feed** subscribers can add to their calendar |
 | Let an absent player catch up | ✅ | **Notifications** (recap posted, next session) plus a **read-only recap share link** to send a guest |
 | Pause / complete / archive a campaign | ✅ | A real read-only **"completed"** state, enforced server-wide (not just cosmetic) |
