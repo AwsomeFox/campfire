@@ -598,7 +598,7 @@ export class ActionResolverService {
     // initially automatic preview into that same kind of pending human decision; the driver marks
     // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply, encounter.round);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -608,7 +608,7 @@ export class ActionResolverService {
       // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
       // silently commit a number the spec itself could never have rolled.
       this.assertResolutionWithinSpecBounds(spec, resolution);
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round);
       applied = true;
     }
     return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
@@ -1095,6 +1095,7 @@ export class ActionResolverService {
     actionIndex: number | null,
     actionFingerprint: string | null,
     awaitingConfirmation: boolean,
+    turnRound: number,
   ): void {
     this.db
       .insert(actionPendingResolutions)
@@ -1107,6 +1108,7 @@ export class ActionResolverService {
         actionIndex,
         actionFingerprint,
         awaitingConfirmation,
+        turnRound,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
       })
@@ -1367,7 +1369,7 @@ export class ActionResolverService {
       throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
     }
 
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id);
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id, pending.turnRound);
     return { undoToken };
   }
 
@@ -1391,6 +1393,8 @@ export class ActionResolverService {
      * entries for a single resolve/apply. Claimed (marked consumed) inside this transaction.
      */
     chainId: string,
+    /** The resolve-time round stored with the opaque pending chain, never client input. */
+    turnRound: number,
   ): ActionUndoToken {
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
@@ -1423,7 +1427,7 @@ export class ActionResolverService {
       // resource mutation so a stale player action is atomically rejected.
       const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
       if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
-      if (role !== 'dm' && resolution.turnRound !== liveEncounter.round) throw new ForbiddenException('Action preview is from a previous turn.');
+      if (role !== 'dm' && turnRound !== liveEncounter.round) throw new ForbiddenException('Action preview is from a previous turn.');
       this.assertPlayerActiveTurn(liveEncounter, actor, role);
       committedEncounter = liveEncounter;
 

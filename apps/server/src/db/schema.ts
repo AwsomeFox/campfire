@@ -2209,6 +2209,9 @@ export const actionPendingResolutions = sqliteTable('action_pending_resolutions'
   actionIndex: integer('action_index'),
   actionFingerprint: text('action_fingerprint'),
   awaitingConfirmation: integer('awaiting_confirmation', { mode: 'boolean' }).notNull().default(false),
+  // Player-owned previews are bound to the server's current encounter round. This lives only
+  // in the pending row: clients submit the opaque chain id, never turn metadata they could forge.
+  turnRound: integer('turn_round').notNull().default(0),
   // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
   // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
   resolutionJson: text('resolution_json').notNull().default('{}'),

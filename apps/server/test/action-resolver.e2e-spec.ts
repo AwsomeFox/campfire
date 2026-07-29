@@ -425,5 +425,4 @@ describe('action resolver (e2e HTTP)', () => {
     const undo = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(dm).send(dmApply.body.undoToken);
     expect(undo.status).toBe(200);
   });
-  });
 });

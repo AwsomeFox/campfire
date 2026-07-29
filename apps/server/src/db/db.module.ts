@@ -4340,6 +4340,7 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
       id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
       action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+      turn_round INTEGER NOT NULL DEFAULT 0,
       resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
@@ -4380,6 +4381,18 @@ function migrateActionPendingFingerprint1451(sqlite: Database.Database): void {
     // than allowing the same-named replacement ambiguity this migration closes.
     sqlite.exec('DELETE FROM action_pending_resolutions WHERE action_fingerprint IS NULL');
   }
+}
+
+/**
+ * Issue #1316: bind player action previews to the round in which the server resolved them.
+ * This is deliberately a new tail migration: 0145 is already recorded by deployed installs.
+ * Existing pending previews predate this binding and receive round 0, which makes a player
+ * apply fail closed while preserving the DM's existing authority to apply a declaration.
+ */
+function migrateActionPendingTurnRound1316(sqlite: Database.Database): void {
+  const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
+  if (columns.length === 0 || columns.some((column) => column.name === 'turn_round')) return;
+  sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN turn_round INTEGER NOT NULL DEFAULT 0');
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
@@ -4675,6 +4688,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
   // safely acquire this later ALTER in place.
   { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
+  { name: '0146_action_pending_turn_round_1316', run: migrateActionPendingTurnRound1316 },
 ];
 
 /**

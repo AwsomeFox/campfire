@@ -690,10 +690,10 @@ describe('action resolver (real SQLite, service layer)', () => {
     orm.update(encounters).set({ currentCombatantId: actor }).where(eq(encounters.id, encounterId)).run();
     const preview = service.resolve(encounterId, request, alice, 'player');
     orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
-    expect(() => service.apply(encounterId, preview.resolution, alice, 'player')).toThrow(/active turn/i);
+    expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/active turn/i);
 
     // DM override remains available for the same stale resolution.
-    expect(service.apply(encounterId, preview.resolution, dmUser, 'dm').undoToken).toBeDefined();
+    expect(service.apply(encounterId, { chainId: preview.chainId }, dmUser, 'dm').undoToken).toBeDefined();
   });
 
   it('keeps a player preview valid when initiative is re-sorted during that same turn', () => {
@@ -709,7 +709,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     // combatant or round. A preview remains tied to this actor's current turn, not its index.
     orm.update(encounters).set({ turnIndex: 1 }).where(eq(encounters.id, encounterId)).run();
 
-    expect(service.apply(encounterId, preview.resolution, alice, 'player').undoToken).toBeDefined();
+    expect(service.apply(encounterId, { chainId: preview.chainId }, alice, 'player').undoToken).toBeDefined();
   });
 
   it('rechecks a player turn inside the apply transaction before writing consequences or resources', () => {
@@ -720,6 +720,13 @@ describe('action resolver (real SQLite, service layer)', () => {
       alice,
       'player',
     );
+    expect(
+      orm
+        .select({ turnRound: actionPendingResolutions.turnRound })
+        .from(actionPendingResolutions)
+        .where(eq(actionPendingResolutions.id, preview.chainId))
+        .get(),
+    ).toEqual({ turnRound: 1 });
     const internals = service as unknown as { applyInternal: (...args: unknown[]) => unknown };
     const originalApplyInternal = internals.applyInternal;
     internals.applyInternal = (...args) => {
@@ -729,7 +736,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     };
 
     try {
-      expect(() => service.apply(encounterId, preview.resolution, alice, 'player')).toThrow(/active turn/i);
+      expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/active turn/i);
     } finally {
       internals.applyInternal = originalApplyInternal;
     }
@@ -756,7 +763,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     };
 
     try {
-      expect(() => service.apply(encounterId, preview.resolution, alice, 'player')).toThrow(/previous turn/i);
+      expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/previous turn/i);
     } finally {
       internals.applyInternal = originalApplyInternal;
     }
