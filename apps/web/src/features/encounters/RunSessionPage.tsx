@@ -1067,6 +1067,36 @@ export default function RunSessionPage() {
   const [encounterSyncOverride, setEncounterSyncOverride] = useState<EncounterOverrideState>(ENCOUNTER_OVERRIDE_INACTIVE);
   const connectingSinceRef = useRef<number | null>(null);
   const [connectingGraceElapsed, setConnectingGraceElapsed] = useState(false);
+  // Issue #1446 review fix (round 5) — one level up from the encounter-switch fix below:
+  // `eventStatus`, the connecting-grace timer, and `encounterSyncOverride` all belong to
+  // the CAMPAIGN's SSE stream (or, for the override, the identity that granted it) — they
+  // outlive an encounter switch but NOT a campaign switch or a signed-in-identity change.
+  // `RunSessionPage` is reused across BOTH: a cross-campaign SPA navigation (e.g.
+  // following a notification link — NotificationsBell.tsx — into a different campaign's
+  // encounter) keeps this component mounted with a new `cid`, exactly like an encounter
+  // switch keeps it mounted with a new `eid`. Without this, a DM's override confirmed in
+  // campaign A would silently authorize stale-state writes in campaign B — a cross-
+  // campaign leak of a trust decision, strictly worse than the ergonomic bug it started
+  // as. A user-identity change (re-auth as someone else without an intervening route
+  // change/remount) is the same class of leak one level further up and is covered by the
+  // same key. Rather than another special-cased reset effect (the failure mode behind the
+  // last two review rounds — an effect with the wrong dependency array, or a second effect
+  // whose reset the first effect's timer didn't expect), this state is explicitly KEYED to
+  // `(campaignId, userId)`: the key is compared during render (React's documented
+  // "adjust state while rendering" pattern), and a mismatch is corrected in the SAME
+  // render that detects it, before any effect below ever observes stream state that
+  // belongs to a different campaign or identity. Both behaviors (persist across an
+  // encounter switch, reset across a campaign/identity switch) fall out of this one
+  // comparison — no per-transition special case to keep re-discovering.
+  const campaignStreamKey = `${cid}:${me?.user.id ?? ''}`;
+  const [ownedCampaignStreamKey, setOwnedCampaignStreamKey] = useState(campaignStreamKey);
+  if (ownedCampaignStreamKey !== campaignStreamKey) {
+    setOwnedCampaignStreamKey(campaignStreamKey);
+    setEventStatus(null);
+    connectingSinceRef.current = null;
+    setConnectingGraceElapsed(false);
+    setEncounterSyncOverride(ENCOUNTER_OVERRIDE_INACTIVE);
+  }
   // The player display is deliberately a separate browsing context: navigating this
   // cockpit to `/screen` used to strand the DM without initiative or turn controls.
   // Keep only the window handle and non-secret status here; cast capabilities never
@@ -1403,8 +1433,8 @@ export default function RunSessionPage() {
   //       viewing encounter A is still the same outage after switching to encounter B, so
   //       clearing it here would reintroduce exactly the "confirm on every click" friction
   //       the issue asks to eliminate. Settled only by `settleEncounterOverride` (stream
-  //       back to `live`) or by losing DM authority (see the effect below) — never by an
-  //       encounter switch.
+  //       back to `live`), by losing DM authority, or by a campaign/identity change (see
+  //       `campaignStreamKey` above) — never by an encounter switch.
   useEffect(() => {
     setActionError(null);
     setShowMapGuidance(false);

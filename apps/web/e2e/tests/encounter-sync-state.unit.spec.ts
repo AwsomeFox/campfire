@@ -111,6 +111,11 @@ test.describe('encounter sync state (issue #471)', () => {
     // authority — revoked in the persisted state AND masked atomically at render time.
     expect(source).toMatch(/revokeEncounterOverrideIfUnauthorized/);
     expect(source).toMatch(/canDmWrite \? encounterSyncOverride : ENCOUNTER_OVERRIDE_INACTIVE/);
+    // Issue #1446 review fix (round 5): stream/session-scoped sync state is explicitly
+    // keyed to (campaignId, userId) — reset on a campaign or identity change, but NOT on
+    // an encounter-only switch (that classification lives in the `[eid]` effect above).
+    expect(source).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
+    expect(source).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
   });
 });
 

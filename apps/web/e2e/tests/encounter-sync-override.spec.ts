@@ -626,3 +626,99 @@ test('an active override is revoked the instant DM authority is lost', async ({ 
     await Promise.all([reader.close(), writer.close()]);
   }
 });
+
+/**
+ * Issue #1446 review fix (round 5): the SAME root cause one level up. `RunSessionPage` is
+ * reused not only across encounters in one campaign but across campaigns entirely — e.g.
+ * following a cross-campaign notification link (`NotificationsBell.tsx`, `entityLinks.ts`
+ * resolving a comment to another campaign's encounter route) does an in-app `navigate`,
+ * not a reload. Without this fix, an override confirmed in campaign A stayed active after
+ * switching to campaign B — a cross-campaign leak of a trust decision: campaign B's
+ * combat controls would be immediately actionable with no grace period and no
+ * confirmation for that campaign at all. `eventStatus` / the connecting-grace timer /
+ * `encounterSyncOverride` are now explicitly keyed to `(campaignId, userId)` and reset the
+ * moment that key changes — this test switches the key by navigating cross-campaign
+ * in-app (history.pushState + popstate, the same technique used elsewhere in this suite
+ * for SPA transitions — NOT `page.goto`, which is a real reload and would trivially pass
+ * regardless of this fix by remounting everything fresh).
+ */
+test('an override confirmed in one campaign does not carry over to a different campaign', async ({ browser }) => {
+  const { campaignId: campaignAId, semantic } = seed();
+  const campaignBId = semantic.campaignId;
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  let encounterAId: number | null = null;
+  let encounterBId: number | null = null;
+  let releaseEvents: () => void = () => {};
+
+  try {
+    const liveA = await (await writer.request.get(`/api/v1/campaigns/${campaignAId}/encounters?status=running`)).json();
+    for (const e of liveA as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+    const liveB = await (await writer.request.get(`/api/v1/campaigns/${campaignBId}/encounters?status=running`)).json();
+    for (const e of liveB as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+
+    const encA = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignAId}/encounters`, {
+        data: { name: 'E2E1446 Cross-Campaign A', hidden: false },
+      })
+    ).json();
+    encounterAId = encA.id;
+    const encB = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignBId}/encounters`, {
+        data: { name: 'E2E1446 Cross-Campaign B', hidden: false },
+      })
+    ).json();
+    encounterBId = encB.id;
+
+    // Both campaigns' streams hang forever — the DM's whole session is in the exact
+    // "SSE never connects" environment this issue targets, for either campaign.
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await reader.route('**/api/v1/campaigns/*/events', async (route) => {
+      await neverConnect;
+      await route.abort('connectionfailed');
+    });
+
+    await page.goto(`/c/${campaignAId}/encounters/${encounterAId}`);
+
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
+    await page.getByTestId('encounter-sync-override-confirm').click();
+    await expect(page.getByTestId('encounter-sync-override-active')).toBeVisible();
+
+    // In-app cross-campaign navigation (SPA transition, no reload) — the same mechanism a
+    // notification link uses, reusing this component with a new `cid`.
+    await page.evaluate((url) => {
+      window.history.pushState({}, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }, `/c/${campaignBId}/encounters/${encounterBId}`);
+    await expect(page).toHaveURL(new RegExp(`/c/${campaignBId}/encounters/${encounterBId}$`));
+
+    // The regression: campaign B must NOT inherit campaign A's override, its elapsed grace
+    // timer, or its `connected`-adjacent status. It starts genuinely fresh: blocked, and —
+    // once its OWN grace period elapses — offered its OWN confirmation, not silently live.
+    await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
+    const startBtn = page.getByRole('button', { name: 'Start' });
+    await expect(startBtn).toBeDisabled();
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
+    await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toBeVisible();
+    await expect(startBtn).toBeDisabled();
+  } finally {
+    releaseEvents();
+    for (const id of [encounterAId, encounterBId]) {
+      if (id != null) {
+        await writer.request.post(`/api/v1/encounters/${id}/end`).catch(() => undefined);
+        await writer.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      }
+    }
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});
