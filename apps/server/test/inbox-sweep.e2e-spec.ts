@@ -698,7 +698,6 @@ describe('inbox sweep (e2e)', () => {
     expect(res.body.job.itemsNewlyErrored).toBe(0);
     expect(classifier.calls).toHaveLength(1);
     expect(classifier.calls[0].capture.noteId).toBe(newNoteId);
->>>>>>> 3d3e275d9 (fix(inbox-sweep): distinguish new vs recovered ledger rows in sweep counts (#1717))
   });
 
   it('reports a disabled job with a stated reason when no AI provider is configured, and touches nothing', async () => {
