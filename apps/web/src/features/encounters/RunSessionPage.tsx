@@ -90,8 +90,12 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
-import { reconcileEncounterPatchResponse, type QueuedEncounterPatch } from './encounterPatchQueue';
-import { reconcileFogSyncState } from './fogSyncState';
+import {
+  isAdjacentDuplicateEncounterPatch,
+  reconcileEncounterPatchResponse,
+  type QueuedEncounterPatch,
+} from './encounterPatchQueue';
+import { pendingFogForEncounter, reconcileFogSyncState, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -988,7 +992,7 @@ export default function RunSessionPage() {
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
-  const [pendingFog, setPendingFog] = useState<FogState | null | undefined>(undefined);
+  const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
@@ -1904,9 +1908,9 @@ export default function RunSessionPage() {
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
-  const pendingEncounterPatchKeys = useRef(new Set<string>());
   const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   const encounterPatchQueue = useRef<Promise<void>>(Promise.resolve());
+  const encounterPatchSequence = useRef(0);
   const activeEncounterIdRef = useRef(eid);
   activeEncounterIdRef.current = eid;
   const gridDefaultAttempts = useRef(new Set<string>());
@@ -1934,6 +1938,7 @@ export default function RunSessionPage() {
     }: {
       encounterId: number;
       patch: Record<string, unknown>;
+      queueId: string;
       pendingKey: string;
       defaultAttemptKey?: string;
       expectedUpdatedAt?: string;
@@ -1952,12 +1957,14 @@ export default function RunSessionPage() {
     },
     onSuccess: (updated, variables) => {
       queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), () =>
-        reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.pendingKey, variables.encounterId),
+        reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.queueId, variables.encounterId),
       );
     },
     onSettled: (_data, error, variables) => {
-      pendingEncounterPatchKeys.current.delete(variables.pendingKey);
-      pendingEncounterPatches.current.delete(variables.pendingKey);
+      pendingEncounterPatches.current.delete(variables.queueId);
+      const hasLaterPendingFog = Array.from(pendingEncounterPatches.current.values()).some(
+        (entry) => entry.encounterId === variables.encounterId && Object.prototype.hasOwnProperty.call(entry.patch, 'fog'),
+      );
       // #1589 — wake a default attempt that deduped against this exact pending key, but ONLY
       // when the request that just settled was NOT itself a default attempt.
       //
@@ -1981,9 +1988,11 @@ export default function RunSessionPage() {
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
       if (wake && error && !variables.defaultAttemptKey) wake();
-      if (variables.encounterId === activeEncounterIdRef.current && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
+      if (!hasLaterPendingFog && variables.encounterId === activeEncounterIdRef.current && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
         const settledFog = variables.patch.fog as FogState | null;
-        setPendingFog((current) => (current !== undefined && fogStatesEqual(current, settledFog) ? undefined : current));
+        setPendingFog((current) =>
+          current?.encounterId === variables.encounterId && fogStatesEqual(current.fog, settledFog) ? undefined : current,
+        );
       }
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
@@ -1997,7 +2006,7 @@ export default function RunSessionPage() {
   const queueEncounterPatch = useCallback(
     (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
       const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
-      if (pendingEncounterPatchKeys.current.has(pendingKey)) {
+      if (isAdjacentDuplicateEncounterPatch(pendingEncounterPatches.current.values(), eid, pendingKey)) {
         // #1589 — dedup against the in-flight request that already owns this exact body. A
         // default-normalization attempt (`defaultAttemptKey` set) that loses this race must
         // still get its retry once the owning request frees the key — see the ref's doc
@@ -2007,8 +2016,8 @@ export default function RunSessionPage() {
         }
         return false;
       }
-      pendingEncounterPatchKeys.current.add(pendingKey);
-      pendingEncounterPatches.current.set(pendingKey, { encounterId: eid, pendingKey, patch });
+      const queueId = `${pendingKey}:${++encounterPatchSequence.current}`;
+      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, patch });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
       // Make every encounter patch optimistic. Fog edits in particular need their cache value
@@ -2028,7 +2037,7 @@ export default function RunSessionPage() {
         .catch(() => undefined)
         .then(async () => {
           const expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(queuedEncounterId))?.updatedAt;
-          await mutateQueuedPatch({ encounterId: queuedEncounterId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
+          await mutateQueuedPatch({ encounterId: queuedEncounterId, queueId, patch, pendingKey, defaultAttemptKey, expectedUpdatedAt });
         })
         .catch(() => undefined);
       return true;
@@ -2066,8 +2075,8 @@ export default function RunSessionPage() {
   const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
   const setEncounterFog = useCallback((fog: FogState | null) => {
-    if (queueEncounterPatch({ fog })) setPendingFog(fog);
-  }, [queueEncounterPatch]);
+    if (queueEncounterPatch({ fog })) setPendingFog({ encounterId: eid, fog });
+  }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
 
@@ -2747,7 +2756,7 @@ export default function RunSessionPage() {
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
-          pendingFog={pendingFog}
+          pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
