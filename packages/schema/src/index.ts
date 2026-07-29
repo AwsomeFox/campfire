@@ -2753,6 +2753,7 @@ export const InboxSweepItemResult = z.object({
   entityId: Id.nullable(),
   proposalId: Id.nullable(),
   reason: z.string().min(1),
+  body: z.string().optional(),
 });
 export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
 
@@ -2768,6 +2769,8 @@ export const InboxSweepJob = z.object({
   itemsProposed: z.number().int().nonnegative(),
   itemsSkipped: z.number().int().nonnegative(),
   itemsErrored: z.number().int().nonnegative(),
+  /** Number of proposals actually created in this sweep (excludes recovered prior rows). */
+  itemsNewlyProposed: z.number().int().nonnegative().optional(),
   detail: z.string(),
   createdBy: z.string(),
   createdAt: z.string(),
