@@ -134,7 +134,7 @@ export interface BackupDiskStatus {
 }
 
 type ScheduledArchiveVerification =
-  | { verified: true; checksum: string; error: '' }
+  | { verified: true; checksum: string; clean: boolean; error: '' }
   | { verified: false; checksum: string | null; error: string };
 
 export interface BackupRetentionStatus {
@@ -667,7 +667,36 @@ export class BackupService implements OnApplicationBootstrap {
         }
         fs.renameSync(partialPath, filePath);
         const checksum = verification.checksum;
-        const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
+        if (!verification.clean) {
+          const prune = await this.pruneVerifiedScheduledBackups(
+            dir,
+            retentionPolicy,
+            previous?.lastArchiveName ?? '',
+            previous?.lastChecksum ?? '',
+            filePath,
+            verification,
+          );
+          const message =
+            `Scheduled backup archived but is incomplete (${filePath}); preserving the prior last-known-good archive.`;
+          // A missing upload must not erase the scheduled archive or block future
+          // attempts, but an incomplete archive is not a restore-complete success.
+          // Keep the prior known-good cadence record while retention bounds older
+          // recoverable-but-partial archives without letting them displace it.
+          await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes, prune);
+          this.logger.warn(
+            `${message} Pruned ${prune.count} older archive(s), ${prune.bytes} bytes.` +
+              (prune.error ? ` Retention errors: ${prune.error}` : ''),
+          );
+          return;
+        }
+        const prune = await this.pruneVerifiedScheduledBackups(
+          dir,
+          retentionPolicy,
+          archiveName,
+          checksum,
+          filePath,
+          verification,
+        );
         const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
         const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
         await this.writeCadence({
@@ -818,6 +847,7 @@ export class BackupService implements OnApplicationBootstrap {
     message: string,
     disk: BackupDiskStatus | null,
     estimatedBytes: number,
+    prune?: { count: number; bytes: number; error: string },
   ): Promise<void> {
     const nextRunAt = new Date(Date.now() + this.failureBackoffMs(previous, intervalMs)).toISOString();
     await this.writeCadence({
@@ -830,7 +860,7 @@ export class BackupService implements OnApplicationBootstrap {
       lastArchiveName: previous?.lastArchiveName ?? null,
       lastVerifiedAt: previous?.lastVerifiedAt ?? null,
       consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
-      metrics: this.metricsAfterFailure(previous?.metrics, disk, estimatedBytes),
+      metrics: this.metricsAfterFailure(previous?.metrics, disk, estimatedBytes, prune),
     });
   }
 
@@ -855,13 +885,18 @@ export class BackupService implements OnApplicationBootstrap {
     previous: BackupCadenceMetrics | undefined,
     disk: BackupDiskStatus | null,
     estimatedBytes: number,
+    prune?: { count: number; bytes: number; error: string },
   ): BackupCadenceMetrics {
     const metrics = this.normalizeMetrics(previous);
     return {
       ...metrics,
       failureCount: metrics.failureCount + 1,
+      pruneCount: metrics.pruneCount + (prune?.count ?? 0),
+      prunedBytes: metrics.prunedBytes + (prune?.bytes ?? 0),
       lastFreeBytes: disk?.freeBytes ?? null,
       lastEstimatedBytes: estimatedBytes,
+      lastPruneAt: prune?.count ? nowIso() : metrics.lastPruneAt,
+      lastPruneError: prune ? prune.error : metrics.lastPruneError,
     };
   }
 
@@ -915,8 +950,8 @@ export class BackupService implements OnApplicationBootstrap {
       return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
     }
     try {
-      await this.inspectFile(filePath);
-      return { verified: true, checksum, error: '' };
+      const inspection = await this.inspectFile(filePath);
+      return { verified: true, checksum, clean: inspection.reconciliation.clean, error: '' };
     } catch (err) {
       return { verified: false, checksum, error: err instanceof Error ? err.message : String(err) };
     }
@@ -935,6 +970,7 @@ export class BackupService implements OnApplicationBootstrap {
     lastArchiveName: string,
     lastChecksum: string,
     knownVerifiedPath?: string,
+    knownVerification?: ScheduledArchiveVerification,
   ): Promise<{ count: number; bytes: number; error: string }> {
     const files = this.listScheduledBackupFiles(dir);
     const candidates: BackupRetentionCandidate[] = [];
@@ -942,15 +978,16 @@ export class BackupService implements OnApplicationBootstrap {
       // The just-published archive was comprehensively verified while it still
       // had its partial name. Reusing that result avoids another full archive
       // read/decompression pass, but only for this explicit path in this run.
-      const verification = knownVerifiedPath && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
-        ? { verified: true, checksum: lastChecksum, error: '' }
+      const verification = knownVerifiedPath && knownVerification && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
+        ? knownVerification
         : await this.verifyScheduledArchive(file.abs);
       const markers = this.retentionMarkers(file.abs);
       candidates.push({
         name: file.name,
         bytes: file.bytes,
         mtimeMs: file.mtimeMs,
-        verified: verification.verified,
+        verified: verification.verified && verification.clean,
+        partial: verification.verified && !verification.clean,
         lastKnownGood:
           file.name === lastArchiveName ||
           (lastArchiveName.length === 0 && verification.checksum === lastChecksum),
@@ -1087,8 +1124,9 @@ export class BackupService implements OnApplicationBootstrap {
    *      `changed` (restoring would leave the DB inconsistent with the file).
    *   5. Scan the live uploads/ tree once more and record any files that are NOT
    *      referenced by any committed attachment row as `orphans`.
-   *   6. Fail loudly if any file went missing (ENOENT) or changed under capture;
-   *      partial / inconsistent archives should not silently claim success.
+   *   6. Record missing files in the manifest and fail loudly if a file changed
+   *      under capture; missing files are already absent from the live server,
+   *      while changed bytes would make the archive internally inconsistent.
    *   7. #496: When the running server relies on an auto-generated
    *      `DATA_DIR/ai-config.key` and the caller supplies a `keyPassphrase`, the
    *      keyfile is wrapped in an AES-256-GCM envelope (scrypt(passphrase, salt))
@@ -1359,11 +1397,16 @@ export class BackupService implements OnApplicationBootstrap {
       }
       zip.append(manifestJson, { name: MANIFEST_ENTRY });
 
-      // Fail loudly if any file was missing or changed under capture — partial /
-      // inconsistent archives should never silently claim success (#828 AC). Orphans
-      // are informational and don't block the archive: they're either reserved uploads
-      // (recoverable on restore) or concurrent writes after the generation boundary.
-      if (missing > 0 || changed > 0) {
+      // Missing files are already unavailable in the live server and are recorded in
+      // manifest.reconciliation. Changed files, however, make the captured bytes
+      // inconsistent with the snapshot and must still abort this archive.
+      if (missing > 0) {
+        this.logger.warn(
+          `Backup reconciliation found ${missing} attachment file(s) missing from storage; recording them in the manifest.`,
+        );
+      }
+
+      if (changed > 0) {
         throw new Error(
           `Backup failed reconciliation: ${missing} missing, ${changed} changed attachment file(s). ` +
             `Backup generation ${reconciliation.generation} — see manifest.reconciliation for details.`,
@@ -1469,7 +1512,8 @@ export class BackupService implements OnApplicationBootstrap {
   private validateManifestAttachmentsAgainstSnapshot(manifest: BackupManifest, dbPath: string): void {
     const byId = new Map(manifest.attachments.map((record) => [record.id, record]));
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    let count = 0;
+    let capturedCount = 0;
+    let missingCount = 0;
     try {
       try {
         for (const row of db.prepare(
@@ -1477,12 +1521,16 @@ export class BackupService implements OnApplicationBootstrap {
         ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
           const record = byId.get(row.id);
           const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
-          if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
+          if (!record) {
+            missingCount++;
+            continue;
+          }
+          if (record.campaignId !== row.campaignId || record.mime !== row.mime ||
             record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
             throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
           }
           byId.delete(row.id);
-          count++;
+          capturedCount++;
         }
       } catch (err) {
         // The earlier integrity probe intentionally accepts any SQLite database
@@ -1494,7 +1542,11 @@ export class BackupService implements OnApplicationBootstrap {
         throw err;
       }
     } finally { db.close(); }
-    if (count !== manifest.attachments.length || byId.size !== 0) {
+    if (
+      capturedCount !== manifest.attachments.length ||
+      missingCount !== manifest.reconciliation.missing ||
+      byId.size !== 0
+    ) {
       throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
     }
   }

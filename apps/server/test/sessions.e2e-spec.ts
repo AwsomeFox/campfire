@@ -104,6 +104,79 @@ describe('sessions (e2e) — sessionCount + duplicate number', () => {
   });
 });
 
+describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const created = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed retry campaign' });
+    campaignId = created.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('creates a new session instead of deduplicating to a trashed matching recap', async () => {
+    const server = ctx.app.getHttpServer();
+    const input = { recap: 'This retry must not return a trashed recap.' };
+    const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(input);
+    expect(first.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${first.body.id}`).set(dm)).status).toBe(200);
+
+    const retry = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(input);
+    expect(retry.status).toBe(201);
+    expect(retry.body.id).not.toBe(first.body.id);
+    expect((await request(server).get(`/api/v1/sessions/${retry.body.id}`).set(dm)).status).toBe(200);
+  });
+
+  it('allows reusing a trashed session number', async () => {
+    const server = ctx.app.getHttpServer();
+    const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 });
+    expect(first.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${first.body.id}`).set(dm)).status).toBe(200);
+    const replacement = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 });
+    expect(replacement.status).toBe(201);
+    expect((await request(server).post(`/api/v1/sessions/${first.body.id}/restore`).set(dm)).status).toBe(409);
+  });
+
+  it('prevents restoring a trashed session after PATCH reuses its number', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashed = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 78 });
+    expect(trashed.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${trashed.body.id}`).set(dm)).status).toBe(200);
+
+    const live = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 79 });
+    expect(live.status).toBe(201);
+    const patched = await request(server).patch(`/api/v1/sessions/${live.body.id}`).set(dm).send({ number: 78 });
+    expect(patched.status).toBe(200);
+    expect(patched.body.number).toBe(78);
+
+    expect((await request(server).post(`/api/v1/sessions/${trashed.body.id}/restore`).set(dm)).status).toBe(409);
+  });
+
+  it('rolls back recap revisions when a duplicate-number PATCH is rejected', async () => {
+    const server = ctx.app.getHttpServer();
+    const original = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm)
+      .send({ number: 80, recap: 'Original recap' });
+    const conflict = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 81 });
+    expect(original.status).toBe(201);
+    expect(conflict.status).toBe(201);
+
+    const beforeRevisions = await request(server).get(`/api/v1/revisions/session/${original.body.id}`).set(dm);
+    expect(beforeRevisions.body).toEqual([]);
+    const rejected = await request(server)
+      .patch(`/api/v1/sessions/${original.body.id}`).set(dm)
+      .send({ number: 81, recap: 'Must not create a revision' });
+    expect(rejected.status).toBe(409);
+
+    expect((await request(server).get(`/api/v1/sessions/${original.body.id}`).set(dm)).body.recap).toBe('Original recap');
+    expect((await request(server).get(`/api/v1/revisions/session/${original.body.id}`).set(dm)).body).toEqual([]);
+  });
+});
+
 /**
  * Issue #59: sessions carry a DM-only dmSecret (prep notes on a session record)
  * with the same strip-for-non-DM redaction as quests/NPCs/locations. The recap

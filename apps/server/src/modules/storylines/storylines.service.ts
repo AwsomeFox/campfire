@@ -73,6 +73,17 @@ function branchToDomain(row: typeof storyBranches.$inferSelect): StoryBranch {
 }
 
 /**
+ * A cascade gets an ISO-8601 marker in a namespace that ordinary soft deletes
+ * (which use `nowIso()`'s millisecond precision) cannot produce.  Keeping the
+ * marker in `deletedAt` preserves the existing schema while allowing restore to
+ * distinguish a cascade from an independently deleted beat in the same
+ * millisecond.  The arc id makes markers for concurrent cascades distinct too.
+ */
+function arcCascadeDeletedAt(arcId: number): string {
+  return nowIso().replace('Z', `${String(arcId).padStart(12, '0')}Z`);
+}
+
+/**
  * Storylines (issue #27): a DM-only branching arc/beat planner. Every method here
  * is reached only through routes/tools that already asserted `dm` role, so no
  * redaction/hidden-filtering is needed — the whole surface is DM prep content and
@@ -198,12 +209,15 @@ export class StorylinesService {
 
   async removeArc(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getArcRowOrThrow(id);
-    const ts = nowIso();
+    const ts = arcCascadeDeletedAt(id);
     // Soft-delete (issue #701): stamp the arc and every beat in one transaction so
-    // topology (branches) and prose revisions survive for restore. Beats hidden by an
-    // arc cascade are restored together when the arc is restored.
+    // topology (branches) and prose revisions survive for restore. Only beats live at
+    // this moment receive the cascade timestamp, which is the restoration marker.
     this.db.transaction((tx) => {
-      tx.update(storyBeats).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+      tx.update(storyBeats)
+        .set({ deletedAt: ts, updatedAt: ts })
+        .where(and(eq(storyBeats.arcId, id), notDeleted(storyBeats.deletedAt)))
+        .run();
       tx.update(storyArcs).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
     });
     await this.audit.log({
@@ -217,14 +231,29 @@ export class StorylinesService {
     });
   }
 
-  /** Restore a trashed arc and every beat soft-deleted with it (issue #701). */
+  /** Restore a trashed arc and only the beats soft-deleted by its cascade (issue #701). */
   async restoreArc(id: number, user: RequestUser, role: Role): Promise<StoryArcWithBeats> {
     const existing = await this.getArcRowOrThrow(id, true);
-    if (existing.deletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
     const ts = nowIso();
     this.db.transaction((tx) => {
-      tx.update(storyArcs).set({ deletedAt: null, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
-      tx.update(storyBeats).set({ deletedAt: null, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+      // The arc may have been restored and trashed again after the outer lookup.
+      // Re-read its cascade marker inside this synchronous transaction so we restore
+      // the beats from the same deletion that we clear on the arc.
+      const current = tx
+        .select({ deletedAt: storyArcs.deletedAt })
+        .from(storyArcs)
+        .where(eq(storyArcs.id, id))
+        .get();
+      if (!current || current.deletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
+      const cascadeDeletedAt = current.deletedAt;
+      tx.update(storyArcs)
+        .set({ deletedAt: null, updatedAt: ts })
+        .where(and(eq(storyArcs.id, id), eq(storyArcs.deletedAt, cascadeDeletedAt)))
+        .run();
+      tx.update(storyBeats)
+        .set({ deletedAt: null, updatedAt: ts })
+        .where(and(eq(storyBeats.arcId, id), eq(storyBeats.deletedAt, cascadeDeletedAt)))
+        .run();
     });
     await this.audit.log({
       actor: auditActor(user),

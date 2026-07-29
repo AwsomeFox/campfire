@@ -34,6 +34,8 @@ export interface BackupRetentionCandidate {
   mtimeMs: number;
   /** Set only after manifest/zip/reconciliation verification by BackupService. */
   verified: boolean;
+  /** A valid archive with recorded missing files; retainable but never last-known-good. */
+  partial?: boolean;
   /** Archive matches the scheduler's persisted last-known-good record. */
   lastKnownGood?: boolean;
   /** Operator-pinned local archive, e.g. a marker file next to the zip. */
@@ -133,10 +135,15 @@ export function planBackupRetention(
   };
 
   const verified = normalized.filter((candidate) => candidate.verified).sort(newestFirst);
-  const eligible = verified.filter((candidate) => !candidate.protected);
+  const partial = normalized.filter((candidate) => candidate.partial === true).sort(newestFirst);
+  const eligible = [...verified, ...partial].filter((candidate) => !candidate.protected);
 
   if (policy.keepCount !== null) {
     verified
+      .slice(policy.keepCount)
+      .filter((candidate) => !candidate.protected)
+      .forEach((candidate) => markPrune(candidate, 'count'));
+    partial
       .slice(policy.keepCount)
       .filter((candidate) => !candidate.protected)
       .forEach((candidate) => markPrune(candidate, 'count'));

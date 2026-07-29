@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { StorylinesService } from '../src/modules/storylines/storylines.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -212,6 +213,50 @@ describe('storylines (e2e)', () => {
 
     expect((await request(server).get(`/api/v1/arcs/${arcId}`).set(dm)).status).toBe(404);
     expect((await request(server).get(`/api/v1/beats/${beatId}`).set(dm)).status).toBe(404);
+  });
+
+  it('restoring an arc leaves beats trashed before the arc deletion in the trash', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Selective restore' });
+    const firstBeat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Discarded idea' });
+    const cascadeBeat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Keep with arc' });
+
+    expect((await request(server).delete(`/api/v1/beats/${firstBeat.body.id}`).set(dm)).status).toBe(200);
+    expect((await request(server).delete(`/api/v1/arcs/${arc.body.id}`).set(dm)).status).toBe(200);
+
+    const restored = await request(server).post(`/api/v1/arcs/${arc.body.id}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body.beats.map((beat: { id: number }) => beat.id)).toEqual([cascadeBeat.body.id]);
+    expect((await request(server).get(`/api/v1/beats/${firstBeat.body.id}`).set(dm)).status).toBe(404);
+  });
+
+  it('uses the current cascade marker when an arc is restored and trashed again during restore', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Racing restore' });
+    const beat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Restore with arc' });
+    expect((await request(server).delete(`/api/v1/arcs/${arc.body.id}`).set(dm)).status).toBe(200);
+
+    const storylines = ctx.app.get(StorylinesService) as unknown as {
+      getArcRowOrThrow(id: number, includeDeleted?: boolean): Promise<unknown>;
+    };
+    const getArcRowOrThrow = storylines.getArcRowOrThrow.bind(storylines);
+    let interleaved = false;
+    const lookup = jest.spyOn(storylines, 'getArcRowOrThrow').mockImplementation(async (id, includeDeleted) => {
+      const row = await getArcRowOrThrow(id, includeDeleted);
+      if (!interleaved && id === arc.body.id && includeDeleted === true) {
+        interleaved = true;
+        expect((await request(server).post(`/api/v1/arcs/${arc.body.id}/restore`).set(dm)).status).toBe(201);
+        expect((await request(server).delete(`/api/v1/arcs/${arc.body.id}`).set(dm)).status).toBe(200);
+      }
+      return row;
+    });
+    try {
+      const restored = await request(server).post(`/api/v1/arcs/${arc.body.id}/restore`).set(dm);
+      expect(restored.status).toBe(201);
+      expect(restored.body.beats.map((item: { id: number }) => item.id)).toEqual([beat.body.id]);
+    } finally {
+      lookup.mockRestore();
+    }
   });
 
   // Issue #264: a beat links to the play record it corresponds to (session/quest/encounter),

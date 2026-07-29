@@ -317,6 +317,27 @@ export class RevisionsService {
   }
 
   /**
+   * Commit a prose version as part of a caller-owned synchronous transaction.
+   * Use this when a prose edit has additional guards or related writes that
+   * must either all commit or all roll back with the version history.
+   */
+  commitProseVersionInTx(
+    tx: SyncDb,
+    params: {
+      entityType: RevisionEntityType;
+      entityId: number;
+      campaignId: number;
+      priorProse: string;
+      nextProse: string;
+      user: RequestUser;
+      restoredFromRevisionId?: number | null;
+      ts?: string;
+    },
+  ): void {
+    this.commitProseVersionOn(tx, params);
+  }
+
+  /**
    * @deprecated Prefer {@link commitProseVersion}. Kept as a thin adapter so any
    * stray caller that only has prior prose still records a legacy closed version
    * and opens an empty tip — not used by production entity services.

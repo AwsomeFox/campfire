@@ -225,13 +225,15 @@ test.describe('shared notification controller', () => {
   test('confirms mark all read when undisplayed rows exist', async ({ page }) => {
     const { campaignId } = seed();
     const items30 = Array.from({ length: 30 }, (_, index) => notification(`Notice ${index + 1}`, 9800 + index));
-    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 35 } }));
+    let unreadCount = 35;
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: unreadCount } }));
     await page.route(LIST_URL, (route) => route.fulfill({ json: items30 }));
     await page.route('**/api/v1/notifications/mark-read', async (route) => {
       const body = route.request().postDataJSON() as { all?: boolean };
       if (body.all) {
         const undisplayedIds = [9770, 9771, 9772, 9773, 9774];
         const updatedIds = [...items30.map((item) => item.id), ...undisplayedIds];
+        unreadCount = 0;
         await route.fulfill({ json: { updated: updatedIds.length, updatedIds } });
         return;
       }
@@ -528,6 +530,69 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
   await context.close();
 });
 
+test('restores a new unread count after mark-all-read across tabs', async ({ browser }) => {
+  const { campaignId } = seed();
+  const context: BrowserContext = await browser.newContext({
+    storageState: stateFor('player'),
+    serviceWorkers: 'block',
+  });
+  let unreadCount = 2;
+  const item = notification('A newly arrived recap', 9911);
+  let holdNextCount = false;
+  let staleCountStarted = false;
+  let releaseStaleCount: () => void = () => {};
+  const staleCount = new Promise<void>((resolve) => {
+    releaseStaleCount = resolve;
+  });
+
+  await context.route(COUNT_URL, async (route: Route) => {
+    const countAtRequest = unreadCount;
+    if (holdNextCount) {
+      holdNextCount = false;
+      staleCountStarted = true;
+      await staleCount;
+    }
+    await route.fulfill({ json: { count: countAtRequest } });
+  });
+  await context.route(LIST_URL, (route) => route.fulfill({ json: [item] }));
+  await context.route('**/api/v1/notifications/mark-read', async (route: Route) => {
+    const body = route.request().postDataJSON() as { all?: boolean };
+    if (body.all) unreadCount = 0;
+    await route.fulfill({ json: { updated: 1, updatedIds: [item.id] } });
+  });
+
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await first.goto(`/c/${campaignId}`);
+  await second.goto(`/c/${campaignId}`);
+  await expect(first.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+
+  // Start a count load before read-all in the other tab, then release its stale
+  // positive response after the read-all broadcast arrives.
+  holdNextCount = true;
+  void second.getByRole('link', { name: 'Quests', exact: true }).click();
+  await expect.poll(() => staleCountStarted).toBe(true);
+  await first.getByRole('button', { name: /Notifications/ }).click();
+  await first.getByRole('button', { name: 'Mark all (2) read' }).click();
+  const confirm = first.getByRole('dialog').filter({ hasText: 'Mark all 2 notifications as read?' });
+  await confirm.getByRole('button', { name: 'Mark all 2 read' }).click();
+  await expect(first.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+
+  releaseStaleCount();
+  await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+
+  // A second tab's new count request starts after read-all, so its positive
+  // response is fresh server evidence rather than the released stale request.
+  unreadCount = 1;
+  await second.getByRole('link', { name: 'Dashboard', exact: true }).click();
+  await expect(second.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+  await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+
+  await context.close();
+});
+
 test.describe('Issue #550: Notification Center, pagination, confirmation, and undo', () => {
   test.use({ storageState: stateFor('player'), serviceWorkers: 'block' });
 
@@ -609,4 +674,3 @@ test.describe('Issue #550: Notification Center, pagination, confirmation, and un
     await expect(page.getByRole('button', { name: 'Load more notifications' })).toHaveCount(0);
   });
 });
-

@@ -601,8 +601,7 @@ export class ScribeService implements OnApplicationBootstrap {
       for (const prior of priorSucceeded) {
         if (prior.proposalId === null) continue;
         const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, prior.proposalId)).limit(1);
-        if (!prop) continue;
-        if (prop.status === 'pending') {
+        if (prop?.status === 'pending') {
           return this.record(campaignId, trigger, user, 'skipped', {
             detail: 'a scribe recap proposal is already pending review',
             proposalId: prior.proposalId,
@@ -612,6 +611,9 @@ export class ScribeService implements OnApplicationBootstrap {
             sourcePreview,
           });
         }
+      }
+      for (const prior of priorSucceeded) {
+        if (prior.proposalId === null) continue;
         if (prior.sourceHash === sourceHash) {
           return this.record(campaignId, trigger, user, 'skipped', {
             detail: 'identical source already drafted',
@@ -966,7 +968,7 @@ export class ScribeService implements OnApplicationBootstrap {
   }
 
   /**
-   * Oldest ended scheduled session without a prior post_session job (#499).
+   * Oldest ended scheduled session without a terminal post_session job (#499).
    *
    * Only EFFECTIVELY-scheduled nights are draftable (#504): a cancelled night was never
    * played, and a completed one already has the recap this run would draft. That is
@@ -984,11 +986,29 @@ export class ScribeService implements OnApplicationBootstrap {
       .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql()))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
 
+    // A no-material window is terminal: its bounded session window cannot gain
+    // source material later. Failed and pending-proposal skips stay eligible for
+    // retry, while an identical-source skip is terminal for that fixed window.
     const processed = await this.db
-      .select({ scheduledSessionId: aiScribeJobs.scheduledSessionId })
+      .select({ scheduledSessionId: aiScribeJobs.scheduledSessionId, status: aiScribeJobs.status, detail: aiScribeJobs.detail, sourceStats: aiScribeJobs.sourceStats })
       .from(aiScribeJobs)
-      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')));
-    const done = new Set(processed.map((r) => r.scheduledSessionId).filter((id): id is number => id != null));
+      .where(
+        and(
+          eq(aiScribeJobs.campaignId, campaignId),
+          eq(aiScribeJobs.trigger, 'post_session'),
+          inArray(aiScribeJobs.status, ['succeeded', 'no_material', 'skipped']),
+        ),
+      );
+    const done = new Set<number>();
+    for (const job of processed) {
+      if (job.scheduledSessionId !== null && (job.status === 'succeeded' || job.status === 'no_material')) {
+        done.add(job.scheduledSessionId);
+      }
+      if (job.status === 'skipped' && job.detail === 'identical source already drafted') {
+        const stats = parseSourceStats(job.sourceStats);
+        if (stats?.scheduledSessionId !== undefined) done.add(stats.scheduledSessionId);
+      }
+    }
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -1015,6 +1035,7 @@ export class ScribeService implements OnApplicationBootstrap {
           eq(aiScribeJobs.campaignId, campaignId),
           eq(aiScribeJobs.trigger, 'post_session'),
           eq(aiScribeJobs.scheduledSessionId, scheduledSessionId),
+          inArray(aiScribeJobs.status, ['succeeded', 'no_material']),
         ),
       )
       .limit(1);
@@ -1109,8 +1130,10 @@ export class ScribeService implements OnApplicationBootstrap {
     } = {},
   ): Promise<ScribeRunResult> {
     const scheduledSessionId =
-      extra.scheduledSessionId ??
-      (extra.scope && isSessionScope(extra.scope) ? extra.scope.scheduledSessionId : null);
+      status === 'skipped'
+        ? null
+        : extra.scheduledSessionId ??
+          (extra.scope && isSessionScope(extra.scope) ? extra.scope.scheduledSessionId : null);
     const [row] = await this.db
       .insert(aiScribeJobs)
       .values({

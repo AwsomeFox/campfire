@@ -310,6 +310,35 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     expect(seat.body.lastTurnAt).not.toBeNull();
   });
 
+  it('keeps an earlier pending proposal blocked after a newer successful dry run (#1491)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe Pending Before Dry Run');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party found the sealed observatory.');
+
+    harness.script({ text: 'The party found the sealed observatory.' });
+    const first = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(first.body.job.status).toBe('succeeded');
+    const proposalId = first.body.proposalIds[0] as number;
+
+    await seedResolvedInbox(harness, campaignId, 'The party mapped the observatory dome.');
+    harness.script({ text: 'A dry-run preview of the observatory dome.' });
+    const preview = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({ dryRun: true, force: true });
+    expect(preview.body.job.status).toBe('succeeded');
+    expect(preview.body.job.proposalId).toBeNull();
+
+    await seedResolvedInbox(harness, campaignId, 'The party heard machinery beneath the floor.');
+    harness.script({ text: 'A forced draft about the machinery beneath the floor.' });
+    const forced = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({ force: true });
+    const forcedProposalId = forced.body.proposalIds[0] as number;
+    expect((await request(harness.server).post(`${API}/proposals/${forcedProposalId}/reject`).set(dm).send({})).status).toBe(201);
+
+    await seedResolvedInbox(harness, campaignId, 'The party found a hidden stair below the observatory.');
+    const blocked = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(blocked.body.job.status).toBe('skipped');
+    expect(blocked.body.proposalIds).toEqual([proposalId]);
+  });
+
   it('is gated: with the experimental flag off, a run is disabled and files nothing', async () => {
     // Flag off for this campaign's run: disable it server-wide first.
     await request(harness.server).patch(`${API}/settings`).set(dm).send({ experimentalAiDm: false });
@@ -483,6 +512,63 @@ describe('AI scribe — post-session sweep (e2e)', () => {
     const retry = again.find((r) => r.job.campaignId === campaignId);
     expect(retry).toBeUndefined();
     expect(proposals.body).toHaveLength(1);
+  });
+
+  it('retries a failed post-session run for the same night and only marks success complete', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe failed post-session retry');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party found the missing map.');
+    await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ postSession: true });
+    const scheduled = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(), durationMinutes: 60, title: 'Retry night' });
+
+    const svc = harness.ctx.app.get(ScribeService);
+    harness.script({ text: '' });
+    const failed = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(failed?.job).toMatchObject({ status: 'failed', scheduledSessionId: scheduled.body.id });
+
+    harness.script({ text: 'The recovered map showed a safe path through the marsh.' });
+    const retried = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(retried?.job).toMatchObject({ status: 'succeeded', scheduledSessionId: scheduled.body.id });
+
+    expect((await svc.sweep()).some((result) => result.job.campaignId === campaignId)).toBe(false);
+  });
+
+  it('advances past a terminal identical-source post-session skip without stamping the schedule id (#1491)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe terminal duplicate skip');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ postSession: true });
+    const first = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(), durationMinutes: 60, title: 'First night' });
+    await seedResolvedInbox(harness, campaignId, 'The party found a cipher in the ruins.');
+
+    harness.script({ text: 'The party found a cipher in the ruins.' });
+    const manual = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/scribe/run`)
+      .set(dm)
+      .send({ scheduledSessionId: first.body.id });
+    expect(manual.body.job.status).toBe('succeeded');
+    expect((await request(harness.server).post(`${API}/proposals/${manual.body.proposalIds[0]}/reject`).set(dm).send({})).status).toBe(201);
+
+    const svc = harness.ctx.app.get(ScribeService);
+    const duplicate = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(duplicate?.job).toMatchObject({ status: 'skipped', scheduledSessionId: null });
+    expect(duplicate?.job.sourceStats?.scheduledSessionId).toBe(first.body.id);
+
+    const second = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), durationMinutes: 60, title: 'Second night' });
+    await seedResolvedInbox(harness, campaignId, 'The cipher revealed a route to the observatory.');
+    harness.script({ text: 'The cipher revealed a route to the observatory.' });
+    const next = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(next?.job.scheduledSessionId).toBe(second.body.id);
   });
 
   it('scopes post-session material to one scheduled game night (#499)', async () => {

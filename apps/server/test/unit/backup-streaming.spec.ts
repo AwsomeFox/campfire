@@ -641,4 +641,76 @@ describe('backup streaming writer (#603)', () => {
       else process.env.BACKUP_DIR = previous;
     }
   });
+
+  it('does not promote an incomplete scheduled archive over the last known good backup', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    const previousKeepCount = process.env.BACKUP_KEEP_COUNT;
+    process.env.BACKUP_DIR = backupDir;
+    process.env.BACKUP_KEEP_COUNT = '1';
+    const svc = service();
+    await (svc as any).runScheduledBackup(60 * 60 * 1000);
+    const before = await (svc as any).readCadence();
+    const verify = jest.spyOn(svc as any, 'verifyScheduledArchive').mockResolvedValue({
+      verified: true,
+      checksum: 'a'.repeat(64),
+      clean: false,
+      error: '',
+    });
+    try {
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      const cadence = await (svc as any).readCadence();
+      expect(fs.readdirSync(backupDir).filter((name) => name.endsWith('.zip'))).toHaveLength(2);
+      expect(cadence.lastSuccessAt).toBe(before.lastSuccessAt);
+      expect(cadence.lastArchiveName).toBe(before.lastArchiveName);
+      expect(cadence.lastError).toMatch(/incomplete/i);
+      expect(cadence.metrics.pruneCount).toBe((before.metrics?.pruneCount ?? 0) + 1);
+      expect(cadence.metrics.prunedBytes).toBeGreaterThan(before.metrics?.prunedBytes ?? 0);
+    } finally {
+      verify.mockRestore();
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+      if (previousKeepCount === undefined) delete process.env.BACKUP_KEEP_COUNT;
+      else process.env.BACKUP_KEEP_COUNT = previousKeepCount;
+    }
+  });
+
+  it('records retention failures from incomplete scheduled archives', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    const previousKeepCount = process.env.BACKUP_KEEP_COUNT;
+    process.env.BACKUP_DIR = backupDir;
+    process.env.BACKUP_KEEP_COUNT = '1';
+    const svc = service();
+    await (svc as any).runScheduledBackup(60 * 60 * 1000);
+    const verify = jest.spyOn(svc as any, 'verifyScheduledArchive').mockResolvedValue({
+      verified: true,
+      checksum: 'a'.repeat(64),
+      clean: false,
+      error: '',
+    });
+    try {
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      const realRmSync = fs.rmSync.bind(fs);
+      const rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(((target: fs.PathLike, options?: fs.RmDirOptions) => {
+        if (String(target).endsWith('.zip')) throw new Error('retention remove failed');
+        return realRmSync(target, options);
+      }) as typeof fs.rmSync);
+      try {
+        await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      } finally {
+        rmSync.mockRestore();
+      }
+      const cadence = await (svc as any).readCadence();
+      expect(cadence.metrics.lastPruneError).toMatch(/retention remove failed/);
+      expect(cadence.metrics.pruneCount).toBe(0);
+    } finally {
+      verify.mockRestore();
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+      if (previousKeepCount === undefined) delete process.env.BACKUP_KEEP_COUNT;
+      else process.env.BACKUP_KEEP_COUNT = previousKeepCount;
+    }
+  });
 });

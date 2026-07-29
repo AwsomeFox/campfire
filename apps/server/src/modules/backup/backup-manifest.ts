@@ -62,9 +62,9 @@ export interface BackupAttachmentRecord {
 /**
  * Reconciliation summary written to the manifest (#828). Records how well the
  * uploaded files match the DB snapshot's attachment rows. missing/changed/orphan
- * counts of zero indicate a fully consistent archive; a non-zero missing or
- * changed count means the archive is partial and should not be treated as a
- * clean restore source without operator review.
+ * counts of zero indicate a fully consistent archive. Missing files are
+ * recorded but do not prevent a recoverable archive; changed files never
+ * publish an archive because their captured bytes are untrustworthy.
  */
 export interface BackupReconciliation {
   /** Unique id for this backup generation (uuid-ish, monotonically fresh). */
@@ -83,7 +83,7 @@ export interface BackupReconciliation {
   orphans: string[];
   /** Total number of orphan files (may exceed `orphans.length` if capped). */
   orphanCount: number;
-  /** Whether the archive is fully reconciled (missing === 0 && changed === 0). */
+  /** Whether every committed attachment row had a captured file. */
   clean: boolean;
 }
 
@@ -316,8 +316,8 @@ function parseManifestV3(raw: Record<string, unknown>): BackupManifest {
     !asNonEmptyString(r.generation) || !validCount(r.totalAttachments) || !validCount(r.missing) ||
     !validCount(r.changed) || !Array.isArray(r.orphans) || !validCount(r.orphanCount) ||
     typeof r.clean !== 'boolean' || !orphans.every((value) => typeof value === 'string') ||
-    totalAttachments !== attachments.length || uploadCount !== attachments.length ||
-    missing !== 0 || changed !== 0 || orphanCount < orphans.length || clean !== true
+    totalAttachments !== attachments.length + missing || uploadCount !== attachments.length ||
+    changed !== 0 || orphanCount < orphans.length || clean !== (missing === 0)
   ) {
     throw new BadRequestException('Invalid backup archive — manifest reconciliation is invalid');
   }

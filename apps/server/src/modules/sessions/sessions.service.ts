@@ -371,15 +371,6 @@ export class SessionsService {
     return row.title ? `Session ${row.number}: ${row.title}` : `Session ${row.number}`;
   }
 
-  /** Session `number` must be unique within a campaign — 409 on a duplicate. */
-  private async assertNumberAvailable(campaignId: number, number: number, excludeId?: number): Promise<void> {
-    const conflict = excludeId
-      ? and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), ne(sessions.id, excludeId))
-      : and(eq(sessions.campaignId, campaignId), eq(sessions.number, number));
-    const [row] = await this.db.select({ id: sessions.id }).from(sessions).where(conflict).limit(1);
-    if (row) throw new ConflictException(`Session number ${number} already exists in this campaign`);
-  }
-
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
     const ts = nowIso();
     const recap = input.recap ?? '';
@@ -422,7 +413,7 @@ export class SessionsService {
         const [newest] = tx
           .select()
           .from(sessions)
-          .where(eq(sessions.campaignId, campaignId))
+          .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
           .orderBy(desc(sessions.number))
           .limit(1)
           .all();
@@ -456,7 +447,7 @@ export class SessionsService {
       const [conflict] = tx
         .select({ id: sessions.id })
         .from(sessions)
-        .where(and(eq(sessions.campaignId, campaignId), eq(sessions.number, input.number)))
+        .where(and(eq(sessions.campaignId, campaignId), eq(sessions.number, input.number), notDeleted(sessions.deletedAt)))
         .limit(1)
         .all();
       if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
@@ -546,9 +537,6 @@ export class SessionsService {
     // Optimistic concurrency (#157): 409 if the caller's expectedUpdatedAt is stale,
     // BEFORE any write or revision snapshot, so a losing writer never clobbers.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
-    if (input.number !== undefined) {
-      await this.assertNumberAvailable(existing.campaignId, input.number, id);
-    }
     const shouldLinkSchedule = input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId;
     // An explicit `scheduledSessionId: null` is an UNLINK, not a plain column write —
     // it has to clear the schedule's side too, or the schedule stays 'completed' with
@@ -570,18 +558,7 @@ export class SessionsService {
       // 400. Evaluated here, a rejected relink leaves the recap completely unchanged.
       this.scheduling.assertCanLinkSession(input.scheduledSessionId!, id);
     }
-    // Commit an immutable prose version when the recap actually changes (#157/#813):
-    // close the prior tip (real author preserved) and open a tip for the new prose.
-    if (input.recap !== undefined && input.recap !== existing.recap) {
-      await this.revisions.commitProseVersion({
-        entityType: 'session',
-        entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.recap,
-        nextProse: input.recap,
-        user,
-      });
-    }
+    const recapChanged = input.recap !== undefined && input.recap !== existing.recap;
     const { scheduledSessionId, ...restInput } = input;
     // `scheduledSessionId` is never written by the plain patch: linkSessionInTx /
     // unlinkSessionInTx own that column so both sides of the relationship always move
@@ -590,6 +567,37 @@ export class SessionsService {
     // nothing, and a committed edit never leaves a half-link.
     const updatePatch = shouldLinkSchedule || shouldUnlinkSchedule ? restInput : input;
     const written = this.db.transaction((tx) => {
+      // Keep the live-number guard in the same synchronous SQLite transaction as
+      // the write. Otherwise a concurrent restore can pass its own guard after
+      // this pre-check but before this PATCH commits, leaving two live sessions
+      // with one number.
+      if (input.number !== undefined) {
+        const [conflict] = tx
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(and(
+            eq(sessions.campaignId, existing.campaignId),
+            eq(sessions.number, input.number),
+            ne(sessions.id, id),
+            notDeleted(sessions.deletedAt),
+          ))
+          .limit(1)
+          .all();
+        if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
+      }
+      // Commit an immutable prose version only after every in-transaction guard.
+      // A rejected number or schedule update must not leave revision history for
+      // recap text that never reached the session row.
+      if (recapChanged) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'session',
+          entityId: id,
+          campaignId: existing.campaignId,
+          priorProse: existing.recap,
+          nextProse: input.recap!,
+          user,
+        });
+      }
       const [updated] = tx
         .update(sessions)
         .set({ ...updatePatch, updatedAt: nowIso() })
@@ -680,11 +688,26 @@ export class SessionsService {
   async restore(id: number, user: RequestUser, role: Role): Promise<Session> {
     const existing = await this.getRowOrThrow(id, true);
     if (existing.deletedAt == null) throw new NotFoundException(`Session ${id} is not in the trash`);
-    const [row] = await this.db
-      .update(sessions)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(sessions.id, id))
-      .returning();
+    const row = this.db.transaction((tx) => {
+      const [conflict] = tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(and(
+          eq(sessions.campaignId, existing.campaignId),
+          eq(sessions.number, existing.number),
+          ne(sessions.id, id),
+          notDeleted(sessions.deletedAt),
+        ))
+        .limit(1)
+        .all();
+      if (conflict) throw new ConflictException(`Session number ${existing.number} already exists in this campaign`);
+      return tx
+        .update(sessions)
+        .set({ deletedAt: null, updatedAt: nowIso() })
+        .where(eq(sessions.id, id))
+        .returning()
+        .all()[0];
+    });
     await this.recomputeSessionCount(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),
