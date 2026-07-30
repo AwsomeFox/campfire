@@ -1636,9 +1636,8 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'expectedUpdatedAt',
   'mapAttachmentId',
   // Map replacement lifecycle (issue #870). The driver may replace with a session-generated
-  // map, but whether to preserve or reset spatial state follows the same mapAttachmentId
-  // policy and is therefore part of the VTT overlay class.
-  'mapAlignment',
+  // map, but may not reset the alignment; mapAlignment is treated as an unknown field on
+  // update_encounter and refused by the allowlist guard.
   'gridSize',
   'gridScale',
   'gridUnit',
@@ -1854,12 +1853,9 @@ export function guardDriverLivePlayArgs(
 
   if (toolName === 'update_encounter') {
     const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_encounter!;
-    // `hidden` is refused rather than dropped, and that asymmetry with create is deliberate:
-    // on create, dropping it yields the safe default and the call still does what the model
-    // wanted (a fight exists). On update, silently dropping a reveal would let the model — and
-    // the DM reading the transcript — believe the encounter had been revealed when it had not,
-    // which is a worse failure than a clear refusal. Nothing is disclosed by refusing: the
-    // seat already knows the encounter exists.
+    // `hidden` and `mapAlignment` are refused rather than dropped. `hidden` controls encounter
+    // visibility (#262/#754) and must be a human act. `mapAlignment` is a map-replacement reset
+    // directive (#870) and may not be set by the autonomous seat through update_encounter.
     if ('hidden' in args) {
       return {
         ok: false,
@@ -1867,6 +1863,25 @@ export function guardDriverLivePlayArgs(
         message:
           'The driver may not change an encounter\'s hidden state. Revealing an encounter discloses its roster ' +
           'and difficulty to players and must be done by the human DM.',
+      };
+    }
+    if ('mapAlignment' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
+          'quest/session links on encounters it created this session. Rejected: mapAlignment.',
+      };
+    }
+    const otherForbidden = Object.keys(args).filter((k) => rule.forbidden.has(k));
+    if (otherForbidden.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
+          `quest/session links on encounters it created this session. Rejected: ${otherForbidden.join(', ')}.`,
       };
     }
     const unknown = unknownArgKeys(args, rule);
