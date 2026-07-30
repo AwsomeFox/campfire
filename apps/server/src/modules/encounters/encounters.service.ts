@@ -4291,9 +4291,10 @@ export class EncountersService {
         ? null
         : freshEncounter.lairResumeCombatantId;
       let startingAfterRemoval: Combatant | null = null;
+      let startedCombatantSnapshot: Pick<typeof combatants.$inferSelect, 'id' | 'turnState' | 'conditions' | 'conditionInstances'> | null = null;
+      const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
       if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
         const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
-        const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
         if (ruleEntryIds.length > 0) {
           const entries = tx.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries)
@@ -4314,6 +4315,17 @@ export class EncountersService {
         startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
           ? advanceRoster.find((combatant) => combatant.id === advanced.currentCombatantId) ?? null
           : null;
+        if (startingAfterRemoval) {
+          const startingRow = roster.find((row) => row.id === startingAfterRemoval!.id);
+          if (startingRow) {
+            startedCombatantSnapshot = {
+              id: startingRow.id,
+              turnState: startingRow.turnState,
+              conditions: startingRow.conditions,
+              conditionInstances: startingRow.conditionInstances,
+            };
+          }
+        }
       }
       let afterEncounter = {
         currentCombatantId: newCurrentId,
@@ -4372,6 +4384,18 @@ export class EncountersService {
         }
         tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       }
+      if (wrappedToNextRound) {
+        for (const row of roster) {
+          if (row.id === combatantId || row.ruleEntryId === null) continue;
+          const mapped = statblocks.get(row.ruleEntryId);
+          if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
+          const domain = combatantToDomain(row);
+          const reset = resetLegendaryUsage(domain.turnState);
+          if (reset !== domain.turnState) {
+            tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+          }
+        }
+      }
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
@@ -4388,7 +4412,7 @@ export class EncountersService {
         actorId,
         encounterId,
         combatantId,
-        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval }),
+        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot }),
         beforeEncounterJson: toJsonText({
           currentCombatantId: freshEncounter.currentCombatantId,
           turnIndex: freshEncounter.turnIndex,
@@ -4430,15 +4454,18 @@ export class EncountersService {
             deathSaveSuccesses: number; deathSaveFailures: number;
             conditions: string; conditionInstances: string | null;
           } | null;
+          startedCombatantSnapshot?: Pick<typeof combatants.$inferSelect, 'id' | 'turnState' | 'conditions' | 'conditionInstances'> | null;
         }) | null>(undo.snapshotJson, null);
         if (!storedSnapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
-        const { sheetUpdatedAtAtRemoval, sheetStateAtRemoval, ...snapshot } = storedSnapshot;
+        const { sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot, ...snapshot } = storedSnapshot;
         // A committed undo may have lost its response. Replaying the restored row is safe;
         // never turn the client-visible Retry into a permanent 404 after success.
         if (undo.consumedAt != null) {
           const prior = tx.select().from(combatants).where(eq(combatants.id, snapshot.id)).get();
-          if (!prior) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
-          restored = prior;
+          // The first undo committed an authoritative response. A subsequent removal
+          // must not turn a lost-response retry into a 404 merely because that row is
+          // absent again; replay the persisted response exactly as other receipts do.
+          restored = prior ?? snapshot;
           emittedEncounter = current;
           replayed = true;
           return;
@@ -4508,6 +4535,13 @@ export class EncountersService {
           const restoredTurnIndex = restoredRoster
             ? turnIndexFor(this.sortCombatantsWithAdapter(restoredRoster, 'running', runningAdapter!), before.currentCombatantId)
             : before.turnIndex;
+          if (startedCombatantSnapshot) {
+            tx.update(combatants).set({
+              turnState: startedCombatantSnapshot.turnState,
+              conditions: startedCombatantSnapshot.conditions,
+              conditionInstances: startedCombatantSnapshot.conditionInstances,
+            }).where(eq(combatants.id, startedCombatantSnapshot.id)).run();
+          }
           tx.update(encounters).set({
             currentCombatantId: before.currentCombatantId,
             turnIndex: restoredTurnIndex,
@@ -4536,7 +4570,12 @@ export class EncountersService {
             updatedAt: nowIso(),
           }).where(eq(encounters.id, encounterId)).run();
         }
-        tx.update(combatantRemovalUndos).set({ consumedAt: nowIso() }).where(eq(combatantRemovalUndos.token, undoToken)).run();
+        // Snapshot is the receipt's response body after its first successful undo.
+        // Retaining it lets later retries replay even if another removal intervenes.
+        tx.update(combatantRemovalUndos).set({
+          snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot }),
+          consumedAt: nowIso(),
+        }).where(eq(combatantRemovalUndos.token, undoToken)).run();
         this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.restore', entityType: 'combatant', entityId: snapshot.id, campaignId: current.campaignId, detail: snapshot.name });
         restored = snapshot;
         emittedEncounter = current;

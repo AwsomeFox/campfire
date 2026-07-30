@@ -234,12 +234,42 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       .where(eq(combatants.id, c3.id))
       .run();
 
-    await service.removeCombatant(encounterId, c1, dmUser, 'dm');
+    const removal = await service.removeCombatant(encounterId, c1, dmUser, 'dm');
 
     expect(currentId(orm, encounterId)).toBe(c3.id);
     const [successor] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).limit(1).all();
     expect(JSON.parse(successor.turnState ?? '{}')).toMatchObject({ used: {}, movementUsedFt: 0 });
     expect(JSON.parse(successor.conditionInstances ?? '[]')).toEqual([expect.objectContaining({ id: 'remove_start_tick', roundsRemaining: 1 })]);
+
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    const [rewoundSuccessor] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).limit(1).all();
+    expect(JSON.parse(rewoundSuccessor.turnState ?? '{}')).toMatchObject({ used: { action: 1 }, movementUsedFt: 30 });
+    expect(JSON.parse(rewoundSuccessor.conditionInstances ?? '[]')).toEqual([expect.objectContaining({ id: 'remove_start_tick', roundsRemaining: 2 })]);
+  });
+
+  it('removing the last active combatant resets legendary usage for the new round', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm.insert(rulePacks)
+      .values({ slug: 'removal-round-legendary', name: 'Removal round legendary', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning()
+      .all();
+    const [entry] = orm.insert(ruleEntries)
+      .values({
+        packId: pack.id, slug: 'removal-round-drake', name: 'Removal round drake', type: 'monster', summary: '', body: '',
+        dataJson: JSON.stringify({ legendary_actions: [{ name: 'Tail attack' }] }), createdAt: ts, updatedAt: ts,
+      })
+      .returning()
+      .all();
+    orm.update(combatants).set({ ruleEntryId: entry.id, turnState: JSON.stringify({ used: { legendary: 3 } }) }).where(eq(combatants.id, c1)).run();
+
+    await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [newRoundBoss] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+    expect(JSON.parse(newRoundBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
   });
 
   it('undoing an active removal restores the combatant phase after entering a lair slot', async () => {
