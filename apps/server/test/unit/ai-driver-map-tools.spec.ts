@@ -183,14 +183,20 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
 
   it('preserves generate_map args through execution-time clear+assign rewriting', () => {
     const s = session();
-    const args: Record<string, unknown> = { campaignId: 1, kind: 'cave', style: 'ruins' };
+    const args: Record<string, unknown> = { campaignId: 1, kind: 'cave', theme: 'stone' };
     const liveGuard = guardDriverLivePlayArgs('generate_map', args, s);
     expect(liveGuard.ok).toBe(true);
     if (liveGuard.ok) {
       for (const key of Object.keys(args)) delete args[key];
       Object.assign(args, liveGuard.args);
-      expect(args).toEqual({ campaignId: 1, kind: 'cave', style: 'ruins' });
+      expect(args).toEqual({ campaignId: 1, kind: 'cave', theme: 'stone' });
     }
+  });
+
+  it('rejects unknown generate_map args with the allowlist (#1792)', () => {
+    const s = session();
+    const result = guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'cave', style: 'ruins' }, s);
+    expect(result.ok).toBe(false);
   });
 
   it('models generate -> update attachment-id handoff via session bookkeeping', () => {

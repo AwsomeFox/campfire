@@ -1665,6 +1665,75 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
  */
 const DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS = new Set(['name', 'locationId', 'questId', 'sessionId']);
 
+export interface DriverLivePlayToolArgRule {
+  /** Fields the guard passes through after any value-level checks. */
+  allowed: ReadonlySet<string>;
+  /** Fields the tool's input schema accepts but the guard refuses or drops. */
+  forbidden: ReadonlySet<string>;
+}
+
+export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLivePlayToolArgRule>> = {
+  'generate_map': {
+    allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit']),
+    forbidden: new Set(),
+  },
+  'generate_ai_map': {
+    allowed: new Set([
+      'campaignId',
+      'idempotencyKey',
+      'prompt',
+      'mode',
+      'chips',
+      'kind',
+      'size',
+      'theme',
+      'dimensions',
+      'count',
+      'seed',
+      'complexity',
+      'gridScale',
+      'gridUnit',
+      'imageModel',
+    ]),
+    forbidden: new Set(['includeCampaignSecrets']),
+  },
+  'refine_ai_map': {
+    allowed: new Set(['campaignId', 'jobId', 'prompt', 'chips', 'count', 'fromPreviewId']),
+    forbidden: new Set(),
+  },
+  'create_encounter': {
+    allowed: new Set(['campaignId', 'name', 'locationId', 'questId', 'sessionId']),
+    forbidden: new Set(['hidden']),
+  },
+  'update_encounter': {
+    allowed: new Set([
+      ...DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS,
+      ...DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS,
+    ]),
+    forbidden: new Set(['hidden', 'mapAlignment']),
+  },
+  'adjust_treasury': {
+    allowed: new Set(['campaignId', 'delta']),
+    forbidden: new Set(['set']),
+  },
+  'add_inventory_item': {
+    allowed: new Set(['campaignId', 'ownerType', 'name', 'qty', 'notes', 'iconSlug']),
+    forbidden: new Set(['characterId']),
+  },
+  'update_inventory_item': {
+    allowed: new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']),
+    forbidden: new Set(['qty', 'ownerType', 'characterId', 'expectedUpdatedAt']),
+  },
+};
+
+function filterAllowedArgs(args: Record<string, unknown>, allowed: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(args).filter(([k]) => allowed.has(k)));
+}
+
+function unknownArgKeys(args: Record<string, unknown>, rule: DriverLivePlayToolArgRule): string[] {
+  return Object.keys(args).filter((k) => !rule.allowed.has(k) && !rule.forbidden.has(k));
+}
+
 export type DriverLivePlayArgGuardResult =
   | { ok: true; args: Record<string, unknown> }
   | { ok: false; code: string; message: string };
@@ -1733,6 +1802,7 @@ export function guardDriverLivePlayArgs(
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
   // budget so an autonomous seat cannot burn provider/image cost by spamming generation.
   if (toolName === 'generate_map' || toolName === 'generate_ai_map' || toolName === 'refine_ai_map') {
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES[toolName]!;
     const calls = session.generateMapCallsThisTurn ?? 0;
     if (calls >= DRIVER_GENERATE_MAP_BUDGET_PER_TURN) {
       return {
@@ -1741,7 +1811,15 @@ export function guardDriverLivePlayArgs(
         message: `The driver may call map-generation tools at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
       };
     }
-    return { ok: true, args: { ...args } };
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_field',
+        message: `The driver may not pass unknown arguments to ${toolName}. Rejected: ${unknown.join(', ')}.`,
+      };
+    }
+    return { ok: true, args: filterAllowedArgs(args, rule.allowed) };
   }
 
   // Issue #1022: encounter CREATION is additive and therefore safe to allow directly — except
@@ -1752,11 +1830,26 @@ export function guardDriverLivePlayArgs(
   // proceeds — `resolveCreateHidden(undefined)` in EncountersService then applies the
   // private-by-default rule, so the outcome is identical to the model having omitted it.
   if (toolName === 'create_encounter') {
-    const { hidden: _discardedHidden, ...rest } = args;
-    return { ok: true, args: rest };
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.create_encounter!;
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may set name, location, quest, and session links on a new encounter. ' +
+          `Rejected: ${unknown.join(', ')}.`,
+      };
+    }
+    // `hidden` is dropped rather than refused: the resulting args are indistinguishable from the
+    // model having omitted it, so EncountersService's private-by-default rule (#754) applies.
+    const safe = { ...args };
+    delete safe.hidden;
+    return { ok: true, args: filterAllowedArgs(safe, rule.allowed) };
   }
 
   if (toolName === 'update_encounter') {
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_encounter!;
     // `hidden` is refused rather than dropped, and that asymmetry with create is deliberate:
     // on create, dropping it yields the safe default and the call still does what the model
     // wanted (a fight exists). On update, silently dropping a reveal would let the model — and
@@ -1772,19 +1865,17 @@ export function guardDriverLivePlayArgs(
           'and difficulty to players and must be done by the human DM.',
       };
     }
-    const authoringKeys = Object.keys(args).filter((key) => DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key));
-    const rejected = Object.keys(args).filter(
-      (key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key) && !DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key),
-    );
-    if (rejected.length > 0) {
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
       return {
         ok: false,
         code: 'forbidden_encounter_field',
         message:
           'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
-          `quest/session links on encounters it created this session. Rejected: ${rejected.join(', ')}.`,
+          `quest/session links on encounters it created this session. Rejected: ${unknown.join(', ')}.`,
       };
     }
+    const authoringKeys = Object.keys(args).filter((key) => DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key));
     // The reshape half is confined to the seat's OWN creations (#1022). An encounter the human
     // DM prepared is theirs: renaming or re-linking it is overwriting their work with no diff
     // for them to review, which is precisely what the proposal queue exists for and precisely
@@ -1815,10 +1906,21 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    return { ok: true, args: { ...args } };
+    return { ok: true, args: filterAllowedArgs(args, rule.allowed) };
   }
 
   if (toolName === 'adjust_treasury') {
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.adjust_treasury!;
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message:
+          'The driver may only grant treasury via a positive per-denomination delta. ' +
+          `Rejected: ${unknown.join(', ')}.`,
+      };
+    }
     if ('set' in args && args.set !== undefined) {
       return {
         ok: false,
@@ -1884,10 +1986,21 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    return { ok: true, args: { ...args } };
+    return { ok: true, args: filterAllowedArgs(args, rule.allowed) };
   }
 
   if (toolName === 'add_inventory_item') {
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.add_inventory_item!;
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message:
+          'The driver may only grant items to the party pool (name, qty, notes, iconSlug). ' +
+          `Rejected: ${unknown.join(', ')}.`,
+      };
+    }
     // Grant-only guard mirroring update_inventory_item's shape (#1495): the party/treasury
     // pool only, never a specific character, and a bounded qty per call — the exact guard
     // this tool was missing entirely before #1495 (it fell through to blanket allow with an
@@ -1932,30 +2045,19 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    return { ok: true, args: { ...args } };
+    return { ok: true, args: filterAllowedArgs(args, rule.allowed) };
   }
 
   if (toolName === 'update_inventory_item') {
-    // Issue #1326 review (coordinator): ALLOWLIST, not denylist. The tool's live-play
-    // latitude is grant quantity (a positive qtyDelta + idempotencyKey) OR edit harmless
-    // metadata (name/notes/iconSlug); every argument the driver may pass is enumerated
-    // here and anything outside it is refused outright. The PREVIOUS shape denied
-    // qty/ownerType/characterId/non-positive qtyDelta and let everything else (name, notes,
-    // iconSlug — and, unnoticed until review, this PR's own equipped/equipSlot/equippedAction)
-    // pass straight through uninspected. A denylist means widening InventoryItemUpdate
-    // silently widens what an autonomous seat may do; this allowlist fails CLOSED on the
-    // next such widening instead of failing open. Repo-wide conversion of the remaining
-    // denylist guards is tracked separately (#1792) — this is the one tool this PR's own
-    // schema change touched.
-    const ALLOWED_KEYS = new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']);
-    const rejected = Object.keys(args).filter((key) => !ALLOWED_KEYS.has(key));
-    if (rejected.length > 0) {
+    const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_inventory_item!;
+    const unknown = unknownArgKeys(args, rule);
+    if (unknown.length > 0) {
       return {
         ok: false,
         code: 'forbidden_inventory_field',
         message:
           'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. ' +
-          `Rejected: ${rejected.join(', ')}.`,
+          `Rejected: ${unknown.join(', ')}.`,
       };
     }
     const hasDelta = 'qtyDelta' in args;
@@ -1979,7 +2081,7 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    if (hasDelta) {
+    if ('qtyDelta' in args) {
       const delta = args.qtyDelta;
       if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
         return {
@@ -1989,7 +2091,7 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    return { ok: true, args: { ...args } };
+    return { ok: true, args: filterAllowedArgs(args, rule.allowed) };
   }
 
   return { ok: true, args: { ...args } };
