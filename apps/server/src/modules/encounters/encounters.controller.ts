@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -7,11 +7,12 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
+import { isVisibleTo } from '../../common/redact';
 
 @ApiTags('encounters')
 // Campaign-scoped list/create only. Role-safe map bytes live on
@@ -508,6 +509,36 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.updateCombatant(id, cid, body, user, role);
+  }
+
+  @Post(':id/combatants/:cid/death-save')
+  @ApiOperation({
+    summary: 'Roll a death save',
+    description:
+      'The server rolls exactly one d20 for a dying character combatant, applies that same face to the 5e death-save lifecycle, audits the write, and records one matching campaign-shared dice-log entry. The caller cannot provide a die result.',
+  })
+  @ApiResponse({ status: 201, description: 'The updated combatant and the single authoritative dice-log roll.' })
+  @ApiResponse({ status: 400, description: 'Combatant is not a dying character.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or owning player, or campaign is archived.' })
+  @ApiResponse({ status: 404, description: 'Encounter was deleted or does not exist.' })
+  async rollDeathSave(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: DeathSaveRollDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    // A same-key retry is a read of the stored response, so retain the soft-deleted
+    // encounter long enough to establish current membership. Fresh writes are rejected
+    // by the transaction-local mutable check in the service.
+    const row = await this.encounters.getRowOrThrow(id, true);
+    await this.access.requireMember(user, row.campaignId, { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }))) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
+    // A same-key retry only replays an already-committed response. Let the service
+    // distinguish that safe read from a fresh write after membership is established.
+    const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+    return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
   }
 
   @Post(':id/token-batches/preview') @HttpCode(200)

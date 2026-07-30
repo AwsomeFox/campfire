@@ -4,15 +4,19 @@ import { eq, inArray } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
+  campaigns,
   encounters as encountersTable,
   rulePacks,
   ruleEntries,
   combatants as combatantsTable,
   npcs,
   encounterEvents as encounterEventsTable,
+  diceRolls,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { AuditService } from '../src/modules/audit/audit.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
+import { RollsService } from '../src/modules/rolls/rolls.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -3058,6 +3062,1031 @@ describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () 
     expect(res.status).toBe(200);
     expect(res.body.hpCurrent).toBe(0);
     expect(res.body.deathState).toBe('none');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1462 — the d20 that resolves a death save must be the one in the
+// campaign's shared dice tray. The face is server-owned: neither REST nor MCP
+// callers may submit it through the generic combatant PATCH.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let heroCombatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'One True d20' })).body.id;
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    const encounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Last Breath', hidden: false });
+    encounterId = encounter.body.id;
+    heroCombatantId = encounter.body.combatants[0].id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function setDying(): Promise<void> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(dm)
+      .send({ hpSet: 0 });
+    expect(res.status).toBe(200);
+    expect(res.body.deathState).toBe('dying');
+  }
+
+  async function setConscious(): Promise<void> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(dm)
+      .send({ hpSet: 12 });
+    expect(res.status).toBe(200);
+  }
+
+  async function current(): Promise<HpShape> {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/encounters/${encounterId}`).set(player);
+    return (res.body.combatants as HpShape[]).find((combatant) => combatant.id === heroCombatantId)!;
+  }
+
+  async function deathSaveRolls(): Promise<Array<{ label?: string; expr?: string; rolls?: number[]; total?: number }>> {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    return res.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
+  }
+
+  it('rejects a caller-selected deathSaveRoll on the generic PATCH', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(player)
+      .send({ deathSaveRoll: 20 });
+    expect(res.status).toBe(400);
+  });
+
+  it('keeps hidden death saves out of the shared feed and hides their existence from non-DMs', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const beforeRolls = await deathSaveRolls();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const viewerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(viewer)
+      .send({ idempotencyKey: 'hidden-death-save-viewer' });
+    const dmAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(dm)
+      .send({ idempotencyKey: 'hidden-death-save-dm' });
+    expect(viewerAttempt.status).toBe(404);
+    expect(dmAttempt.status).toBe(403);
+    expect(
+      (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
+    ).toHaveLength(beforeRolls.length);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+  });
+
+  it('rejects a stabilized character before rolling or persisting evidence', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+          .set(dm)
+          .send({ deathSaveSuccesses: 3 })
+      ).status,
+    ).toBe(200);
+    const beforeRolls = await deathSaveRolls();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'stable-death-save' });
+
+      expect(rejected.status).toBe(400);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'stable', deathSaveSuccesses: 3, deathSaveFailures: 0 });
+    } finally {
+      rollSpy.mockRestore();
+      await setConscious();
+    }
+  });
+
+  it('rolls back the death-save outcome when the matching dice entry cannot persist', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const rolls = ctx.app.get(RollsService);
+    const recordSpy = jest.spyOn(rolls, 'recordInTransaction').mockImplementation(() => {
+      throw new Error('simulated dice storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-storage-failure' });
+      expect(res.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+      const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+      expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(0);
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('rolls back the death-save outcome when its required audit entry cannot persist', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const audit = ctx.app.get(AuditService);
+    const auditSpy = jest.spyOn(audit, 'logInTx').mockImplementation(() => {
+      throw new Error('simulated audit storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-audit-failure' });
+      expect(res.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+      const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+      expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(0);
+    } finally {
+      auditSpy.mockRestore();
+    }
+  });
+
+  it('rolls back every death-save event with its keyed outcome, then writes one death and roll event on retry', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+          .set(player)
+          .send({ deathSaveFailures: 2 })
+      ).status,
+    ).toBe(200);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const deathSaveEvents = async () =>
+      (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))).filter(
+        (event) => event.targetId === heroCombatantId && (event.detail === 'died' || event.detail.startsWith('death save d20 roll ')),
+      );
+    const beforeEvents = await deathSaveEvents();
+    const service = ctx.app.get(EncountersService);
+    const eventSpy = jest.spyOn(service as any, 'appendEventInTransaction').mockImplementationOnce(() => {
+      throw new Error('simulated event storage failure');
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [1], total: 1 });
+    const body = { idempotencyKey: 'death-save-event-retry' };
+    try {
+      const failed = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(failed.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 2 });
+      expect(await deathSaveEvents()).toEqual(beforeEvents);
+
+      const retry = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(retry.status).toBe(201);
+      expect(rollSpy).toHaveBeenCalledTimes(2);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dead', deathSaveSuccesses: 0, deathSaveFailures: 3 });
+      const afterEvents = await deathSaveEvents();
+      expect(afterEvents.slice(beforeEvents.length)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'death', detail: 'died' }),
+          expect.objectContaining({ type: 'roll', detail: expect.stringContaining('death save d20 roll 1: Natural 1!') }),
+        ]),
+      );
+      expect(afterEvents).toHaveLength(beforeEvents.length + 2);
+      await setConscious();
+    } finally {
+      eventSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('uses exactly the logged natural 1 to add two failures', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const beforeRolls = await deathSaveRolls();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [1], total: 1 });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-natural-one' });
+
+      expect(res.status).toBe(201);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      expect(res.body.roll).toMatchObject({ expr: '1d20', rolls: [1], total: 1, label: 'Nyx · death save' });
+      expect(res.body.combatant).toMatchObject({ deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 2 });
+
+      const matching = await deathSaveRolls();
+      expect(matching).toHaveLength(beforeRolls.length + 1);
+      expect(matching[0]).toMatchObject({ expr: '1d20', rolls: [1], total: 1 });
+      const audits = await ctx.app
+        .get<DrizzleDb>(DB)
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, 'encounter.combatant.death_save_roll'));
+      expect(audits).toEqual(expect.arrayContaining([expect.objectContaining({ campaignId, entityId: heroCombatantId, actor: 'dev:p-1' })]));
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('uses exactly the logged natural 20 to revive the character', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const beforeRolls = await deathSaveRolls();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [20], total: 20 });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-natural-twenty' });
+
+      expect(res.status).toBe(201);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      expect(res.body.roll).toMatchObject({ expr: '1d20', rolls: [20], total: 20, label: 'Nyx · death save' });
+      expect(res.body.combatant).toMatchObject({ hpCurrent: 1, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+
+      const matching = await deathSaveRolls();
+      expect(matching).toHaveLength(beforeRolls.length + 1);
+      expect(matching[0]).toMatchObject({ expr: '1d20', rolls: [20], total: 20 });
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays one committed REST death-save intent after a lost response without another d20 or dice row', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const beforeRolls = await deathSaveRolls();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const deathSaveEventCount = async () =>
+      (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))).filter(
+        (event) => event.targetId === heroCombatantId && event.detail.startsWith('death save d20 roll '),
+      ).length;
+    const beforeEvents = await deathSaveEventCount();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-rest-lost-response' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+
+      expect(first.status).toBe(201);
+      expect(await deathSaveEventCount()).toBe(beforeEvents + 1);
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      expect(await deathSaveEventCount()).toBe(beforeEvents + 1);
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length + 1);
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('retries cleanly after an atomic audit failure without leaving a committed unaudited death save', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const beforeRolls = (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player)).body
+      .filter((roll: { label?: string }) => roll.label === 'Nyx · death save').length;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+    const audit = ctx.app.get(AuditService);
+    const auditSpy = jest.spyOn(audit, 'logInTx').mockImplementationOnce(() => {
+      throw new Error('simulated transient audit storage failure');
+    });
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-audit-retry' };
+    try {
+      const failed = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(failed.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+
+      const retry = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(retry.status).toBe(201);
+      expect(rollSpy).toHaveBeenCalledTimes(2);
+      const afterRolls = (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player)).body
+        .filter((roll: { label?: string }) => roll.label === 'Nyx · death save').length;
+      expect(afterRolls).toBe(beforeRolls + 1);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits + 1);
+    } finally {
+      auditSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays a committed death save after its combatant is removed without creating new evidence', async () => {
+    const server = ctx.app.getHttpServer();
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Lost response after removal', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/start`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+    const beforeRolls = await deathSaveRolls();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, replayEncounterId))
+    ).filter((event) => event.targetId === replayCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-removed-replay' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(first.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length + 1);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits + 1);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, replayEncounterId))
+      ).filter((event) => event.targetId === replayCombatantId && event.detail.startsWith('death save d20 roll '));
+      expect(afterEvents).toHaveLength(beforeEvents + 1);
+      expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/end`).set(dm)).status).toBe(201);
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a death save for a ruleset without 5e death saves before rolling or persisting evidence', async () => {
+    const server = ctx.app.getHttpServer();
+    const starfinderCampaign = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'No 5e death saves' });
+    expect(starfinderCampaign.status).toBe(201);
+    const starfinderCampaignId = starfinderCampaign.body.id as number;
+    // Campaign writes rightly reject a rule-system slug without its installed pack.
+    // This adapter-bound regression only needs the persisted campaign selection.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, starfinderCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${starfinderCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Vesk', hpCurrent: 12, hpMax: 12 })
+      ).status,
+    ).toBe(201);
+    const starfinderEncounter = await request(server)
+      .post(`/api/v1/campaigns/${starfinderCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Zero G', hidden: false });
+    expect(starfinderEncounter.status).toBe(201);
+    const starfinderEncounterId = starfinderEncounter.body.id as number;
+    const starfinderCombatantId = starfinderEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+    const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+    const beforeRolls = (await request(server).get(`/api/v1/campaigns/${starfinderCampaignId}/rolls`).set(dm)).body.length;
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}/death-save`)
+        .set(dm)
+        .send({ idempotencyKey: 'starfinder-death-save' });
+      expect(rejected.status).toBe(400);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await request(server).get(`/api/v1/campaigns/${starfinderCampaignId}/rolls`).set(dm)).body).toHaveLength(beforeRolls);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits);
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when the encounter ends after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const raceEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'End race', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceEncounterId = raceEncounter.body.id as number;
+    const raceCombatantId = raceEncounter.body.combatants[0].id as number;
+    const raceCharacterId = raceEncounter.body.combatants[0].characterId as number;
+    expect((await request(server).post(`/api/v1/encounters/${raceEncounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${raceEncounterId}/start`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    let sheetAfterEnd: Record<string, unknown> | null = null;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      // The first lookup is death-save preflight; the second is updateCombatant
+      // after it has captured its outer encounter row but before the transaction.
+      if (adapterLookups === 2) {
+        expect((await request(server).post(`/api/v1/encounters/${raceEncounterId}/end`).set(dm)).status).toBe(201);
+        const sheet = await request(server).get(`/api/v1/characters/${raceCharacterId}`).set(dm);
+        expect(sheet.status).toBe(200);
+        sheetAfterEnd = sheet.body;
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    try {
+      const beforeRolls = await deathSaveRolls();
+      const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      const beforeEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+      ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-end-race' });
+
+      expect(rejected.status).toBe(409);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+      ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll '));
+      expect(afterEvents).toHaveLength(beforeEvents);
+      expect(sheetAfterEnd).not.toBeNull();
+      expect((await request(server).get(`/api/v1/characters/${raceCharacterId}`).set(dm)).body).toMatchObject(sheetAfterEnd!);
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when character ownership changes after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const raceCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save owner race' });
+    expect(raceCampaign.status).toBe(201);
+    const raceCampaignId = raceCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Ownership Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const raceCharacterId = character.body.id as number;
+    const raceEncounter = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ownership race', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceEncounterId = raceEncounter.body.id as number;
+    const raceCombatantId = raceEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeDice = (await db.select().from(diceRolls).where(eq(diceRolls.campaignId, raceCampaignId))).length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === raceCampaignId).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+    ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      // Lookup one is death-save preflight; lookup two is updateCombatant after its
+      // outer read but before the keyed transaction's fresh ownership recheck.
+      if (adapterLookups === 2) {
+        const reassign = await request(server)
+          .patch(`/api/v1/characters/${raceCharacterId}`)
+          .set(dm)
+          .send({ ownerUserId: 'dev:p-2' });
+        expect(reassign.status).toBe(200);
+        expect(reassign.body.ownerUserId).toBe('dev:p-2');
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-ownership-race' });
+
+      expect(rejected.status).toBe(403);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await db.select().from(diceRolls).where(eq(diceRolls.campaignId, raceCampaignId))).length).toBe(beforeDice);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === raceCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+      ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll '));
+      expect(afterEvents).toHaveLength(beforeEvents);
+      expect((await db.select().from(combatantsTable).where(eq(combatantsTable.id, raceCombatantId)).limit(1))[0]).toMatchObject({
+        hpCurrent: 0,
+        deathState: 'dying',
+        deathSaveSuccesses: 0,
+        deathSaveFailures: 0,
+      });
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when the encounter is trashed after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash race' });
+    expect(trashCampaign.status).toBe(201);
+    const trashCampaignId = trashCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Trash Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const trashEncounter = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Trash race', hidden: false });
+    expect(trashEncounter.status).toBe(201);
+    const trashEncounterId = trashEncounter.body.id as number;
+    const trashCombatantId = trashEncounter.body.combatants[0].id as number;
+    const trashCharacterId = trashEncounter.body.combatants[0].characterId as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeRolls = (await request(server).get(`/api/v1/campaigns/${trashCampaignId}/rolls`).set(player)).body.length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === trashCampaignId).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, trashEncounterId))
+    ).filter((event) => event.targetId === trashCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect((await request(server).delete(`/api/v1/encounters/${trashEncounterId}`).set(dm)).status).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-trash-race' });
+
+      expect(rejected.status).toBe(404);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await request(server).get(`/api/v1/campaigns/${trashCampaignId}/rolls`).set(player)).body).toHaveLength(beforeRolls);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === trashCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, trashEncounterId))
+      ).filter((event) => event.targetId === trashCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+      expect(afterEvents).toBe(beforeEvents);
+      expect((await request(server).get(`/api/v1/characters/${trashCharacterId}`).set(dm)).body).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when the campaign is trashed after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save campaign trash race' });
+    expect(trashCampaign.status).toBe(201);
+    const trashCampaignId = trashCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Campaign Trash Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const trashEncounter = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Campaign trash race', hidden: false });
+    expect(trashEncounter.status).toBe(201);
+    const trashEncounterId = trashEncounter.body.id as number;
+    const trashCombatantId = trashEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeDice = (await db.select().from(diceRolls).where(eq(diceRolls.campaignId, trashCampaignId))).length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === trashCampaignId).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect((await request(server).delete(`/api/v1/campaigns/${trashCampaignId}`).set(dm)).status).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-campaign-trash-race' });
+
+      expect(rejected.status).toBe(403);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await db.select().from(diceRolls).where(eq(diceRolls.campaignId, trashCampaignId))).length).toBe(beforeDice);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === trashCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      expect(
+        (await db.select().from(combatantsTable).where(eq(combatantsTable.id, trashCombatantId)).limit(1))[0],
+      ).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('returns not found when a combatant is removed after death-save preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const raceCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save combatant race' });
+    expect(raceCampaign.status).toBe(201);
+    const raceCampaignId = raceCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${raceCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Vanishing Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const raceEncounter = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Combatant race', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceEncounterId = raceEncounter.body.id as number;
+    const raceCombatantId = raceEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect(
+          (await request(server).delete(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`).set(dm)).status,
+        ).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const beforeRolls = (await request(server).get(`/api/v1/campaigns/${raceCampaignId}/rolls`).set(player)).body.length;
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-combatant-remove-race' });
+
+      expect(rejected.status).toBe(404);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await request(server).get(`/api/v1/campaigns/${raceCampaignId}/rolls`).set(player)).body).toHaveLength(beforeRolls);
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays a same-key death save that commits during retry preflight after combatant removal', async () => {
+    const server = ctx.app.getHttpServer();
+    const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save late replay' });
+    expect(replayCampaign.status).toBe(201);
+    const replayCampaignId = replayCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${replayCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Late Replay Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${replayCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Late replay', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let retryAtBarrier!: () => void;
+    const retryBarrier = new Promise<void>((resolve) => {
+      retryAtBarrier = resolve;
+    });
+    const waitForRetryBarrier = async () => {
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          retryBarrier,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('retry did not reach the death-save preflight barrier')), 5_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    };
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 1) {
+        retryAtBarrier();
+        await retryGate;
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-late-replay' };
+    let retryRequest: Promise<request.Response> | undefined;
+    try {
+      // Park the retry after its initial replay lookup but before the mutable-row
+      // preflight. The original request can then commit the same key without two
+      // mutually blocked HTTP requests, making the late-replay window deterministic.
+      retryRequest = request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body)
+        .then((response) => response);
+      await waitForRetryBarrier();
+
+      const original = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body)
+      expect(original.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`).set(dm)).status).toBe(200);
+
+      releaseRetry();
+      const replay = await retryRequest;
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(original.body);
+      expect(adapterLookups).toBeGreaterThanOrEqual(3);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      // If an assertion fails while the retry is parked, let its request finish so
+      // the shared Nest test app can shut down cleanly instead of timing out in afterAll.
+      releaseRetry();
+      await retryRequest?.catch(() => undefined);
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays a committed REST death save after encounter trashing without allowing a fresh key', async () => {
+    const server = ctx.app.getHttpServer();
+    const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash replay' });
+    expect(replayCampaign.status).toBe(201);
+    const replayCampaignId = replayCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${replayCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Replay Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${replayCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Trash replay', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-trashed-replay' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(first.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      const fresh = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-trashed-fresh' });
+
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(fresh.status).toBe(404);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays a committed death save after the encounter and campaign end without creating new evidence', async () => {
+    const server = ctx.app.getHttpServer();
+    // This lifecycle transition must be self-contained: other death-save regressions
+    // intentionally leave the shared fixture in different terminal states.
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Lost response after end', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/start`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+    const beforeRolls = await deathSaveRolls();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, replayEncounterId))
+    ).filter((event) => event.targetId === replayCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-ended-replay' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(first.status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${replayEncounterId}/end`).set(dm)).status).toBe(201);
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length + 1);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits + 1);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, replayEncounterId))
+      ).filter((event) => event.targetId === replayCombatantId && event.detail.startsWith('death save d20 roll '));
+      expect(afterEvents).toHaveLength(beforeEvents + 1);
+      const fresh = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-after-archive' });
+      expect(fresh.status).toBe(403);
+    } finally {
+      rollSpy.mockRestore();
+    }
   });
 });
 

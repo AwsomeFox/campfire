@@ -12,10 +12,11 @@ describe('AI Driver encounter creation allow-list (#1075)', () => {
     expect(isDriverToolAllowed(writeTool('create_encounter'))).toBe(true);
   });
 
-  it('begin_encounter, add_combatant, and roll_initiative remain allowed', () => {
+  it('begin_encounter, add_combatant, initiative, and authoritative death saves remain allowed', () => {
     expect(isDriverToolAllowed(writeTool('begin_encounter'))).toBe(true);
     expect(isDriverToolAllowed(writeTool('add_combatant'))).toBe(true);
     expect(isDriverToolAllowed(writeTool('roll_initiative'))).toBe(true);
+    expect(isDriverToolAllowed(writeTool('roll_death_save'))).toBe(true);
   });
 
   it('delete_encounter remains forbidden (destructive write)', () => {
@@ -27,6 +28,7 @@ describe('AI Driver encounter creation allow-list (#1075)', () => {
       { name: 'create_encounter', mutating: true, proposalCapable: false },
       { name: 'add_combatant', mutating: true, proposalCapable: false },
       { name: 'roll_initiative', mutating: true, proposalCapable: false },
+      { name: 'roll_death_save', mutating: true, proposalCapable: false },
       { name: 'begin_encounter', mutating: true, proposalCapable: false },
       { name: 'end_encounter', mutating: true, proposalCapable: false },
       { name: 'next_turn', mutating: true, proposalCapable: false },
@@ -39,6 +41,7 @@ describe('AI Driver encounter creation allow-list (#1075)', () => {
       'create_encounter',
       'add_combatant',
       'roll_initiative',
+      'roll_death_save',
       'begin_encounter',
       'end_encounter',
       'next_turn',

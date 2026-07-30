@@ -10024,12 +10024,6 @@ export const CombatantUpdate = z.object({
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
   deathState: DeathState.optional(),
-  // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
-  // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
-  // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at
-  // 1 HP (clears the dying slate), 10–19 = one success, 2–9 = one failure. The server's
-  // 5e HP engine (applyCombatantHp) applies the roll to the combatant's death-save state.
-  deathSaveRoll: z.number().int().min(1).max(20).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   // Structured condition instance mutations (issue #423)
@@ -10061,13 +10055,27 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
   // Inline homebrew statblock edits (issue #425) — dm only, enforced server-side.
   statblock: CombatantStatblock.optional(),
-  // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` /
-  // `deathSaveRoll` are relative writes — replaying one double-damages. Send a key
+  // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
+  // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL
   // committed combatant (same hpCurrent, same death state) instead of re-applying.
   // Reusing one key for a DIFFERENT patch is a 409 IDEMPOTENCY_KEY_REUSE.
   idempotencyKey: IdempotencyKey,
 });
+
+/**
+ * Body for the server-authoritative death-save action (issue #1462). The caller supplies
+ * no die face: the server rolls exactly one d20, applies that same face, and writes it to
+ * the shared dice log. An explicit contract prevents REST and MCP from drifting into
+ * accepting a player-selected result.
+ */
+export const DeathSaveRollRequest = z.object({
+  // Unlike legacy combatant PATCHes, this endpoint is new and every call changes
+  // state. Require an intent key so a client that loses its response can replay
+  // the same d20 outcome rather than roll again.
+  idempotencyKey: z.string().min(1).max(128),
+});
+export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).

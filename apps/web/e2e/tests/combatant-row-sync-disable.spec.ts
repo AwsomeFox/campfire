@@ -16,7 +16,9 @@ import { CREDS } from '../global-setup';
  * sees them, sync-blocked or not.
  */
 
-async function seedOwnedCombatant(hp: { hpCurrent: number; hpMax: number } = { hpCurrent: 24, hpMax: 24 }) {
+async function seedOwnedCombatant(
+  hp: { hpCurrent: number; hpMax: number; deathState?: 'dying' } = { hpCurrent: 24, hpMax: 24 },
+) {
   const { baseURL, campaignId } = seed();
   const dm = await request.newContext({ baseURL });
   const player = await request.newContext({ baseURL });
@@ -52,6 +54,12 @@ async function seedOwnedCombatant(hp: { hpCurrent: number; hpMax: number } = { h
     (c) => c.characterId === character.id,
   );
   if (!heroCombatant) throw new Error('expected auto-added hero combatant');
+
+  if (hp.deathState) {
+    await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatant.id}`, {
+      data: { deathState: hp.deathState },
+    });
+  }
 
   await dm.dispose();
   return {
@@ -189,6 +197,7 @@ test.describe('CombatantRow sync-gate disable, not unmount (issue #1746)', () =>
     const { baseURL, campaignId, encounterId, heroCombatantId, characterId, playerCtx } = await seedOwnedCombatant({
       hpCurrent: 0,
       hpMax: 24,
+      deathState: 'dying',
     });
     const context = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
     const page = await context.newPage();

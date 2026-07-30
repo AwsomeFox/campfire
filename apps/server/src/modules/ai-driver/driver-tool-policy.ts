@@ -109,6 +109,8 @@ export const DRIVER_COLLABORATIVE_DEFER_TOOLS: ReadonlySet<string> = new Set([
   'apply_action',
   'update_character_hp',
   'set_character_conditions',
+  // Unlike ordinary dice tools, this roll commits its result to the death-save state.
+  'roll_death_save',
   // Who is on the board, and whose turn it is.
   'next_turn',
   'add_combatant',

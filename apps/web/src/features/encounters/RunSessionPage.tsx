@@ -734,10 +734,8 @@ const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Sta
  * highest-lit pip clears it back down), committing via onSet. Read-only unless
  * `canEditPermission`; also disabled (not unmounted) while `syncBlocked` (issue #1746).
  *
- * Roll button (issue #619): rolls a d20 and posts `deathSaveRoll` to the server, which
- * applies the 5e crit/fumble rules — nat 1 = two failure pips, nat 20 = revive at 1 HP
- * (saves cleared), 10–19 = one success, 2–9 = one failure. The server's response is the
- * source of truth for the counters + HP; the button just supplies the d20 face.
+ * Roll button (issue #1462): requests one server-authoritative d20, which drives both
+ * the 5e outcome and the matching shared dice-log entry.
  */
 /**
  * Death-save pips (issue #428 hit area, #1478 stability).
@@ -811,6 +809,7 @@ function DeathSaveTracker({
   successes,
   failures,
   canEditPermission,
+  canRoll,
   busy,
   syncBlocked,
   syncBlockedReason,
@@ -830,6 +829,8 @@ function DeathSaveTracker({
    * disables (not unmounts) on it, same as every other write control in the row.
    */
   canEditPermission: boolean;
+  /** Terminal states retain their pips but cannot make another authoritative roll. */
+  canRoll: boolean;
   busy: boolean;
   /** Issue #1746: the encounter sync gate is blocking conflict-prone writes right now. */
   syncBlocked: boolean;
@@ -871,7 +872,7 @@ function DeathSaveTracker({
           onSet={onSet}
         />
       </span>
-      {canEditPermission && (
+      {canEditPermission && canRoll && (
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
@@ -973,7 +974,7 @@ function hpPatchWithActor(
   return actorId != null ? { ...patch, actorId } : patch;
 }
 
-const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp', 'deathSaveRoll']);
+const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp']);
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -1993,31 +1994,32 @@ export default function RunSessionPage() {
     [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
 
+  const deathSaveRoll = useKeyedMutation({
+    mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
+      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+    },
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
   const patchCombatantTurnState = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
     [combatantTurnState],
   );
 
-  /**
-   * Roll a death save (issue #619): roll a d20 client-side, POST it to the campaign's
-   * shared dice log so the whole table sees the roll, then PATCH the combatant with
-   * `deathSaveRoll`. The SERVER is the source of truth for the outcome (nat 1 = two
-   * failures, nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure) — its
-   * response drives the pips + HP, and the combatantPatch invalidation re-renders this
-   * row immediately. The dice-log post is fire-and-forget for table visibility; if it
-   * fails we still apply the roll outcome (the combat-log event records provenance too).
-   */
+  /** One server roll drives both the death-save outcome and its shared dice-log entry. */
   const rollDeathSave = useCallback(
-    (combatant: Pick<Combatant, 'id' | 'name'>) => {
-      const face = 1 + Math.floor(Math.random() * 20); // 1–20, uniform
-      const label = `${combatant.name} · death save`;
-      // Visible in the shared dice tray. A plain 1d20 expr so crit/fumble flavor lights up.
-      void api.post(`${API}/campaigns/${cid}/roll`, { expr: '1d20', label }).catch(() => {
-        /* table-visibility best-effort; outcome is driven by the combatant PATCH below */
-      });
-      patchCombatant(combatant.id, { deathSaveRoll: face });
-    },
-    [cid, patchCombatant],
+    (combatant: Pick<Combatant, 'id'>) => deathSaveRoll.mutate({ combatantId: combatant.id }),
+    [deathSaveRoll],
   );
 
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
@@ -3092,8 +3094,9 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
+          deathSavePending={reconcileBlocks}
+          isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}
           onRollDeathSave={rollDeathSave}
-          onPatchCombatant={patchCombatant}
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
@@ -6486,7 +6489,7 @@ function CombatantRow({
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
-  /** Roll a death save (issue #619) — rolls d20, posts to the dice log, drives the server outcome. */
+  /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
   onSetInitiative: (value: number) => void;
   /** Clear initiative back to the unrolled state (issue #715) — sends `initiative: null`. */
@@ -6901,6 +6904,7 @@ function CombatantRow({
               successes={combatant.deathSaveSuccesses ?? 0}
               failures={combatant.deathSaveFailures ?? 0}
               canEditPermission={canEditPermission}
+              canRoll={combatant.deathState === 'dying'}
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}

@@ -48,7 +48,7 @@ import { encounterOpIdempotency } from '../../db/schema';
 export const ENCOUNTER_OP_IDEMPOTENCY_TTL_MS = 6 * 60 * 60 * 1000;
 
 /** The non-idempotent encounter operations that carry keys. */
-export type EncounterOperation = 'combatant.update' | 'turn.advance';
+export type EncounterOperation = 'combatant.update' | 'combatant.death_save_roll' | 'turn.advance';
 
 // The drizzle transaction handle and the DB handle are structurally identical for the
 // handful of statements issued here (one table, three shapes). Typing them precisely means

@@ -3,7 +3,7 @@ import { and, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -78,6 +78,41 @@ type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
+/** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
+type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number };
+type CombatantTransactionHook = (
+  tx: SyncDb,
+  fresh: typeof combatants.$inferSelect,
+  freshEncounter: typeof encounters.$inferSelect,
+) => void;
+type EncounterEventFields = {
+  actor?: string | null;
+  target?: string | null;
+  actorId?: number | null;
+  targetId?: number | null;
+  detail?: string;
+  chainId?: string | null;
+  parentEventId?: number | null;
+  phase?: EncounterEventPhase | null;
+  performedBy?: EncounterEventPerformedBy | null;
+  metadata?: EncounterEventMetadata;
+};
+/** Narrow extension point for an action whose idempotent response is not just a combatant. */
+type CombatantUpdateTransactionOptions = {
+  beforeWriteInTransaction?: CombatantTransactionHook;
+  afterWriteInTransaction?: (
+    tx: SyncDb,
+    committed: Combatant,
+    fresh: typeof combatants.$inferSelect,
+    freshEncounter: typeof encounters.$inferSelect,
+  ) => void;
+  /** The caller inserted every death-save event with its keyed write, so do not append duplicates after commit. */
+  deathSaveEventsInTransaction?: boolean;
+  operation?: EncounterOpClaim['operation'];
+  operationFingerprint?: unknown;
+  operationResponse?: (combatant: Combatant) => unknown;
+  replayCombatant?: (response: unknown) => Combatant | null;
+};
 type RollRequestInput = z.infer<typeof RollRequest>;
 type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
@@ -407,6 +442,31 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
   };
 }
 
+function deathSaveRollEventDetail(
+  die: number,
+  successes: number,
+  failures: number,
+  beforeDeath: string,
+  afterDeath: string,
+): string {
+  let rollResult = '';
+  if (die === 20) {
+    rollResult = 'Natural 20! Revived with 1 HP!';
+  } else if (die === 1) {
+    rollResult = `Natural 1! (2 failures) — totals: ${successes} succ / ${failures} fail`;
+  } else if (die >= 10) {
+    rollResult = `Success (rolled ${die}) — totals: ${successes} succ / ${failures} fail`;
+  } else {
+    rollResult = `Failure (rolled ${die}) — totals: ${successes} succ / ${failures} fail`;
+  }
+  if (afterDeath === 'dead' && beforeDeath !== 'dead') {
+    rollResult += ' (Dead)';
+  } else if (afterDeath === 'stable' && beforeDeath !== 'stable') {
+    rollResult += ' (Stabilized)';
+  }
+  return `death save d20 roll ${die}: ${rollResult}`;
+}
+
 /**
  * Issue #43: non-DM viewers must not see a monster's (or DM-controlled NPC's) exact
  * HP — a player polling the run-session view would otherwise read the boss at an
@@ -553,7 +613,7 @@ export class EncountersService {
   }
 
   /**
-   * Reject a write against an 'ended' encounter (issues #163, #470). Combatant mutations
+   * Reject a write against a trashed or 'ended' encounter (issues #163, #470). Combatant mutations
    * were the first gap: per-combatant writes never checked status, so after a fight any
    * owning player or DM could keep editing the historical record and every combatant HP
    * patch rewrote the linked character's live sheet HP through write-through in
@@ -564,6 +624,9 @@ export class EncountersService {
    * the supported path back to a mutable 'running' encounter.
    */
   private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
+    if (encounterRow.deletedAt !== null) {
+      throw new NotFoundException(`Encounter ${encounterRow.id} not found`);
+    }
     if (encounterRow.status === 'ended') {
       throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
     }
@@ -914,18 +977,7 @@ export class EncountersService {
     encounterId: number,
     round: number,
     type: EncounterEventType,
-    fields: {
-      actor?: string | null;
-      target?: string | null;
-      actorId?: number | null;
-      targetId?: number | null;
-      detail?: string;
-      chainId?: string | null;
-      parentEventId?: number | null;
-      phase?: EncounterEventPhase | null;
-      performedBy?: EncounterEventPerformedBy | null;
-      metadata?: EncounterEventMetadata;
-    },
+    fields: EncounterEventFields,
   ): Promise<void> {
     await this.db.insert(encounterEvents).values({
       encounterId,
@@ -943,6 +995,32 @@ export class EncountersService {
       metadataJson: fields.metadata && Object.keys(fields.metadata).length > 0 ? JSON.stringify(fields.metadata) : null,
       createdAt: nowIso(),
     });
+  }
+
+  /** Insert an event into the caller's existing write transaction. */
+  private appendEventInTransaction(
+    tx: SyncDb,
+    encounterId: number,
+    round: number,
+    type: EncounterEventType,
+    fields: EncounterEventFields,
+  ): void {
+    tx.insert(encounterEvents).values({
+      encounterId,
+      round,
+      type,
+      actor: fields.actor ?? null,
+      target: fields.target ?? null,
+      actorId: fields.actorId ?? null,
+      targetId: fields.targetId ?? null,
+      detail: fields.detail ?? '',
+      chainId: fields.chainId ?? null,
+      parentEventId: fields.parentEventId ?? null,
+      phase: fields.phase ?? null,
+      performedByJson: fields.performedBy ? JSON.stringify(fields.performedBy) : null,
+      metadataJson: fields.metadata && Object.keys(fields.metadata).length > 0 ? JSON.stringify(fields.metadata) : null,
+      createdAt: nowIso(),
+    }).run();
   }
 
   /**
@@ -3101,6 +3179,233 @@ export class EncountersService {
   }
 
   /**
+   * Roll one server-authoritative d20 for a dying 5e character, atomically applying
+   * its outcome and matching dice/audit/combat-log evidence. A same-key retry replays
+   * its committed response without rolling again, including after lifecycle changes.
+   */
+  async rollDeathSave(
+    encounterId: number,
+    combatantId: number,
+    idempotencyKey: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ combatant: Combatant; roll: DiceRoll }> {
+    // A retained trashed row is sufficient to authorize an existing keyed replay;
+    // fresh writes still fail in updateCombatant's transaction-local mutable check.
+    const encounter = await this.getRowOrThrow(encounterId, true);
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const operationFingerprint = { combatantId };
+    const deathSaveClaim: EncounterOpClaim = {
+      actorId: user.id,
+      operation: 'combatant.death_save_roll',
+      key: idempotencyKey,
+      encounterId,
+      campaignId: encounter.campaignId,
+      fingerprint: encounterOpFingerprint(operationFingerprint),
+    };
+    const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll } | null => {
+      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
+      return candidate.combatant && candidate.roll ? { combatant: candidate.combatant, roll: candidate.roll } : null;
+    };
+
+    // A committed response is safe to replay even if the combatant has since been
+    // removed or the campaign became read-only. The controller/MCP tool has already
+    // checked current campaign membership and role; this lookup performs no domain
+    // write and is keyed to that authorized actor, encounter, and target.
+    const replayCommittedDeathSave = (): { combatant: Combatant; roll: DiceRoll } | null => {
+      let replay: { combatant: Combatant; roll: DiceRoll } | null = null;
+      this.db.transaction((tx) => {
+        const prior = findPriorEncounterOp(tx, deathSaveClaim, Date.now());
+        replay = prior ? replayResponse(prior.response) : null;
+      });
+      return replay;
+    };
+    const earlyReplay = replayCommittedDeathSave();
+    if (earlyReplay) return earlyReplay;
+
+    try {
+      // Fresh death saves retain the normal archive protection. Recheck inside the
+      // write transaction below as well, so an archive racing this request cannot
+      // admit a new result after the preflight succeeds.
+      await this.assertCampaignWritableForFreshDeathSave(encounter.campaignId);
+      const adapter = await this.adapterForCampaign(encounter.campaignId);
+      if (!hasDeathSavesForAdapter(adapter)) {
+        throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
+      }
+      const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+
+      // This pre-read authorizes the actor. The mutable-encounter guard itself lives below
+      // the keyed replay lookup, so a lost-response retry can recover its committed result
+      // even if another DM ended the encounter before it arrived.
+      if (role !== 'dm') {
+        if (combatant.characterId === null) throw new ForbiddenException('Only dm may modify this combatant');
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may roll this death save');
+        }
+      }
+
+      let roll: DiceRoll | null = null;
+      let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
+      const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
+      const updated = await this.updateCombatant(
+        encounterId,
+        combatantId,
+        deathSavePatch,
+        user,
+        role,
+        {
+          operation: 'combatant.death_save_roll',
+          // The d20 is server generated inside the transaction. Bind the key to the action
+          // target, not that random face, so the same intent replays before any new RNG work.
+          operationFingerprint,
+          beforeWriteInTransaction: (tx, fresh, freshEncounter) => {
+            this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
+            this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
+            if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+              throw new NotFoundException(`Encounter ${encounterId} not found`);
+            }
+            if (freshEncounter.hidden) {
+              throw new ForbiddenException('Death saves cannot be rolled while an encounter is hidden');
+            }
+            if (role !== 'dm') {
+              const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, fresh.characterId!)).limit(1).all();
+              if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
+                throw new ForbiddenException('Only dm or the owning player may roll this death save');
+              }
+            }
+            // A concurrent first roll cannot leave a second request applying a face to a
+            // no-longer-dying combatant. This code is deliberately after the prior-claim
+            // lookup, so a lost-response retry returns its stored outcome instead.
+            if (
+              fresh.encounterId !== encounterId ||
+              fresh.kind !== 'character' ||
+              fresh.hpCurrent !== 0 ||
+              fresh.deathState !== 'dying'
+            ) {
+              throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
+            }
+            const result = this.rollDeathSaveD20();
+            result.label = `${fresh.name} · death save`;
+            roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
+            // `updateCombatant` applies this server-only face after the hook returns.
+            deathSavePatch.deathSaveRoll = result.total;
+          },
+          afterWriteInTransaction: (tx, committed, fresh, freshEncounter) => {
+            // This evidence is part of the authoritative action: commit it with the
+            // combatant outcome, dice row, audit entry, and idempotency replay response,
+            // or roll all five back. A retry then cannot replay an outcome whose combat
+            // log is permanently missing (or duplicated).
+            this.audit.logInTx(tx, {
+              actor: auditActor(user),
+              actorRole: role,
+              action: 'encounter.combatant.death_save_roll',
+              entityType: 'combatant',
+              entityId: combatantId,
+              campaignId: encounter.campaignId,
+              detail: `${committed.name}: d20 ${roll!.total}`,
+            });
+            if (committed.deathState === 'dead' && fresh.deathState !== 'dead') {
+              const actor =
+                freshEncounter.currentCombatantId === null || freshEncounter.currentCombatantId === combatantId
+                  ? null
+                  : tx
+                      .select({ id: combatants.id, name: combatants.name })
+                      .from(combatants)
+                      .where(and(eq(combatants.id, freshEncounter.currentCombatantId), eq(combatants.encounterId, encounterId)))
+                      .limit(1)
+                      .all()[0] ?? null;
+              this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'death', {
+                actor: actor?.name ?? null,
+                target: committed.name,
+                actorId: actor?.id ?? null,
+                targetId: combatantId,
+                detail: 'died',
+              });
+            }
+            this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'roll', {
+              target: committed.name,
+              targetId: combatantId,
+              detail: deathSaveRollEventDetail(
+                roll!.total,
+                committed.deathSaveSuccesses,
+                committed.deathSaveFailures,
+                fresh.deathState,
+                committed.deathState,
+              ),
+            });
+          },
+          deathSaveEventsInTransaction: true,
+          operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
+          replayCombatant: (response) => {
+            replayed = replayResponse(response);
+            return replayed?.combatant ?? null;
+          },
+        },
+      );
+      if (replayed) return replayed;
+      if (roll === null) throw new Error('Death-save dice roll was not persisted');
+      const persistedRoll = roll as DiceRoll;
+
+      return { combatant: updated, roll: persistedRoll };
+    } catch (err) {
+      // The original same-key request can commit after our early replay lookup but
+      // before a mutable-row preflight (for example, before another DM removes the
+      // combatant). Recheck the stored outcome before surfacing that later 404/409 so
+      // an ambiguous retry still recovers the committed authoritative result.
+      const lateReplay = replayCommittedDeathSave();
+      if (lateReplay) return lateReplay;
+      throw err;
+    }
+  }
+
+  /** Kept as a seam for deterministic death-save endpoint regressions. */
+  private rollDeathSaveD20(): RollResult {
+    return rollDice('1d20');
+  }
+
+  private async assertCampaignWritableForFreshDeathSave(campaignId: number): Promise<void>;
+  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx: SyncDb): void;
+  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx?: SyncDb): Promise<void> | void {
+    if (tx) {
+      const [campaign] = tx
+        .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1)
+        .all();
+      if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
+        throw new ForbiddenException(
+          `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
+        );
+      }
+      return;
+    }
+    return this.db
+      .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1)
+      .then(([campaign]) => {
+        if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
+          throw new ForbiddenException(
+            `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
+          );
+        }
+      });
+  }
+
+  private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
+    const [campaign] = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1).all();
+    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+    if (!hasDeathSavesForAdapter(adapter)) {
+      throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
+    }
+  }
+
+  /**
    * dm may change anything (including initiative, and the combatant identity fields
    * name/hpMax/initMod — issue #114). A player may only touch HP-ish fields
    * (hpDelta, hpSet, hpTemp, deathSave counters, add/removeConditions), and only on a
@@ -3109,12 +3414,16 @@ export class EncountersService {
   async updateCombatant(
     encounterId: number,
     combatantId: number,
-    patch: CombatantUpdateInput,
+    patch: CombatantInternalUpdateInput,
     user: RequestUser,
     role: Role,
+    options?: CombatantUpdateTransactionOptions,
   ): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounterRow);
+    // An operation key may name a result that already committed before the encounter
+    // ended. Let the transaction check that claim first; fresh keyed writes still hit
+    // the same guard inside the transaction below.
+    if (!patch.idempotencyKey) this.assertMutable(encounterRow);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
     const isDm = role === 'dm';
@@ -3283,10 +3592,9 @@ export class EncountersService {
     //     Concurrent tracker deltas still compose via the in-tx set rebase (#747).
     //   • /end writes combatant conditions back onto the sheet alongside HP.
     //   • MCP `update_combatant` and `set_character_conditions` share these paths.
-    const mirrorSheet =
+    const shouldMirrorSheet =
       existing.kind === 'character' &&
       existing.characterId !== null &&
-      encounterRow.status !== 'ended' &&
       (recomputeHp || conditionFieldsTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
@@ -3319,14 +3627,16 @@ export class EncountersService {
     const opClaim: EncounterOpClaim | null = patch.idempotencyKey
       ? {
           actorId: user.id,
-          operation: 'combatant.update',
+          operation: options?.operation ?? 'combatant.update',
           key: patch.idempotencyKey,
           encounterId,
           campaignId: encounterRow.campaignId,
           // Fingerprint the payload minus the key itself, plus the target combatant: the
           // same key resent for a DIFFERENT patch is a client bug, and replaying the
           // first response for it would hide the bug rather than surface it.
-          fingerprint: encounterOpFingerprint({ combatantId, ...patch, idempotencyKey: undefined }),
+          fingerprint: encounterOpFingerprint(
+            options?.operationFingerprint ?? { combatantId, ...patch, idempotencyKey: undefined },
+          ),
         }
       : null;
     let replayedCombatant: Combatant | null = null;
@@ -3340,11 +3650,30 @@ export class EncountersService {
             // client does not know the outcome, so the committed HP is the whole point.
             // (A missing body cannot happen here: the combatant response is stored inside
             // this transaction, never backfilled. Fall back defensively anyway.)
-            replayedCombatant = (prior.response as Combatant | null) ?? null;
+            replayedCombatant = options?.replayCombatant
+              ? options.replayCombatant(prior.response)
+              : (prior.response as Combatant | null) ?? null;
             if (replayedCombatant) return;
           }
         }
+        // No matching committed response: this is a fresh write. Re-read the encounter
+        // inside this transaction after the replay lookup so an End that committed while
+        // the request was awaiting preflight cannot be bypassed with the stale outer row.
+        const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+        if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        this.assertMutable(freshEncounter);
+        // The sheet mirror has the same lifecycle boundary: derive it from the
+        // transaction-local encounter row, never the stale preflight snapshot.
+        const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        if (!fresh || fresh.encounterId !== encounterId) {
+          throw new NotFoundException(`Combatant ${combatantId} not found`);
+        }
+        // A caller may attach a tightly-scoped transactional side effect after the
+        // fresh lifecycle read but before this mutation. A failure rolls both it and
+        // the ensuing combatant write back. Used only for #1462's mandatory dice-log
+        // evidence, which must never diverge from its death-save outcome.
+        options?.beforeWriteInTransaction?.(tx, fresh, freshEncounter);
         beforeHp = fresh.hpCurrent;
         beforeTemp = fresh.hpTemp;
         beforeDeath = fresh.deathState;
@@ -3577,12 +3906,18 @@ export class EncountersService {
             .run();
         }
 
+        options?.afterWriteInTransaction?.(tx, combatantToDomain(row), fresh, freshEncounter);
+
         // The claim lands LAST but in the SAME transaction as everything above, carrying the
         // exact response body this call will return. Both commit or neither does — there is
         // no instant at which the effect exists without its key (double-apply on retry) or
         // the key exists without its effect (a retry blocked from ever applying).
         if (opClaim) {
-          recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+          const committed = combatantToDomain(row);
+          recordEncounterOp(tx, opClaim, nowIso(), {
+            body: options?.operationResponse ? options.operationResponse(committed) : committed,
+            role,
+          });
         }
       });
     } catch (err) {
@@ -3590,7 +3925,12 @@ export class EncountersService {
         // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
         // Replay their response so exactly one apply survives (issue #580).
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response) return prior.response as Combatant;
+        if (prior.response) {
+          const replayed = options?.replayCombatant
+            ? options.replayCombatant(prior.response)
+            : (prior.response as Combatant | null);
+          if (replayed) return replayed;
+        }
         return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
       }
       throw err;
@@ -3689,7 +4029,7 @@ export class EncountersService {
     // dropping to 0 HP (monsters don't roll saves; 0 HP is simply "down"). Attribute the
     // kill when the attacker is known and distinct (issue #620), so a recap can say who
     // felled the boss rather than only that it dropped.
-    if (afterDeath === 'dead' && beforeDeath !== 'dead') {
+    if (!options?.deathSaveEventsInTransaction && afterDeath === 'dead' && beforeDeath !== 'dead') {
       await this.appendEvent(encounterId, round, 'death', {
         actor: actorName,
         target: targetName,
@@ -3712,27 +4052,12 @@ export class EncountersService {
     // death event above already fires if the roll killed or the revival shows as HP gain;
     // this line adds the roll itself.
     // death save event logging (issue #424).
-    if (patch.deathSaveRoll !== undefined) {
+    if (patch.deathSaveRoll !== undefined && !options?.deathSaveEventsInTransaction) {
       const die = patch.deathSaveRoll;
-      let rollResult = '';
-      if (die === 20) {
-        rollResult = 'Natural 20! Revived with 1 HP!';
-      } else if (die === 1) {
-        rollResult = `Natural 1! (2 failures) — totals: ${afterSucc} succ / ${afterFail} fail`;
-      } else if (die >= 10) {
-        rollResult = `Success (rolled ${die}) — totals: ${afterSucc} succ / ${afterFail} fail`;
-      } else {
-        rollResult = `Failure (rolled ${die}) — totals: ${afterSucc} succ / ${afterFail} fail`;
-      }
-      if (afterDeath === 'dead' && beforeDeath !== 'dead') {
-        rollResult += ' (Dead)';
-      } else if (afterDeath === 'stable' && beforeDeath !== 'stable') {
-        rollResult += ' (Stabilized)';
-      }
       await this.appendEvent(encounterId, round, 'roll', {
         target: targetName,
         targetId: targetCombatantId,
-        detail: `death save d20 roll ${die}: ${rollResult}`,
+        detail: deathSaveRollEventDetail(die, afterSucc, afterFail, beforeDeath, afterDeath),
       });
     } else if (patch.deathSaveSuccesses !== undefined || patch.deathSaveFailures !== undefined) {
       await this.appendEvent(encounterId, round, 'override', {
