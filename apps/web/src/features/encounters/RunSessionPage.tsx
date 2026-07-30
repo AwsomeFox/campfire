@@ -1083,7 +1083,6 @@ export default function RunSessionPage() {
   const [pendingTrashUndo, setPendingTrashUndo] = useState<{ encounterId: number } | null>(null);
   const trashedEncounterIdsRef = useRef(new Set<number>());
   const trashedEncounterRevisionsRef = useRef(new Map<number, string>());
-  const trashedEncounterDeletionObservedRef = useRef(new Set<number>());
   // Keep one key for a remove intent until a definite response. If its success
   // response is lost, pressing Remove again must replay the same receipt rather
   // than turn the retry into a 404 after the original delete committed.
@@ -1270,19 +1269,13 @@ export default function RunSessionPage() {
   // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
-    queryFn: async () => {
-      try {
-        return reconcileEncounterPatchResponse(
-          await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
-          pendingEncounterPatches.current.values(),
-          '',
-          eid,
-        );
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) trashedEncounterDeletionObservedRef.current.add(eid);
-        throw error;
-      }
-    },
+    queryFn: async () =>
+      reconcileEncounterPatchResponse(
+        await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+        pendingEncounterPatches.current.values(),
+        '',
+        eid,
+      ),
     enabled: Number.isFinite(eid),
     refetchInterval: 5_000,
   });
@@ -1299,7 +1292,6 @@ export default function RunSessionPage() {
     )) {
       trashedEncounterIdsRef.current.delete(encounter.id);
       trashedEncounterRevisionsRef.current.delete(encounter.id);
-      trashedEncounterDeletionObservedRef.current.delete(encounter.id);
     }
   }, [encounter?.id, encounter?.updatedAt]);
 
@@ -1753,7 +1745,6 @@ export default function RunSessionPage() {
     onSuccess: (_result, { encounterId, updatedAt }) => {
       trashedEncounterIdsRef.current.add(encounterId);
       if (updatedAt) trashedEncounterRevisionsRef.current.set(encounterId, updatedAt);
-      trashedEncounterDeletionObservedRef.current.delete(encounterId);
       if (encounterId === activeEncounterIdRef.current) {
         setConfirmDelete(false);
         dismissCompetingRecoveryUndos();
@@ -2151,7 +2142,6 @@ export default function RunSessionPage() {
     await api.post(`${API}/encounters/${sourceEncounterId}/restore`);
     trashedEncounterIdsRef.current.delete(sourceEncounterId);
     trashedEncounterRevisionsRef.current.delete(sourceEncounterId);
-    trashedEncounterDeletionObservedRef.current.delete(sourceEncounterId);
     setPendingTrashUndo(null);
     await invalidateEncounter(queryClient, sourceEncounterId);
   }

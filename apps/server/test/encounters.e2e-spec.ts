@@ -761,7 +761,10 @@ describe('encounters (e2e)', () => {
       const expired = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedExpired.body.undoToken });
       expect(expired.status).toBe(404);
       const expiredRetry = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm).send({ idempotencyKey: expiredIdempotencyKey });
-      expect(expiredRetry.status).toBe(404);
+      expect(expiredRetry.status).toBe(200);
+      expect(expiredRetry.body.undoToken).toBe(removedExpired.body.undoToken);
+      const nonIdempotentRetry = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm);
+      expect(nonIdempotentRetry.status).toBe(404);
     });
 
     it('undo nulls a rule entry reference removed during its recovery window', async () => {

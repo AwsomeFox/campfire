@@ -4236,9 +4236,16 @@ export class EncountersService {
       // roster view; an earlier device must never overwrite a newer turn transition.
       const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
-      // An expired undo cannot provide a usable replay receipt. Sweep first so a
-      // retry cannot receive a token that undoRemoveCombatant must reject.
-      tx.delete(combatantRemovalUndos).where(lte(combatantRemovalUndos.expiresAt, now)).run();
+      // Short-lived undo capabilities expire after 30 seconds, but idempotency receipts
+      // (requestKey) must be retained for 24h so retried DELETE requests replay their original
+      // response instead of re-executing against a restored combatant.
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      tx.delete(combatantRemovalUndos)
+        .where(or(
+          and(lte(combatantRemovalUndos.expiresAt, now), isNull(combatantRemovalUndos.requestKey)),
+          lte(combatantRemovalUndos.createdAt, twentyFourHoursAgo),
+        ))
+        .run();
       const prior = idempotencyKey
         ? tx.select().from(combatantRemovalUndos).where(and(
           eq(combatantRemovalUndos.requestKey, idempotencyKey),

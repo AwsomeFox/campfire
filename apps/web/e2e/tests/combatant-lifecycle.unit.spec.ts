@@ -97,6 +97,13 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     });
   });
 
+  test('massive damage reducing HP to 0 with overflow >= hpMax marks character dead optimistically', () => {
+    expect(applyOptimisticHpDelta(combatant({ hpCurrent: 10, hpMax: 20 }), -35)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dead',
+    });
+  });
+
   test('temporary HP that absorbs damage preserves a stabilized character', () => {
     expect(
       withOptimisticHpLifecycle(combatant({ hpCurrent: 0, hpTemp: 4, deathState: 'stable' }), 0, false),

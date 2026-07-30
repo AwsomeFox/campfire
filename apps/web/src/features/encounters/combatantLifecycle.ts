@@ -5,10 +5,18 @@ import type { Combatant } from '@campfire/schema';
  * an HP mutation is in flight. The returned encounter response remains the
  * authority for every other death-state transition.
  */
-export function withOptimisticHpLifecycle(combatant: Combatant, hpCurrent: number, damagedWhileDown = true): Combatant {
+export function withOptimisticHpLifecycle(
+  combatant: Combatant,
+  hpCurrent: number,
+  damagedWhileDown = true,
+  isInstantDeath = false,
+): Combatant {
   if (combatant.kind !== 'character') return { ...combatant, hpCurrent };
   if (hpCurrent === 0) {
-    if (damagedWhileDown && combatant.hpCurrent === 0 && combatant.deathState !== 'dead') {
+    if (isInstantDeath || combatant.deathState === 'dead') {
+      return { ...combatant, hpCurrent, deathState: 'dead' };
+    }
+    if (damagedWhileDown && combatant.hpCurrent === 0) {
       const deathSaveFailures = Math.min(3, combatant.deathSaveFailures + 1);
       return {
         ...combatant,
@@ -18,7 +26,7 @@ export function withOptimisticHpLifecycle(combatant: Combatant, hpCurrent: numbe
         deathSaveFailures,
       };
     }
-    const deathState = combatant.deathState === 'dead' || (combatant.deathState === 'stable' && !damagedWhileDown)
+    const deathState = combatant.deathState === 'stable' && !damagedWhileDown
       ? combatant.deathState
       : 'dying';
     return { ...combatant, hpCurrent, deathState };

@@ -48,11 +48,19 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
   const dmg = -delta;
   const temp = c.hpTemp ?? 0;
   const fromTemp = Math.min(temp, dmg);
-  const overflow = dmg - fromTemp;
+  const realDmg = dmg - fromTemp;
   // Damage fully absorbed by temporary HP does not change real HP or its
   // lifecycle. Preserve any server-owned death state until the response arrives.
-  if (overflow === 0) return { ...c, hpTemp: temp - fromTemp };
-  return withOptimisticHpLifecycle({ ...c, hpTemp: temp - fromTemp }, Math.max(0, c.hpCurrent - overflow), overflow > 0);
+  if (realDmg === 0) return { ...c, hpTemp: temp - fromTemp };
+  const newHpCurrent = Math.max(0, c.hpCurrent - realDmg);
+  const excessDamage = realDmg - c.hpCurrent;
+  const isInstantDeath = c.hpMax != null && c.hpMax > 0 && newHpCurrent === 0 && excessDamage >= c.hpMax;
+  return withOptimisticHpLifecycle(
+    { ...c, hpTemp: temp - fromTemp },
+    newHpCurrent,
+    realDmg > 0,
+    isInstantDeath,
+  );
 }
 
 export type OptimisticHpDelta = {
