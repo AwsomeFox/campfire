@@ -202,7 +202,7 @@ export default function InventoryPage() {
               <Btn type="button" className="cf-page-header__action" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
-              <Btn type="button" ghost className="cf-page-header__action" onClick={() => setShowCompendiumPicker(true)}>
+              <Btn type="button" ghost className="cf-page-header__action" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
                 {t('inventory.fromCompendium')}
               </Btn>
             </div>

@@ -105,7 +105,7 @@ export function CharacterInventorySection({
               <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
-              <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setShowCompendiumPicker(true)}>
+              <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
                 {t('inventory.fromCompendium')}
               </Btn>
             </div>

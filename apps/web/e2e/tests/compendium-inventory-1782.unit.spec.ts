@@ -9,6 +9,7 @@ const characterInventory = readFileSync(resolve(__dirname, '../../src/features/c
 test.describe('compendium inventory discoverability (#1782)', () => {
   test('Inventory page surfaces From compendium affordance in header and renders picker', () => {
     expect(inventoryPage).toContain("t('inventory.fromCompendium')");
+    expect(inventoryPage).toContain("aria-label={t('inventory.fromCompendium')}");
     expect(inventoryPage).toContain('CompendiumItemPickerModal');
     expect(inventoryPage).toContain('setShowCompendiumPicker(true)');
   });
@@ -17,6 +18,7 @@ test.describe('compendium inventory discoverability (#1782)', () => {
     expect(inventoryShared).toContain("t('inventory.fromCompendium')");
     expect(inventoryShared).toContain('CompendiumItemPickerModal');
     expect(characterInventory).toContain("t('inventory.fromCompendium')");
+    expect(characterInventory).toContain("aria-label={t('inventory.fromCompendium')}");
     expect(characterInventory).toContain('CompendiumItemPickerModal');
   });
 
