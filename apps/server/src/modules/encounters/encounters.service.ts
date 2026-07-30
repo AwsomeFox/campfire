@@ -3267,6 +3267,15 @@ export class EncountersService {
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
             }
+            if (freshEncounter.hidden) {
+              throw new ForbiddenException('Death saves cannot be rolled while an encounter is hidden');
+            }
+            if (role !== 'dm') {
+              const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, fresh.characterId!)).limit(1).all();
+              if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
+                throw new ForbiddenException('Only dm or the owning player may roll this death save');
+              }
+            }
             // A concurrent first roll cannot leave a second request applying a face to a
             // no-longer-dying combatant. This code is deliberately after the prior-claim
             // lookup, so a lost-response retry returns its stored outcome instead.
