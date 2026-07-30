@@ -2252,7 +2252,7 @@ ${CAMPAIGN_MODULES_DDL}`;
  */
 export const RULE_ENTRIES_FTS_SQL = `
 CREATE VIRTUAL TABLE IF NOT EXISTS rule_entries_fts USING fts5(
-  name, summary, body, content='rule_entries', content_rowid='id'
+  name, summary, body, content='rule_entries', content_rowid='id', tokenize = 'unicode61 remove_diacritics 2'
 );
 
 CREATE TRIGGER IF NOT EXISTS rule_entries_ai AFTER INSERT ON rule_entries BEGIN

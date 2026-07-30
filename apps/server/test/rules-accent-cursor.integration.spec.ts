@@ -63,9 +63,18 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
     const zoeAccentResultLike = await fallbackRulesService.search({ q: 'Zoë' });
     expect(zoeAccentResultLike.items.some((i) => i.name === 'Zoë')).toBe(true);
 
+    const zoeResultLike = await fallbackRulesService.search({ q: 'Zoe' });
+    expect(zoeResultLike.items.some((i) => i.name === 'Zoë')).toBe(true);
+
     const resumeAccentResultLike = await fallbackRulesService.search({ q: 'Résumé' });
     expect(resumeAccentResultLike.items.some((i) => i.name === 'Résumé')).toBe(true);
 
+    const resumeResultLike = await fallbackRulesService.search({ q: 'Resume' });
+    expect(resumeResultLike.items.some((i) => i.name === 'Résumé')).toBe(true);
+
+    // Exact-name rank bucket ranking assertion (issue #1493 review feedback)
+    expect(zoeResultFts.items[0].name).toBe('Zoë');
+    expect(zoeResultLike.items[0].name).toBe('Zoë');
   });
 
   it('paginates a pack containing Æther Elemental without skipping entries between Æ and æ', async () => {

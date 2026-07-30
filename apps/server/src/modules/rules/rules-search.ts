@@ -32,6 +32,12 @@ export function clampRuleSearchLimit(limit?: number): number {
  * 0 exact, 1 prefix, 2 contains, 3 body/summary-only.
  */
 export function nameMatchBucket(q: string, name: string): number {
+  const rawNeedle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  const rawName = name.toLowerCase();
+  if (rawName === rawNeedle) return 0;
+  if (rawName.startsWith(rawNeedle)) return 1;
+  if (rawName.includes(rawNeedle)) return 2;
+
   const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
   if (!needle) return 3;
   const folded = foldForSearch(name);

@@ -434,16 +434,22 @@ class ImportJobCancelledError extends Error {}
  * Ties within a bucket are broken by the caller's secondary ORDER BY
  * (FTS bm25 rank, or name in the LIKE fallback).
  */
+function foldSqlCol(col: any) {
+  return sql`replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(lower(${col}), 'é', 'e'), 'è', 'e'), 'ê', 'e'), 'ë', 'e'), 'á', 'a'), 'à', 'a'), 'â', 'a'), 'ä', 'a'), 'ó', 'o'), 'ò', 'o'), 'ô', 'o'), 'ö', 'o'), 'ú', 'u'), 'ù', 'u'), 'û', 'u'), 'ü', 'u'), 'ñ', 'n'), 'ç', 'c')`;
+}
+
+/**
+ * Name-match ranking expression used to compute candidate relevance bucket
+ * (FTS bm25 rank, or name in the LIKE fallback).
+ */
 function nameMatchRank(q: string) {
-  // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
-  // sanitisation in the LIKE fallback below). Fold the needle with the shared
-  // helper (#624); SQL lower() on the column remains ASCII-limited on SQLite —
-  // FTS path is preferred when available; LIKE fallback is best-effort for ASCII.
+  const rawNeedle = q.trim().replace(/[%_]/g, '').toLowerCase();
   const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
+  const foldedName = foldSqlCol(ruleEntries.name);
   return sql`CASE
-    WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
-    WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
-    WHEN lower(${ruleEntries.name}) LIKE ${`%${needle}%`} THEN 2
+    WHEN lower(${ruleEntries.name}) = ${rawNeedle} OR ${foldedName} = ${needle} THEN 0
+    WHEN lower(${ruleEntries.name}) LIKE ${`${rawNeedle}%`} OR ${foldedName} LIKE ${`${needle}%`} THEN 1
+    WHEN lower(${ruleEntries.name}) LIKE ${`%${rawNeedle}%`} OR ${foldedName} LIKE ${`%${needle}%`} THEN 2
     ELSE 3
   END`;
 }
@@ -2588,9 +2594,13 @@ export class RulesService implements OnModuleInit {
     const needle = foldForSearch(opts.q.trim().replace(/[%_]/g, ''));
     const rawLike = `%${opts.q.replace(/[%_]/g, '')}%`;
     const foldedLike = `%${needle}%`;
+    const foldedName = foldSqlCol(ruleEntries.name);
+    const foldedSummary = foldSqlCol(ruleEntries.summary);
+    const foldedBody = foldSqlCol(ruleEntries.body);
+    const likeClause = sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`;
     const baseConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.name} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${foldedLike})`,
+      likeClause,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2606,7 +2616,7 @@ export class RulesService implements OnModuleInit {
 
     const matchConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.name} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${foldedLike})`,
+      likeClause,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([

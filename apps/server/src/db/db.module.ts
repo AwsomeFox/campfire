@@ -86,26 +86,28 @@ export const CAMPAIGN_SEARCH_FTS_AVAILABLE = Symbol('CAMPAIGN_SEARCH_FTS_AVAILAB
  */
 function setupRuleEntriesFts(sqlite: Database.Database): boolean {
   try {
-    sqlite.exec(RULE_ENTRIES_FTS_SQL);
-    // External-content FTS tables read their content table for SELECT count(*),
-    // so that count cannot distinguish a populated-but-unindexed legacy table.
-    // Repair that historical no-FTS -> FTS upgrade exactly once. A persisted
-    // marker avoids rebuilding healthy indexes at every boot and handles both
-    // fully empty and partially backfilled legacy indexes without relying on
-    // token coverage (some valid rule entries have no tokenizable text).
     ensureDbMetaTable(sqlite);
     const repaired = sqlite
       .prepare('SELECT 1 FROM __db_meta WHERE key = ?')
       .get(RULE_ENTRIES_FTS_REPAIR_META_KEY);
     const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
     if (!repaired) {
+      sqlite.exec(`
+        DROP TABLE IF EXISTS rule_entries_fts;
+        DROP TRIGGER IF EXISTS rule_entries_ai;
+        DROP TRIGGER IF EXISTS rule_entries_ad;
+        DROP TRIGGER IF EXISTS rule_entries_au;
+      `);
+      sqlite.exec(RULE_ENTRIES_FTS_SQL);
       if (entries.count > 0) {
         sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
-        dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
+        dbLog.log(`rebuilt rule_entries FTS index with unicode61 remove_diacritics 2 for ${entries.count} existing entries`);
       }
       sqlite
-        .prepare('INSERT INTO __db_meta (key, value, updated_at) VALUES (?, ?, ?)')
+        .prepare('INSERT OR REPLACE INTO __db_meta (key, value, updated_at) VALUES (?, ?, ?)')
         .run(RULE_ENTRIES_FTS_REPAIR_META_KEY, 'complete', new Date().toISOString());
+    } else {
+      sqlite.exec(RULE_ENTRIES_FTS_SQL);
     }
     return true;
   } catch {
