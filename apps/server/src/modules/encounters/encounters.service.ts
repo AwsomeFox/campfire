@@ -5663,6 +5663,16 @@ export class EncountersService {
       }
       const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
       const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
+
+      if (
+        fresh.round <= 1 &&
+        freshPhase === 'combatant' &&
+        sorted.length > 0 &&
+        fresh.currentCombatantId === sorted[0].id
+      ) {
+        throw new BadRequestException('Cannot undo past the start of the encounter');
+      }
+
       const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped } = retreatEncounterTurn(
         sorted,
         fresh.currentCombatantId,

@@ -17,6 +17,7 @@ export type EncounterLifecycleAction =
   | 'rollInitiative'
   | 'start'
   | 'nextTurn'
+  | 'undoTurn'
   | 'end'
   | 'reopen'
   | 'delete';
@@ -28,6 +29,7 @@ const MATRIX: Record<EncounterLifecycleStatus, EncounterLifecycleActions> = {
     rollInitiative: true,
     start: true,
     nextTurn: false,
+    undoTurn: false,
     end: false,
     reopen: false,
     delete: true,
@@ -36,6 +38,7 @@ const MATRIX: Record<EncounterLifecycleStatus, EncounterLifecycleActions> = {
     rollInitiative: true,
     start: false,
     nextTurn: true,
+    undoTurn: true,
     end: true,
     reopen: false,
     delete: false,
@@ -44,6 +47,7 @@ const MATRIX: Record<EncounterLifecycleStatus, EncounterLifecycleActions> = {
     rollInitiative: false,
     start: false,
     nextTurn: false,
+    undoTurn: false,
     end: false,
     reopen: true,
     delete: true,
