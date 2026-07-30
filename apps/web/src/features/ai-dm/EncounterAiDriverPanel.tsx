@@ -15,6 +15,7 @@ import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { speakerPrefix } from './transcript';
 import { StuckLadder } from './StuckLadder';
+import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import { TranscriptRow } from './AiDmTranscriptUi';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
 import {
@@ -84,6 +85,18 @@ export function EncounterAiDriverPanel({
     if (!encounter.currentCombatantId) return undefined;
     return encounter.combatants.find((c: Combatant) => c.id === encounter.currentCombatantId)?.name;
   }, [encounter.combatants, encounter.currentCombatantId]);
+
+  /**
+   * #1494 — the id → name map the confirmation summaries resolve against, assembled from reads
+   * THIS PANEL ALREADY MAKES (the encounter's combatants + the roster fetched when the dock
+   * opens). Mirrors AiTablePage's derivation so the same combatant/character ids that name a
+   * summary on the Table name it here too; an id neither holds stays an id rather than being
+   * named from a fetch the viewer was never authorized for.
+   */
+  const confirmationEntities = useMemo(
+    () => [...(charactersQuery.data ?? []), ...encounter.combatants],
+    [charactersQuery.data, encounter.combatants],
+  );
 
   const paused = session?.state === 'paused';
   const humanControl = session?.state === 'human_control';
@@ -300,6 +313,17 @@ export function EncounterAiDriverPanel({
 
       {open && (
         <div {...regionProps} className="flex flex-col gap-3 px-3 pb-3 min-h-0 border-t border-[var(--color-divider)] pt-3">
+          {/*
+            #1494 — pending AI tool confirmations, surfaced where a DM mid-encounter is actually
+            looking when `begin_encounter` / `end_encounter` / `award_xp` fire. Reuses the
+            app-wide confirmation queue (the same React Query key as the AI Table) and its SSE +
+            GET recovery path — no second stream — so a confirmation queued on either surface
+            resolves from either. The panel renders nothing for non-DMs or an empty queue, so its
+            appearance is itself the signal; mounted first so a waiting decision is seen before
+            the transcript scrolls it out of view.
+          */}
+          <ToolConfirmationsPanel campaignId={campaignId} isDm={isDm} knownEntities={confirmationEntities} />
+
           <div className="flex flex-wrap items-center gap-2 justify-between">
             <p className="text-xs text-secondary m-0 truncate flex-1 min-w-0">
               {session?.scene ? (
