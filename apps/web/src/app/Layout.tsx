@@ -153,7 +153,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
           {error && <p className="text-sm text-rose-400">{error}</p>}
           <div className="dialog-actions">
             <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
-            <Btn type="submit" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</Btn>
+            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</button>
           </div>
         </form>
       )}
