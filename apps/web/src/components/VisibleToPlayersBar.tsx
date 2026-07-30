@@ -27,7 +27,7 @@ export function VisibleToPlayersBar({
   onReveal?: () => Promise<void>;
 }) {
   const [pendingAction, setPendingAction] = useState<'hide' | 'reveal' | null>(null);
-  const [pendingUndo, setPendingUndo] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState<'hide' | 'reveal' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function hide() {
@@ -36,7 +36,7 @@ export function VisibleToPlayersBar({
     setError(null);
     try {
       await onHide();
-      setPendingUndo(true);
+      setPendingUndo('hide');
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't hide from players.");
     } finally {
@@ -50,6 +50,7 @@ export function VisibleToPlayersBar({
     setError(null);
     try {
       await onReveal();
+      setPendingUndo('reveal');
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't reveal to players.");
     } finally {
@@ -57,16 +58,30 @@ export function VisibleToPlayersBar({
     }
   }
 
-  if (pendingUndo) {
+  if (pendingUndo === 'hide') {
     return (
       <UndoSnackbar
         message="Hidden from players."
         successMessage="Visible to players again."
         onUndo={async () => {
           await onUndoHide();
-          setPendingUndo(false);
+          setPendingUndo(null);
         }}
-        onExpire={() => setPendingUndo(false)}
+        onExpire={() => setPendingUndo(null)}
+      />
+    );
+  }
+
+  if (pendingUndo === 'reveal') {
+    return (
+      <UndoSnackbar
+        message="Visible to players again."
+        successMessage="Hidden from players."
+        onUndo={async () => {
+          await onHide();
+          setPendingUndo(null);
+        }}
+        onExpire={() => setPendingUndo(null)}
       />
     );
   }
@@ -85,7 +100,7 @@ export function VisibleToPlayersBar({
         </span>
         {error && <span className="text-xs text-rose-300">{error}</span>}
         <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void reveal()}>
-          {pendingAction === 'reveal' ? 'Revealing…' : 'Reveal now'}
+          {pendingAction === 'reveal' ? 'Revealing…' : pendingAction === 'hide' ? 'Hiding…' : 'Reveal now'}
         </Btn>
       </div>
     );
@@ -103,7 +118,7 @@ export function VisibleToPlayersBar({
       </span>
       {error && <span className="text-xs text-rose-300">{error}</span>}
       <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void hide()}>
-        {pendingAction === 'hide' ? 'Hiding…' : 'Hide'}
+        {pendingAction === 'hide' ? 'Hiding…' : pendingAction === 'reveal' ? 'Revealing…' : 'Hide'}
       </Btn>
     </div>
   );
