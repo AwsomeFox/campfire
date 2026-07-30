@@ -7,9 +7,9 @@ name: Watch main CI
 # duplicate import (#1702) — produces a red run nobody is looking at.
 #
 # This workflow polls the latest commit on `main` through the GitHub Checks API
-# and opens/updates a tracking issue whenever a required check fails, cancels,
-# times out, or needs action. It closes the issue once a later main commit is
-# fully green again.
+# and opens/updates a tracking issue whenever the required aggregate `ci` check
+# fails, times out, or needs action. It closes the issue once a later main
+# commit is fully green again.
 #
 # The ruleset recommendation (`strict_required_status_checks_policy`) and the
 # duplicate-import lint guard are handled elsewhere; see the PR for #1703.
@@ -58,15 +58,35 @@ jobs:
           # from the `ci` run itself so we never rely on the ordering of the
           # returned check-run array.
           #
-          # If HEAD itself has no `ci` check-run (e.g. a docs-only commit), walk
-          # back the most recent main commits until we find the latest one with a
-          # `ci` run, so a red code commit is not silently dropped behind a
-          # CI-skipping push. Paginate through commit history (up to a reasonable
-          # cap) rather than stopping at an arbitrary per-page limit.
+          # If HEAD itself has no `ci` check-run, walk back the most recent main
+          # commits until we find the latest one with a `ci` run, so a red code
+          # commit is not silently dropped behind a CI-skipping push. We only
+          # skip past a commit if its changed files match `ci.yml`'s
+          # paths-ignore (docs/**, design/**, **/*.md, LICENSE); a non-docs
+          # commit without a `ci` run is either still in progress or a CI
+          # infrastructure break, and we refuse to inherit an older verdict or
+          # close the tracking issue on stale data. Paginate through commit
+          # history (up to a reasonable cap) rather than stopping at an
+          # arbitrary per-page limit.
+          is_docs_only_commit() {
+            local sha=$1
+            local files
+            files=$(gh api "repos/${REPO}/commits/${sha}" | jq -r '.files[].filename // empty')
+            [ -n "$files" ] || return 1
+            local f
+            while IFS= read -r f; do
+              case "$f" in
+                *.md|docs/*|design/*|LICENSE|*/LICENSE) continue ;;
+                *) return 1 ;;
+              esac
+            done <<< "$files"
+            return 0
+          }
+
           find_latest_ci_run() {
             local page=1
             local max_pages=2
-            local commits_json sha ci_run_for_sha
+            local commits_json sha ci_run_for_sha found_this_page
 
             while [ "$page" -le "$max_pages" ]; do
               commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=100&page=${page}")
@@ -80,6 +100,14 @@ jobs:
                 if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
                   echo "$ci_run_for_sha"
                   return 0
+                fi
+
+                # Only fall back past a commit if it was intentionally skipped
+                # by ci.yml paths-ignore. A non-docs commit without a `ci`
+                # run is not a safe signal to inherit an older verdict.
+                if ! is_docs_only_commit "$sha"; then
+                  echo "Commit ${sha} has no aggregate 'ci' check-run and is not docs-only; not falling back." >&2
+                  return 1
                 fi
               done <<< "$(echo "$commits_json" | jq -r '.[].sha')"
 
@@ -120,7 +148,7 @@ jobs:
             --json number --jq '.[0].number // empty')
 
           case "$ci_conclusion" in
-            failure|cancelled|timed_out|action_required)
+            failure|timed_out|action_required)
               body=$(printf '%s\n' \
                 "Main has a failing aggregate CI run on its latest tested commit." \
                 "" \
