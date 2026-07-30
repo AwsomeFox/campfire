@@ -33,7 +33,7 @@ test.describe('Campaign Trash page and entity restoration', () => {
     const row = page.getByRole('listitem').filter({ hasText: name });
     await expect(row).toBeVisible();
 
-    const restoreBtn = row.getByRole('button', { name: `Restore ${name}` });
+    const restoreBtn = row.getByRole('button', { name: 'Restore' });
     await expect(restoreBtn).toBeVisible();
 
     const [restoreRes] = await Promise.all([
