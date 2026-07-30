@@ -2632,3 +2632,110 @@ describe('rules / rule packs — identical re-import short-circuit (#1518)', () 
     await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
 });
+
+/**
+ * Issue #1518 cross-day regression. Every importer except Open5e stamps `meta.version` to
+ * `nowIso().slice(0,10)` — a per-day UTC date string. The manifest fingerprint is content-only
+ * (`packManifestHash` excludes `meta.version`), so an unchanged pack re-imported on a LATER
+ * calendar day must still match the tracked manifest hash and short-circuit the per-entry
+ * read+sha256 classification. This is the motivating Datasworn / large-pack case: without the
+ * fix, a same-content re-import that crossed a UTC midnight recomputed a different hash each
+ * day and fell through to the full synchronous scan, re-introducing the event-loop-blocking
+ * burst the short-circuit exists to eliminate.
+ *
+ * The upload importer is used here because an operator can supply `pack.version`, so two
+ * distinct `YYYY-MM-DD` values deterministically model a re-import that crossed a UTC day
+ * boundary — without depending on real wall-clock time. Both uploads carry byte-identical
+ * entry content.
+ */
+describe('rules / rule packs — identical re-import across a UTC day boundary (#1518 content-only hash)', () => {
+  let ctx: TestAppContext;
+  const uploader = { 'x-dev-role': 'dm', 'x-dev-user': 'cross-day-1518-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const baseEntries = [
+    { slug: 'oracle-reroll', name: 'Oracle Reroll', type: 'feat', summary: 'Reroll once.', body: 'Reroll a single die.' },
+    { slug: 'starved', name: 'Starved', type: 'condition', summary: 'Hunger penalty.', body: 'You cannot regain hit points.' },
+  ];
+
+  function uploadAs(server: Server, version: string) {
+    return request(server)
+      .post('/api/v1/rules/packs/upload')
+      .set(uploader)
+      .send({
+        source: 'upload',
+        pack: {
+          slug: 'cross-day-1518',
+          name: 'Cross-Day #1518',
+          version,
+          license: 'CC-BY-4.0',
+          sourceUrl: 'https://example.com/cross-day',
+        },
+        entries: baseEntries,
+      });
+  }
+
+  it('short-circuits an unchanged pack re-imported on a later day (content-only hash excludes meta.version)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    // Day 1: install the pack. Stamps a content-only manifest hash on the pack row.
+    const day1Res = await uploadAs(server, '2026-07-29');
+    expect(day1Res.status).toBe(202);
+    const day1 = await pollJob(server, uploader, day1Res.body.id);
+    expect(day1.status).toBe('completed');
+    expect(day1.outcome).toBe('created');
+    expect(day1.pack.entryCount).toBe(2);
+    const packId = day1.pack.id;
+    const day1Hash = day1.preview.sourceHash;
+    expect(day1Hash).toMatch(/^[a-f0-9]{64}$/);
+    const [rowDay1] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    expect(rowDay1?.manifestHash).toBe(day1Hash);
+    expect(rowDay1?.version).toBe('2026-07-29');
+
+    // Mutate one entry's content via a path the manifest hash does NOT cover (a direct DB
+    // write, standing in for the only-in-test divergence). A FULL per-entry classification
+    // would re-hash this row and report changed:1; the short-circuit skips that re-hash, so
+    // the mutation stays invisible. This turns the zero-change result below into proof that
+    // the classification actually ran the fast path, not just that it produced a no-op.
+    const [anEntry] = db.select().from(ruleEntries).where(eq(ruleEntries.packId, packId)).limit(1).all();
+    expect(anEntry).toBeDefined();
+    db.update(ruleEntries)
+      .set({ body: `${anEntry!.body} [mutated outside the import flow]`, updatedAt: new Date().toISOString() })
+      .where(eq(ruleEntries.id, anEntry!.id))
+      .run();
+
+    // Day 2 (a LATER UTC day): byte-identical content, but a DIFFERENT meta.version date —
+    // exactly what every date-stamped importer produces across a midnight boundary.
+    const day2Res = await uploadAs(server, '2026-07-30');
+    expect(day2Res.status).toBe(202);
+    const day2 = await pollJob(server, uploader, day2Res.body.id);
+    expect(day2.status).toBe('completed');
+    expect(day2.outcome).toBe('updated');
+
+    // The content-only hash is identical across the two version strings (the volatile date was
+    // excluded from the fingerprint), so the short-circuit fired and the per-entry re-hash was
+    // skipped — the day-1 mutation went undetected.
+    expect(day2.added).toBe(0);
+    expect(day2.changed).toBe(0); // would be 1 if the full classification re-hashed the mutated row
+    expect(day2.removed).toBe(0);
+    expect(day2.preview).toMatchObject({ added: 0, changed: 0, removed: 0, unchanged: 2 });
+    expect(day2.preview.sourceHash).toBe(day1Hash); // version excluded -> identical content-only hash
+
+    // The tracked manifest hash is unchanged (the content-only hash matched across days) ...
+    const [rowDay2] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    expect(rowDay2?.manifestHash).toBe(day1Hash);
+    // ... while the displayed version label still advanced to the day-2 stamp (#1518 keeps
+    // version OUT of the comparison but refreshes it as a separate displayed field).
+    expect(rowDay2?.version).toBe('2026-07-30');
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(uploader);
+  });
+});
