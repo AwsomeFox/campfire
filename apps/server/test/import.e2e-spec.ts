@@ -1401,6 +1401,28 @@ describe('campaign import — scheduledAt validation at the boundary (issue #152
     }
   });
 
+  it('rejects impossible calendar dates Date would silently roll over to another day', async () => {
+    // V8's Date accepts these and new Date(...).toISOString() quietly moves them
+    // to a different day (Feb 30 -> Mar 2, April 31 -> May 1, hour 24 -> next day).
+    // The boundary must reject them so an untrusted archive can't import to a
+    // CHANGED scheduled date; each yields a 400 naming the row.
+    for (const bad of [
+      '2030-02-30T19:00:00.000Z', // Feb 30 (no such day)
+      '2030-04-31T19:00:00.000Z', // April 31 (April has 30 days)
+      '2030-05-01T24:00:00.000Z', // hour 24 -> rolls to May 2
+    ]) {
+      const res = await dmAgent.post('/api/v1/campaigns/import').send({
+        campaign: { name: `Impossible Date Import ${bad}` },
+        scheduledSessions: [
+          { id: 1, scheduledAt: bad, title: 'Impossible night', status: 'scheduled', rsvps: [] },
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/scheduled session #1/);
+      expect(res.body.message).toMatch(/Impossible night/);
+    }
+  });
+
   it('normalizes a parseable non-canonical scheduledAt to ISO UTC and keeps the row visible', async () => {
     const doc = {
       campaign: { name: 'Offset Schedule Import' },

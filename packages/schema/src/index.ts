@@ -1336,6 +1336,43 @@ const IsoDateTime = z
   .refine((v) => !Number.isNaN(Date.parse(v)), 'expected an ISO-8601 date-time'); // normalized to UTC server-side
 
 /**
+ * Strictly validate an offset-bearing ISO-8601 date-time and return its canonical
+ * `...Z` UTC instant, or `null` if the value is not a valid offset-bearing
+ * ISO-8601 date-time.
+ *
+ * Unlike the lenient {@link IsoDateTime} refinement (which only checks
+ * `Date.parse`), this validates the actual calendar components, so it rejects
+ * values V8's `Date` would silently roll over — e.g. `2030-02-30` (Feb 30),
+ * `2030-04-31` (April 31), or `2030-05-01T24:00:00Z` (hour 24) — which
+ * `new Date(...).toISOString()` otherwise quietly moves to a different day. It
+ * also requires an explicit offset (`Z` or ±HH:MM), so a zone-less value is
+ * never read in the host's local timezone (which would import the same archive
+ * to different UTC instants on hosts with different TZ settings).
+ *
+ * Intended for trust boundaries such as campaign import, where the value comes
+ * from an untrusted archive; trusted client inputs keep using {@link IsoDateTime}
+ * so existing create/patch behaviour is unchanged.
+ */
+export function normalizeOffsetIsoDateTime(input: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(input);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = Number(m[6]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  // day 0 of the next (0-based) month = last day of this month — calendar-correct
+  // and timezone-independent, so it catches Feb 30 / April 31 before Date rolls them over.
+  if (day < 1 || day > new Date(year, month, 0).getDate()) return null;
+  const instant = Date.parse(input);
+  if (Number.isNaN(instant)) return null;
+  return new Date(instant).toISOString();
+}
+
+
+/**
  * Organized-play scheduling fields (issue #588).
  *
  * A scheduled session IS the occurrence: rather than fork a parallel
