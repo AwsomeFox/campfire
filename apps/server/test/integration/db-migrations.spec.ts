@@ -75,7 +75,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
-        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id']),
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot']),
       );
       expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
@@ -2190,6 +2190,37 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0146_action_pending_turn_version_1316') as { name?: string })
           ?.name,
       ).toBe('0146_action_pending_turn_version_1316');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('adds NPC disposition snapshots after the #1316 0146 upgrade (#1454)', () => {
+    expect(MIGRATION_NAMES).toContain('0147_combatants_npc_disposition_snapshot_1454');
+    expect(MIGRATION_NAMES.indexOf('0147_combatants_npc_disposition_snapshot_1454')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0146_action_pending_turn_version_1316'),
+    );
+
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE combatants DROP COLUMN npc_disposition_snapshot');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0147_combatants_npc_disposition_snapshot_1454');
+      expect(columnNames(legacy, 'combatants')).not.toContain('npc_disposition_snapshot');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatants')).toContain('npc_disposition_snapshot');
+      expect(
+        (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0147_combatants_npc_disposition_snapshot_1454') as { name?: string })
+          ?.name,
+      ).toBe('0147_combatants_npc_disposition_snapshot_1454');
     } finally {
       upgraded.sqlite.close();
     }
