@@ -22,14 +22,16 @@ const noDuplicateImportSpecifiers = {
         const seen = new Map();
         for (const specifier of node.specifiers) {
           const name = specifier.local.name;
-          if (seen.has(name)) {
+          const kind = specifier.importKind || 'value';
+          const key = `${name}:${kind}`;
+          if (seen.has(key)) {
             context.report({
               node: specifier,
               messageId: 'duplicate',
               data: { name },
             });
           } else {
-            seen.set(name, specifier);
+            seen.set(key, specifier);
           }
         }
       },
