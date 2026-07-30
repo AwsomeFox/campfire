@@ -7187,8 +7187,8 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       const encounter = await request(server).post(`/api/v1/campaigns/${campId}/encounters`).set(dm).send({ name: '1459 Test' });
       const encounterId = encounter.body.id;
       
-      const target = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Target', hpCurrent: 20, hpMax: 20 });
-      const other = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Other', hpCurrent: 20, hpMax: 20 });
+      const target = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Target', hpMax: 20 });
+      const other = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Other', hpMax: 20 });
       const targetId = target.body.id;
       const otherId = other.body.id;
       
