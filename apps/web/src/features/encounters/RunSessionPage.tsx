@@ -4460,8 +4460,12 @@ export function BattleMap({
       if (e.shiftKey && gridOn && baseCalibration && mapRect) {
         const cell = gridCellRevealRect(pct, baseCalibration, mapRect);
         if (cell) {
-          commitFogEdit(appendFogReveal(fog, cell));
-          announce('Revealed grid cell.');
+          if ('reason' in cell) {
+            announce(cell.reason);
+          } else {
+            commitFogEdit(appendFogReveal(fog, cell));
+            announce('Revealed grid cell.');
+          }
           return;
         }
       }
