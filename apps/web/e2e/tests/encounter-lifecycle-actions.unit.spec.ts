@@ -28,11 +28,11 @@ test.describe('encounter lifecycle actions matrix (issue #420)', () => {
   test('every status/action combination matches the server lifecycle', () => {
     const expected: Record<
       EncounterLifecycleStatus,
-      { end: boolean; reopen: boolean; delete: boolean; start: boolean; nextTurn: boolean; rollInitiative: boolean }
+      { end: boolean; reopen: boolean; delete: boolean; start: boolean; nextTurn: boolean; undoTurn: boolean; rollInitiative: boolean }
     > = {
-      preparing: { end: false, reopen: false, delete: true, start: true, nextTurn: false, rollInitiative: true },
-      running: { end: true, reopen: false, delete: false, start: false, nextTurn: true, rollInitiative: true },
-      ended: { end: false, reopen: true, delete: true, start: false, nextTurn: false, rollInitiative: false },
+      preparing: { end: false, reopen: false, delete: true, start: true, nextTurn: false, undoTurn: false, rollInitiative: true },
+      running: { end: true, reopen: false, delete: false, start: false, nextTurn: true, undoTurn: true, rollInitiative: true },
+      ended: { end: false, reopen: true, delete: true, start: false, nextTurn: false, undoTurn: false, rollInitiative: false },
     };
 
     for (const status of STATUSES) {

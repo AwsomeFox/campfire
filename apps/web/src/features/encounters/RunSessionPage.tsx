@@ -1824,6 +1824,19 @@ export default function RunSessionPage() {
     },
   });
 
+  const undoTurnMut = useMutation({
+    mutationFn: () => api.post(`${API}/encounters/${eid}/undo-turn`),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportTurnAdvanceError(err);
+    },
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
   // Drive the gate: on entering `checking`, force a fresh read of committed server state,
   // then release. Deliberately a refetch rather than a cache invalidation — the point is
   // to have actually observed server truth before the DM is allowed to act again, and an
@@ -2096,6 +2109,7 @@ export default function RunSessionPage() {
     nextTurnMut.mutate({
       expectedCurrentCombatantId: encounter?.status === 'running' ? (encounter.currentCombatantId ?? null) : null,
     });
+  const undoTurn = () => undoTurnMut.mutate();
   const toggleEscalationHold = (held: boolean) => escalationControl.mutate({ held });
   const clearEscalationOverride = () => escalationControl.mutate({ override: null });
   const applyEscalationOverride = () => {
@@ -2532,7 +2546,7 @@ export default function RunSessionPage() {
   // #580): while the client is checking committed state, every non-idempotent DM control
   // is unavailable, which is the "reconcile before another action is allowed" rule.
   const headerBusy =
-    runControl.isPending || nextTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
+    runControl.isPending || nextTurnMut.isPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
@@ -2899,6 +2913,14 @@ export default function RunSessionPage() {
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                </Btn>
+                <Btn
+                  ghost
+                  disabled={headerBusy || riskyBlocked}
+                  onClick={undoTurn}
+                  title="Undo turn"
+                >
+                  ← Undo turn
                 </Btn>
                 <Btn
                   disabled={headerBusy || riskyBlocked}
