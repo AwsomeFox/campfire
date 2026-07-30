@@ -17,7 +17,10 @@ import {
   type RulePackInstallSource,
   type RulePackUpload,
   type RuleSearchFacet,
-  type RuleSearchPage, HomebrewRuleEntryInput,
+  type RuleSearchPage,
+  HomebrewRuleEntryInput,
+  OPEN_LEGEND_PACK_SLUG,
+  RULE_PACK_SOURCE_META,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, ruleEntryRevisions, combatants, campaigns, importJobs } from '../../db/schema';
@@ -52,7 +55,6 @@ import {
   fetchOpenLegendSection,
   type OpenLegendSection,
 } from './open-legend-importer';
-import { OPEN_LEGEND_PACK_SLUG, RULE_PACK_SOURCE_META } from '@campfire/schema';
 import {
   ALL_PF2E_SECTIONS,
   MAX_ENTRIES_PER_SECTION as PF2E_MAX_ENTRIES_PER_SECTION,

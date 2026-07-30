@@ -1,8 +1,15 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, eq, like, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CampaignDmRepair, UserCreate, UserUpdate, PreferencesUpdate } from '@campfire/schema';
-import type { MembershipIntegrityCampaign, MembershipIntegrityReport, User } from '@campfire/schema';
+import {
+  CampaignDmRepair,
+  PreferencesUpdate,
+  UserCreate,
+  UserUpdate,
+  type MembershipIntegrityCampaign,
+  type MembershipIntegrityReport,
+  type User,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   users,

@@ -50,24 +50,27 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import {
+  ARCHMAGE_ADAPTER_ID,
   COMBATANT_STATBLOCK_HELP,
-  defaultCombatantStatblock,
-  LAIR_INITIATIVE_COUNT,
-  LEGENDARY_ACTION_SLOT,
-  buildDifficultyExplanation,
-} from '@campfire/schema';
-import {
   FogUndoStack,
+  STARFINDER_ADAPTER_ID,
   appendFogReveal,
+  buildDifficultyExplanation,
+  defaultCombatantStatblock,
   deleteFogRegion,
   ensureFogRectIds,
   eraseFogRegion,
+  filterAoeTemplatesForViewer,
   fogRectFromCorners,
   fogStatesEqual,
+  gridDistanceForAdapter,
+  hasDeathSavesForAdapter,
   hitTestFogRegion,
+  LAIR_INITIATIVE_COUNT,
+  LEGENDARY_ACTION_SLOT,
   moveFogRegion,
+  ruleSystemAdapter,
 } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';

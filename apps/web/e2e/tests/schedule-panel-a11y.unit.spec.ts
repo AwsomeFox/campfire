@@ -2,12 +2,21 @@ import { expect, test } from '@playwright/test';
 import {
   initialRsvpSaveState,
   reduceRsvpSave,
+  RSVP_NOTE_CLEARED_ANNOUNCEMENT,
+  RSVP_NOTE_HELP,
+  RSVP_NOTE_LABEL,
+  RSVP_NOTE_MAX_LEN,
+  RSVP_NOTE_SAVED_ANNOUNCEMENT,
+  RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
   rsvpDisplayStatus,
+  rsvpNoteSaveRequest,
+  rsvpNoteTooLongMessage,
   rsvpOptionDescription,
   rsvpOptions,
   rsvpSavedAnnouncement,
   rsvpStatusSummary,
   SCHEDULE_WHEN_HELP,
+  syncRsvpNoteDraft,
 } from '../../src/features/sessions/schedulePanelA11y';
 
 /**
@@ -77,18 +86,6 @@ test.describe('schedule form help (issue #645)', () => {
 
 
 // -------------------- RSVP note editor (issue #552) --------------------
-
-import {
-  RSVP_NOTE_HELP,
-  RSVP_NOTE_LABEL,
-  RSVP_NOTE_MAX_LEN,
-  RSVP_NOTE_SAVED_ANNOUNCEMENT,
-  RSVP_NOTE_CLEARED_ANNOUNCEMENT,
-  RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
-  rsvpNoteSaveRequest,
-  rsvpNoteTooLongMessage,
-  syncRsvpNoteDraft,
-} from '../../src/features/sessions/schedulePanelA11y';
 
 test.describe('RSVP note editor copy (issue #552)', () => {
   test('label + help are non-empty and mention that others can see it', () => {

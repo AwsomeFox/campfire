@@ -18,12 +18,14 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import { AiDmToolConfirmation, DriverSessionProfile, DriverToolPolicyClass } from '@campfire/schema';
 import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
+  AiDmToolConfirmation,
   buildNarrationLanguageContract,
+  DriverSessionProfile,
+  DriverToolPolicyClass,
   resolveNarrationLanguage,
   resolverImplementsSystemMath,
   ruleSystemAdapter,

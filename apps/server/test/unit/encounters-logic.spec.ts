@@ -26,8 +26,7 @@ import {
   redactEncounterEventsForViewer,
   UNKNOWN_COMBATANT_LABEL,
 } from '../../src/modules/encounters/encounters.logic';
-import type { GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
-import type { CombatantHpState } from '../../src/modules/encounters/encounters.logic';
+import type { CombatantHpState, GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
 
 /**
  * Unit tests for the pure combat-order / turn / HP-band math extracted from

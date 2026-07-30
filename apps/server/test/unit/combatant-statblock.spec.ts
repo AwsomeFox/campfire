@@ -1,8 +1,8 @@
-import { Dnd5eAdapter } from '@campfire/schema';
 import {
+  Dnd5eAdapter,
+  defaultCombatantStatblock,
   expandRawStatblockAction,
   expandStatblockActions,
-  defaultCombatantStatblock,
   isResolvableSpec,
 } from '@campfire/schema';
 

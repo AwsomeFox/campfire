@@ -9,8 +9,10 @@ import {
   listRuleSystemAdapters,
   resolveCharacterCreateStatus,
   starterTemplatesForAdapter,
+  Dnd5eAdapter,
+  OpenLegendAdapter,
+  Pf2eAdapter,
 } from '@campfire/schema';
-import { Dnd5eAdapter, OpenLegendAdapter, Pf2eAdapter } from '@campfire/schema';
 
 describe('character-creation (issue #719)', () => {
   describe('isMinimalCharacterCreate', () => {
