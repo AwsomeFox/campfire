@@ -6,8 +6,7 @@ import {
 } from '@campfire/schema';
 
 /**
- * Applies the client-side HP estimate for one pending mutation. A failed mutation
- * later applies its opposing delta without replacing other pending cache changes.
+ * Applies the client-side HP estimate for one pending mutation.
  */
 export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): Combatant {
   if (c.hpCurrent == null || c.hpMax == null) return c;
@@ -49,6 +48,22 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
   return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
 }
 
-export function rollbackOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): Combatant {
-  return applyOptimisticHpDelta(c, -delta, ruleSystem);
+export type OptimisticHpDelta = {
+  combatantId: number;
+  delta: number;
+};
+
+/** Rebuilds the optimistic encounter cache from a committed base plus pending writes. */
+export function replayOptimisticHpDeltas(
+  encounter: Combatant[],
+  operations: readonly OptimisticHpDelta[],
+  ruleSystem?: string | null,
+): Combatant[] {
+  return operations.reduce(
+    (combatants, { combatantId, delta }) =>
+      combatants.map((combatant) =>
+        combatant.id === combatantId ? applyOptimisticHpDelta(combatant, delta, ruleSystem) : combatant,
+      ),
+    encounter,
+  );
 }
