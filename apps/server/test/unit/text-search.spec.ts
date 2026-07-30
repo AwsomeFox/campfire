@@ -63,6 +63,18 @@ describe('foldForSearch (issue #624)', () => {
     expect(foldedIncludes('note with ` backtick', foldForSearch('`'))).toBe(true);
   });
 
+  it('preserves Japanese voiced and semi-voiced kana distinctions (issue #1493)', () => {
+    expect(foldForSearch('ガード')).toBe('ガード');
+    expect(foldForSearch('カード')).toBe('カード');
+    expect(foldForSearch('ガード')).not.toBe(foldForSearch('カード'));
+  });
+
+  it('folds ligatures æ -> ae and œ -> oe (issue #1493)', () => {
+    expect(foldForSearch('Æther')).toBe('aether');
+    expect(foldForSearch('Cœur')).toBe('coeur');
+    expect(foldedIncludes('Æther Elemental', foldForSearch('aether'))).toBe(true);
+  });
+
   it('does not mutate identity of already-folded ASCII', () => {
     expect(foldForSearch('hello world')).toBe('hello world');
   });

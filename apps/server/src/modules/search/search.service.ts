@@ -88,7 +88,8 @@ function fieldRank(field: string): number {
 
 /** Escapes an FTS5 MATCH query string by quoting each token and enabling prefix matching. */
 function toFtsQuery(q: string): string {
-  const tokens = q
+  const folded = foldForSearch(q);
+  const tokens = (folded || q)
     .split(/[^\p{L}\p{N}]+/u)
     .map((t) => t.replace(/["]/g, ''))
     .filter(Boolean);

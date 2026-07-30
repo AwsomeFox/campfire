@@ -12,7 +12,6 @@ import {
   RULE_SEARCH_DEFAULT_LIMIT,
   RULE_SEARCH_MAX_LIMIT,
 } from '@campfire/schema';
-import { foldForSearch } from '../../common/text-search';
 
 export type BrowseCursor = { v: 1; m: 'browse'; n: string; i: number };
 export type FtsCursor = { v: 1; m: 'fts'; b: number; r: number; i: number };
@@ -27,26 +26,6 @@ export function clampRuleSearchLimit(limit?: number): number {
   return Math.min(n, RULE_SEARCH_MAX_LIMIT);
 }
 
-/**
- * Name-match rank bucket (mirrors SQL nameMatchRank in rules.service.ts).
- * 0 exact, 1 prefix, 2 contains, 3 body/summary-only.
- */
-export function nameMatchBucket(q: string, name: string): number {
-  const rawNeedle = q.trim().replace(/[%_]/g, '').toLowerCase();
-  if (!rawNeedle) return 3;
-  const rawName = name.toLowerCase();
-  if (rawName === rawNeedle) return 0;
-  if (rawName.startsWith(rawNeedle)) return 1;
-  if (rawName.includes(rawNeedle)) return 2;
-
-  const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
-  if (!needle) return 3;
-  const folded = foldForSearch(name);
-  if (folded === needle) return 0;
-  if (folded.startsWith(needle)) return 1;
-  if (folded.includes(needle)) return 2;
-  return 3;
-}
 
 export function encodeRuleSearchCursor(cursor: RuleSearchCursor): string {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
