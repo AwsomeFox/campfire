@@ -1,8 +1,9 @@
 import React, { useRef, useState, useMemo, useCallback, useLayoutEffect } from 'react';
 import type { EncounterEvent } from '@campfire/schema';
-import { Card } from '../../components/Card';
+import { Card } from '../../components/ui';
 import { useTranslation } from 'react-i18next';
-import { GameIcon, UI_ICON_SIZE } from '../../components/GameIcon';
+import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import {
   groupCombatLogEvents,
   formatCombatLogChainDetails,
