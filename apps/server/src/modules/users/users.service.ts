@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, like, ne, notInArray, or } from 'drizzle-orm';
+import { and, count, eq, like, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
@@ -34,6 +34,7 @@ import {
   proposals,
   tableSafetyHolds,
   diceRolls,
+  encounterEvents,
   notifications,
   notificationDigestQueue,
   sessionShares,
@@ -209,6 +210,17 @@ export class UsersService {
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
     tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
     tx.update(castSessions).set({ createdBy: nextLabel }).where(eq(castSessions.createdByUserId, stableUserId)).run();
+    // encounter_events.actorId is a numeric combatant id. Token-batch operators
+    // instead retain their durable user id in performedByJson.
+    tx.update(encounterEvents)
+      .set({ actor: nextLabel })
+      .where(
+        and(
+          eq(encounterEvents.type, 'token_batch'),
+          sql`json_extract(${encounterEvents.performedByJson}, '$.userId') = ${stableUserId}`,
+        ),
+      )
+      .run();
 
     // Moderation evidence is an integrity-protected incident snapshot. Every public
     // attribution field it carries is covered by its stored hashes, so account

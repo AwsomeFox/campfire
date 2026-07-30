@@ -6739,7 +6739,7 @@ export class EncountersService {
       if (encounter.status === 'running') {
         tx.update(encounters).set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` }).where(eq(encounters.id, encounterId)).run();
       }
-      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${plan.length} token placements`, createdAt: nowIso() }).run();
+      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${plan.length} token placements`, performedByJson: JSON.stringify({ userId: user.id, role, kind: 'human' }), createdAt: nowIso() }).run();
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.apply', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${plan.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status: 'applied', applyKey: input.idempotencyKey, afterJson: toJsonText(plan), resultJson: toJsonText(result), appliedAt: nowIso() }).where(and(eq(encounterTokenBatches.id, batch.id), eq(encounterTokenBatches.status, 'previewed'))).run();
       if (changed.changes !== 1) throw new ConflictException('Token batch was applied concurrently');
@@ -6798,7 +6798,7 @@ export class EncountersService {
       if (encounter.status === 'running') {
         tx.update(encounters).set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` }).where(eq(encounters.id, encounterId)).run();
       }
-      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, createdAt: nowIso() }).run();
+      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, performedByJson: JSON.stringify({ userId: user.id, role, kind: 'human' }), createdAt: nowIso() }).run();
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run();
       if (changed.changes !== 1) throw new ConflictException('Token batch changed concurrently');
