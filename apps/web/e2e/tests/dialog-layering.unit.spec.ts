@@ -14,6 +14,7 @@ const WEB_SRC = resolve(__dirname, '../../src');
 const INDEX_CSS = resolve(WEB_SRC, 'index.css');
 const NOCTURNE_CSS = resolve(WEB_SRC, 'nocturne.css');
 const CONFIRM_DIALOG = resolve(WEB_SRC, 'components/ConfirmDialog.tsx');
+const UI_TSX = resolve(WEB_SRC, 'components/ui.tsx');
 const USE_DIALOG = resolve(WEB_SRC, 'components/useDialog.ts');
 
 test.describe('overlay layer scale (issue #791)', () => {
@@ -49,12 +50,21 @@ test.describe('overlay layer scale (issue #791)', () => {
 });
 
 test.describe('ConfirmDialog portal + inert background (issue #791)', () => {
-  test('portals to document.body above navigation', () => {
-    const source = readFileSync(CONFIRM_DIALOG, 'utf8');
+  // ConfirmDialog composes the shared `Dialog` primitive (issue #1783) instead
+  // of hand-rolling its own portal/backdrop — the portal + inert-background
+  // guarantee now lives in ui.tsx, and ConfirmDialog must keep consuming it.
+  test('the shared Dialog primitive portals to document.body above navigation with an inert background', () => {
+    const source = readFileSync(UI_TSX, 'utf8');
     expect(source).toMatch(/createPortal/);
     expect(source).toMatch(/document\.body/);
     expect(source).toMatch(/inertBackground:\s*true/);
-    expect(source).toMatch(/data-overlay="dialog"/);
+    expect(source).toMatch(/data-overlay=\{dataOverlay\}/);
+  });
+
+  test('ConfirmDialog composes Dialog rather than hand-rolling its own portal', () => {
+    const source = readFileSync(CONFIRM_DIALOG, 'utf8');
+    expect(source).toMatch(/<Dialog\b/);
+    expect(source).not.toMatch(/createPortal/);
   });
 
   test('useDialog preserves nested inert state when restoring', () => {
