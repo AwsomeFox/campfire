@@ -59,6 +59,7 @@ import type {
   CheckRequestCreate,
   CheckRequestResolution,
   AdapterResourceDef,
+  DdbCharacterImport,
   ResourcePatch,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
@@ -87,7 +88,6 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
-import type { DdbCharacterImport } from '@campfire/schema';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];

@@ -16,9 +16,10 @@ import {
   isValidIanaTimeZone,
   utcToLocalDateTime,
   type ScheduleNotificationData,
+  SCHEDULE_PAST_DEFAULT_LIMIT,
+  SCHEDULE_PAST_MAX_LIMIT,
 } from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionRestored, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
-import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders, seriesExceptions, sessionSeries } from '../../db/schema';

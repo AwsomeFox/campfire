@@ -37,6 +37,9 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/no-empty-object-type': 'off',
+      // Issue #1703: identical-line merges into a shared `import type` block can
+      // produce duplicate identifiers that only show up after merge.
+      'no-duplicate-imports': ['error', { allowSeparateTypeImports: true }],
     },
   },
   {

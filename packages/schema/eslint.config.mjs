@@ -14,6 +14,9 @@ export default tseslint.config(
       // than blocking the build on pre-existing, deliberate uses.
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      // Issue #1703: identical-line merges into a shared `import type` block can
+      // produce duplicate identifiers that only show up after merge.
+      'no-duplicate-imports': ['error', { allowSeparateTypeImports: true }],
     },
   },
 );

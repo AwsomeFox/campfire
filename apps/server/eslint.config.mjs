@@ -26,6 +26,10 @@ export default tseslint.config(
       // Conflicts with the common `let x = 0; try { x = ... } catch { continue; }`
       // pattern (safe default + skip-on-failure). Prefer keeping the default.
       'no-useless-assignment': 'off',
+      // Issue #1703: identical-line merges into a shared `import type` block can
+      // produce duplicate identifiers that only show up after merge. Catch them in
+      // the lint gate rather than `tsc` / `nest build`.
+      'no-duplicate-imports': ['error', { allowSeparateTypeImports: true }],
       // A handful of modules deliberately use runtime `require()` (optional/
       // conditional CJS interop with better-sqlite3 native bindings, reading
       // package.json for version info, etc.) — long predates this lint gate

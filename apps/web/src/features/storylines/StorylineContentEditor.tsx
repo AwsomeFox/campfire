@@ -1,5 +1,4 @@
-import { Btn, TextArea } from '../../components/ui';
-import { ErrorNote } from '../../components/ui';
+import { Btn, ErrorNote, TextArea } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 
