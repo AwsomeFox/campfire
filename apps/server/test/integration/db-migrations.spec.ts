@@ -1006,7 +1006,6 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       'active',
       'activated_at',
       'activated_by_name',
-      'activated_by_user_id',
       'anonymous',
       'activation_count',
       'released_at',
@@ -1025,7 +1024,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       try {
         freshCols = columnNames(fresh.sqlite, 'table_safety_holds');
         expect([...freshCols].sort()).toEqual(expected);
-        expect(freshCols).toContain('activated_by_user_id');
+        expect(freshCols).not.toContain('activated_by_user_id');
         expect(freshCols).toContain('released_by_user_id');
       } finally {
         fresh.sqlite.close();
@@ -1067,9 +1066,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect(countRows(upgraded.sqlite, 'table_safety_holds')).toBe(1);
         expect(
           upgraded.sqlite
-            .prepare('SELECT activated_by_user_id, released_by_user_id FROM table_safety_holds WHERE campaign_id = 1')
+            .prepare('SELECT released_by_user_id FROM table_safety_holds WHERE campaign_id = 1')
             .get(),
-        ).toEqual({ activated_by_user_id: null, released_by_user_id: null });
+        ).toEqual({ released_by_user_id: null });
       } finally {
         upgraded.sqlite.close();
       }

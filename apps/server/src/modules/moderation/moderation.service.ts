@@ -673,7 +673,11 @@ export class ModerationService implements OnApplicationBootstrap {
 
     // Conflict detection happens BEFORE the write so the report is born escalated
     // rather than briefly visible to the very person it accuses.
-    const subjectIsDm = resolved.authorUserId
+    // A notification can retain an actor solely for attribution relabeling and
+    // moderation evidence. It is not itself an authored moderation target: reports
+    // about a recipient's bell item stay in the campaign DM queue, as they did
+    // before notification actor ids were retained.
+    const subjectIsDm = input.targetType !== 'notification' && resolved.authorUserId
       ? await this.holdsDmRole(campaignId, resolved.authorUserId)
       : false;
     const nowTs = nowIso();
@@ -684,6 +688,11 @@ export class ModerationService implements OnApplicationBootstrap {
       // whatever is in the row NOW is what the snapshot must record.
       const capture = this.rereadCaptureTx(tx, campaignId, resolved);
       const evidenceId = this.captureEvidenceTx(tx, capture);
+      // Bell items are reportable server-captured evidence, but their triggering
+      // actor is not the report's moderation subject. Otherwise a DM-triggered
+      // notification either auto-escalates or is hidden from that table's own queue.
+      // The evidence keeps the actor's stable id for account-lifecycle relabeling.
+      const notificationReport = resolved.targetType === 'notification';
       const [row] = tx
         .insert(moderationReports)
         .values({
@@ -692,8 +701,8 @@ export class ModerationService implements OnApplicationBootstrap {
           targetId: resolved.targetId,
           reporterUserId: user.id,
           reporterName: user.name,
-          subjectUserId: capture.authorUserId,
-          subjectName: capture.authorName,
+          subjectUserId: notificationReport ? '' : capture.authorUserId,
+          subjectName: notificationReport ? '' : capture.authorName,
           reason: input.reason,
           details: input.details ?? '',
           status: subjectIsDm ? 'escalated' : 'open',

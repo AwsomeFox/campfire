@@ -206,7 +206,6 @@ export class UsersService {
     tx.update(checkRequests).set({ requestedByName: nextLabel }).where(eq(checkRequests.requestedByUserId, stableUserId)).run();
     tx.update(aiDmTranscriptEvents).set({ actorName: nextLabel }).where(eq(aiDmTranscriptEvents.actorUserId, stableUserId)).run();
     tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
-    tx.update(tableSafetyHolds).set({ activatedByName: nextLabel }).where(eq(tableSafetyHolds.activatedByUserId, stableUserId)).run();
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
     tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
     tx.update(castSessions).set({ createdBy: nextLabel }).where(eq(castSessions.createdByUserId, stableUserId)).run();

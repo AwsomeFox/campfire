@@ -205,7 +205,6 @@ export class TableSafetyService {
           active: true,
           activatedAt: ts,
           activatedByName: actorName,
-          activatedByUserId: actor?.id ?? null,
           anonymous,
           activationCount: 1,
           releasedAt: null,
@@ -221,7 +220,6 @@ export class TableSafetyService {
             active: true,
             activatedAt: ts,
             activatedByName: actorName,
-            activatedByUserId: actor?.id ?? null,
             anonymous,
             activationCount: sql`${tableSafetyHolds.activationCount} + 1`,
             // The previous hold's resolution is cleared: `recovery` describes how the CURRENT
@@ -274,7 +272,6 @@ export class TableSafetyService {
         active: false,
         activatedAt: null,
         activatedByName: null,
-        activatedByUserId: null,
         anonymous: true,
         activationCount: 0,
         releasedAt: ts,
@@ -292,7 +289,6 @@ export class TableSafetyService {
           // An attributed hold was attributed for the duration of the stop so the table could
           // talk to them; it is not a permanent record of who needed the table to stop.
           activatedByName: null,
-          activatedByUserId: null,
           releasedAt: ts,
           releasedBy: facilitatorName,
           releasedByUserId: facilitatorUserId ?? null,

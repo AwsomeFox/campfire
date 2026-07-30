@@ -321,6 +321,29 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
       expect(foreign.status).toBe(404);
     });
 
+    it('keeps reports of ordinary DM notifications in the campaign moderation queue', async () => {
+      const note = await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/notes`)
+        .send({ body: 'DM-authored notification routing regression', visibility: 'party_shared' });
+      expect(note.status).toBe(201);
+
+      const bell = await victim.get('/api/v1/notifications?limit=20');
+      expect(bell.status).toBe(200);
+      const items = bell.body.items ?? bell.body;
+      const mine = items.find(
+        (item: { id: number; actorName: string; type: string }) => item.type === 'note_shared' && item.actorName === 'mod-dm',
+      );
+      expect(mine).toBeTruthy();
+
+      const report = await fileReport(victim, { targetType: 'notification', targetId: mine.id, reason: 'harassment' });
+      expect(report.status).toBe(201);
+      expect(report.body.status).toBe('open');
+      expect(report.body.subjectUserId).toBe('');
+      const queue = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports`);
+      expect(queue.status).toBe(200);
+      expect(queue.body.items.some((item: { id: number }) => item.id === report.body.id)).toBe(true);
+    });
+
     it('keeps an attributed safety-hold notification non-resolvable for moderation actions', async () => {
       const sqlite = openDb();
       let safetyNotificationId: number;

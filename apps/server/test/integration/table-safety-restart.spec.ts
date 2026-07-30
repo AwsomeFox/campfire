@@ -1,9 +1,8 @@
 import fs from 'node:fs';
 import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { eq } from 'drizzle-orm';
 import { openDatabase, type DrizzleDb } from '../../src/db/db.module';
-import { campaigns, tableSafetyHolds } from '../../src/db/schema';
+import { campaigns } from '../../src/db/schema';
 import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { NotificationsService } from '../../src/modules/notifications/notifications.service';
@@ -185,6 +184,5 @@ describe('table safety hold survives a restart (#599, real SQLite)', () => {
     expect(a.active).toBe(true);
     expect(b.active).toBe(true);
     expect(safety.getHold(campaignId)).toMatchObject({ activationCount: 1, activatedByName: 'Ana', anonymous: false });
-    expect(first.orm.select().from(tableSafetyHolds).where(eq(tableSafetyHolds.campaignId, campaignId)).get()?.activatedByUserId).toBe('1');
   });
 });
