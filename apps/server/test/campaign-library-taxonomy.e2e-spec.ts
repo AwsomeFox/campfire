@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryBulkOperations, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -313,6 +313,47 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(afterUndo.deletedAt).toBeNull();
     expect(afterUndo.equipped).toBe(true);
     expect(afterUndo.equipSlot).toBe('off-hand');
+  });
+
+  // Issue #1326 review (coordinator): a bulk move_inventory_owner journal recorded by
+  // the PRE-#1326 binary never had equipped/equip_slot in its snapshot at all — the
+  // parse schema must tolerate that shape, not require it, or undo permanently 404s/
+  // 500s for every such pre-upgrade record after deploy.
+  it('undoes a pre-upgrade bulk move_inventory_owner journal (no equip fields recorded) without failing, leaving the item unequipped', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [source] = await db.insert(characters).values({ campaignId, name: 'Pre-upgrade source', createdAt: ts, updatedAt: ts }).returning();
+    const [recipient] = await db.insert(characters).values({ campaignId, name: 'Pre-upgrade recipient', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Pre-upgrade blade', ownerType: 'character', characterId: source.id, createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: recipient.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(moved.status).toBe(201);
+
+    // Rewrite the just-recorded journal to the EXACT shape a pre-#1326 binary would
+    // have written: the snapshot's `value` has only ownerType/characterId, nothing else.
+    const recorded = (await db.select().from(campaignLibraryBulkOperations).where(eq(campaignLibraryBulkOperations.id, moved.body.operationId))).at(0)!;
+    const legacyJournal = JSON.parse(recorded.beforeJson);
+    legacyJournal.snapshots = legacyJournal.snapshots.map((snap: { value: Record<string, unknown> }) => ({
+      ...snap,
+      value: { ownerType: snap.value.ownerType, characterId: snap.value.characterId },
+    }));
+    await db
+      .update(campaignLibraryBulkOperations)
+      .set({ beforeJson: JSON.stringify(legacyJournal), inverseJson: JSON.stringify(legacyJournal) })
+      .where(eq(campaignLibraryBulkOperations.id, moved.body.operationId));
+
+    const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm);
+    expect(undone.status).toBe(201);
+    const afterUndo = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterUndo.characterId).toBe(source.id);
+    // A pre-upgrade record never claimed the item was equipped — it lands unequipped.
+    expect(afterUndo.equipped).toBe(false);
+    expect(afterUndo.equipSlot).toBeNull();
   });
 
   it('moves an item to a campaign character and undoes it without parsing a scalar journal', async () => {

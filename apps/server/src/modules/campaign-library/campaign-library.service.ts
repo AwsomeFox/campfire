@@ -361,7 +361,19 @@ export class CampaignLibraryService {
             if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${request.status}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           } else if (request.operation === 'move_inventory_owner') {
-            const before = z.object({ ownerType: z.string(), characterId: z.number().int().nullable(), equipped: z.number().int(), equipSlot: z.string().nullable() }).parse(value);
+            // Issue #1326 review (coordinator, upgrade compatibility): equipped/equipSlot
+            // are OPTIONAL here, not required — a bulk move recorded by the PRE-#1326
+            // binary never had these keys in its snapshot at all. Requiring them would
+            // make undoBulk() throw on every such pre-upgrade journal row, permanently
+            // blocking a legitimate undo. Missing means "recorded before equip state
+            // existed", which is correctly read as `equipped: undefined` (!== 1, so
+            // `canRestoreEquip` below is false) and `equipSlot: undefined` — never
+            // migrate the stored rows to backfill this; the tolerant read is sufficient
+            // and strictly safer (an old journal row is simply data, never re-validated
+            // against today's business rules beyond what's read here).
+            const before = z
+              .object({ ownerType: z.string(), characterId: z.number().int().nullable(), equipped: z.number().int().optional(), equipSlot: z.string().nullable().optional() })
+              .parse(value);
             if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             // Issue #1326 review (Codex): restore the pre-move equip state too, but only
             // when it is safe — the item can only be equipped on a character owner, and
