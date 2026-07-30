@@ -266,14 +266,15 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
       ctx = await createTestApp();
       const server = ctx.app.getHttpServer();
       campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Snippet Center Camp' })).body.id;
-      // >2*SNIPPET_PAD chars of prose before the matched term, so an opening-only
-      // window would show none of it.
-      const padding = 'The party travelled through many quiet provinces without incident. '.repeat(4);
+      // A unique opening marker followed by >2*SNIPPET_PAD chars of prose with no
+      // "red"/"dragon" token, so the matched term sits well past the opening. An
+      // opening-only window would contain the marker and none of the matched terms.
+      const prefix = 'OPENSENTINEL1481 The chronicle opens with lengthy unremarkable travelogue establishing the setting, and no creature is named anywhere in this preamble.';
       questId = (
         await request(server)
           .post(`/api/v1/campaigns/${campaignId}/quests`)
           .set(dm)
-          .send({ title: 'Wyrmhunt', body: `${padding}At last they found the red ancient dragon hoarding the stolen ledger.` })
+          .send({ title: 'Wyrmhunt', body: `${prefix} Then the red ancient dragon appeared.` })
       ).body.id;
     });
 
@@ -289,9 +290,11 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
       );
       expect(hit).toBeTruthy();
       expect(hit!.matchedField).toBe('body');
-      // The snippet must reach the matched term, not just the opening prose.
+      // The snippet must reach the matched term …
       expect(hit!.snippet.toLowerCase()).toContain('dragon');
-      expect(hit!.snippet).not.toContain('without incident');
+      // … and must not be the body opening: the marker sits at position 0, well
+      // outside the ±SNIPPET_PAD window centered on the match.
+      expect(hit!.snippet).not.toContain('OPENSENTINEL1481');
     });
   });
 });
