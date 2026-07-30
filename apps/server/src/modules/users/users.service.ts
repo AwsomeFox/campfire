@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, like, ne, or } from 'drizzle-orm';
+import { and, count, eq, like, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   CampaignDmRepair,
@@ -21,6 +21,13 @@ import {
   characters,
   membershipIntegrityRepairs,
   participantSupportPreferences,
+  notes,
+  comments,
+  entityRevisions,
+  sessionRsvps,
+  diceRolls,
+  notifications,
+  notificationDigestQueue,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
@@ -32,6 +39,9 @@ type UserUpdateInput = z.infer<typeof UserUpdate>;
 type PreferencesUpdateInput = z.infer<typeof PreferencesUpdate>;
 type CampaignDmRepairInput = z.infer<typeof CampaignDmRepair>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/** Public attribution used after an account is removed, never a prior account label. */
+const DELETED_USER_ATTRIBUTION = 'Deleted user';
 
 function toDomain(row: typeof users.$inferSelect): User {
   return {
@@ -138,6 +148,56 @@ export class UsersService {
       .map((membership) => membership.campaignName);
   }
 
+  /** The label every real-session write derives from this account. */
+  private publicAttribution(row: Pick<typeof users.$inferSelect, 'displayName' | 'username'>): string {
+    return row.displayName || row.username;
+  }
+
+  /**
+   * Synchronize only display copies selected by their durable user-id columns.
+   *
+   * Historical rows retain those ids for authorization, block-listing, and provenance;
+   * their copied public labels must instead follow a rename or become neutral before
+   * deletion. Notification title/body are included because schedule-RSVP notifications
+   * embed the same actor label in their already-rendered copy. This is deliberately a
+   * synchronous transaction helper: callers get all labels changed or none of them.
+   */
+  private synchronizeRetainedAttributionTx(
+    tx: SyncDb,
+    userId: number,
+    previousLabel: string,
+    nextLabel: string,
+  ): void {
+    if (previousLabel === nextLabel) return;
+    const stableUserId = String(userId);
+
+    tx.update(notes).set({ authorName: nextLabel }).where(eq(notes.authorUserId, stableUserId)).run();
+    tx.update(comments).set({ authorName: nextLabel }).where(eq(comments.authorUserId, stableUserId)).run();
+    tx.update(entityRevisions).set({ authorName: nextLabel }).where(eq(entityRevisions.authorUserId, stableUserId)).run();
+    tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(eq(entityRevisions.replacedByUserId, stableUserId)).run();
+    tx.update(sessionRsvps).set({ userName: nextLabel }).where(eq(sessionRsvps.userId, stableUserId)).run();
+    tx.update(diceRolls).set({ rollerName: nextLabel }).where(eq(diceRolls.rollerUserId, stableUserId)).run();
+
+    const replaceCopy = (column: typeof notifications.title | typeof notifications.body) =>
+      sql<string>`replace(${column}, ${previousLabel}, ${nextLabel})`;
+    tx.update(notifications)
+      .set({
+        actorName: nextLabel,
+        title: replaceCopy(notifications.title),
+        body: replaceCopy(notifications.body),
+      })
+      .where(eq(notifications.actorUserId, stableUserId))
+      .run();
+    tx.update(notificationDigestQueue)
+      .set({
+        actorName: nextLabel,
+        title: sql<string>`replace(${notificationDigestQueue.title}, ${previousLabel}, ${nextLabel})`,
+        body: sql<string>`replace(${notificationDigestQueue.body}, ${previousLabel}, ${nextLabel})`,
+      })
+      .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+      .run();
+  }
+
   /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */
   async countEnabledAdmins(excludeId?: number): Promise<number> {
     const rows = await this.db
@@ -239,7 +299,15 @@ export class UsersService {
       }
 
       const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
-      if (input.displayName !== undefined) update.displayName = input.displayName;
+      if (input.displayName !== undefined) {
+        update.displayName = input.displayName;
+        this.synchronizeRetainedAttributionTx(
+          tx,
+          id,
+          this.publicAttribution(existing),
+          input.displayName || existing.username,
+        );
+      }
       if (input.serverRole !== undefined) update.serverRole = input.serverRole;
       if (input.disabled !== undefined) update.disabled = input.disabled;
 
@@ -250,17 +318,28 @@ export class UsersService {
 
   /** Self-service preferences (display name + accent color + reading mode) — PATCH /me/preferences. */
   async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
-    await this.getRowOrThrow(id);
+    return this.db.transaction((tx) => {
+      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
 
-    const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
-    if (input.displayName !== undefined) update.displayName = input.displayName;
-    if (input.accentColor !== undefined) update.accentColor = input.accentColor;
-    if (input.textSize !== undefined) update.textSize = input.textSize;
-    if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
-    if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
+      const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
+      if (input.displayName !== undefined) {
+        update.displayName = input.displayName;
+        this.synchronizeRetainedAttributionTx(
+          tx,
+          id,
+          this.publicAttribution(existing),
+          input.displayName || existing.username,
+        );
+      }
+      if (input.accentColor !== undefined) update.accentColor = input.accentColor;
+      if (input.textSize !== undefined) update.textSize = input.textSize;
+      if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
+      if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
 
-    const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
-    return toDomain(row);
+      const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
+      return toDomain(row);
+    });
   }
 
   async remove(id: number): Promise<void> {
@@ -279,6 +358,13 @@ export class UsersService {
           );
         }
       }
+
+      this.synchronizeRetainedAttributionTx(
+        tx,
+        id,
+        this.publicAttribution(existing),
+        DELETED_USER_ATTRIBUTION,
+      );
 
       // Keep every invariant-dependent read and all account/membership writes in
       // this synchronous transaction so delete races serialize with #654 paths.

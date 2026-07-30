@@ -152,7 +152,7 @@ export class UsersController {
       action: 'user.update',
       entityType: 'user',
       entityId: id,
-      detail: `${updated.username}: ${changes.join(', ') || 'no-op'}`,
+      detail: `user:${id}: ${changes.join(', ') || 'no-op'}`,
     });
     return updated;
   }
@@ -163,17 +163,15 @@ export class UsersController {
   @ApiResponse({ status: 204, description: 'Deleted.' })
   @ApiResponse({ status: 409, description: 'Last enabled admin, or last enabled DM of one or more campaigns.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: RequestUser) {
-    // Capture the username before the row is gone, so the trail names the target.
-    const target = await this.users.getOrThrow(id);
     await this.users.remove(id);
-    // #23: server-wide admin trail — account deletion.
+    // #23: server-wide admin trail — stable target id, never a deleted account label.
     await this.audit.log({
       actor: auditActor(actor),
       actorRole: auditActorRole(actor),
       action: 'user.delete',
       entityType: 'user',
       entityId: id,
-      detail: target.username,
+      detail: `user:${id}`,
     });
   }
 
