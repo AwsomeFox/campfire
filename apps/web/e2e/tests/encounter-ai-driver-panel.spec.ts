@@ -126,15 +126,23 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
   test('a player never sees the panel from the encounter dock either', async ({ browser }) => {
     const context = await browser.newContext({ storageState: stateFor('player') });
     const page = await context.newPage();
+    try {
     const { campaignId, encounterId } = seed();
     await mockAiDm(page, campaignId, []);
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
     // The endpoint is DM-only and the query is disabled for anyone else, so even with the dock
     // open there is nothing to render and no 403 drip.
-    if (await page.getByTestId('encounter-ai-driver-toggle').isVisible().catch(() => false)) {
-      await page.getByTestId('encounter-ai-driver-toggle').click();
+    const toggle = page.getByTestId('encounter-ai-driver-toggle');
+    // Use a direct locator-attached check rather than catching every locator error, so a real
+    // failure (e.g. a thrown timeout) surfaces instead of being masked as "toggle absent".
+    if (await toggle.count() > 0 && (await toggle.first().isVisible())) {
+      await toggle.first().click();
     }
     await expect(page.getByTestId('ai-tool-confirmations')).toHaveCount(0);
-    await context.close();
+    } finally {
+      // Always release the browser context even if an assertion above throws, so a leaked
+      // context cannot keep the page alive past this test.
+      await context.close();
+    }
   });
 });

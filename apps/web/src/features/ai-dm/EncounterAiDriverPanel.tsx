@@ -86,13 +86,8 @@ export function EncounterAiDriverPanel({
     return encounter.combatants.find((c: Combatant) => c.id === encounter.currentCombatantId)?.name;
   }, [encounter.combatants, encounter.currentCombatantId]);
 
-  /**
-   * #1494 — the id → name map the confirmation summaries resolve against, assembled from reads
-   * THIS PANEL ALREADY MAKES (the encounter's combatants + the roster fetched when the dock
-   * opens). Mirrors AiTablePage's derivation so the same combatant/character ids that name a
-   * summary on the Table name it here too; an id neither holds stays an id rather than being
-   * named from a fetch the viewer was never authorized for.
-   */
+  // #1494 — id→name map for confirmation summaries, assembled from data this panel already
+  // fetches (combatants + roster). Mirrors AiTablePage so names match across surfaces.
   const confirmationEntities = useMemo(
     () => [...(charactersQuery.data ?? []), ...encounter.combatants],
     [charactersQuery.data, encounter.combatants],
