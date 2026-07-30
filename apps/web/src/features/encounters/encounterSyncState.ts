@@ -90,14 +90,21 @@ export function isConnectingGraceElapsed(connectingSince: number | null, now: nu
  * an explicit DM confirmation ({@link confirmEncounterOverride}) and consumed the
  * moment the stream is `live` again ({@link settleEncounterOverride}), so a later,
  * separate outage prompts again rather than silently sailing through.
+ *
+ * The active variant carries the (campaignId, userId) it was granted FOR (final review
+ * round): that tag is one of the five preconditions {@link encounterOverrideAuthorized}
+ * checks directly, rather than relying solely on a separate reset effect to have already
+ * cleared a cross-campaign or cross-identity override before anything reads `.active`.
  */
-export type EncounterOverrideState = { active: boolean };
+export type EncounterOverrideState =
+  | { active: false }
+  | { active: true; campaignId: number; userId: number | null };
 
 export const ENCOUNTER_OVERRIDE_INACTIVE: EncounterOverrideState = { active: false };
 
 /** Grant the override — call this from the "Continue anyway" confirmation. */
-export function confirmEncounterOverride(): EncounterOverrideState {
-  return { active: true };
+export function confirmEncounterOverride(campaignId: number, userId: number | null): EncounterOverrideState {
+  return { active: true, campaignId, userId };
 }
 
 /**
@@ -114,35 +121,87 @@ export function settleEncounterOverride(
 }
 
 /**
- * Revoke a granted override the instant DM authority is lost (issue #1446 review fix,
- * round 4): the override is a DM decision, and a viewer demoted to player mid-outage must
- * not keep acting on a stale-data acknowledgement they no longer have standing to have
- * made — `canDmWrite` going false has to actually clear the flag, not just hide the
- * confirm affordance, or a demoted player's owned-combatant mutations stay unblocked.
- * Idempotent (returns the same reference) when there is nothing to revoke.
+ * Revoke a granted override the instant it is no longer authorized (issue #1446 review
+ * fixes, rounds 4 and final): the override is a DM decision made against a specific,
+ * freshly-confirmed identity, and a viewer who is demoted mid-outage, or whose identity
+ * goes stale (see {@link EncounterOverrideAuthority.staleIdentity}), must not keep acting
+ * on an acknowledgement they no longer have standing to have made. `authorized` going
+ * false has to actually clear the flag, not just hide the confirm affordance, or a
+ * disqualified viewer's owned-combatant mutations stay unblocked. Idempotent (returns the
+ * same reference) when there is nothing to revoke. Pass
+ * `authority.canDmWrite && !authority.staleIdentity` (or route through
+ * {@link encounterOverrideAuthorized} entirely — see that function's doc for why campaign/
+ * identity match is checked separately, at read time, rather than here).
  */
 export function revokeEncounterOverrideIfUnauthorized(
   override: EncounterOverrideState,
-  canDmWrite: boolean,
+  authorized: boolean,
 ): EncounterOverrideState {
-  if (!canDmWrite && override.active) return ENCOUNTER_OVERRIDE_INACTIVE;
+  if (!authorized && override.active) return ENCOUNTER_OVERRIDE_INACTIVE;
   return override;
 }
 
 /**
  * Whether the "Continue anyway" affordance should be offered at all: not while
  * live (nothing to override), and not during the initial connecting grace period
- * (a genuine sub-second cold connect should just block quietly, not prompt).
+ * (a genuine sub-second cold connect should just block quietly, not prompt). Campaign/
+ * identity match ({@link EncounterOverrideAuthority}) is not a precondition of the OFFER —
+ * there is nothing to compare against before the override exists — it is tagged from the
+ * current context the instant confirmation grants it, so it is satisfied by construction.
  */
 export function encounterOverrideOfferable(state: EncounterSyncState): boolean {
   return state !== 'live' && state !== 'connecting';
 }
 
 /**
+ * Everything the "continue anyway" override needs to actually authorize a mutation right
+ * now (issue #1446, final review round — five prior rounds each found a different
+ * transition that silently satisfied some of these and bypassed one):
+ *   - `canDmWrite`    — DM write authority RIGHT NOW, not merely when confirmed (round 4).
+ *   - `staleIdentity` — true while AuthProvider is showing a cached identity restored
+ *                       after a failed `/me` (its documented contract: membership may be
+ *                       obsolete). The override is neither offerable nor valid while this
+ *                       is true, however long the outage has lasted or who confirmed it.
+ *   - `campaignId` / `userId` — the CURRENT campaign and signed-in user, compared against
+ *                       the override's own stored tag (rounds 5–6: a cross-campaign or
+ *                       cross-identity carry-over is a leaked trust decision, not a mere
+ *                       staleness bug).
+ */
+export type EncounterOverrideAuthority = {
+  canDmWrite: boolean;
+  staleIdentity: boolean;
+  campaignId: number;
+  userId: number | null;
+};
+
+/**
+ * THE single gate for whether an override authorizes anything: every precondition named
+ * above, ANDed together in one place so a reader sees the full set at a glance and a
+ * future change cannot add a sixth transition that bypasses just one of them. Evaluated
+ * identically whether the override was JUST granted (its tag is set from this same
+ * `authority` context, so 3 and 4 hold trivially) or has been active for a while (all
+ * five re-checked on every render) — the round-4 finding (an override survived a
+ * mid-outage demotion) was exactly two different moments where a stale answer went
+ * unchecked, and this function is the fix for both at once.
+ */
+export function encounterOverrideAuthorized(
+  override: EncounterOverrideState,
+  authority: EncounterOverrideAuthority,
+): boolean {
+  return (
+    override.active
+    && authority.canDmWrite
+    && !authority.staleIdentity
+    && override.campaignId === authority.campaignId
+    && override.userId === authority.userId
+  );
+}
+
+/**
  * The actual action gate: conflict-prone mutations are blocked unless the stream is
  * live OR the DM has confirmed the override for this outage. `override` should already
- * reflect current DM authority (see {@link revokeEncounterOverrideIfUnauthorized}) —
- * this function does not itself take a `canDmWrite` param so it stays a pure two-input
+ * reflect current authorization (see {@link encounterOverrideAuthorized}) —
+ * this function does not itself take authority params so it stays a pure two-input
  * gate composable with the existing permission checks callers already run.
  */
 export function encounterActionsBlocked(state: EncounterSyncState, override: EncounterOverrideState): boolean {

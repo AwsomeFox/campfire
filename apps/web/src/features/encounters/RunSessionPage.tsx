@@ -195,6 +195,7 @@ import {
   deriveEncounterSyncState,
   ENCOUNTER_OVERRIDE_INACTIVE,
   encounterActionsBlocked,
+  encounterOverrideAuthorized,
   encounterOverrideOfferable,
   encounterSyncBannerMessage,
   encounterSyncChipClass,
@@ -206,6 +207,7 @@ import {
   isConnectingGraceElapsed,
   revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
+  type EncounterOverrideAuthority,
   type EncounterOverrideState,
   type EncounterSyncRevision,
 } from './encounterSyncState';
@@ -1339,34 +1341,63 @@ export default function RunSessionPage() {
     staleIdentity,
     connectingGraceElapsed,
   });
-  // Issue #1446: a confirmed override is scoped to ONE outage — consumed the moment the
-  // stream is live again, so a later, separate outage prompts again rather than silently
-  // sailing through on a stale confirmation from a previous disconnect. Issue #1446 review
-  // fix (round 4): ALSO revoked the instant DM authority is lost — the override is a DM
-  // decision, and a viewer demoted to player mid-outage must not keep acting on a
-  // stale-data acknowledgement they no longer have standing to have made. Re-promotion
-  // requires a fresh confirmation rather than silently resuming the earlier one.
+  // Issue #1446, final review round: every precondition the "continue anyway" override
+  // needs to authorize anything, named once — see `encounterOverrideAuthorized`'s doc for
+  // the full enumeration and why each one is there. Five prior review rounds each found a
+  // different transition that silently satisfied some of these and bypassed one:
+  // canDmWrite alone (a demoted player kept acting), then campaign/identity match (a
+  // cross-campaign or cross-identity carry-over), and now staleIdentity — AuthProvider's
+  // documented contract for a cached-identity restore is that membership may be obsolete,
+  // so the override must be neither offerable nor valid while it is true, however long
+  // the outage has lasted or who confirmed it.
+  const overrideAuthority: EncounterOverrideAuthority = {
+    canDmWrite,
+    staleIdentity,
+    campaignId: cid,
+    userId: me?.user.id ?? null,
+  };
+  // A confirmed override is scoped to ONE outage — consumed the moment the stream is live
+  // again, so a later, separate outage prompts again rather than silently sailing through
+  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost DM
+  // authority, or the identity went stale) — regaining authority requires a fresh
+  // confirmation rather than silently resuming the earlier one.
   useEffect(() => {
-    setEncounterSyncOverride((prev) => revokeEncounterOverrideIfUnauthorized(settleEncounterOverride(prev, encounterSync), canDmWrite));
-  }, [encounterSync, canDmWrite]);
-  // Belt-and-braces alongside the effect above: mask the override synchronously at
-  // render time too, so there is no one-render gap between `canDmWrite` flipping false
-  // and the stored flag actually being cleared where a demoted player's mutations could
-  // still slip through.
-  const effectiveEncounterSyncOverride = canDmWrite ? encounterSyncOverride : ENCOUNTER_OVERRIDE_INACTIVE;
+    setEncounterSyncOverride((prev) =>
+      revokeEncounterOverrideIfUnauthorized(
+        settleEncounterOverride(prev, encounterSync),
+        overrideAuthority.canDmWrite && !overrideAuthority.staleIdentity,
+      ),
+    );
+  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.staleIdentity]);
+  // Belt-and-braces alongside the effect above: `encounterOverrideAuthorized` is THE
+  // single gate (every precondition, including the campaign/identity tag match),
+  // re-evaluated synchronously at render time too — so there is no one-render gap between
+  // any precondition changing and the stored flag actually being treated as inactive,
+  // where a disqualified viewer's mutations could still slip through.
+  const effectiveEncounterSyncOverride: EncounterOverrideState = encounterOverrideAuthorized(
+    encounterSyncOverride,
+    overrideAuthority,
+  )
+    ? encounterSyncOverride
+    : ENCOUNTER_OVERRIDE_INACTIVE;
   const riskyBlocked = encounterActionsBlocked(encounterSync, effectiveEncounterSyncOverride);
   // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
   // issue text) — a player confirming it would re-enable their own owned-combatant HP /
-  // death-save / action mutations against possibly-stale data. Gate the affordance to
-  // canDmWrite so a player has no path to ever set encounterSyncOverride.active; they stay
-  // blocked (with the informational banner) for the duration of the outage.
+  // death-save / action mutations against possibly-stale data, and a stale-identity
+  // viewer confirming it would authorize mutations against a membership snapshot that may
+  // no longer be true (final review round). Neither has a path to ever set
+  // encounterSyncOverride.active; they stay blocked (with the informational banner) for
+  // the duration.
   const encounterSyncOverrideOfferable =
-    canDmWrite && encounterOverrideOfferable(encounterSync) && !encounterSyncOverride.active;
+    overrideAuthority.canDmWrite
+    && !overrideAuthority.staleIdentity
+    && encounterOverrideOfferable(encounterSync)
+    && !effectiveEncounterSyncOverride.active;
   // Issue #1446 review fix: once the override is active, controls ARE actionable again —
   // the base banner's "combat actions are paused" copy would be actively false (and
   // contradict the enabled controls for both screen-reader and sighted users). Swap to an
   // override-aware i18n variant that keeps the stale-data warning without that claim.
-  const overrideBannerKey = encounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
+  const overrideBannerKey = effectiveEncounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
   const encounterSyncBanner = overrideBannerKey ? t(overrideBannerKey) : encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
@@ -2759,17 +2790,19 @@ export default function RunSessionPage() {
             className="text-xs"
             data-testid="encounter-sync-override-confirm"
             onClick={() => {
-              // Defense in depth alongside the canDmWrite gate above — never let a
-              // non-DM grant the override even if this handler is somehow reachable.
-              if (!canDmWrite) return;
-              setEncounterSyncOverride(confirmEncounterOverride());
+              // Defense in depth alongside the gate above — never let a non-DM or a
+              // stale-identity viewer grant the override even if this handler is somehow
+              // reachable; the tag is set from THIS context, satisfying the campaign/
+              // identity preconditions by construction.
+              if (!overrideAuthority.canDmWrite || overrideAuthority.staleIdentity) return;
+              setEncounterSyncOverride(confirmEncounterOverride(overrideAuthority.campaignId, overrideAuthority.userId));
             }}
           >
             {t('encounters.sync.overrideConfirm')}
           </Btn>
         </div>
       )}
-      {canDmWrite && encounterSyncOverride.active && encounterSync !== 'live' && (
+      {effectiveEncounterSyncOverride.active && encounterSync !== 'live' && (
         <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
           {t('encounters.sync.overrideActive')}
         </span>

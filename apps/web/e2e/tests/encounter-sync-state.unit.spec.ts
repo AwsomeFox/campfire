@@ -10,6 +10,7 @@ import {
   deriveEncounterSyncState,
   ENCOUNTER_OVERRIDE_INACTIVE,
   encounterActionsBlocked,
+  encounterOverrideAuthorized,
   encounterOverrideOfferable,
   encounterResyncAdvanced,
   encounterRiskyActionsBlocked,
@@ -22,6 +23,7 @@ import {
   isConnectingGraceElapsed,
   revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
+  type EncounterOverrideAuthority,
 } from '../../src/features/encounters/encounterSyncState';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
@@ -114,16 +116,23 @@ test.describe('encounter sync state (issue #471)', () => {
     expect(source).toMatch(/confirmEncounterOverride/);
     expect(source).toMatch(/settleEncounterOverride/);
     // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
-    expect(source).toMatch(/canDmWrite\s*&&\s*encounterOverrideOfferable/);
+    expect(source).toMatch(/overrideAuthority\.canDmWrite/);
     expect(source).toMatch(/encounterSyncOverrideBannerKey/);
     // Issue #1446 review fix (round 4): the override must not survive loss of DM
     // authority — revoked in the persisted state AND masked atomically at render time.
     expect(source).toMatch(/revokeEncounterOverrideIfUnauthorized/);
-    expect(source).toMatch(/canDmWrite \? encounterSyncOverride : ENCOUNTER_OVERRIDE_INACTIVE/);
     // Issue #1446 review fix (round 5): stream/session-scoped sync state is explicitly
     // keyed to (campaignId, userId) — reset on a campaign or identity change, but NOT on
     // an encounter-only switch (that classification lives in the `[eid]` effect above).
     expect(source).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
+    // Issue #1446 review fix (final round): every override precondition — DM authority,
+    // identity freshness, campaign match, identity match — is enumerated once in
+    // encounterOverrideAuthorized and composed here as THE single gate, checked both at
+    // confirm time (canDmWrite/staleIdentity guard the offer and the click handler) and
+    // continuously (effectiveEncounterSyncOverride, re-derived every render).
+    expect(source).toMatch(/overrideAuthority\.staleIdentity/);
+    expect(source).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
+    expect(source).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
     expect(source).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
   });
 });
@@ -192,7 +201,7 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
 
     // Stream drops: actions are blocked until the DM explicitly confirms.
     expect(encounterActionsBlocked('reconnecting', override)).toBe(true);
-    override = confirmEncounterOverride();
+    override = confirmEncounterOverride(1, 42);
     expect(override.active).toBe(true);
     expect(encounterActionsBlocked('reconnecting', override)).toBe(false);
 
@@ -216,23 +225,77 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     expect(encounterOverrideOfferable('stale')).toBe(true);
   });
 
-  test('revokeEncounterOverrideIfUnauthorized clears an active override the instant DM authority is lost (issue #1446 review fix)', () => {
-    let override = confirmEncounterOverride();
+  test('revokeEncounterOverrideIfUnauthorized clears an active override the instant it is no longer authorized (issue #1446 review fix)', () => {
+    let override = confirmEncounterOverride(1, 42);
     expect(override.active).toBe(true);
 
-    // Still a DM: untouched.
+    // Still authorized: untouched.
     override = revokeEncounterOverrideIfUnauthorized(override, true);
     expect(override.active).toBe(true);
 
-    // Demoted: the override is REVOKED (cleared), not merely masked — a later
-    // re-promotion must require a fresh confirmation, matching the acceptance
-    // criterion's "revoked on demotion" (not "temporarily hidden").
+    // No longer authorized (demoted, or identity went stale): the override is REVOKED
+    // (cleared), not merely masked — regaining authority must require a fresh
+    // confirmation, matching the acceptance criterion's "revoked" (not "temporarily
+    // hidden").
     override = revokeEncounterOverrideIfUnauthorized(override, false);
     expect(override.active).toBe(false);
     expect(encounterActionsBlocked('offline', override)).toBe(true);
 
     // Idempotent / no-op when there's nothing to revoke.
     expect(revokeEncounterOverrideIfUnauthorized(ENCOUNTER_OVERRIDE_INACTIVE, false)).toBe(ENCOUNTER_OVERRIDE_INACTIVE);
+  });
+
+  test('encounterOverrideAuthorized enumerates every precondition in one place (issue #1446, final review round)', () => {
+    const base: EncounterOverrideAuthority = { canDmWrite: true, staleIdentity: false, campaignId: 1, userId: 42 };
+    const granted = confirmEncounterOverride(1, 42);
+
+    // All five preconditions met: authorized.
+    expect(encounterOverrideAuthorized(granted, base)).toBe(true);
+
+    // Not active at all: never authorized regardless of authority.
+    expect(encounterOverrideAuthorized(ENCOUNTER_OVERRIDE_INACTIVE, base)).toBe(false);
+
+    // 1. canDmWrite RIGHT NOW — a demoted viewer's stored override is unauthorized even
+    // though it was validly granted (round 4).
+    expect(encounterOverrideAuthorized(granted, { ...base, canDmWrite: false })).toBe(false);
+
+    // 2. !staleIdentity — a cached-identity restore never authorizes the override, no
+    // matter who confirmed it or how long the outage has lasted (final review round —
+    // membership may be obsolete while staleIdentity is true).
+    expect(encounterOverrideAuthorized(granted, { ...base, staleIdentity: true })).toBe(false);
+
+    // 3. Same campaign — an override granted in campaign 1 does not authorize anything in
+    // campaign 2 (round 5).
+    expect(encounterOverrideAuthorized(granted, { ...base, campaignId: 2 })).toBe(false);
+
+    // 4. Same identity — an override granted for user 42 does not authorize anything for
+    // a different signed-in user (round 6).
+    expect(encounterOverrideAuthorized(granted, { ...base, userId: 43 })).toBe(false);
+
+    // Every precondition is a hard requirement — failing ANY one of them is enough to
+    // deny authorization, not just a majority.
+    expect(
+      encounterOverrideAuthorized(granted, { canDmWrite: false, staleIdentity: true, campaignId: 2, userId: 43 }),
+    ).toBe(false);
+  });
+
+  test('a stale identity blocks the override offer and any already-active override, at every level (issue #1446, final review round)', () => {
+    // deriveEncounterSyncState already maps staleIdentity to 'offline' regardless of the
+    // transport status underneath it.
+    expect(
+      deriveEncounterSyncState({ eventStatus: 'connected', readStale: false, resyncPending: false, staleIdentity: true }),
+    ).toBe('offline');
+
+    // But an 'offline' reached via staleIdentity must not authorize an override the same
+    // way a genuine transport outage does — encounterOverrideAuthorized (the actual
+    // authorization gate RunSessionPage composes with the DM-authority check) refuses it
+    // outright, independent of state.
+    const granted = confirmEncounterOverride(1, 42);
+    const staleAuthority: EncounterOverrideAuthority = { canDmWrite: true, staleIdentity: true, campaignId: 1, userId: 42 };
+    expect(encounterOverrideAuthorized(granted, staleAuthority)).toBe(false);
+    expect(revokeEncounterOverrideIfUnauthorized(granted, staleAuthority.canDmWrite && !staleAuthority.staleIdentity).active).toBe(
+      false,
+    );
   });
 
   test('encounterRiskyActionsBlocked (base primitive) is unaffected by the override layer', () => {

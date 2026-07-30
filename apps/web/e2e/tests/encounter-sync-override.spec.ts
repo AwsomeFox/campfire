@@ -722,3 +722,79 @@ test('an override confirmed in one campaign does not carry over to a different c
     await Promise.all([reader.close(), writer.close()]);
   }
 });
+
+/**
+ * Issue #1446 review fix (final round): `staleIdentity` is AuthProvider's documented
+ * contract for a cached-identity restore after a failed `/me` (issue #579) — membership
+ * may be obsolete, so mutations must stay disabled. `deriveEncounterSyncState` already
+ * maps `staleIdentity` to `offline`, but the override-offer condition used to ignore it:
+ * a cached former DM could confirm "continue anyway" while running on a stale membership
+ * snapshot, and if connectivity returned without a fresh `/me` revalidation and that user
+ * had since been demoted, the server would legitimately accept the (now unauthorized)
+ * mutation. This proves the override is never offered — and no confirmation is reachable
+ * at all — while `staleIdentity` is true, using the REAL mechanism (a snapshot persisted
+ * by a genuine prior live `/me`, then an offline reload), not a mocked auth context.
+ */
+test('the override is never offered while AuthProvider is showing a stale (cached) identity', async ({ browser }) => {
+  const { campaignId } = seed();
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  let encounterId: number | null = null;
+  let releaseEvents: () => void = () => {};
+
+  try {
+    const live = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+    for (const e of live as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+    const enc = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 Stale Identity', hidden: false },
+      })
+    ).json();
+    encounterId = enc.id;
+
+    // First, a NORMAL load: a real, live `/me` succeeds and AuthProvider persists a
+    // snapshot (issue #579) — this is the genuine mechanism, not a seeded/mocked one.
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    await expect(syncChip).toHaveText('Live');
+
+    // Now make `/me` unreachable (a network-level failure, NOT a 401 — the distinction
+    // issue #579 exists for) and reload. The campaign events stream is also stubbed dead,
+    // matching the outage this issue targets, so the ONLY thing standing between the
+    // reviewer's scenario and a bypass is the staleIdentity check itself.
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await reader.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.abort('connectionfailed');
+    });
+    await reader.route('**/api/v1/me', (route) => route.abort('connectionfailed'));
+
+    await page.reload();
+
+    // The stale-identity fallback renders the authed UI (not a bounce to /login) — the
+    // chip reads `Offline` (deriveEncounterSyncState already maps staleIdentity there).
+    await expect(syncChip).toHaveText('Offline');
+
+    // The regression: no override is ever offered, and none can become active, for as
+    // long as staleIdentity holds — regardless of how long the "outage" persists.
+    await page.waitForTimeout(CONNECTING_GRACE_MS + 2_000);
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-confirm')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
+    const startBtn = page.getByRole('button', { name: 'Start' });
+    await expect(startBtn).toBeDisabled();
+  } finally {
+    releaseEvents();
+    if (encounterId != null) {
+      await writer.request.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+      await writer.request.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
+    }
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});
