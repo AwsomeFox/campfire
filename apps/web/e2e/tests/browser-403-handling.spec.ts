@@ -5,11 +5,12 @@ test.describe('browser 403 handling (issue #1484)', () => {
   test.use({ storageState: stateFor('player') });
 
   test('surfaces 403 inline error without redirecting to login', async ({ page }) => {
-    const { campaignId, activePcId } = seed();
-    await page.goto(`/c/${campaignId}/characters/${activePcId}`);
+    const { campaignId, navigation } = seed();
+    const characterId = navigation.characterId;
+    await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
     // Intercept character PATCH with a 403 Forbidden response
-    await page.route(`**/api/v1/characters/${activePcId}`, async (route) => {
+    await page.route(`**/api/v1/characters/${characterId}`, async (route) => {
       if (route.request().method() === 'PATCH') {
         await route.fulfill({
           status: 403,
@@ -29,7 +30,7 @@ test.describe('browser 403 handling (issue #1484)', () => {
     await saveBtn.click();
 
     // Page must remain on character page and NOT redirect to /login
-    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/characters/${activePcId}$`));
+    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/characters/${characterId}$`));
 
     // Inline error surfaces
     await expect(page.getByRole('alert').filter({ hasText: /Forbidden|Couldn't update/i })).toBeVisible();
