@@ -18,6 +18,7 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
+import { AiDmToolConfirmation, DriverSessionProfile, DriverToolPolicyClass } from '@campfire/schema';
 import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
@@ -69,10 +70,12 @@ import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-
 import {
   checkDriverPolicyRateLimits,
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
   DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
   DRIVER_UNDOABLE_TOOLS,
   isDriverForbiddenToolName,
+  isWithinAftermathWindow,
   MAX_PENDING_TOOL_CONFIRMATIONS,
   noteDriverConfirmToolAttempt,
   noteDriverPolicyViolation,
@@ -81,8 +84,6 @@ import {
   resolveDriverSessionProfile,
   resolveDriverToolPolicy,
   type AiDmPendingToolConfirmation,
-  type DriverSessionProfile,
-  type DriverToolPolicyClass,
 } from './driver-tool-policy';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import {
@@ -597,7 +598,15 @@ type AiDmSessionPrivateGuardFields =
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
 
-/** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
+/**
+ * Strip internal execution-guard bookkeeping before serializing session state to API clients.
+ *
+ * #1495 review finding: a TypeScript `Omit` (see {@link AiDmPublicSessionState}) only narrows
+ * the STATIC type — it does not remove a runtime object key. The actual redaction is this
+ * destructuring, and every name in {@link AiDmSessionPrivateGuardFields} MUST be destructured
+ * out here too, or the field is silently serialized to member-facing session endpoints despite
+ * being typed as absent.
+ */
 export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
   const {
     secretReadApprovals: _approvals,
@@ -611,6 +620,24 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     ...rest
   } = session;
   return rest;
+}
+
+/**
+ * Project a pending confirmation to its public REST shape (#1495, review finding :6197 class).
+ * `AiDmPendingToolConfirmation` carries internal-only bookkeeping — `retainedActionChain`
+ * (#1451's action-chain retention marker) — that `listPendingToolConfirmations`/
+ * `resolveToolConfirmation` used to return VERBATIM to `GET /tool-confirmations` and the approval
+ * response, even though the shared `@campfire/schema` `AiDmToolConfirmation` contract
+ * deliberately excludes it.
+ *
+ * Deliberately schema-enforced (`AiDmToolConfirmation.parse`, which strips unrecognized keys by
+ * zod's default behaviour) rather than hand-maintained destructuring like
+ * {@link toPublicAiDmSessionState} above: a schema-driven projection cannot silently start
+ * passing a newly added internal field through, because the schema itself has to be updated
+ * (and reviewed) for the field to appear in the public shape at all.
+ */
+export function toPublicAiDmToolConfirmation(pending: AiDmPendingToolConfirmation): AiDmToolConfirmation {
+  return AiDmToolConfirmation.parse(pending);
 }
 
 /**
@@ -835,8 +862,14 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.tool === 'string'
     && !!recordOf(rec.args)
     && typeof rec.toolCallId === 'string'
-    && (rec.profile === 'prep' || rec.profile === 'live' || rec.profile === 'aftermath')
-    && (rec.policy === 'auto' || rec.policy === 'confirm' || rec.policy === 'propose' || rec.policy === 'deny')
+    // #1495 (Devin review) — validated against the shared schema enums, not a hand-copied
+    // literal chain: DriverSessionProfile/DriverToolPolicyClass now live in @campfire/schema
+    // specifically so this file cannot drift from them again. A hand-maintained chain here
+    // would silently drop a persisted confirmation on hydration (storedGrantMap discards
+    // anything that fails this guard) the day a member is added to the schema enum but
+    // forgotten here.
+    && DriverSessionProfile.safeParse(rec.profile).success
+    && DriverToolPolicyClass.safeParse(rec.policy).success
     && typeof rec.requestedAt === 'string'
     && typeof rec.actor === 'string'
     && typeof rec.triggeredBy === 'string'
@@ -1361,8 +1394,87 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  */
 export const DRIVER_LIVE_PLAY_TOOL_NAMES: readonly string[] = [...DRIVER_LIVE_PLAY_TOOLS];
 
+/**
+ * Live-play tools with a dedicated argument-level guard branch in
+ * {@link guardDriverLivePlayArgs} (#1495). Kept as an EXPLICIT list rather than derived from the
+ * function's source, so the mechanical coverage test in ai-driver-tool-policy.spec.ts can catch
+ * a tool that is claimed guarded here but has no real branch, or a branch that exists but was
+ * never added here — the exact shape of the #1495 bug (a docblock claimed add_inventory_item
+ * was guarded; it fell through to blanket allow with an unbounded qty).
+ *
+ * Every name in {@link DRIVER_LIVE_PLAY_TOOL_NAMES} must appear in EXACTLY ONE of this set or
+ * {@link DRIVER_UNGUARDED_LIVE_PLAY_TOOLS}.
+ */
+export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
+  'generate_map',
+  'generate_ai_map',
+  'refine_ai_map',
+  'create_encounter',
+  'update_encounter',
+  'adjust_treasury',
+  'add_inventory_item',
+  'update_inventory_item',
+]);
+
+/**
+ * Live-play tools with NO argument-level guard in {@link guardDriverLivePlayArgs}, and why that
+ * is safe (#1495). A tool belongs here, not silently omitted, because the coverage test
+ * requires every {@link DRIVER_LIVE_PLAY_TOOL_NAMES} entry to be accounted for in exactly one of
+ * this set or {@link DRIVER_GUARDED_LIVE_PLAY_TOOLS} — "nobody wrote a guard for it" and
+ * "a guard is deliberately unnecessary" must never look the same.
+ *
+ * Reasons a tool needs no argument-level guard:
+ *  - it is a dice/save roll with no persisted effect on its own — nothing has happened until
+ *    something else applies the result (roll_dice, roll_action_dice, roll_initiative,
+ *    roll_death_save, saving_throw);
+ *  - begin_encounter/end_encounter/remove_combatant are fully bounded by the PER-PROFILE policy
+ *    classes already (PROFILE_TOOL_OVERRIDES denies or confirms them outright in every profile
+ *    that matters — there is no argument shape to further restrict);
+ *  - it commits reversible, narrowly-scoped mechanical state that the profile/undo machinery
+ *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
+ *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
+ *    apply_action, undo_action, update_character_hp, set_character_conditions,
+ *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
+ *  - it is a scene/world-state nudge with no economy or disclosure blast radius
+ *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
+ *    set_location_discovery, whisper_to_player, add_note).
+ */
+export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
+  'roll_dice',
+  'roll_action_dice',
+  'roll_initiative',
+  'roll_death_save',
+  'saving_throw',
+  'commit_encounter',
+  'begin_encounter',
+  'end_encounter',
+  'next_turn',
+  'set_escalation_die',
+  'add_combatant',
+  'update_combatant',
+  'remove_combatant',
+  'resolve_action',
+  'apply_action',
+  'undo_action',
+  'update_character_hp',
+  'set_character_conditions',
+  'adjust_spell_slots',
+  'award_xp',
+  'level_up_character',
+  'long_rest',
+  'short_rest',
+  'reveal_map_region',
+  'check_objective',
+  'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
+  'whisper_to_player',
+  'add_note',
+]);
+
 export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
 } from './driver-tool-policy';
 
@@ -1468,11 +1580,23 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
 }
 
 /**
- * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
- *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
- *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
+ * Execution-time guards for battle-map and economy live-play tools (#488 / #474 policy-lite /
+ * #1495). EVERY tool listed here has an explicit branch below — this docblock is a claim the
+ * function must actually keep (issue #1495 was exactly this docblock going stale: it never
+ * mentioned `add_inventory_item`, and the function had no branch for it either, so the tool
+ * fell through to blanket allow with an unbounded `qty`). See
+ * `ai-driver-tool-policy.spec.ts`'s coverage test for the mechanical check that keeps this list
+ * honest going forward.
+ *  - generate_map / generate_ai_map / refine_ai_map: bounded to
+ *    {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
+ *  - create_encounter: `hidden` is stripped (always DM-only prep on creation).
+ *  - update_encounter: VTT fields only, or authoring fields on the seat's OWN creations;
+ *    `hidden` is refused outright; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
- *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination
+ *    ({@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}).
+ *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
+ *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}).
  *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
  *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
  */
@@ -1625,6 +1749,43 @@ export function guardDriverLivePlayArgs(
           message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
         };
       }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'add_inventory_item') {
+    // Grant-only guard mirroring update_inventory_item's shape (#1495): the party/treasury
+    // pool only, never a specific character, and a bounded qty per call — the exact guard
+    // this tool was missing entirely before #1495 (it fell through to blanket allow with an
+    // unbounded qty).
+    if ('ownerType' in args && args.ownerType !== undefined && args.ownerType !== 'party') {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_owner',
+        message: 'The driver may only grant inventory items to the shared party pool (ownerType must be "party").',
+      };
+    }
+    if ('characterId' in args && args.characterId !== null && args.characterId !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_owner',
+        message: 'The driver may not target a specific character with add_inventory_item; grants go to the party pool.',
+      };
+    }
+    const qty = 'qty' in args && args.qty !== undefined ? args.qty : 1;
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty <= 0) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_qty',
+        message: 'add_inventory_item qty must be a positive integer.',
+      };
+    }
+    if (qty > DRIVER_INVENTORY_GRANT_MAX_QTY) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_grant_limit',
+        message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
+      };
     }
     return { ok: true, args: { ...args } };
   }
@@ -3254,18 +3415,30 @@ export class AiDriverService {
     };
   }
 
-  /** Resolve the driver session profile from encounter state (#474). */
-  private async resolveSessionProfile(campaignId: number): Promise<DriverSessionProfile> {
+  /**
+   * Resolve the driver session profile from encounter state (#474 / #1495).
+   *
+   * `ended` still lists the campaign's full ended-encounter history (no cheap DB-level date
+   * filter exists for it), but `profile` no longer follows from that history being non-empty:
+   * only an encounter whose `endedAt` falls within {@link isWithinAftermathWindow}'s recency
+   * window makes the profile `aftermath`. Once every ended encounter has aged out of that
+   * window, this resolves `downtime` instead of clinging to `aftermath`.
+   */
+  private async resolveSessionProfile(
+    campaignId: number,
+  ): Promise<{ profile: DriverSessionProfile }> {
     const [running, preparing, ended] = await Promise.all([
       this.encounters.listForCampaign(campaignId, 'running', 'dm'),
       this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
       this.encounters.listForCampaign(campaignId, 'ended', 'dm'),
     ]);
-    return resolveDriverSessionProfile({
+    const now = Date.now();
+    const profile = resolveDriverSessionProfile({
       hasRunningEncounter: running.length > 0,
       hasPreparingEncounter: preparing.length > 0,
-      hasEndedEncounter: ended.length > 0,
+      hasRecentlyEndedEncounter: ended.some((encounter) => isWithinAftermathWindow(encounter.endedAt, now)),
     });
+    return { profile };
   }
 
   private policyForTool(
@@ -3628,7 +3801,7 @@ export class AiDriverService {
     // registry per call from classifyDriverRead + the on-file approvals.
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
-    const sessionProfile = await this.resolveSessionProfile(campaignId);
+    const { profile: sessionProfile } = await this.resolveSessionProfile(campaignId);
     // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
     // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
     // denied live-play tools are withheld from the schema. Execution still enforces the same
@@ -5557,6 +5730,9 @@ export class AiDriverService {
       // combat log so awards survive reload (toast alone is not enough). Best-effort:
       // a log failure must not fail the grant that already committed.
       if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        // #1495 — the economy-cap accounting already happened BEFORE dispatch (see the
+        // reservation just before `toolset.call` earlier in this loop iteration); nothing to
+        // note here. This block now only owns the combat-log note.
         const detail = formatDriverLootCombatLogDetail(call.name, args);
         if (detail) {
           try {

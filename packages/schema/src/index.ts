@@ -7445,6 +7445,39 @@ export const AiDmSeat = z.object({
 export type AiDmSeat = z.infer<typeof AiDmSeat>;
 
 /**
+ * Session phase for the AI driver's per-profile tool policy (#474 / #1495): prep, live combat, a
+ * brief post-fight aftermath, or neutral downtime (no encounter running, prepping, or recently
+ * ended). Shared between the server's tool-policy engine and the web tool-confirmation queue so
+ * a server-side profile change cannot compile while the client's independent copy silently
+ * drifts (issue #1495) — see AGENTS.md's "do not redefine shared domain shapes" rule.
+ */
+export const DriverSessionProfile = z.enum(['prep', 'live', 'aftermath', 'downtime']);
+export type DriverSessionProfile = z.infer<typeof DriverSessionProfile>;
+
+/** How the AI driver may commit a tool call under the campaign's per-profile policy (#474). */
+export const DriverToolPolicyClass = z.enum(['auto', 'confirm', 'propose', 'deny']);
+export type DriverToolPolicyClass = z.infer<typeof DriverToolPolicyClass>;
+
+/**
+ * A DM-reviewed, queued confirm-policy tool call awaiting approval (#474), as returned by
+ * `GET /campaigns/:id/ai-dm/tool-confirmations`. `args` is intentionally an opaque record: it
+ * carries whatever arguments the specific tool named in `tool` accepts.
+ */
+export const AiDmToolConfirmation = z.object({
+  id: z.string(),
+  tool: z.string(),
+  args: z.record(z.string(), z.unknown()),
+  toolCallId: z.string(),
+  profile: DriverSessionProfile,
+  policy: DriverToolPolicyClass,
+  requestedAt: IsoDate,
+  actor: z.string(),
+  triggeredBy: z.string(),
+  turnNumber: z.number().int().nonnegative(),
+});
+export type AiDmToolConfirmation = z.infer<typeof AiDmToolConfirmation>;
+
+/**
  * SERVER-WIDE AI SEAT DEFAULTS (#1070).
  *
  * A multi-campaign DM used to reconfigure the AI seat from scratch every time: `defaultSeat`

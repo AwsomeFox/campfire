@@ -4,6 +4,7 @@ import {
   guardDriverLivePlayArgs,
   formatDriverLootCombatLogDetail,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
 } from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
@@ -121,6 +122,87 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       ok: false,
       code: 'forbidden_treasury_field',
       message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
+    });
+  });
+
+  it('#1495: guardDriverLivePlayArgs enforces a grant-only, bounded-qty, party-only guard on add_inventory_item', () => {
+    const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
+
+    // default qty (implicit) grant is allowed
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Potion of Healing' }, session)).toEqual({
+      ok: true,
+      args: { name: 'Potion of Healing' },
+    });
+
+    // explicit party-pool grant with a modest qty is allowed
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Rope (50ft)', qty: 2, ownerType: 'party' }, session),
+    ).toEqual({
+      ok: true,
+      args: { name: 'Rope (50ft)', qty: 2, ownerType: 'party' },
+    });
+
+    // targeting a specific character (ownerType other than "party") is refused
+    expect(
+      guardDriverLivePlayArgs(
+        'add_inventory_item',
+        { name: 'Longsword +1', ownerType: 'character', characterId: 42 },
+        session,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_owner',
+      message: 'The driver may only grant inventory items to the shared party pool (ownerType must be "party").',
+    });
+
+    // characterId alone (without an explicit non-party ownerType) is also refused
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Dagger', characterId: 7 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_owner',
+      message: 'The driver may not target a specific character with add_inventory_item; grants go to the party pool.',
+    });
+
+    // an excessive qty is rejected
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Gold Coin', qty: 999999 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_grant_limit',
+      message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
+    });
+
+    // the boundary qty is allowed, one over it is not
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: DRIVER_INVENTORY_GRANT_MAX_QTY }, session),
+    ).toEqual({
+      ok: true,
+      args: { name: 'Torch', qty: DRIVER_INVENTORY_GRANT_MAX_QTY },
+    });
+    expect(
+      guardDriverLivePlayArgs(
+        'add_inventory_item',
+        { name: 'Torch', qty: DRIVER_INVENTORY_GRANT_MAX_QTY + 1 },
+        session,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_grant_limit',
+      message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
+    });
+
+    // zero, negative, and non-integer qty are all rejected
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 0 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+      message: 'add_inventory_item qty must be a positive integer.',
+    });
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: -1 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+      message: 'add_inventory_item qty must be a positive integer.',
+    });
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 1.5 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+      message: 'add_inventory_item qty must be a positive integer.',
     });
   });
 
