@@ -93,6 +93,21 @@ export class MockAiProvider implements AiProvider {
   private readonly queue: MockResponse[];
   private cursor = 0;
   /**
+   * #1500 — set the first time {@link next} is called past the end of the canned queue, i.e. the
+   * provider fell back to an echo reply. Once true a scripted test has desynced: the driver made
+   * more provider calls than were scripted, and every later `script(...)` push lands behind the
+   * cursor and is silently dropped — so the harness refuses further `script(...)` calls until a
+   * reset. Cleared by {@link clearResponses}.
+   */
+  private exhausted = false;
+  /**
+   * #1500 — how many provider calls were answered by the echo fallback (cursor already past the
+   * canned queue) since the last reset. Zero means every call consumed a scripted response; the
+   * harness' `assertScriptDrained` asserts this stays zero so a desynced test can no longer
+   * echo-pass.
+   */
+  private echoFallbackCount = 0;
+  /**
    * #598 — invoked the instant a {@link MockResponse.stallAfterDone} stall begins. Lets a test
    * act inside the window between the terminal frame landing and the driver's `finally`.
    */
@@ -112,6 +127,9 @@ export class MockAiProvider implements AiProvider {
   clearResponses(): void {
     this.queue.length = 0;
     this.cursor = 0;
+    // #1500 — a fresh queue is no longer exhausted and owes no echoes.
+    this.exhausted = false;
+    this.echoFallbackCount = 0;
   }
 
   /** Clear the request log (pairs with {@link clearResponses} for isolation). */
@@ -119,9 +137,29 @@ export class MockAiProvider implements AiProvider {
     this.received.length = 0;
   }
 
+  /** #1500 — true once the canned queue ran out and the provider served an echo fallback. */
+  get isExhausted(): boolean {
+    return this.exhausted;
+  }
+
+  /** #1500 — number of provider calls answered by the echo fallback since the last reset. */
+  get echoFallbacks(): number {
+    return this.echoFallbackCount;
+  }
+
   /** Next canned response (or an echo fallback), advancing the cursor. */
   private next(): MockResponse {
-    const r = this.cursor < this.queue.length ? this.queue[this.cursor] : {};
+    if (this.cursor >= this.queue.length) {
+      // #1500 — record the desync: the driver asked for a turn no test scripted, so the mock is
+      // about to return an echo with `finishReason: 'stop'` and no tool calls — a reply a
+      // desynced test can silently read as a clean `complete`. Surfaced via isExhausted /
+      // echoFallbacks so the harness can fail the test instead of echo-passing.
+      this.exhausted = true;
+      this.echoFallbackCount += 1;
+      this.cursor += 1;
+      return {};
+    }
+    const r = this.queue[this.cursor];
     this.cursor += 1;
     return r;
   }

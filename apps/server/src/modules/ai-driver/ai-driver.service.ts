@@ -169,7 +169,12 @@ export type AiDmStopReason =
   // dispatched. Deliberately NOT a flavour of `provider_error`: that reason is retryable
   // plumbing failure and is surfaced to the table as "the AI provider failed", which is both
   // untrue here and the wrong lever set. It is equally not `complete` — that is the bug.
-  | 'content_withheld';
+  | 'content_withheld'
+  // #1500 — the provider's `length` finish cut the reply mid-sentence at the per-step token cap.
+  // The partial prose WAS delivered (a length finish is deliverable, unlike a content_filter),
+  // but the turn is not a finished DM turn, so the seat parks on the stuck ladder for a human
+  // rather than reporting a healthy `complete`.
+  | 'truncated';
 
 /** Abort reason wired into provider AbortSignals when a stop control fires (#558). */
 export const GENERATION_STOP_ABORT = 'generation_stop';
@@ -464,7 +469,8 @@ export type AiDmStuckReason =
   | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
   | 'provider_error' // provider failed or stalled mid-stream (#1046 / #1063)
   | 'unsupported_claim' // the turn asserted rules/canon the server could not verify (#577)
-  | 'content_withheld'; // a provider content filter / refusal withheld the turn (#598)
+  | 'content_withheld' // a provider content filter / refusal withheld the turn (#598)
+  | 'truncated'; // a provider `length` finish cut the reply mid-sentence (#1500)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -819,6 +825,10 @@ const STUCK_REASONS = allowlist<AiDmStuckReason>({
   // owes this table a decision, and would happily accept the next action as if the refused
   // turn had never happened.
   content_withheld: true,
+  // #1500 — a length-truncated turn. Must hydrate for the same reason content_withheld does:
+  // a restart that filed it as healthy would silently accept the next action as if the cut-off
+  // turn had been a finished DM turn.
+  truncated: true,
 });
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -4796,7 +4806,12 @@ export class AiDriverService {
 
         const toolCalls = result?.toolCalls ?? [];
         if (toolCalls.length === 0) {
-          stopReason = 'complete';
+          // #1500 — a `length` finish means the provider hit the per-step token cap mid-sentence,
+          // so this is a fragment, not a finished DM turn. content_filter/refusal already broke
+          // out above as content_withheld; `length` is the one deliver-but-flag finish reason.
+          // Filing it as `complete` would deliver a mid-sentence fragment as canon and leave the
+          // seat healthy — park it as `truncated` so the stuck ladder asks the table for a hand.
+          stopReason = result?.finishReason === 'length' ? 'truncated' : 'complete';
           break;
         }
 
@@ -7526,6 +7541,9 @@ export function classifyStuck(ctx: {
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
   if (ctx.stopReason === 'provider_error') return 'provider_error';
+  // #1500 — a length-truncated turn is incomplete; park it for a human, ranked with the hard
+  // stops (it is not healthy play) and above the soft signals below.
+  if (ctx.stopReason === 'truncated') return 'truncated';
   // #577 — a turn that COMPLETED but asserted rules/canon the server could not verify is not a
   // healthy turn. Ranked below the hard stops (those are the more actionable diagnosis) and above
   // the soft signals, because an unverified ruling is what the table most needs to act on.
@@ -7558,6 +7576,10 @@ function describeStuck(reason: AiDmStuckReason): string {
     case 'content_withheld':
       // Neutral and non-specific on purpose (#598) — see describeWithheldTurn in driver-safety.ts.
       return 'The AI’s reply was withheld before it reached the table — nothing was posted or saved. A human can retry, nudge with different framing, or continue without the AI.';
+    case 'truncated':
+      // #1500 — the partial prose was delivered, so say so plainly: the reply is incomplete,
+      // not missing. Retry re-runs the turn; nudge replays it with a hint to finish.
+      return 'The AI’s reply was cut off mid-sentence by the token limit and is incomplete. A human can retry or nudge it to finish.';
     default:
       return 'The AI needs help.';
   }
