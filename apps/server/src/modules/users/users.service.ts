@@ -242,7 +242,7 @@ export class UsersService {
         .where(
           and(
             eq(notifications.actorUserId, stableUserId),
-            notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published']),
+            notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published', 'ai_dm_alert']),
           ),
         )
         .run();
@@ -251,7 +251,7 @@ export class UsersService {
         .where(
           and(
             eq(notificationDigestQueue.actorUserId, stableUserId),
-            notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published']),
+            notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published', 'ai_dm_alert']),
           ),
         )
         .run();

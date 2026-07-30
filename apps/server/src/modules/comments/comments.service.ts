@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, CommentReplyPage, CommentThread, CommentThreadPage, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, characters, comments } from '../../db/schema';
+import { attachments, characters, comments, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { notDeleted } from '../../common/soft-delete';
@@ -578,22 +578,34 @@ export class CommentsService {
     const attribution = await this.resolveCharacterAttribution(campaignId, input, user);
 
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(comments)
-      .values({
-        campaignId,
-        entityType,
-        entityId,
-        parentId,
-        authorUserId: user.id,
-        authorName: user.name,
-        body: input.body,
-        inCharacter: input.inCharacter ?? false,
-        ...attribution,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    const accountId = Number.parseInt(user.id, 10);
+    const row = this.db.transaction((tx) => {
+      const current = Number.isInteger(accountId)
+        ? tx
+            .select({ displayName: users.displayName, username: users.username })
+            .from(users)
+            .where(eq(users.id, accountId))
+            .limit(1)
+            .get()
+        : undefined;
+      return tx
+        .insert(comments)
+        .values({
+          campaignId,
+          entityType,
+          entityId,
+          parentId,
+          authorUserId: user.id,
+          authorName: current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name),
+          body: input.body,
+          inCharacter: input.inCharacter ?? false,
+          ...attribution,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+    });
 
     await this.audit.log({
       actor: auditActor(user),
