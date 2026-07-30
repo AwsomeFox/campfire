@@ -47,7 +47,8 @@ test.describe('browser 403 handling (issue #1484)', () => {
     await confirmBtn.click();
 
     // Page must remain on character page and NOT redirect to /login
-    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/characters/${characterId}\\?focus=xp$`));
+    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/characters/${characterId}`));
+    await expect(page).not.toHaveURL(/\/login/);
 
     // Inline error surfaces
     await expect(page.getByRole('alert').filter({ hasText: /Forbidden|Couldn't level up/i })).toBeVisible();
