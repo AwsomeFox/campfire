@@ -50,7 +50,7 @@ export const CombatLog = React.memo(function CombatLog({ events }: { events: Enc
 
   return (
     <Card className="space-y-2 min-w-0" id="combat-log">
-      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>Combat log</h2>
+      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>{t('combatLogHeading', 'Combat log')}</h2>
       <div
         ref={logRef}
         role="log"

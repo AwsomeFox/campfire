@@ -157,10 +157,6 @@ import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
   formatCombatLogAnnouncementBatch,
-  formatCombatLogChainDetails,
-  formatCombatLogChainSummary,
-  formatCombatLogEventSummary,
-  groupCombatLogEvents,
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
