@@ -105,7 +105,7 @@ export function CharacterInventorySection({
               <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
-              <Btn density="xs" type="button" variant="secondary" className="cf-print-hide text-xs" onClick={() => setShowCompendiumPicker(true)}>
+              <Btn density="xs" ghost type="button" className="cf-print-hide text-xs" onClick={() => setShowCompendiumPicker(true)}>
                 {t('inventory.fromCompendium')}
               </Btn>
             </div>
