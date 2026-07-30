@@ -3232,7 +3232,13 @@ export default function RunSessionPage() {
                   encounterId={eid}
                   combatant={c}
                   isCurrentTurn={c.id === currentCombatantId}
-                  canEdit={canEditCombatant(c)}
+                  // Permission decides whether these controls MOUNT at all (issue #1746):
+                  // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
+                  // them. Whether the sync gate currently blocks writes is a separate, transient
+                  // signal passed via `syncBlocked` so the row can render disabled instead of
+                  // unmounting — see CombatantRow's `syncBlocked` prop.
+                  canEdit={canEditCombatantPermission(c)}
+                  syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   canViewStatblock={isDm}
                   canRemove={canDmWrite}
@@ -3277,7 +3283,9 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onUseMonsterAction={
-                    canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                    // Permission-only mount (issue #1746): the sync gate disables the rendered
+                    // "Use" buttons via `syncBlocked` below rather than unmounting the list.
+                    canEditCombatantPermission(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
                       ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
@@ -3331,7 +3339,9 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onPatchTurnState={
-                    canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
+                    // Permission-only mount (issue #1746): the delay/ready controls stay in the
+                    // tree and are disabled via `syncBlocked` instead of disappearing.
+                    canEditCombatantPermission(c) && c.id === currentCombatantId && encounter.status === 'running'
                       ? (patch) => patchCombatantTurnState(c.id, patch)
                       : undefined
                   }
@@ -6328,6 +6338,7 @@ function CombatantRow({
   combatant,
   isCurrentTurn,
   canEdit,
+  syncBlocked,
   canEditIdentity,
   canViewStatblock,
   canRemove,
@@ -6371,7 +6382,15 @@ function CombatantRow({
   encounterId: number;
   combatant: Combatant;
   isCurrentTurn: boolean;
+  /** Permission to edit this combatant right now — governs whether editing controls mount at all. */
   canEdit: boolean;
+  /**
+   * Issue #1746: the encounter sync gate is currently blocking conflict-prone writes
+   * (`riskyBlocked` at the call site). Distinct from `canEdit` (permission): a
+   * permitted viewer's controls stay mounted and are rendered disabled with an
+   * accessible reason instead of disappearing, so a reconnect never reflows the row.
+   */
+  syncBlocked: boolean;
   canEditIdentity: boolean;
   canViewStatblock: boolean;
   canRemove: boolean;
@@ -6429,6 +6448,15 @@ function CombatantRow({
   onPatchTurnState?: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation();
+  // Issue #1746: one shared reason string for every write control this row disables while
+  // the sync gate blocks — kept as a single computed value so every site stays in agreement
+  // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
+  // tech via `aria-describedby` (below) rather than `title` alone, which screen readers
+  // announce inconsistently and keyboard-only users cannot reach at all.
+  const syncBlockedReason = syncBlocked ? t('encounters.sync.controlsPaused') : undefined;
+  const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
+  const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
   const [addingCondition, setAddingCondition] = useState(false);
   const [editingIdentity, setEditingIdentity] = useState(false);
   const [nameDraft, setNameDraft] = useState(combatant.name);
@@ -6546,6 +6574,13 @@ function CombatantRow({
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
     >
+      {/* Issue #1746: single accessible reason shared by every write control this row
+          disables while the sync gate blocks, referenced via aria-describedby below. */}
+      {syncBlocked && (
+        <span id={syncBlockedReasonId} className="sr-only">
+          {syncBlockedReason}
+        </span>
+      )}
       {canSetInitiative ? (
         <div className="flex items-center" style={{ gap: 2 }}>
           <input
@@ -6760,10 +6795,12 @@ function CombatantRow({
                   <button
                     type="button"
                     aria-label={`Clear ${combatant.name} concentration`}
+                    aria-describedby={syncBlockedDescribedBy}
                     onClick={() => onPatchSourceTurnState(combatant.id, { concentration: null })}
-                    disabled={busy}
+                    disabled={busy || syncBlocked}
+                    title={syncBlockedReason}
                     style={{
-                      cursor: busy ? 'default' : 'pointer',
+                      cursor: busy || syncBlocked ? 'default' : 'pointer',
                       opacity: 0.7,
                       background: 'transparent',
                       border: 0,
@@ -6856,14 +6893,16 @@ function CombatantRow({
                       <button
                         type="button"
                         aria-label={`Edit ${inst.name}`}
+                        aria-describedby={syncBlockedDescribedBy}
                         onClick={() => {
                           setEditingConditionId(inst.id);
                           setConditionDraft(conditionDraftFromInstance(inst));
                           setAddingCondition(true);
                         }}
-                        disabled={busy}
+                        disabled={busy || syncBlocked}
+                        title={syncBlockedReason}
                         style={{
-                          cursor: busy ? 'default' : 'pointer',
+                          cursor: busy || syncBlocked ? 'default' : 'pointer',
                           opacity: 0.7,
                           background: 'transparent',
                           border: 0,
@@ -6877,10 +6916,12 @@ function CombatantRow({
                       <button
                         type="button"
                         aria-label={`Remove ${inst.name}`}
+                        aria-describedby={syncBlockedDescribedBy}
                         onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
-                        disabled={busy}
+                        disabled={busy || syncBlocked}
+                        title={syncBlockedReason}
                         style={{
-                          cursor: busy ? 'default' : 'pointer',
+                          cursor: busy || syncBlocked ? 'default' : 'pointer',
                           opacity: 0.7,
                           background: 'transparent',
                           border: 0,
@@ -6906,10 +6947,12 @@ function CombatantRow({
                   <button
                     type="button"
                     aria-label={`Remove ${cond}`}
+                    aria-describedby={syncBlockedDescribedBy}
                     onClick={() => onRemoveCondition(cond)}
-                    disabled={busy}
+                    disabled={busy || syncBlocked}
+                    title={syncBlockedReason}
                     style={{
-                      cursor: busy ? 'default' : 'pointer',
+                      cursor: busy || syncBlocked ? 'default' : 'pointer',
                       opacity: 0.7,
                       background: 'transparent',
                       border: 0,
@@ -6934,7 +6977,9 @@ function CombatantRow({
             <button
               type="button"
               className="btn btn-ghost"
-              disabled={busy}
+              disabled={busy || syncBlocked}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
               data-testid={`delay-toggle-${combatant.id}`}
               onClick={() => onPatchTurnState({ delaying: !combatant.turnState?.delaying })}
               style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
@@ -6950,7 +6995,9 @@ function CombatantRow({
               className="input"
               placeholder="Ready action trigger…"
               value={readiedDraft}
-              disabled={busy}
+              disabled={busy || syncBlocked}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
               maxLength={200}
               onChange={(e) => setReadiedDraft(e.target.value)}
               onKeyDown={(e) => {
@@ -6965,7 +7012,9 @@ function CombatantRow({
             <button
               type="button"
               className="btn btn-ghost"
-              disabled={busy}
+              disabled={busy || syncBlocked}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
               data-testid={`readied-set-${combatant.id}`}
               onClick={() => {
                 const trimmed = readiedDraft.trim();
@@ -6979,7 +7028,9 @@ function CombatantRow({
               <button
                 type="button"
                 className="btn btn-ghost"
-                disabled={busy}
+                disabled={busy || syncBlocked}
+                title={syncBlockedReason}
+                aria-describedby={syncBlockedDescribedBy}
                 data-testid={`readied-clear-${combatant.id}`}
                 onClick={() => {
                   setReadiedDraft('');
@@ -7214,7 +7265,12 @@ function CombatantRow({
                     </span>
                   )}
                 </div>
-                <Btn type="submit" disabled={busy || conditionDraft.name.trim() === ''}>
+                <Btn
+                  type="submit"
+                  disabled={busy || syncBlocked || conditionDraft.name.trim() === ''}
+                  title={syncBlockedReason}
+                  aria-describedby={syncBlockedDescribedBy}
+                >
                   {editingConditionId ? 'Update condition' : 'Add condition'}
                 </Btn>
                 <button
@@ -7232,8 +7288,13 @@ function CombatantRow({
               </form>
             ) : (
               <button
+                type="button"
                 className="btn btn-ghost"
                 style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                disabled={syncBlocked}
+                title={syncBlockedReason}
+                aria-describedby={syncBlockedDescribedBy}
+                data-testid={`add-condition-toggle-${combatant.id}`}
                 onClick={() => {
                   setEditingConditionId(null);
                   setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
@@ -7249,8 +7310,9 @@ function CombatantRow({
               <button
                 type="button"
                 className="btn btn-ghost"
-                disabled={busy || (combatant.rpCurrent ?? 0) < 1 || (combatant.spCurrent ?? 0) >= combatant.spMax}
-                title={(combatant.rpCurrent ?? 0) < 1 ? 'Requires at least 1 Resolve Point' : '10-minute Stamina Rest: spends 1 RP to restore full SP'}
+                disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1 || (combatant.spCurrent ?? 0) >= combatant.spMax}
+                title={syncBlockedReason ?? ((combatant.rpCurrent ?? 0) < 1 ? 'Requires at least 1 Resolve Point' : '10-minute Stamina Rest: spends 1 RP to restore full SP')}
+                aria-describedby={syncBlockedDescribedBy}
                 onClick={() => onPatchCombatant({ spSet: combatant.spMax, rpDelta: -1 })}
                 style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                 data-testid="stamina-rest-btn"
@@ -7265,8 +7327,9 @@ function CombatantRow({
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  disabled={busy}
-                  title="Stabilize combatant at 0 HP"
+                  disabled={busy || syncBlocked}
+                  title={syncBlockedReason ?? 'Stabilize combatant at 0 HP'}
+                  aria-describedby={syncBlockedDescribedBy}
                   onClick={() => onPatchCombatant({ deathState: 'stable' })}
                   style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                 >
@@ -7277,8 +7340,9 @@ function CombatantRow({
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      disabled={busy || (combatant.rpCurrent ?? 0) < 1}
-                      title="Spend 1 RP to stabilize"
+                      disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1}
+                      title={syncBlockedReason ?? 'Spend 1 RP to stabilize'}
+                      aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ deathState: 'stable', rpDelta: -1 })}
                       style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                     >
@@ -7287,8 +7351,9 @@ function CombatantRow({
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      disabled={busy || (combatant.rpCurrent ?? 0) < 1}
-                      title="Spend 1 RP to revive at 1 HP"
+                      disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1}
+                      title={syncBlockedReason ?? 'Spend 1 RP to revive at 1 HP'}
+                      aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ hpSet: 1, deathState: 'none', rpDelta: -1 })}
                       style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                     >
@@ -7312,6 +7377,7 @@ function CombatantRow({
             encounterId={encounterId}
             combatantId={combatant.id}
             enabled
+            disabledReason={syncBlockedReason}
             onUseAction={onUseMonsterAction}
           />
         )}
@@ -7392,8 +7458,9 @@ function CombatantRow({
                     <button
                       type="button"
                       className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
-                      disabled={busy || (combatant.rpCurrent ?? 0) <= 0}
-                      title="Decrease Resolve Points"
+                      disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) <= 0}
+                      title={syncBlockedReason ?? 'Decrease Resolve Points'}
+                      aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ rpDelta: -1 })}
                     >
                       −
@@ -7401,8 +7468,9 @@ function CombatantRow({
                     <button
                       type="button"
                       className="btn btn-ghost !px-1 text-[10px] cf-density-xs"
-                      disabled={busy || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
-                      title="Increase Resolve Points"
+                      disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
+                      title={syncBlockedReason ?? 'Increase Resolve Points'}
+                      aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ rpDelta: 1 })}
                     >
                       +
@@ -7428,9 +7496,12 @@ function CombatantRow({
               type="number"
               min={0}
               aria-label={`Set temporary HP for ${combatant.name}`}
+              aria-describedby={syncBlockedDescribedBy}
               placeholder="temp"
               value={tempDraft}
-              disabled={busy}
+              disabled={busy || syncBlocked}
+              title={syncBlockedReason}
+              data-testid={`temp-hp-input-${combatant.id}`}
               onChange={(e) => setTempDraft(e.target.value)}
               onBlur={commitTempHp}
               onKeyDown={(e) => {
@@ -7462,7 +7533,12 @@ function CombatantRow({
               className="btn btn-icon btn-secondary cf-target-44"
               style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
               /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
-                 lands instantly via setQueryData, so there's no round-trip to wait on. */
+                 lands instantly via setQueryData, so there's no round-trip to wait on.
+                 `busy` intentionally does NOT disable this button; only the sync gate
+                 (issue #1746) does, since a blocked write really cannot be trusted. */
+              disabled={syncBlocked}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
               aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
               onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
             >
