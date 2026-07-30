@@ -660,18 +660,21 @@ export class NotesService {
     }
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
     const row = this.db.transaction((tx) => {
-      const current = tx
-        .select({ displayName: users.displayName, username: users.username })
-        .from(users)
-        .where(eq(users.id, Number(user.id)))
-        .limit(1)
-        .get();
+      const accountId = Number(user.id);
+      const current = Number.isInteger(accountId) && accountId > 0
+        ? tx
+            .select({ displayName: users.displayName, username: users.username })
+            .from(users)
+            .where(eq(users.id, accountId))
+            .limit(1)
+            .get()
+        : undefined;
       return tx
         .insert(notes)
         .values({
         campaignId,
         authorUserId: user.id,
-        authorName: current ? (current.displayName || current.username) : 'Deleted user',
+        authorName: current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name),
         kind: 'note',
         visibility,
         entityType: input.entityType ?? null,
@@ -924,18 +927,21 @@ export class NotesService {
     await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
     const row = this.db.transaction((tx) => {
-      const current = tx
-        .select({ displayName: users.displayName, username: users.username })
-        .from(users)
-        .where(eq(users.id, Number(user.id)))
-        .limit(1)
-        .get();
+      const accountId = Number(user.id);
+      const current = Number.isInteger(accountId) && accountId > 0
+        ? tx
+            .select({ displayName: users.displayName, username: users.username })
+            .from(users)
+            .where(eq(users.id, accountId))
+            .limit(1)
+            .get()
+        : undefined;
       return tx
         .insert(notes)
         .values({
         campaignId,
         authorUserId: user.id,
-        authorName: current ? (current.displayName || current.username) : 'Deleted user',
+        authorName: current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name),
         kind: 'inbox',
         visibility: 'dm_shared',
         entityType: null,
