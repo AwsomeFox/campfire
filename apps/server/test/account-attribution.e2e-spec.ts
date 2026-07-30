@@ -124,6 +124,11 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.moderationReporter.every((row) => row.reporterName === label)).toBe(true);
     expect(rows.moderationSubject.every((row) => row.subjectName === label)).toBe(true);
     expect(rows.moderationEvidence.every((row) => row.authorName === label)).toBe(true);
+    expect(
+      rows.moderationEvidence
+        .filter((row) => row.targetType === 'notification')
+        .every((row) => row.content === NEUTRAL_NOTIFICATION_BODY),
+    ).toBe(true);
     expect(rows.moderationEvidence.every((row) => verifyModerationEvidence({ campaignId: row.campaignId, targetType: row.targetType, targetId: row.targetId, reason: row.reason, source: row.source, authorUserId: row.authorUserId, authorName: row.authorName, recipientUserId: row.recipientUserId, anchorEntityType: row.anchorEntityType, anchorEntityId: row.anchorEntityId, revisionAt: row.revisionAt, capturedAt: row.capturedAt, context: JSON.parse(row.contextJson) as Record<string, unknown>, content: row.content }, row.contentHash, row.redactedAt, row.metadataHash) === 'intact')).toBe(true);
     expect(rows.moderationMutes.every((row) => row.userName === label)).toBe(true);
     expect(rows.checkRequests.every((row) => row.requestedByName === label)).toBe(true);
@@ -193,6 +198,42 @@ describe('account historical attribution privacy (e2e)', () => {
     expect((await member.post(`/api/v1/campaigns/${campaignId}/roll`).send({ expr: '1d20', label: 'Attribution check' })).status).toBe(201);
 
     const db = ctx.app.get<DrizzleDb>(DB);
+    // A real attributed safety hold must retain its stable actor id without
+    // excluding that actor from table-wide delivery. Report the delivered bell
+    // item too, so its moderation snapshot is covered by later privacy rewrites.
+    expect((await member.post(`/api/v1/campaigns/${campaignId}/safety/hold`).send({ anonymous: false })).status).toBe(200);
+    const safetyNotification = db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.campaignId, campaignId))
+      .all()
+      .find((row) => row.type === 'safety_hold' && row.userId === adminId);
+    expect(safetyNotification).toBeDefined();
+    expect(safetyNotification!.actorUserId).toBe(String(memberId));
+    expect(safetyNotification!.actorName).toBe(OLD_LABEL);
+    expect(safetyNotification!.body).toContain(OLD_LABEL);
+    expect(
+      db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.campaignId, campaignId))
+        .all()
+        .some((row) => row.type === 'safety_hold' && row.userId === memberId && row.actorUserId === String(memberId)),
+    ).toBe(true);
+    expect(
+      (await admin
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports`)
+        .send({ targetType: 'notification', targetId: safetyNotification!.id, reason: 'harassment' })).status,
+    ).toBe(201);
+    expect(
+      db
+        .select()
+        .from(moderationEvidence)
+        .where(eq(moderationEvidence.authorUserId, String(memberId)))
+        .all()
+        .some((row) => row.targetType === 'notification' && row.content.includes(OLD_LABEL)),
+    ).toBe(true);
+
     const ts = '2099-01-01T00:00:00.000Z';
     characterId = db.insert(characters).values({ campaignId, name: 'Attribution character', createdAt: ts, updatedAt: ts }).returning().get().id;
     const charterVersionId = db.insert(sessionZeroCharterVersions).values({ campaignId, version: 1, lines: '[]', veils: '[]', safetyTools: '[]', houseRules: '', toneAndExpectations: '', material: false, changeSummary: '', publishedBy: String(adminId), publishedAt: ts }).returning().get().id;
@@ -205,7 +246,7 @@ describe('account historical attribution privacy (e2e)', () => {
     db.insert(moderationReports).values({ campaignId, targetType: 'conduct', targetId: null, reporterUserId: String(memberId), reporterName: OLD_LABEL, subjectUserId: String(memberId), subjectName: OLD_LABEL, reason: 'conduct', details: '', status: 'open', resolution: null, resolutionNote: '', evidenceId, quarantined: false, escalationReason: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(moderationMutes).values({ campaignId, userId: String(memberId), userName: OLD_LABEL, reason: 'test', createdBy: String(adminId), createdAt: ts, liftedAt: null, liftedBy: null }).run();
     db.insert(checkRequests).values({ campaignId, characterId, encounterId: null, checkId: 'save:DEX', checkLabel: 'DEX save', mode: 'flat', dc: null, consequence: '', status: 'pending', requestedByUserId: String(memberId), requestedByName: OLD_LABEL, rollId: null, createdAt: ts, resolvedAt: null }).run();
-    db.insert(aiDmTranscriptEvents).values({ campaignId, seq: 1, eventId: 'account-attribution-transcript', kind: 'player.action', actorUserId: String(memberId), actorName: OLD_LABEL, clientRef: null, turnId: null, payload: '{}', visibility: 'all', createdAt: ts }).run();
+    db.insert(aiDmTranscriptEvents).values({ campaignId, seq: 99, eventId: 'account-attribution-transcript', kind: 'player.action', actorUserId: String(memberId), actorName: OLD_LABEL, clientRef: null, turnId: null, payload: '{}', visibility: 'all', createdAt: ts }).run();
     db.insert(proposals).values({ campaignId, entityType: 'note', entityId: null, action: 'create', payload: '{}', proposer: OLD_LABEL, proposerUserId: String(memberId), proposerToken: null, status: 'pending', resolvedBy: '', note: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(notifications).values({ userId: adminId, campaignId, type: 'note_created', title: `${OLD_LABEL} left Old Handlex intact`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'note', entityId: noteId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();
     db.insert(notificationDigestQueue).values({ userId: adminId, campaignId, type: 'schedule_rsvp', title: `${OLD_LABEL} at Old Handlex`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'scheduled_session', entityId: schedule.body.id, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), reason: 'digest', createdAt: ts }).run();

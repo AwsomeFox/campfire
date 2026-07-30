@@ -144,35 +144,39 @@ describe('table safety hold / X-Card (#599)', () => {
     expect(rows[0].requestId).toBeNull();
   });
 
-  it('notifies the table with a NULL actor so nobody is excluded from the ping', async () => {
+  it('notifies every member while retaining only attributed actor ids', async () => {
     const campaignId = await newCampaign('Notify All');
     const notifications = ctx.app.get(NotificationsService);
-    const spy = jest.spyOn(notifications, 'notifyCampaign');
+    const anonymousSpy = jest.spyOn(notifications, 'notifyCampaign');
+    const attributedSpy = jest.spyOn(notifications, 'notifyCampaignIncludingActor');
     try {
       await request(server).post(`/api/v1/campaigns/${campaignId}/safety/hold`).set(player).send({});
-      const call = spy.mock.calls.find((c) => c[0] === campaignId && (c[2] as { type?: string })?.type === 'safety_hold');
+      const call = anonymousSpy.mock.calls.find(
+        (c) => c[0] === campaignId && (c[2] as { type?: string })?.type === 'safety_hold',
+      );
       expect(call).toBeDefined();
       // THE ASSERTION THAT MATTERS. `notifyCampaign` EXCLUDES its actor from the recipient
       // list — correct for "Ana updated the quest", catastrophic here: the one member with no
       // ping would be the member who raised the hold. Attribution by conspicuous absence,
-      // computed by the table over lunch. Passing null is what closes it, and it is passed for
-      // ATTRIBUTED holds too so the delivery pattern itself cannot distinguish the two cases.
+      // computed by the table over lunch. Anonymous holds pass null and retain no id at all.
       expect(call?.[1]).toBeNull();
       expect(call?.[2]).toMatchObject({ type: 'safety_hold' });
 
       const attributed = await newCampaign('Notify All Attributed');
-      spy.mockClear();
+      attributedSpy.mockClear();
       await request(server)
         .post(`/api/v1/campaigns/${attributed}/safety/hold`)
         .set(player)
         .send({ anonymous: false });
-      const attributedCall = spy.mock.calls.find(
+      const attributedCall = attributedSpy.mock.calls.find(
         (c) => c[0] === attributed && (c[2] as { type?: string })?.type === 'safety_hold',
       );
       expect(attributedCall).toBeDefined();
-      expect(attributedCall?.[1]).toBeNull();
+      expect(attributedCall?.[1]).toBe('dev:safety-player');
+      expect(attributedCall?.[3]).toEqual({ bypassBlockFilter: true });
     } finally {
-      spy.mockRestore();
+      anonymousSpy.mockRestore();
+      attributedSpy.mockRestore();
     }
   });
 

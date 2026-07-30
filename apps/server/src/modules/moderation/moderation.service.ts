@@ -1519,11 +1519,9 @@ export class ModerationService implements OnApplicationBootstrap {
     return {
       targetType: 'notification',
       targetId,
-      // The notifications table stores only the actor's display NAME, not their id
-      // (see db/schema.ts), so a notification report has no machine-resolvable
-      // subject. The DM sees `subjectName` and can act on the person by hand; the
-      // `mute` action, which needs an id, refuses with a clear message.
-      authorUserId: '',
+      // Preserve the durable actor id when the notification has one. System and
+      // anonymous notifications remain intentionally un-attributed.
+      authorUserId: row.actorUserId ?? '',
       authorName: row.actorName,
     };
   }
@@ -1611,7 +1609,7 @@ export class ModerationService implements OnApplicationBootstrap {
           targetId: row.id,
           reason: 'report',
           source: 'server_capture',
-          authorUserId: '',
+          authorUserId: row.actorUserId ?? '',
           authorName: row.actorName,
           recipientUserId: String(row.userId),
           anchorEntityType: row.entityType,

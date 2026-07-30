@@ -210,6 +210,10 @@ export class UsersService {
     // user id/content/context rather than leaving a privacy update looking tampered.
     const evidenceRows = tx.select().from(moderationEvidence).where(eq(moderationEvidence.authorUserId, stableUserId)).all();
     for (const row of evidenceRows) {
+      // Notification evidence copies bell title/body verbatim. Once the actor is
+      // linked by stable id, remove those public copies rather than attempting an
+      // unsafe substring replacement inside user-authored text.
+      const content = row.targetType === 'notification' ? 'This notification has updated attribution.' : row.content;
       const payload: ModerationEvidencePayload = {
         campaignId: row.campaignId,
         targetType: row.targetType,
@@ -224,11 +228,12 @@ export class UsersService {
         revisionAt: row.revisionAt,
         capturedAt: row.capturedAt,
         context: fromJsonText<Record<string, unknown>>(row.contextJson, {}),
-        content: row.content,
+        content,
       };
       tx.update(moderationEvidence)
         .set({
           authorName: nextLabel,
+          content,
           contentHash: moderationEvidenceHash(payload),
           metadataHash: moderationEvidenceMetadataHash(payload),
         })
