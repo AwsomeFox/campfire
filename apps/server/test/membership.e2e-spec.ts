@@ -439,9 +439,9 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
       altId = altRes.body.id;
     });
 
-    it('unlinked character: player B cannot edit (403), ownerUserId is null', async () => {
+    it('unlinked character: player B cannot read or edit it (403)', async () => {
       const getRes = await userB.get(`/api/v1/characters/${heroId}`);
-      expect(getRes.body.ownerUserId).toBeNull();
+      expect(getRes.status).toBe(403);
 
       const patchRes = await userB.patch(`/api/v1/characters/${heroId}`).send({ notes: 'should fail' });
       expect(patchRes.status).toBe(403);

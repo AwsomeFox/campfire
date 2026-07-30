@@ -294,7 +294,10 @@ export default async function globalSetup(config: FullConfig) {
     kind: 'Navigation fixture',
     status: 'explored',
   });
-  const navCharacter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/characters`, {
+  // The cross-surface fixture must be accessible to the player-role specs that
+  // exercise a full character sheet. A player-created sheet is owned automatically.
+  const navCharacterOwner = await loginContext(baseURL, 'player');
+  const navCharacter = await okJson(navCharacterOwner, 'post', `/api/v1/campaigns/${campaignId}/characters`, {
     name: 'DLRNAV Aria',
     className: 'Ranger',
     status: 'retired',
@@ -303,6 +306,7 @@ export default async function globalSetup(config: FullConfig) {
     hpCurrent: 24,
     ac: 14,
   });
+  await navCharacterOwner.dispose();
   const navSession = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/sessions`, {
     number: 1,
     title: 'DLRNAV First Crossing',

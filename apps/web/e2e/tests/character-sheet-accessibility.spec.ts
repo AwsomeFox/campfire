@@ -15,8 +15,8 @@ import { seed, stateFor } from './seed';
  * Issue #448 — name every skill, save, XP, and HP control on the character sheet.
  *
  * Edit mode (owner/DM): unique proficiency names + pressed state, labeled XP
- * award with help/error, contextual HP buttons. Read mode (viewer): axe-clean
- * without edit controls exposing identical “○” names.
+ * award with help/error, contextual HP buttons. Non-owners must not receive a
+ * full sheet at all, including its controls.
  */
 
 test.describe('character sheet accessibility (issue #448)', () => {
@@ -132,26 +132,22 @@ test.describe('character sheet accessibility (issue #448)', () => {
     });
   });
 
-  test.describe('read mode', () => {
+  test.describe('non-owner access', () => {
     test.use({ storageState: stateFor('viewer') });
 
-    test('read-only sheet keeps roll names unique and is axe-clean', async ({ page }) => {
+    test('does not expose another player\'s sheet or its roll controls', async ({ page }) => {
       const { campaignId, navigation } = seed();
+      const response = page.waitForResponse(
+        (res) => res.url().includes(`/api/v1/characters/${navigation.characterId}`) && res.request().method() === 'GET',
+      );
       await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+      expect((await response).status()).toBe(403);
 
-      // Viewers must not see proficiency toggles (glyph-only ○ buttons).
+      // A forbidden sheet cannot leak even read-only character controls.
       await expect(page.getByRole('button', { name: '○', exact: true })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: /Roll STR save/i })).toBeVisible();
-      await expect(page.getByRole('button', { name: /Roll Athletics/i })).toBeVisible();
+      await expect(page.getByRole('button', { name: /Roll STR save/i })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Roll Athletics/i })).toHaveCount(0);
       await expect(page.getByRole('textbox', { name: XP_AWARD_LABEL })).toHaveCount(0);
-
-      for (const testId of ['character-saving-throws', 'character-skills']) {
-        const scan = await new AxeBuilder({ page })
-          .include(`[data-testid="${testId}"]`)
-          .disableRules(['color-contrast'])
-          .analyze();
-        expect(scan.violations, testId).toEqual([]);
-      }
     });
   });
 });

@@ -55,7 +55,8 @@ async function expectPrintSurface(page: Page): Promise<void> {
 
 test.describe('print layouts (#667)', () => {
   test('prints a character sheet without application chrome', async ({ browser }) => {
-    const context = await browser.newContext({ storageState: stateFor('viewer') });
+    // The seeded navigation sheet is player-owned; full sheets are owner/DM scoped.
+    const context = await browser.newContext({ storageState: stateFor('player') });
     const page = await context.newPage();
     try {
       await page.goto(`/c/${seed().campaignId}/characters/${seed().navigation.characterId}`);
