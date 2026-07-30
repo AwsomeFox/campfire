@@ -9,7 +9,8 @@ test('TurnWorkspace keeps the server-authoritative death save single-flight', ()
   expect(source).toContain('deathSavePending?: boolean');
   expect(source).toContain("const isDying = turn.current.deathState === 'dying';");
   expect(source).toContain('{isDying && hasDeathSaves && (');
-  expect(source).toContain('disabled={controlsDisabled || deathSavePending || !onRollDeathSave}');
+  expect(source).toContain('isCombatantPending?: (combatantId: number) => boolean');
+  expect(source).toContain('disabled={controlsDisabled || deathSavePending || isCombatantPending?.(turn.current.combatantId) || !onRollDeathSave}');
   expect(source).not.toContain('Math.random()');
   expect(source).not.toContain('onPatchCombatant');
 });
@@ -29,7 +30,8 @@ test('a death-save request only disables its own combatant', () => {
 test('an ambiguous death-save outcome reconciles before allowing another roll', () => {
   expect(runSessionSource).toContain('if (isAmbiguousOutcome(err)) enterReconciling();');
   expect(runSessionSource).toContain('busy={pendingCombatantIds.has(c.id) || reconcileBlocks}');
-  expect(runSessionSource).toContain('deathSavePending={currentCombatantId != null && (pendingCombatantIds.has(currentCombatantId) || reconcileBlocks)}');
+  expect(runSessionSource).toContain('deathSavePending={reconcileBlocks}');
+  expect(runSessionSource).toContain('isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}');
 });
 
 test('terminal death-save states retain pips without exposing an invalid roll action', () => {

@@ -39,6 +39,8 @@ interface TurnWorkspaceProps {
   actionsDisabled?: boolean;
   /** Keeps the death-save action single-flight while its authoritative request is in flight. */
   deathSavePending?: boolean;
+  /** Resolves the in-flight state for the actor returned by the turn query. */
+  isCombatantPending?: (combatantId: number) => boolean;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   /** Issue #425: DM uses a suggested monster action from the turn workspace. */
   onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
@@ -94,6 +96,7 @@ export function TurnWorkspace({
   currentTurnState,
   actionsDisabled = false,
   deathSavePending = false,
+  isCombatantPending,
   onRollDeathSave,
   onUseSuggestedAction,
 }: TurnWorkspaceProps) {
@@ -217,7 +220,7 @@ export function TurnWorkspace({
               className="btn btn-primary min-h-[44px] min-w-[44px] px-4 py-2 font-bold text-sm flex items-center gap-1.5"
               data-testid="turn-roll-death-save"
               aria-label={`Roll a death save for ${turn.current.name}`}
-              disabled={controlsDisabled || deathSavePending || !onRollDeathSave}
+              disabled={controlsDisabled || deathSavePending || isCombatantPending?.(turn.current.combatantId) || !onRollDeathSave}
               onClick={() => {
                 if (onRollDeathSave && turn.current) onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
               }}

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -12,6 +12,7 @@ import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
+import { isVisibleTo } from '../../common/redact';
 
 @ApiTags('encounters')
 // Campaign-scoped list/create only. Role-safe map bytes live on
@@ -533,6 +534,9 @@ export class EncountersController {
     // A same-key retry only replays an already-committed response. Let the service
     // distinguish that safe read from a fresh write after membership is established.
     const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
     return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
   }
 
