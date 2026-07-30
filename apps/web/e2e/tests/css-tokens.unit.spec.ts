@@ -185,6 +185,30 @@ test.describe('CSS custom-property validation (issue #882)', () => {
     }
   });
 
+  test('the dice roll overlay layer token is defined and stays within the documented stacking scale (issue #1532)', () => {
+    // --cf-layer-modal was referenced with a bare `1200` fallback and no
+    // definition, putting the dice roll overlay far outside the documented
+    // overlay scale (issue #791: tabbar 40, dialog/notification 50, snackbar 60).
+    expect(DEFINED.has('--cf-layer-modal'), '--cf-layer-modal must be defined').toBe(true);
+
+    const index = readFileSync(join(WEB_SRC, 'index.css'), 'utf8');
+    const definitionMatch = index.match(/--cf-layer-modal:\s*(\d+)/);
+    expect(definitionMatch, '--cf-layer-modal must be defined as a numeric layer value').not.toBeNull();
+    const modalLayer = Number(definitionMatch![1]);
+
+    // Must be the documented value exactly (issue #791's scale: tabbar 40,
+    // dialog/notification 50, snackbar 60, dice overlay 70) — a mere
+    // lower-bound check (e.g. "greater than 60") would still pass for the
+    // very regression this guards against: the old undefined-token fallback
+    // was 1200, which is also greater than 60.
+    expect(modalLayer).toBe(70);
+
+    // The call site must resolve the real token rather than fall back to a
+    // stale, undocumented magic number.
+    expect(index).not.toContain('var(--cf-layer-modal, 1200)');
+    expect(index).toMatch(/\.cf-dice-roll-overlay\s*\{[^}]*z-index:\s*var\(--cf-layer-modal\)/s);
+  });
+
   test('CSS cascade files are discoverable (guards the fixture against relocation)', () => {
     // If index.css or nocturne.css moved, the DEFINED set would be empty and
     // the assertions above would vacuously pass. This guard fails loudly so a
