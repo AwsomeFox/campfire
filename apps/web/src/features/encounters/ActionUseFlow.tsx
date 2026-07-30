@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
  * and offer undo. Player-safe preview text is shown before commit; DM-only mechanics stay
  * out of the player-facing lines.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   ActionApplyPolicy,
@@ -79,6 +79,13 @@ export function ActionUsePanel({
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
   const [commitSubmitted, setCommitSubmitted] = useState(false);
   const [isUnconfirmed, setIsUnconfirmed] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    ref.current?.focus({ preventScroll: true });
+    announce(`${actionName} ready. Pick targets or preview.`);
+  }, [actionName, announce]);
 
   const candidates = useMemo(
     () => legalTargets(combatants, actorCombatantId, spec.targets.allow),
@@ -157,6 +164,8 @@ export function ActionUsePanel({
 
   return (
     <div
+      ref={ref}
+      tabIndex={-1}
       className="cf-inset"
       role="region"
       aria-label={`Use ${actionName}`}
@@ -168,10 +177,10 @@ export function ActionUsePanel({
         <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
         <button
           type="button"
-          className="btn btn-ghost"
+          className="btn btn-ghost cf-target-44"
           disabled={commit.isPending || commitSubmitted || isUnconfirmed}
           onClick={onDismiss}
-          style={{ marginLeft: 'auto', minHeight: 32 }}
+          style={{ marginLeft: 'auto' }}
           aria-label="Cancel action use"
         >
           Cancel

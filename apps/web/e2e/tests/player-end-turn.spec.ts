@@ -9,7 +9,7 @@ import { CREDS } from '../global-setup';
 test.describe('player end turn (issue #487)', () => {
   test.use({ storageState: stateFor('player') });
 
-  test('player sees End my turn on their row and advancing yields the next actor', async ({ page }) => {
+  test('player ends their turn from the workspace and advancing yields the next actor', async ({ page }) => {
     const { baseURL, campaignId } = seed();
 
     const playerCtx = await request.newContext({ baseURL });
@@ -79,13 +79,13 @@ test.describe('player end turn (issue #487)', () => {
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
 
-      const endRowBtn = page.getByTestId(`end-my-turn-${heroCombatant.id}`);
-      await expect(endRowBtn).toBeVisible();
-      await expect(page.getByTestId('workspace-end-turn')).toHaveText(/End my turn/);
+      const endTurnBtn = page.getByTestId('workspace-end-turn');
+      await expect(endTurnBtn).toBeVisible();
+      await expect(endTurnBtn).toHaveText(/Next turn/);
 
-      await endRowBtn.click();
+      await endTurnBtn.click();
       await expect(page.getByTestId(`combatant-row-${dummy.id}`)).toHaveAttribute('data-current-turn', 'true');
-      await expect(endRowBtn).toHaveCount(0);
+      await expect(endTurnBtn).toHaveCount(0);
     } finally {
       if (encounterId != null) {
         await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
