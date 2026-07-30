@@ -749,12 +749,18 @@ export class CharactersService {
         if (opts?.deathSaveSuccesses !== undefined) updatePayload.deathSaveSuccesses = opts.deathSaveSuccesses;
         if (opts?.deathSaveFailures !== undefined) updatePayload.deathSaveFailures = opts.deathSaveFailures;
         if (opts?.hpTemp !== undefined) updatePayload.hpTemp = opts.hpTemp;
-        tx.update(combatants)
+        const mirrored = tx.update(combatants)
           .set(updatePayload)
           .where(eq(combatants.id, combatant.id))
           .run();
-        touchedEncounterIds.add(encounterId);
-        campaignId ??= encCampaignId;
+        // The candidate roster was read before this transaction. A concurrent removal
+        // can therefore make this UPDATE a no-op; do not manufacture an encounter
+        // revision for a combatant that was never mirrored. Undo uses this revision to
+        // distinguish a real post-removal write from an unchanged removal window.
+        if (mirrored.changes > 0) {
+          touchedEncounterIds.add(encounterId);
+          campaignId ??= encCampaignId;
+        }
       }
       // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
       // without waiting for the poll (pairs with character.updated for the inline card).
@@ -834,7 +840,7 @@ export class CharactersService {
     // The condition mirror shares the same removal-undo revision guard as HP sync.
     this.db.transaction((tx) => {
       for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
-        tx.update(combatants)
+        const mirrored = tx.update(combatants)
           .set({
             // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
             // behind and the next tracker write derives the condition straight back (#423 ×
@@ -849,8 +855,12 @@ export class CharactersService {
           })
           .where(eq(combatants.id, combatant.id))
           .run();
-        touchedEncounterIds.add(encounterId);
-        campaignId ??= encCampaignId;
+        // As with HP sync, only a linked row that still exists warrants a new
+        // encounter revision. The initial roster read can race a combatant removal.
+        if (mirrored.changes > 0) {
+          touchedEncounterIds.add(encounterId);
+          campaignId ??= encCampaignId;
+        }
       }
       for (const encounterId of touchedEncounterIds) {
         tx.update(encounters)

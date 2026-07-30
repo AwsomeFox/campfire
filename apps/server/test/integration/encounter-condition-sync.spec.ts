@@ -159,6 +159,46 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     expect(readConditions(ctx.orm, 'character', ctx.characterId)).toContain('poisoned');
   });
 
+  it.each([
+    {
+      name: 'HP',
+      sync: (service: CharactersService, characterId: number, campaignId: number) =>
+        (service as unknown as {
+          syncActiveCombatants: (id: number, hpCurrent: number, hpMax?: number, opts?: { campaignId?: number }) => Promise<void>;
+        }).syncActiveCombatants(characterId, 13, undefined, { campaignId }),
+    },
+    {
+      name: 'conditions',
+      sync: (service: CharactersService, characterId: number, campaignId: number) =>
+        (service as unknown as {
+          syncActiveCombatantConditions: (id: number, conditions: string, opts?: { campaignId?: number }) => Promise<void>;
+        }).syncActiveCombatantConditions(characterId, JSON.stringify(['poisoned']), { campaignId }),
+    },
+  ])('does not bump the encounter revision when concurrent removal wins the $name mirror race', async ({ sync }) => {
+    const ctx = seedRunningFight();
+    const originalTransaction = ctx.orm.transaction.bind(ctx.orm);
+    let removedBeforeMirror = false;
+    const transactionSpy = jest.spyOn(ctx.orm, 'transaction').mockImplementation((callback) => {
+      // The mirror's roster query has already selected this combatant. Delete it just
+      // before the mirror transaction, which models a concurrent remove committing in
+      // that gap. Its UPDATE must affect zero rows and leave the undo revision alone.
+      if (!removedBeforeMirror) {
+        removedBeforeMirror = true;
+        ctx.orm.delete(combatants).where(eq(combatants.id, ctx.combatantId)).run();
+      }
+      return originalTransaction(callback);
+    });
+    try {
+      await sync(ctx.charactersService, ctx.characterId, ctx.campaignId);
+    } finally {
+      transactionSpy.mockRestore();
+    }
+
+    expect(removedBeforeMirror).toBe(true);
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.combatantStateVersion).toBe(0);
+  });
+
   it('does not expose a sheet combatant write without its undo revision', async () => {
     const ctx = seedRunningFight();
     const [removedTurn] = ctx.orm.insert(combatants).values({
