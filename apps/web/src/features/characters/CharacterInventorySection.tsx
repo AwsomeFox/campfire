@@ -101,14 +101,14 @@ export function CharacterInventorySection({
       ) : (
         <>
           {canManageCharacter && !adding && (
-            <div className="flex items-center gap-2">
+            <>
               <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
-              <Btn density="xs" ghost type="button" className="cf-print-hide text-xs" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
+              <Btn density="xs" ghost type="button" className="cf-print-hide text-xs ml-2" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
                 {t('inventory.fromCompendium')}
               </Btn>
-            </div>
+            </>
           )}
 
           {adding && canManageCharacter && (
