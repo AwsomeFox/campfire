@@ -2054,7 +2054,10 @@ export function guardDriverLivePlayArgs(
 
   if (toolName === 'update_inventory_item') {
     const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_inventory_item!;
-    const unknown = unknownArgKeys(args, rule);
+    // Issue #1792: treat every key outside the allowed set as rejected. This is the
+    // allowlist posture: `qty`, owner moves, and any future schema-widened field (e.g.
+    // equipped / equipSlot / equippedAction) are all refused by the same path.
+    const unknown = Object.keys(args).filter((k) => !rule.allowed.has(k));
     if (unknown.length > 0) {
       return {
         ok: false,
