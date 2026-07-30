@@ -71,7 +71,11 @@ jobs:
           is_docs_only_commit() {
             local sha=$1
             local files
-            files=$(gh api "repos/${REPO}/commits/${sha}" | jq -r '.files[].filename // empty')
+            if ! files=$(gh api "repos/${REPO}/commits/${sha}" 2>/dev/null \
+              | jq -r '.files[].filename // empty'); then
+              echo "GitHub API request failed while fetching commit ${sha}; aborting instead of masking the error." >&2
+              return 2
+            fi
             [ -n "$files" ] || return 1
             local f
             while IFS= read -r f; do
@@ -89,14 +93,20 @@ jobs:
             local commits_json sha ci_run_for_sha found_this_page
 
             while [ "$page" -le "$max_pages" ]; do
-              commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=100&page=${page}")
+              if ! commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=100&page=${page}" 2>/dev/null); then
+                echo "GitHub API request failed while listing main commits on page ${page}; aborting." >&2
+                return 2
+              fi
 
               local found_this_page=0
               while IFS= read -r sha; do
                 [ -n "$sha" ] || continue
                 found_this_page=$((found_this_page + 1))
-                ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" \
-                  | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty')
+                if ! ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" 2>/dev/null \
+                  | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty'); then
+                  echo "GitHub API request failed while fetching check-runs for ${sha}; aborting." >&2
+                  return 2
+                fi
                 if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
                   echo "$ci_run_for_sha"
                   return 0
@@ -122,7 +132,16 @@ jobs:
             return 1
           }
 
-          ci_run=$(find_latest_ci_run || true)
+          set +e
+          ci_run=$(find_latest_ci_run)
+          find_exit=$?
+          set -e
+
+          if [ "$find_exit" -eq 2 ]; then
+            echo "GitHub API request failed while looking up the latest 'ci' run; failing the watcher step." >&2
+            exit 1
+          fi
+
           if [ -z "$ci_run" ] || [ "$ci_run" = "null" ]; then
             echo "No aggregate 'ci' check-run found on the latest main commits; no verdict available."
             exit 0
