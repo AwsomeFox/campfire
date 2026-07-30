@@ -24,7 +24,7 @@ import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 import { useFormattingLocale, useTimeFormat, formatDateTime } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
-import { Btn, Card } from '../components/ui';
+import { Btn, Card, Dialog } from '../components/ui';
 import { PasswordInput } from '../components/PasswordInput';
 import { useDialog } from '../components/useDialog';
 import { useClearAnnouncements } from '../components/Announcer';
@@ -79,24 +79,18 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
-  // Escape-to-close (suppressed mid-save), focus trap, and focus restore to trigger.
-  const dialogRef = useDialog<HTMLDivElement>({ onClose, disabled: saving });
-  const titleId = 'change-password-title';
+  const titleId = useRef(`password-modal-title-${Math.random().toString(36).slice(2)}`).current;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    setError(null);
-    if (newPassword.length < 8) {
-      setError('New password must be at least 8 characters.');
-      return;
-    }
     if (newPassword !== confirm) {
-      setError('New passwords do not match.');
+      setError(t('nav.passwordsDoNotMatch'));
       return;
     }
+    setError(null);
     setSaving(true);
     try {
       await api.post(`${API}/me/password`, { currentPassword, newPassword });
@@ -109,65 +103,61 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="dialog-backdrop" style={{ zIndex: 52 }} onClick={() => !saving && onClose()}>
-      <div
-        ref={dialogRef}
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="dialog-title" id={titleId}>{t('nav.passwordModalTitle')}</div>
-        {done ? (
-          <div className="space-y-3">
-            <p className="text-sm" style={{ color: '#34d399' }}>{t('nav.passwordUpdated')}</p>
-            <Btn className="w-full" onClick={onClose}>{t('nav.done')}</Btn>
+    <Dialog
+      title={t('nav.passwordModalTitle')}
+      titleId={titleId}
+      backdropStyle={{ zIndex: 52 }}
+      onBackdropClick={() => !saving && onClose()}
+      ariaBusy={saving}
+    >
+      {done ? (
+        <div className="space-y-3">
+          <p className="text-sm text-emerald-400">{t('nav.passwordUpdated')}</p>
+          <Btn className="w-full" onClick={onClose}>{t('nav.done')}</Btn>
+        </div>
+      ) : (
+        <form className="space-y-3" onSubmit={onSubmit}>
+          <div className="field">
+            <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
+            <PasswordInput
+              id="currentPassword"
+              className="input"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              autoComplete="current-password"
+              revealNoun="current password"
+            />
           </div>
-        ) : (
-          <form className="space-y-3" onSubmit={onSubmit}>
-            <div className="field">
-              <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
-              <PasswordInput
-                id="currentPassword"
-                className="input"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                autoComplete="current-password"
-                revealNoun="current password"
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="newPassword">{t('nav.newPassword')}</label>
-              <PasswordInput
-                id="newPassword"
-                className="input"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                autoComplete="new-password"
-                revealNoun="new password"
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
-              <PasswordInput
-                id="confirmPassword"
-                className="input"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                revealNoun="confirm password"
-              />
-            </div>
-            {error && <p className="text-sm text-rose-400">{error}</p>}
-            <div className="dialog-actions">
-              <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
-              <Btn type="submit" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</Btn>
-            </div>
-          </form>
-        )}
-      </div>
-    </div>
+          <div className="field">
+            <label htmlFor="newPassword">{t('nav.newPassword')}</label>
+            <PasswordInput
+              id="newPassword"
+              className="input"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              autoComplete="new-password"
+              revealNoun="new password"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
+            <PasswordInput
+              id="confirmPassword"
+              className="input"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              revealNoun="confirm password"
+            />
+          </div>
+          {error && <p className="text-sm text-rose-400">{error}</p>}
+          <div className="dialog-actions">
+            <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
+            <Btn type="submit" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</Btn>
+          </div>
+        </form>
+      )}
+    </Dialog>
   );
 }
 

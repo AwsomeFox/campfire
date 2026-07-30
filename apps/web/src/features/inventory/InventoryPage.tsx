@@ -512,7 +512,7 @@ function TreasuryCard({
       {editing ? (
         <form onSubmit={save} className="space-y-3">
           {stale && (
-            <p className="text-sm rounded-md p-2" style={{ background: 'var(--color-neutral-800)', color: 'var(--color-amber, #f59e0b)' }}>
+            <p className="text-sm rounded-md p-2 bg-[var(--color-neutral-800)] text-amber-300">
               {t('inventory.staleTreasury')}
               <Btn density="xs"
                 ghost

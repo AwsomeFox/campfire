@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ListDetailLink } from '../../components/ListDetailLink';
+import { EntityCard } from '../../components/EntityCard';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -16,7 +16,6 @@ import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
-import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -155,36 +154,26 @@ export default function FactionListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {factions.map((faction) => (
-              <ListDetailLink
+              <EntityCard
                 key={faction.id}
                 to={`/c/${id}/factions/${faction.id}`}
-                className="cf-card cf-card-hover cf-density-compact space-y-2"
-              >
-                <div className="flex items-center gap-2.5">
-                  {faction.portraitUrl ? (
-                    <img
-                      src={faction.portraitUrl}
-                      alt=""
-                      className="h-9 w-9 shrink-0 rounded-full object-cover border border-[var(--color-divider)]"
-                    />
-                  ) : (
-                    <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
-                      {initials(faction.name)}
-                    </span>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={faction.name} aria-label={`Faction: ${faction.name}`}>{faction.name}</p>
-                    {faction.kind && <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={faction.kind}>{faction.kind}</p>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <Chip variant={standingVariant(faction.standing)}>
-                    {formatStandingChip(faction.standing, faction.reputation, t)}
-                  </Chip>
-                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
-                  {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
-                </div>
-              </ListDetailLink>
+                className="cf-card-hover"
+                title={faction.name}
+                aria-label={`Faction: ${faction.name}`}
+                nameClassName="font-bold text-slate-200 text-sm truncate cf-name-reveal"
+                /* className="font-bold text-slate-200 text-sm truncate cf-name-reveal" */
+                subtitle={faction.kind}
+                portraitUrl={faction.portraitUrl}
+                badges={
+                  <>
+                    <Chip variant={standingVariant(faction.standing)}>
+                      {formatStandingChip(faction.standing, faction.reputation, t)}
+                    </Chip>
+                    {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
+                    {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
+                  </>
+                }
+              />
             ))}
           </div>
         )}

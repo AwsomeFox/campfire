@@ -1,9 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useDialog } from './useDialog';
-import { TextInput } from './ui';
+import { Dialog, TextInput } from './ui';
 import { useKeyboardCommandHint } from './KeyboardCommandProvider';
 
 export function GlobalSearchPalette({
@@ -20,12 +18,6 @@ export function GlobalSearchPalette({
   const titleId = useId();
   const { ariaKeyshortcuts } = useKeyboardCommandHint('globalSearch');
 
-  const dialogRef = useDialog<HTMLDivElement>({
-    onClose,
-    initialFocusRef: inputRef,
-    inertBackground: true,
-  });
-
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
@@ -37,39 +29,33 @@ export function GlobalSearchPalette({
     navigate(term ? `/c/${campaignId}/search?q=${encodeURIComponent(term)}` : `/c/${campaignId}/search`);
   }
 
-  return createPortal(
-    <div className="dialog-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        data-keyboard-command-overlay
-        className="dialog w-full max-w-lg"
-        onMouseDown={(e) => e.stopPropagation()}
+  return (
+    <Dialog
+      title={t('keyboard.searchTitle')}
+      titleId={titleId}
+      titleAs="h2"
+      className="w-full max-w-lg"
+      onBackdropClick={onClose}
+      initialFocusRef={inputRef}
+      data-keyboard-command-overlay
+    >
+      <p className="text-sm text-muted mb-3">{t('keyboard.searchHint')}</p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
       >
-        <h2 id={titleId} className="text-lg font-semibold text-white mb-2">
-          {t('keyboard.searchTitle')}
-        </h2>
-        <p className="text-sm text-muted mb-3">{t('keyboard.searchHint')}</p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <TextInput
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t('nav.searchPlaceholder')}
-            aria-label={t('nav.searchAria')}
-            aria-keyshortcuts={ariaKeyshortcuts}
-            autoComplete="off"
-          />
-        </form>
-      </div>
-    </div>,
-    document.body,
+        <TextInput
+          ref={inputRef}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('nav.searchPlaceholder')}
+          aria-label={t('nav.searchAria')}
+          aria-keyshortcuts={ariaKeyshortcuts}
+          autoComplete="off"
+        />
+      </form>
+    </Dialog>
   );
 }

@@ -182,7 +182,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
       {stuck && session.stuck && (
         <div
           className="cf-inset p-4 flex flex-col gap-3"
-          style={{ borderColor: '#f59e0b', background: 'color-mix(in srgb, #f59e0b 8%, transparent)' }}
+          style={{ borderColor: 'var(--color-amber, #f59e0b)', background: 'color-mix(in srgb, var(--color-amber, #f59e0b) 8%, transparent)' }}
           role="alert"
         >
           <div className="flex items-start gap-2">

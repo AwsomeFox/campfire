@@ -12,6 +12,7 @@ import { useDialog } from './useDialog';
 import { UI_ICON_SIZE } from '../lib/uiIcons';
 export type { ChipVariant } from './chipVariants';
 export type { UiDensity, UiElevation } from './density';
+export { EntityCard, type EntityCardProps } from './EntityCard';
 
 type DensityProps = { density?: UiDensity };
 
@@ -131,13 +132,17 @@ export function Dialog({
   onBackdropClick,
   className = '',
   backdropClassName = '',
+  style,
+  backdropStyle,
   role = 'dialog',
   descId,
+  ariaLabel,
   ariaBusy,
   initialFocusRef,
   backdropTestId,
   dialogTestId,
   'data-overlay': dataOverlay = 'dialog',
+  'data-keyboard-command-overlay': dataKeyboardCommandOverlay,
 }: {
   title?: ReactNode;
   titleId?: string;
@@ -160,15 +165,19 @@ export function Dialog({
   onBackdropClick?: () => void;
   className?: string;
   backdropClassName?: string;
+  style?: React.CSSProperties;
+  backdropStyle?: React.CSSProperties;
   /** @default 'dialog' — pass 'alertdialog' for destructive confirmations. */
   role?: 'dialog' | 'alertdialog';
   descId?: string;
+  ariaLabel?: string;
   ariaBusy?: boolean;
   /** Prefer this element over the first focusable when focus enters the dialog. */
   initialFocusRef?: RefObject<HTMLElement | null>;
   backdropTestId?: string;
   dialogTestId?: string;
   'data-overlay'?: string;
+  'data-keyboard-command-overlay'?: boolean;
 }) {
   const dialogRef = useDialog<HTMLDivElement>({
     onClose: onBackdropClick ?? (() => {}),
@@ -181,6 +190,7 @@ export function Dialog({
   return createPortal(
     <div
       className={`dialog-backdrop ${backdropClassName}`.trim()}
+      style={backdropStyle}
       data-overlay={dataOverlay}
       data-testid={backdropTestId}
       onClick={onBackdropClick}
@@ -188,12 +198,15 @@ export function Dialog({
       <div
         ref={dialogRef}
         className={`dialog ${densityClass(density)} ${className}`.trim()}
+        style={style}
         role={role}
         aria-modal="true"
+        aria-label={ariaLabel}
         aria-labelledby={titleId}
         aria-describedby={descId}
         aria-busy={ariaBusy || undefined}
         data-testid={dialogTestId}
+        data-keyboard-command-overlay={dataKeyboardCommandOverlay || undefined}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (

@@ -1,10 +1,8 @@
-import { useCallback, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api, API, ApiError } from '../lib/api';
 import { useCampaignAccess } from '../app/CampaignAccessContext';
-import { useDialog } from './useDialog';
-import { Btn, ErrorNote, TextArea } from './ui';
+import { api, API, ApiError } from '../lib/api';
+import { Btn, Dialog, ErrorNote, TextArea } from './ui';
 import { useKeyboardCommandHint } from './KeyboardCommandProvider';
 
 export function QuickCaptureDialog({
@@ -17,34 +15,29 @@ export function QuickCaptureDialog({
   const { t } = useTranslation();
   const { isDm, canMemberWrite } = useCampaignAccess();
   const [body, setBody] = useState('');
+  const [dest, setDest] = useState<'private' | 'inbox'>('private');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dest, setDest] = useState<'private' | 'inbox'>('private');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const titleId = useId();
   const { ariaKeyshortcuts } = useKeyboardCommandHint('quickCapture');
 
-  const dialogRef = useDialog<HTMLDivElement>({
-    onClose,
-    disabled: saving,
-    initialFocusRef: inputRef,
-    inertBackground: true,
-  });
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const save = useCallback(async () => {
-    if (!body.trim() || !canMemberWrite) return;
+    if (!canMemberWrite) return;
+    const trimmed = body.trim();
+    if (!trimmed) return;
     setSaving(true);
     setError(null);
     try {
       if (dest === 'inbox') {
-        await api.post(`${API}/campaigns/${campaignId}/inbox`, { body: body.trim() });
+        await api.post(`${API}/campaigns/${campaignId}/inbox`, { body: trimmed });
       } else {
-        await api.post(`${API}/campaigns/${campaignId}/notes`, {
-          body: body.trim(),
-          visibility: 'private',
-        });
+        await api.post(`${API}/campaigns/${campaignId}/notes`, { body: trimmed, audience: 'private' });
       }
-      setBody('');
       onClose();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t('keyboard.quickCaptureFailed'));
@@ -55,68 +48,63 @@ export function QuickCaptureDialog({
 
   if (!canMemberWrite) return null;
 
-  return createPortal(
-    <div className="dialog-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) onClose(); }}>
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        data-keyboard-command-overlay
-        className="dialog w-full max-w-lg"
-        onMouseDown={(e) => e.stopPropagation()}
+  return (
+    <Dialog
+      title={t('keyboard.quickCaptureTitle')}
+      titleId={titleId}
+      titleAs="h2"
+      className="w-full max-w-lg"
+      onBackdropClick={() => !saving && onClose()}
+      initialFocusRef={inputRef}
+      ariaBusy={saving}
+      data-keyboard-command-overlay
+    >
+      <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
+      {error && <ErrorNote message={error} />}
+      {!isDm && (
+        <div className="flex gap-2 mb-2 text-xs">
+          <button
+            type="button"
+            className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
+            onClick={() => setDest('private')}
+          >
+            {t('keyboard.quickCapturePrivate')}
+          </button>
+          <button
+            type="button"
+            className={`btn btn-ghost cf-density-xs ${dest === 'inbox' ? 'btn-primary' : ''}`}
+            onClick={() => setDest('inbox')}
+          >
+            {t('keyboard.quickCaptureInbox')}
+          </button>
+        </div>
+      )}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+        className="space-y-3"
       >
-        <h2 id={titleId} className="text-lg font-semibold text-white mb-2">
-          {t('keyboard.quickCaptureTitle')}
-        </h2>
-        <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
-        {error && <ErrorNote message={error} />}
-        {!isDm && (
-          <div className="flex gap-2 mb-2 text-xs">
-            <button
-              type="button"
-              className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
-              onClick={() => setDest('private')}
-            >
-              {t('keyboard.quickCapturePrivate')}
-            </button>
-            <button
-              type="button"
-              className={`btn btn-ghost cf-density-xs ${dest === 'inbox' ? 'btn-primary' : ''}`}
-              onClick={() => setDest('inbox')}
-            >
-              {t('keyboard.quickCaptureInbox')}
-            </button>
-          </div>
-        )}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-          className="space-y-3"
-        >
-          <TextArea
-            ref={inputRef}
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={4}
-            placeholder={dest === 'inbox' ? t('keyboard.quickCapturePlaceholderInbox') : t('keyboard.quickCapturePlaceholderPrivate')}
-            aria-label={t('keyboard.quickCaptureBodyLabel')}
-            aria-keyshortcuts={ariaKeyshortcuts}
-            disabled={saving}
-          />
-          <div className="flex justify-end gap-2">
-            <Btn type="button" ghost disabled={saving} onClick={onClose}>
-              {t('nav.cancel')}
-            </Btn>
-            <Btn type="submit" disabled={saving || !body.trim()}>
-              {saving ? t('nav.saving') : dest === 'inbox' ? t('keyboard.quickCaptureSend') : t('nav.save')}
-            </Btn>
-          </div>
-        </form>
-      </div>
-    </div>,
-    document.body,
+        <TextArea
+          ref={inputRef}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={4}
+          placeholder={dest === 'inbox' ? t('keyboard.quickCapturePlaceholderInbox') : t('keyboard.quickCapturePlaceholderPrivate')}
+          aria-label={t('keyboard.quickCaptureBodyLabel')}
+          aria-keyshortcuts={ariaKeyshortcuts}
+          disabled={saving}
+        />
+        <div className="flex justify-end gap-2">
+          <Btn type="button" ghost disabled={saving} onClick={onClose}>
+            {t('nav.cancel')}
+          </Btn>
+          <Btn type="submit" disabled={saving || !body.trim()}>
+            {saving ? t('nav.saving') : dest === 'inbox' ? t('keyboard.quickCaptureSend') : t('nav.save')}
+          </Btn>
+        </div>
+      </form>
+    </Dialog>
   );
 }
