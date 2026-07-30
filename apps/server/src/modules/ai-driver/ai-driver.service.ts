@@ -1635,6 +1635,10 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'encounterId',
   'expectedUpdatedAt',
   'mapAttachmentId',
+  // Map replacement lifecycle (issue #870). The driver may replace with a session-generated
+  // map, but whether to preserve or reset spatial state follows the same mapAttachmentId
+  // policy and is therefore part of the VTT overlay class.
+  'mapAlignment',
   'gridSize',
   'gridScale',
   'gridUnit',
@@ -1674,7 +1678,7 @@ export interface DriverLivePlayToolArgRule {
 
 export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLivePlayToolArgRule>> = {
   'generate_map': {
-    allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit']),
+    allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit', 'mapAlignment']),
     forbidden: new Set(),
   },
   'generate_ai_map': {
