@@ -9,7 +9,7 @@ import {
   formatCombatLogChainDetails,
   formatCombatLogChainSummary,
   formatCombatLogEventSummary,
-} from './combatLogAccessibility'; // guessing the file name
+} from './combatLogAccessibility'; 
 
 const EVENT_ICON: Record<string, string> = {
   damage: 'crossed-swords',

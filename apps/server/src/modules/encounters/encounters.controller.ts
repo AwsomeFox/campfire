@@ -457,6 +457,9 @@ export class EncountersController {
   ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException();
+    }
     if (afterId !== undefined) {
       const parsed = Number(afterId);
       if (!Number.isInteger(parsed) || parsed < 0) {
