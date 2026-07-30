@@ -832,6 +832,33 @@ describe('encounters (e2e)', () => {
       expect(replay.body).toEqual(restored.body);
     });
 
+    it('replays the consumed undo response after the restored combatant changes', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo response replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Undo response replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Replay response target', hpMax: 5 });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      expect((await request(server)
+        .patch(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -2 })).body.hpCurrent).toBe(3);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(restored.body);
+    });
+
     it('replays a consumed removal undo after the encounter ends', async () => {
       const server = ctx.app.getHttpServer();
       const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Ended undo replay campaign' });

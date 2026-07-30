@@ -8,6 +8,16 @@ import type { Combatant } from '@campfire/schema';
 export function withOptimisticHpLifecycle(combatant: Combatant, hpCurrent: number, damagedWhileDown = true): Combatant {
   if (combatant.kind !== 'character') return { ...combatant, hpCurrent };
   if (hpCurrent === 0) {
+    if (damagedWhileDown && combatant.hpCurrent === 0 && combatant.deathState !== 'dead') {
+      const deathSaveFailures = Math.min(3, combatant.deathSaveFailures + 1);
+      return {
+        ...combatant,
+        hpCurrent,
+        deathState: deathSaveFailures >= 3 ? 'dead' : 'dying',
+        deathSaveSuccesses: combatant.deathState === 'stable' ? 0 : combatant.deathSaveSuccesses,
+        deathSaveFailures,
+      };
+    }
     const deathState = combatant.deathState === 'dead' || (combatant.deathState === 'stable' && !damagedWhileDown)
       ? combatant.deathState
       : 'dying';

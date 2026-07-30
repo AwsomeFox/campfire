@@ -39,7 +39,10 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
     };
   }
   if (delta >= 0) {
-    return withOptimisticHpLifecycle(c, Math.min(c.hpMax, c.hpCurrent + delta), false);
+    const hpCurrent = Math.min(c.hpMax, c.hpCurrent + delta);
+    // A zero or capped heal leaves a downed combatant's server-owned lifecycle
+    // state alone. Only a real recovery above 0 clears its death-save slate.
+    return hpCurrent > 0 ? withOptimisticHpLifecycle(c, hpCurrent, false) : { ...c, hpCurrent };
   }
   // Damage: temporary HP absorbs first, then real HP, floored at 0.
   const dmg = -delta;

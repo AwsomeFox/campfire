@@ -4485,11 +4485,9 @@ export class EncountersService {
         // A committed undo may have lost its response. Replaying the restored row is safe;
         // never turn the client-visible Retry into a permanent 404 after success.
         if (undo.consumedAt != null) {
-          const prior = tx.select().from(combatants).where(eq(combatants.id, snapshot.id)).get();
-          // The first undo committed an authoritative response. A subsequent removal
-          // must not turn a lost-response retry into a 404 merely because that row is
-          // absent again; replay the persisted response exactly as other receipts do.
-          restored = prior ?? snapshot;
+          // Replay the first undo's persisted response, rather than a row another
+          // request may have changed after that response was committed.
+          restored = snapshot;
           emittedEncounter = current;
           replayed = true;
           return;

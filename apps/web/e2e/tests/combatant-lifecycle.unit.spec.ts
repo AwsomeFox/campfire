@@ -80,6 +80,23 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     });
   });
 
+  test('a zero or capped heal at 0 HP preserves the server-owned death state', () => {
+    expect(applyOptimisticHpDelta(combatant({ hpCurrent: 0, hpMax: 0, deathState: 'none' }), 0)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+    });
+  });
+
+  test('damage while down records the automatic failure and dies on the third', () => {
+    expect(
+      applyOptimisticHpDelta(combatant({ hpCurrent: 0, deathState: 'dying', deathSaveFailures: 2 }), -1),
+    ).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dead',
+      deathSaveFailures: 3,
+    });
+  });
+
   test('temporary HP that absorbs damage preserves a stabilized character', () => {
     expect(
       withOptimisticHpLifecycle(combatant({ hpCurrent: 0, hpTemp: 4, deathState: 'stable' }), 0, false),
