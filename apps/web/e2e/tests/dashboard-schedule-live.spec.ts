@@ -14,8 +14,8 @@ async function clearIssueSchedules(request: APIRequestContext, campaignId: numbe
     await request.get(`/api/v1/campaigns/${campaignId}/schedule`),
     'list issue #790 schedules',
   );
-  for (const schedule of schedules) {
-    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior schedule');
+  for (const schedule of schedules.filter((item) => item.title.startsWith('E2E790 '))) {
+    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior issue #790 schedule');
   }
 }
 
@@ -73,6 +73,13 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await initialStream;
     const sessionLog = page.locator('.dashboard-session-log');
     await expect(sessionLog).toBeVisible();
+
+    await json<ScheduledSessionWithRsvps>(
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
+        data: { scheduledAt: new Date(Date.now() + 86400000 * 100).toISOString(), title: 'E2E790 Fallback' },
+      }),
+      'create fallback schedule',
+    );
 
     const created = await json<ScheduledSessionWithRsvps>(
       await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
@@ -157,11 +164,11 @@ test('dashboard next-session projection stays live across remote writes, campaig
 
     await json<unknown>(await writer.request.delete(`/api/v1/schedule/${created.id}`, { data: {} }), 'cancel remotely');
     await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
-    // The global-setup seed 'DLRNAV Saturday Game' (2032-07-24) is the
+    // The relative fallback session 'E2E790 Fallback' (now + 100 days) is the
     // campaign's only remaining future session, so once the test-authored
     // Gamma session is cancelled the live projection falls back to it —
     // proving the deletion propagated rather than the card staying stale.
-    await expect(page.locator('.dashboard-session-log a').filter({ hasText: 'DLRNAV Saturday Game' })).toBeVisible();
+    await expect(page.locator('.dashboard-session-log a').filter({ hasText: 'E2E790 Fallback' })).toBeVisible();
   } finally {
     await Promise.all([reader.close(), writer.close()]);
   }
