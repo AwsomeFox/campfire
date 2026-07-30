@@ -12,7 +12,6 @@ import {
   turnIndexFor,
   advanceTurn,
   initialEncounterTurnState,
-  lairLeadsRound,
   retreatTurn,
   shouldSkipTurnOnAdvance,
   hpBandFor,
