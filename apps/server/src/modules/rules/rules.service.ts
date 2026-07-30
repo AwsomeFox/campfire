@@ -475,13 +475,29 @@ function nameMatchRank(q: string) {
 
 /** Escapes an FTS5 MATCH query string by quoting it as a single phrase, then appending a prefix wildcard per token. */
 function toFtsQuery(q: string): string {
-  const folded = foldForSearch(q);
-  const tokens = (folded || q)
+  const rawTokens = q
     .split(/\s+/)
     .map((t) => t.replace(/["]/g, ''))
     .filter(Boolean);
-  if (tokens.length === 0) return '';
-  return tokens.map((t) => `"${t}"*`).join(' ');
+  if (rawTokens.length === 0) return '';
+
+  return rawTokens
+    .map((rawToken) => {
+      const unicode61Token = rawToken
+        .normalize('NFD')
+        // eslint-disable-next-line no-misleading-character-class
+        .replace(/[\u{0300}-\u{036f}\u{1ab0}-\u{1aff}\u{1dc0}-\u{1dff}\u{20d0}-\u{20ff}\u{fe20}-\u{fe2f}]/gu, '')
+        .normalize('NFKC')
+        .toLowerCase();
+      const expandedToken = foldForSearch(rawToken);
+
+      if (unicode61Token && expandedToken && unicode61Token !== expandedToken) {
+        return `("${unicode61Token}"* OR "${expandedToken}"*)`;
+      }
+      const tokenToUse = expandedToken || unicode61Token || rawToken;
+      return `"${tokenToUse}"*`;
+    })
+    .join(' ');
 }
 
 const RULE_FACET_ORDER: RuleEntryType[] = [
@@ -2613,11 +2629,13 @@ export class RulesService implements OnModuleInit {
     const rankExpr = nameMatchRank(opts.q);
     const needle = foldForSearch(opts.q.trim().replace(/[%_]/g, ''));
     const rawLike = `%${opts.q.replace(/[%_]/g, '')}%`;
-    const foldedLike = `%${needle}%`;
+    const foldedLike = needle ? `%${needle}%` : undefined;
     const foldedName = foldSqlCol(ruleEntries.name);
     const foldedSummary = foldSqlCol(ruleEntries.summary);
     const foldedBody = foldSqlCol(ruleEntries.body);
-    const likeClause = sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`;
+    const likeClause = foldedLike
+      ? sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`
+      : sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${rawLike})`;
     const baseConditions = [
       isNull(ruleEntries.campaignId),
       likeClause,

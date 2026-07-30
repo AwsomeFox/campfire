@@ -88,13 +88,29 @@ function fieldRank(field: string): number {
 
 /** Escapes an FTS5 MATCH query string by quoting each token and enabling prefix matching. */
 function toFtsQuery(q: string): string {
-  const folded = foldForSearch(q);
-  const tokens = (folded || q)
+  const rawTokens = q
     .split(/[^\p{L}\p{N}]+/u)
     .map((t) => t.replace(/["]/g, ''))
     .filter(Boolean);
-  if (tokens.length === 0) return '';
-  return tokens.map((t) => `"${t}"*`).join(' ');
+  if (rawTokens.length === 0) return '';
+
+  return rawTokens
+    .map((rawToken) => {
+      const unicode61Token = rawToken
+        .normalize('NFD')
+        // eslint-disable-next-line no-misleading-character-class
+        .replace(/[\u{0300}-\u{036f}\u{1ab0}-\u{1aff}\u{1dc0}-\u{1dff}\u{20d0}-\u{20ff}\u{fe20}-\u{fe2f}]/gu, '')
+        .normalize('NFKC')
+        .toLowerCase();
+      const expandedToken = foldForSearch(rawToken);
+
+      if (unicode61Token && expandedToken && unicode61Token !== expandedToken) {
+        return `("${unicode61Token}"* OR "${expandedToken}"*)`;
+      }
+      const tokenToUse = expandedToken || unicode61Token || rawToken;
+      return `"${tokenToUse}"*`;
+    })
+    .join(' ');
 }
 
 function candidateKey(type: SearchResultType, id: number): string {

@@ -51,6 +51,20 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
       `)
       .run(pack.id, 'etoile-entry', 'Étoile', 'rule', 'A star named Étoile', '', ts, ts);
 
+    dbCtx.sqlite
+      .prepare(`
+        INSERT INTO rule_entries (pack_id, slug, name, type, summary, body, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(pack.id, 'strasse-entry', 'Straße Guard', 'rule', 'A guard on Strasse', '', ts, ts);
+
+    dbCtx.sqlite
+      .prepare(`
+        INSERT INTO rule_entries (pack_id, slug, name, type, summary, body, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(pack.id, 'aether-entry', 'Æther Elemental', 'monster', 'An Aether Elemental', '', ts, ts);
+
     // FTS Path (primary production path backed by unicode61 remove_diacritics FTS table)
     const zoeResultFts = await rulesService.search({ q: 'Zoe' });
     expect(zoeResultFts.items.some((i) => i.name === 'Zoë')).toBe(true);
@@ -69,6 +83,18 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
 
     const etoileUpperResultFts = await rulesService.search({ q: 'Étoile' });
     expect(etoileUpperResultFts.items.some((i) => i.name === 'Étoile')).toBe(true);
+
+    const strasseResultFts = await rulesService.search({ q: 'Straße' });
+    expect(strasseResultFts.items.some((i) => i.name === 'Straße Guard')).toBe(true);
+
+    const strasseAsciiResultFts = await rulesService.search({ q: 'Strasse' });
+    expect(strasseAsciiResultFts.items.some((i) => i.name === 'Straße Guard')).toBe(true);
+
+    const aetherResultFts = await rulesService.search({ q: 'Æther' });
+    expect(aetherResultFts.items.some((i) => i.name === 'Æther Elemental')).toBe(true);
+
+    const aetherAsciiResultFts = await rulesService.search({ q: 'Aether' });
+    expect(aetherAsciiResultFts.items.some((i) => i.name === 'Æther Elemental')).toBe(true);
 
     // Fallback LIKE Path (forces ftsAvailable = false)
     const fallbackRulesService = new RulesService(dbCtx.orm, false, { log: jest.fn() } as any, {} as any);
@@ -90,6 +116,10 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
 
     const etoileUpperResultLike = await fallbackRulesService.search({ q: 'Étoile' });
     expect(etoileUpperResultLike.items.some((i) => i.name === 'Étoile')).toBe(true);
+
+    // Pure combining diacritic query should not return every table row in LIKE fallback mode
+    const pureDiacriticLike = await fallbackRulesService.search({ q: '\u0301' });
+    expect(pureDiacriticLike.items).toHaveLength(0);
 
     // Exact-name rank bucket ranking assertion (issue #1493 review feedback)
     expect(zoeResultFts.items[0].name).toBe('Zoë');
