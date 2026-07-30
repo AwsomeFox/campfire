@@ -207,10 +207,12 @@ export function resolveCharacterCreateStatus(
     stats?: Record<string, number>;
     name?: string;
     className?: string;
+    deathState?: Character['deathState'];
   },
   _adapter: RuleSystemAdapter,
 ): Character['status'] {
   if (input.status) return input.status;
+  if (input.deathState === 'dead') return 'dead';
   // Name-only party-page creates become drafts; API callers that already pass combat
   // numbers without an explicit status keep the historical active default (issue #719).
   if (isMinimalCharacterCreate(input)) return 'draft';
