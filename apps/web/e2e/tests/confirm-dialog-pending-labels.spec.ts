@@ -172,6 +172,8 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     await expect(combatantRow).toBeVisible();
     await combatantRow.getByRole('button', { name: /^Remove .+/ }).first().click();
     const dialog = page.getByRole('dialog', { name: 'Remove this combatant from the encounter?' });
+    await expect(dialog).toContainText('This removes their HP, conditions, initiative, and turn state.');
+    await expect(dialog).toContainText('You can undo it immediately to restore the combatant.');
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
     await started;
     await expectBusyConfirm(

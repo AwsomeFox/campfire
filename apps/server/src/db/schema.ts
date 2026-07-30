@@ -1477,6 +1477,9 @@ export const encounters = sqliteTable('encounters', {
   // Internal monotonic token for a logical turn. Unlike round/index it also changes
   // when a DM undoes back to the same combatant, invalidating banked player previews.
   turnVersion: integer('turn_version').notNull().default(0),
+  // Internal ABA guard for removal undo. Unlike turnVersion, ordinary combatant
+  // state changes advance this counter without invalidating player action previews.
+  combatantStateVersion: integer('combatant_state_version').notNull().default(0),
   escalationDie: integer('escalation_die').notNull().default(0),
   escalationDieHeld: integer('escalation_die_held', { mode: 'boolean' }).notNull().default(false),
   escalationDieOverride: integer('escalation_die_override'),
@@ -2054,6 +2057,24 @@ export const combatants = sqliteTable('combatants', {
   conditionInstances: text('condition_instances'),
   // Issue #425: inline homebrew statblock JSON (CombatantStatblock) for manual monsters.
   statblockJson: text('statblock_json'),
+});
+
+/** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */
+export const combatantRemovalUndos = sqliteTable('combatant_removal_undos', {
+  token: text('token').primaryKey(),
+  requestKey: text('request_key'),
+  // Retry keys belong to the authenticated principal, matching the other
+  // encounter idempotency surfaces. A second DM must not receive the first
+  // DM's capability merely because their clients generated the same key.
+  actorId: text('actor_id').notNull().default(''),
+  encounterId: integer('encounter_id').notNull(),
+  combatantId: integer('combatant_id').notNull(),
+  snapshotJson: text('snapshot_json').notNull(),
+  beforeEncounterJson: text('before_encounter_json').notNull(),
+  afterEncounterJson: text('after_encounter_json').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  consumedAt: text('consumed_at'),
+  createdAt: text('created_at').notNull(),
 });
 
 /** Campaign-scoped homebrew monster library (issue #425). */

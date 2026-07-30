@@ -212,6 +212,187 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(turnState.movementUsedFt).toBe(0);
   });
 
+  it('removing the active combatant starts the selected successor’s turn lifecycle', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const [c3] = orm
+      .insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Eligible successor', initiative: 5, hpCurrent: 8, hpMax: 8, sortOrder: 2 })
+      .returning()
+      .all();
+    // The next ordered actor is down, so removal skips it and starts c3 instead.
+    orm.update(combatants).set({ deathState: 'dead' }).where(eq(combatants.id, c2)).run();
+    await service.updateCombatantTurnState(encounterId, c3.id, { useSlot: 'action', moveFt: 30 }, dmUser, 'dm');
+    const startTick = {
+      id: 'remove_start_tick', name: 'hexed', ruleEntryId: null, source: null, sourceCombatantId: null,
+      durationRounds: 2, roundsRemaining: 2, timing: 'start-of-turn', saveTiming: 'none', saveDc: null,
+      saveAbility: null, isConcentration: false, stacks: 1, notes: '', custom: false,
+    };
+    orm.update(combatants)
+      .set({ conditions: JSON.stringify(['hexed']), conditionInstances: JSON.stringify([startTick]) })
+      .where(eq(combatants.id, c3.id))
+      .run();
+
+    const removal = await service.removeCombatant(encounterId, c1, dmUser, 'dm');
+
+    expect(currentId(orm, encounterId)).toBe(c3.id);
+    const [successor] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).limit(1).all();
+    expect(JSON.parse(successor.turnState ?? '{}')).toMatchObject({ used: {}, movementUsedFt: 0 });
+    expect(JSON.parse(successor.conditionInstances ?? '[]')).toEqual([expect.objectContaining({ id: 'remove_start_tick', roundsRemaining: 1 })]);
+
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    const [rewoundSuccessor] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).limit(1).all();
+    expect(JSON.parse(rewoundSuccessor.turnState ?? '{}')).toMatchObject({ used: { action: 1 }, movementUsedFt: 30 });
+    expect(JSON.parse(rewoundSuccessor.conditionInstances ?? '[]')).toEqual([expect.objectContaining({ id: 'remove_start_tick', roundsRemaining: 2 })]);
+  });
+
+  it('removing the last active combatant resets legendary usage for the new round', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm.insert(rulePacks)
+      .values({ slug: 'removal-round-legendary', name: 'Removal round legendary', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning()
+      .all();
+    const [entry] = orm.insert(ruleEntries)
+      .values({
+        packId: pack.id, slug: 'removal-round-drake', name: 'Removal round drake', type: 'monster', summary: '', body: '',
+        dataJson: JSON.stringify({ legendary_actions: [{ name: 'Tail attack' }] }), createdAt: ts, updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [otherBoss] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Inactive legendary', initiative: 5, hpCurrent: 8, hpMax: 8, sortOrder: 2, ruleEntryId: entry.id, deathState: 'dead', turnState: JSON.stringify({ used: { legendary: 3 } }) })
+      .returning()
+      .all();
+    orm.update(combatants).set({ ruleEntryId: entry.id, turnState: JSON.stringify({ used: { legendary: 3 } }) }).where(eq(combatants.id, c1)).run();
+
+    await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'action', moveFt: 30 }, dmUser, 'dm');
+    await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
+    const removal = await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [newRoundBoss] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+    expect(JSON.parse(newRoundBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
+    expect(JSON.parse(newRoundBoss.turnState ?? '{}')).toMatchObject({ used: {}, movementUsedFt: 0 });
+    const [newRoundOtherBoss] = orm.select().from(combatants).where(eq(combatants.id, otherBoss.id)).limit(1).all();
+    expect(JSON.parse(newRoundOtherBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
+
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    const [rewoundOtherBoss] = orm.select().from(combatants).where(eq(combatants.id, otherBoss.id)).limit(1).all();
+    expect(JSON.parse(rewoundOtherBoss.turnState ?? '{}').used.legendary).toBe(3);
+  });
+
+  it('removing a lair resume target chooses the next eligible combatant', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const [downed] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Downed fallback', initiative: 5, hpCurrent: 0, hpMax: 8, sortOrder: 2, deathState: 'dead' })
+      .returning()
+      .all();
+    const [eligible] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Eligible fallback', initiative: 1, hpCurrent: 8, hpMax: 8, sortOrder: 3 })
+      .returning()
+      .all();
+    orm.update(encounters)
+      .set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: eligible.id });
+    expect(afterRemoval.lairResumeCombatantId).not.toBe(downed.id);
+    expect(afterRemoval.lairResumeCombatantId).not.toBe(c1);
+  });
+
+  it('removing a lair resume target exits the lair phase when no actor is eligible', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm.update(combatants).set({ hpCurrent: 0, deathState: 'dead' }).where(eq(combatants.id, c1)).run();
+    orm.update(encounters)
+      .set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ turnPhase: 'combatant', currentCombatantId: null, lairResumeCombatantId: null });
+  });
+
+  it('removing the final lair resume target carries the round wrap', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm.update(encounters)
+      .set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ round: 2, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
+  });
+
+  it('undoing an active removal restores the combatant phase after entering a lair slot', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm.insert(rulePacks)
+      .values({ slug: 'lair-turn-test', name: 'Lair turn test', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning()
+      .all();
+    const [lairEntry] = orm.insert(ruleEntries)
+      .values({
+        packId: pack.id, slug: 'lair-turn-monster', name: 'Lair turn monster', type: 'monster', summary: '', body: '',
+        dataJson: JSON.stringify({ lairActions: [{ name: 'Shifting walls' }] }), createdAt: ts, updatedAt: ts,
+      })
+      .returning()
+      .all();
+    orm.update(combatants).set({ ruleEntryId: lairEntry.id }).where(eq(combatants.id, c1)).run();
+
+    const removal = await service.removeCombatant(encounterId, c1, dmUser, 'dm');
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 });
+
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    const [afterUndo] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterUndo).toMatchObject({ turnPhase: 'combatant', currentCombatantId: c1, lairResumeCombatantId: null });
+  });
+
+  it('removing the final initiative-20 actor carries a lair-entry round wrap', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm.insert(rulePacks)
+      .values({ slug: 'lair-wrap-test', name: 'Lair wrap test', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning()
+      .all();
+    const [lairEntry] = orm.insert(ruleEntries)
+      .values({
+        packId: pack.id, slug: 'lair-wrap-monster', name: 'Lair wrap monster', type: 'monster', summary: '', body: '',
+        dataJson: JSON.stringify({ lairActions: [{ name: 'Crumbling floor' }] }), createdAt: ts, updatedAt: ts,
+      })
+      .returning()
+      .all();
+    orm.update(combatants).set({ initiative: 21, ruleEntryId: lairEntry.id }).where(eq(combatants.id, c1)).run();
+    orm.update(combatants).set({ initiative: 20 }).where(eq(combatants.id, c2)).run();
+    orm.update(encounters).set({ currentCombatantId: c2 }).where(eq(encounters.id, encounterId)).run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ round: 2, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
+  });
+
   it('delay / ready flags persist and are player-authorized on their own combatant', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();

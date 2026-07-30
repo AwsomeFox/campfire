@@ -19,6 +19,10 @@ describe('AI Driver encounter creation allow-list (#1075)', () => {
     expect(isDriverToolAllowed(writeTool('roll_death_save'))).toBe(true);
   });
 
+  it('allows undo_remove_combatant to recover a just-removed combatant', () => {
+    expect(isDriverToolAllowed(writeTool('undo_remove_combatant'))).toBe(true);
+  });
+
   it('delete_encounter remains forbidden (destructive write)', () => {
     expect(isDriverToolAllowed(writeTool('delete_encounter'))).toBe(false);
   });

@@ -117,6 +117,15 @@ describe('driver-tool-policy (#474)', () => {
     }
   });
 
+  it('auto-allows combatant undo so recovery is not blocked behind a second confirmation', () => {
+    const decision = resolveDriverToolPolicy({
+      profile: 'live',
+      tool: writeTool('undo_remove_combatant'),
+      onLivePlayAllowList: true,
+    });
+    expect(decision).toMatchObject({ policy: 'auto', offer: true });
+  });
+
   it('denies remove_combatant and end_encounter in aftermath', () => {
     expect(
       resolveDriverToolPolicy({

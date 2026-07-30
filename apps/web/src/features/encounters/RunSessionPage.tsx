@@ -29,6 +29,7 @@ import type {
   CastSessionCreated,
   Character,
   Combatant,
+  CombatantRemoveResult,
   CombatantKind,
   ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
@@ -73,7 +74,7 @@ import {
 } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
+import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
@@ -94,6 +95,12 @@ import {
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import {
+  canStabilizeCombatant,
+  hasRestoredTrashedEncounter,
+  isCurrentCombatantUndoEncounter,
+  REMOVE_COMBATANT_CONFIRM_BODY,
+} from './combatantLifecycle';
 import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
@@ -1073,7 +1080,15 @@ export default function RunSessionPage() {
   /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
   const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
+  const [pendingTrashUndo, setPendingTrashUndo] = useState<{ encounterId: number } | null>(null);
+  const trashedEncounterIdsRef = useRef(new Set<number>());
+  const trashedEncounterRevisionsRef = useRef(new Map<number, string>());
+  // Keep one key for a remove intent until a definite response. If its success
+  // response is lost, pressing Remove again must replay the same receipt rather
+  // than turn the retry into a 404 after the original delete committed.
+  const combatantRemovalKeys = useRef(new Map<string, string>());
+  const [pendingCombatantUndo, setPendingCombatantUndo] = useState<{ name: string; undoToken: string; encounterId: number } | null>(null);
+  const [dismissTokenUndoNonce, setDismissTokenUndoNonce] = useState(0);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
   const [encounterReadStale, setEncounterReadStale] = useState(false);
@@ -1265,6 +1280,20 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  // An encounter can be restored by another client or API caller. A newer authoritative
+  // revision clears only that old local-trash marker, not the still-cached pre-trash row.
+  useEffect(() => {
+    if (!encounter) return;
+    const trashedRevision = trashedEncounterRevisionsRef.current.get(encounter.id);
+    if (hasRestoredTrashedEncounter(
+      trashedRevision,
+      encounter.updatedAt,
+    )) {
+      trashedEncounterIdsRef.current.delete(encounter.id);
+      trashedEncounterRevisionsRef.current.delete(encounter.id);
+    }
+  }, [encounter?.id, encounter?.updatedAt]);
 
   useEffect(() => {
     setEscalationOverrideDraft(encounter?.escalationDieOverride == null ? '' : String(encounter.escalationDieOverride));
@@ -1679,6 +1708,18 @@ export default function RunSessionPage() {
     onError: reportError,
   });
 
+  const dismissCompetingRecoveryUndos = useCallback(() => {
+    setActionUndo(null);
+    setPendingCombatantUndo(null);
+    setDismissTokenUndoNonce((nonce) => nonce + 1);
+  }, []);
+  const dismissRecoveryUndosForTokenBatch = useCallback(() => {
+    if (!isCurrentCombatantUndoEncounter(eid, activeEncounterIdRef.current) || trashedEncounterIdsRef.current.has(eid)) return false;
+    setActionUndo(null);
+    setPendingCombatantUndo(null);
+    return true;
+  }, [eid]);
+
   // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
   // These are mutually exclusive DM header actions, so one shared pending flag gating
   // just the header group is correct — unlike the old global lock, it never touches the
@@ -1698,12 +1739,17 @@ export default function RunSessionPage() {
   });
 
   const deleteEncounterMut = useMutation({
-    mutationFn: () => api.delete(`${API}/encounters/${eid}`),
+    mutationFn: ({ encounterId }: { encounterId: number; updatedAt?: string }) => api.delete(`${API}/encounters/${encounterId}`),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSuccess: () => {
-      setConfirmDelete(false);
-      setPendingTrashUndo(true);
+    onSuccess: (_result, { encounterId, updatedAt }) => {
+      trashedEncounterIdsRef.current.add(encounterId);
+      if (updatedAt) trashedEncounterRevisionsRef.current.set(encounterId, updatedAt);
+      if (encounterId === activeEncounterIdRef.current) {
+        setConfirmDelete(false);
+        dismissCompetingRecoveryUndos();
+        setPendingTrashUndo({ encounterId });
+      }
     },
   });
 
@@ -2089,11 +2135,15 @@ export default function RunSessionPage() {
       },
     );
   };
-  const deleteEncounter = () => deleteEncounterMut.mutate();
+  const deleteEncounter = () => deleteEncounterMut.mutate({ encounterId: eid, updatedAt: encounter?.updatedAt });
   async function undoTrashEncounter() {
-    await api.post(`${API}/encounters/${eid}/restore`);
-    setPendingTrashUndo(false);
-    await invalidateEncounter(queryClient, eid);
+    const sourceEncounterId = pendingTrashUndo?.encounterId;
+    if (sourceEncounterId == null) return;
+    await api.post(`${API}/encounters/${sourceEncounterId}/restore`);
+    trashedEncounterIdsRef.current.delete(sourceEncounterId);
+    trashedEncounterRevisionsRef.current.delete(sourceEncounterId);
+    setPendingTrashUndo(null);
+    await invalidateEncounter(queryClient, sourceEncounterId);
   }
   const reopenChoicesComplete =
     hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);
@@ -2134,17 +2184,62 @@ export default function RunSessionPage() {
   }, [encounterStatus]);
 
   const removeCombatant = (combatantId: number) => {
+    const snapshot = encounter?.combatants.find((combatant) => combatant.id === combatantId);
+    const requestEncounterId = eid;
+    const removalKey = `${requestEncounterId}:${combatantId}`;
+    const idempotencyKey = combatantRemovalKeys.current.get(removalKey) ?? newOperationId();
+    combatantRemovalKeys.current.set(removalKey, idempotencyKey);
     setActionError(null);
     markCombatantPending(combatantId, true);
     api
-      .delete(`${API}/encounters/${eid}/combatants/${combatantId}`)
-      .then(() => {
+      .delete<CombatantRemoveResult>(`${API}/encounters/${requestEncounterId}/combatants/${combatantId}`, { json: { idempotencyKey } })
+      .then(({ undoToken }) => {
+        combatantRemovalKeys.current.delete(removalKey);
+        if (
+          !isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current) ||
+          trashedEncounterIdsRef.current.has(requestEncounterId)
+        ) return;
         setConfirmRemoveCombatantId(null);
-        invalidateEncounter(queryClient, eid);
+        dismissCompetingRecoveryUndos();
+        setPendingCombatantUndo({ name: snapshot?.name ?? 'Combatant', undoToken, encounterId: requestEncounterId });
+        invalidateEncounter(queryClient, requestEncounterId);
       })
-      .catch(reportError)
-      .finally(() => markCombatantPending(combatantId, false));
+      .catch((error) => {
+        // A response from the application conclusively rejected the intent. Keep
+        // the key for transient failures (including retryable HTTP 408/425/429) and
+        // ambiguous mutation timeouts, so Retry remains a safe replay even when the
+        // server committed first.
+        if (!isTransientError(error) && !isAmbiguousMutation(error)) combatantRemovalKeys.current.delete(removalKey);
+        if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) reportError(error);
+      })
+      .finally(() => {
+        if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) markCombatantPending(combatantId, false);
+      });
   };
+
+  async function undoRemoveCombatant() {
+    if (!pendingCombatantUndo) return;
+    if (pendingCombatantUndo.encounterId !== eid) {
+      setPendingCombatantUndo(null);
+      return;
+    }
+    const requestEncounterId = pendingCombatantUndo.encounterId;
+    const undoToken = pendingCombatantUndo.undoToken;
+    try {
+      await api.post(`${API}/encounters/${requestEncounterId}/combatants/undo-remove`, { undoToken });
+      setPendingCombatantUndo((pending) => pending?.undoToken === undoToken ? null : pending);
+      await invalidateEncounter(queryClient, requestEncounterId);
+    } catch (err) {
+      if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) reportError(err);
+      throw err;
+    }
+  }
+
+  useEffect(() => {
+    activeEncounterIdRef.current = eid;
+    setPendingCombatantUndo(null);
+    setPendingCombatantIds(new Set());
+  }, [eid]);
 
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
@@ -3074,6 +3169,8 @@ export default function RunSessionPage() {
           onMoveToken={moveToken}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
+          dismissTokenUndoNonce={dismissTokenUndoNonce}
+          onBeginTokenBatchUndo={dismissRecoveryUndosForTokenBatch}
           onUnplaceToken={unplaceToken}
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
@@ -3258,9 +3355,12 @@ export default function RunSessionPage() {
           applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
-          onApplied={(token) => {
-            void invalidateEncounter(queryClient, eid);
+          onApplied={(token, _policy, sourceEncounterId) => {
+            if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
+            void invalidateEncounter(queryClient, sourceEncounterId);
             setPendingActionUse(null);
+            if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
+            dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
           }}
         />
@@ -3581,9 +3681,19 @@ export default function RunSessionPage() {
           onExpire={() => navigate(`/c/${cid}/encounters`)}
         />
       )}
+      {pendingCombatantUndo && (
+        <UndoSnackbar
+          key={pendingCombatantUndo.undoToken}
+          message={`${pendingCombatantUndo.name} removed from the encounter.`}
+          onUndo={undoRemoveCombatant}
+          onExpire={() => setPendingCombatantUndo(null)}
+          successMessage={`${pendingCombatantUndo.name} restored to the encounter.`}
+        />
+      )}
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
+          body={REMOVE_COMBATANT_CONFIRM_BODY}
           confirmLabel="Remove"
           pendingLabel="Removing…"
           busy={pendingCombatantIds.has(confirmRemoveCombatantId)}
@@ -3712,6 +3822,8 @@ export function BattleMap({
   onMoveToken,
   onBatchTokens,
   onUndoTokenBatch,
+  dismissTokenUndoNonce,
+  onBeginTokenBatchUndo,
   onUnplaceToken,
   onSetTokenSize,
   onSetGrid,
@@ -3741,6 +3853,10 @@ export function BattleMap({
   onMoveToken: (combatantId: number, x: number, y: number) => void;
   onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
   onUndoTokenBatch?: (undoToken: string) => Promise<void>;
+  /** Clears action/combatant recovery before this map starts its own recovery window. Returns false after Trash. */
+  onBeginTokenBatchUndo?: () => boolean;
+  /** A parent-created recovery action supersedes the map's token-batch recovery window. */
+  dismissTokenUndoNonce?: number;
   onUnplaceToken: (combatantId: number) => void;
   onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
   onSetGrid: (patch: EncounterGridPatch) => void;
@@ -3826,6 +3942,16 @@ export function BattleMap({
   const [tokenSelectionRect, setTokenSelectionRect] = useState<{ start: MapPoint; end: MapPoint } | null>(null);
   const [tokenLasso, setTokenLasso] = useState<MapPoint[] | null>(null);
   const [tokenBatchUndo, setTokenBatchUndo] = useState<string | null>(null);
+  const tokenUndoDismissNonceRef = useRef(dismissTokenUndoNonce);
+  useEffect(() => {
+    if (tokenUndoDismissNonceRef.current === dismissTokenUndoNonce) return;
+    tokenUndoDismissNonceRef.current = dismissTokenUndoNonce;
+    setTokenBatchUndo(null);
+  }, [dismissTokenUndoNonce]);
+  const beginTokenBatchUndo = useCallback((undoToken: string) => {
+    if (onBeginTokenBatchUndo?.() === false) return;
+    setTokenBatchUndo(undoToken);
+  }, [onBeginTokenBatchUndo]);
   const [formationName, setFormationName] = useState('');
   const formationsQuery = useQuery({
     queryKey: ['token-formations', campaignId],
@@ -4643,7 +4769,7 @@ export function BattleMap({
         // Player movement remains a single permitted token. A DM multi-drag is one
         // server-authoritative atomic batch, never a partial PATCH loop.
         if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
-          setTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
+          beginTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
         }).catch(error => onError(error instanceof Error ? error.message : 'Unable to move selected tokens'));
         else onMoveToken(gesture.tokenId, pt.x, pt.y);
       }
@@ -6052,7 +6178,7 @@ export function BattleMap({
                     catch (error) { onError(error instanceof Error ? error.message : 'Unable to plan formation'); return; }
                     if (!onBatchTokens) return;
                     if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
-                    void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                    void onBatchTokens(plan, tokenPlanningAspect).then(result => { beginTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                   }}>{kind === 'sides' ? 'Party / enemy sides' : `${kind[0].toUpperCase()}${kind.slice(1)}`}</button>)}
                   <details>
                     <summary className="cf-chip" style={{ cursor: 'pointer' }}>Selected tokens</summary>
@@ -6080,7 +6206,7 @@ export function BattleMap({
                       if (!plan.length) throw new Error('No selected tokens match this formation');
                       if (!onBatchTokens) return;
                       if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
-                      void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                      void onBatchTokens(plan, tokenPlanningAspect).then(result => { beginTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                     } catch (error) { onError(error instanceof Error ? error.message : 'Invalid saved formation'); }
                   }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}><UIIcon name="close" size="xs" /></button></span>)}
                 </div>
@@ -6101,7 +6227,7 @@ export function BattleMap({
                           const plan = planCollisionFreePlacement(encounter.combatants, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect, calibration, mapRect);
                           if (!onBatchTokens) return;
                           void onBatchTokens(plan.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
-                            setTokenBatchUndo(result.undoToken); announce(`${plan.length} tokens placed with collision-free spacing`);
+                            beginTokenBatchUndo(result.undoToken); announce(`${plan.length} tokens placed with collision-free spacing`);
                           }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place all tokens'));
                         } catch (error) {
                           onError(error instanceof Error ? error.message : 'Unable to find collision-free positions');
@@ -7432,8 +7558,8 @@ function CombatantRow({
               </button>
             )}
 
-            {/* Dying / Stabilization Controls for Starfinder or Down Combatants */}
-            {(combatant.deathState === 'dying' || (combatant.hpCurrent != null && combatant.hpCurrent <= 0)) && onPatchCombatant && (
+            {/* Stabilization is a character-only recovery control; monsters/NPCs simply go down. */}
+            {canStabilizeCombatant(combatant) && onPatchCombatant && (
               <>
                 <button
                   type="button"

@@ -1015,6 +1015,37 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
+  it('bumps combatant state when an action undo races a fight start', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    orm.update(encounters)
+      .set({ status: 'preparing', combatantStateVersion: 0 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+    const originalTransaction = orm.transaction.bind(orm);
+    let startedBeforeUndoTransaction = false;
+    const transactionSpy = jest.spyOn(orm, 'transaction').mockImplementation((callback) => {
+      if (!startedBeforeUndoTransaction) {
+        startedBeforeUndoTransaction = true;
+        orm.update(encounters).set({ status: 'running' }).where(eq(encounters.id, encounterId)).run();
+      }
+      return originalTransaction(callback);
+    });
+    try {
+      service.undo(encounterId, applied.undoToken!, alice, 'player');
+    } finally {
+      transactionSpy.mockRestore();
+    }
+
+    expect(startedBeforeUndoTransaction).toBe(true);
+    expect(orm.select().from(encounters).where(eq(encounters.id, encounterId)).get()!.combatantStateVersion).toBe(1);
+  });
+
   it('#1449: an undo token with an unknown chainId is rejected', () => {
     const { service, encounterId, actor } = seed();
     const bogus = ActionUndoToken.parse({

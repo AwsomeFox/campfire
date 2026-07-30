@@ -1289,6 +1289,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
   turn_version INTEGER NOT NULL DEFAULT 0,
+  combatant_state_version INTEGER NOT NULL DEFAULT 0,
   escalation_die INTEGER NOT NULL DEFAULT 0,
   escalation_die_held INTEGER NOT NULL DEFAULT 0,
   escalation_die_override INTEGER,
@@ -1774,6 +1775,22 @@ CREATE TABLE IF NOT EXISTS combatants (
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
   statblock_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS combatant_removal_undos (
+  token TEXT PRIMARY KEY,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  combatant_id INTEGER NOT NULL,
+  request_key TEXT,
+  actor_id TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL,
+  before_encounter_json TEXT NOT NULL,
+  after_encounter_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, actor_id, request_key) WHERE request_key IS NOT NULL;
 
 -- Campaign-scoped homebrew monster library (issue #425).
 CREATE TABLE IF NOT EXISTS campaign_library_monsters (

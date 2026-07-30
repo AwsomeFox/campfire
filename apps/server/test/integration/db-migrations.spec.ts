@@ -2299,4 +2299,57 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       booted.sqlite.close();
     }
   });
+
+  it('upgrades removal receipt retries to actor-scoped keys without losing prior receipts (#1469)', () => {
+     expect(MIGRATION_NAMES).toContain('0150_combatant_remove_undo_1469');
+     expect(MIGRATION_NAMES).toContain('0151_combatant_remove_revision_1469');
+
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'combatant_removal_undos')).toEqual(expect.arrayContaining(['actor_id', 'request_key']));
+      const freshIndex = fresh.sqlite
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_combatant_removal_undos_request'")
+        .get() as { sql: string };
+      expect(freshIndex.sql).toContain('encounter_id, actor_id, request_key');
+    } finally {
+      fresh.sqlite.close();
+    }
+
+    // Rewind just the final revision to the shape shipped by the first #1469
+    // migration. Existing receipts must remain readable, while fresh receipts
+    // receive the actor-scoped key index.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      // The fixture only needs a historical receipt row; it intentionally does
+      // not seed the surrounding encounter tables.
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('DROP INDEX IF EXISTS idx_combatant_removal_undos_request');
+      legacy.exec('ALTER TABLE combatant_removal_undos DROP COLUMN actor_id');
+      legacy.exec('CREATE UNIQUE INDEX idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, request_key) WHERE request_key IS NOT NULL');
+      legacy
+        .prepare(`INSERT INTO combatant_removal_undos
+          (token, encounter_id, combatant_id, request_key, snapshot_json, before_encounter_json, after_encounter_json, expires_at, created_at)
+          VALUES (?, 1, 1, 'legacy-key', '{}', '{}', '{}', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`)
+        .run('legacy-removal-receipt');
+       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0151_combatant_remove_revision_1469');
+      legacy.pragma('foreign_keys = ON');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatant_removal_undos')).toContain('actor_id');
+      expect(
+        upgraded.sqlite.prepare('SELECT actor_id FROM combatant_removal_undos WHERE token = ?').get('legacy-removal-receipt'),
+      ).toEqual({ actor_id: '' });
+      const indexColumns = upgraded.sqlite
+        .prepare("SELECT name FROM pragma_index_info('idx_combatant_removal_undos_request') ORDER BY seqno")
+        .all() as Array<{ name: string }>;
+      expect(indexColumns.map((column) => column.name)).toEqual(['encounter_id', 'actor_id', 'request_key']);
+     } finally {
+       upgraded.sqlite.close();
+     }
+   });
 });

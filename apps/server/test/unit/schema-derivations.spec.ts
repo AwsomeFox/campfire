@@ -5,6 +5,7 @@ import {
   normalizeStats,
   DiceExprPattern,
   XpAward,
+  CombatantRemoveRequest,
   CombatantUpdate,
 } from '@campfire/schema';
 
@@ -117,5 +118,11 @@ describe('schema — direct encounter damage metadata (issue #605)', () => {
     expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: 4 }).success).toBe(true);
     expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: 0 }).success).toBe(false);
     expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: -1 }).success).toBe(false);
+  });
+});
+
+describe('schema — combatant removal retries', () => {
+  it('keeps the idempotency key optional for parity between REST and MCP', () => {
+    expect(CombatantRemoveRequest.parse({})).toEqual({});
   });
 });
