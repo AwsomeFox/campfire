@@ -393,6 +393,14 @@ jobs:
           name: playwright-report-shard-${{ matrix.shard }}
           path: apps/web/playwright-report/
           if-no-files-found: ignore
+      - name: Upload Playwright test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results-shard-${{ matrix.shard }}
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 1
 
   # Runtime PWA gate (issue #569). `build-test-*` proves the built FILES satisfy
   # the PWA contract; this proves a real Chromium actually registers the worker

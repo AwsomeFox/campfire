@@ -49,8 +49,9 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveValue(String(boss.initiative));
     await expect(page.getByLabel(`Initiative for ${skirmisher.name}`)).toHaveValue(String(skirmisher.initiative));
 
-    // DM-only run controls exist.
-    await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
+    // DM-only run controls exist. The workspace also exposes a turn-end Next turn
+    // button (issue #1456), so scope to the first visible header control.
+    await expect(page.getByRole('button', { name: 'Next turn →' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
