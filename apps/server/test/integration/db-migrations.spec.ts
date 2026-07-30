@@ -2517,7 +2517,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     try {
       // Simulate legacy ai_driver_control_state schema prior to 0153
       legacy.exec(`
-        CREATE TABLE IF NOT EXISTS __migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS __migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE ai_driver_control_state (
           campaign_id INTEGER PRIMARY KEY,
           status TEXT NOT NULL,
