@@ -87,7 +87,7 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
   await page.request.delete(`/api/v1/attachments/${attachment.id}`);
 });
 
-test('disables in-character posting when the selected character leaves the owned roster', async ({ page }) => {
+test('removes a deleted speaker from the owned roster without disabling other owned speakers', async ({ page }) => {
   const { campaignId, navigation } = seed();
   const created = await page.request.post(`/api/v1/campaigns/${campaignId}/characters`, {
     data: { name: 'Fleeting Speaker' },
@@ -108,11 +108,15 @@ test('disables in-character posting when the selected character leaves the owned
   await expect(discussion.getByRole('button', { name: 'Post' }).last()).toBeEnabled();
 
   // Ownership changes under the open compose box; a reload refreshes ownedCharacters.
+  // The global navigation fixture is also player-owned so player sheet tests stay
+  // authorized, therefore a removed temporary speaker must disappear without
+  // disabling in-character posting for that remaining owned character.
   expect((await page.request.delete(`/api/v1/characters/${character.id}`)).ok()).toBe(true);
   await page.reload();
   await expect(discussion).toBeVisible();
-  await expect(discussion.getByRole('checkbox', { name: 'In character' }).last()).toBeDisabled();
-  await discussion.getByPlaceholder('Add to the discussion…').fill('Stale character id must not enable Post.');
-  // With no owned characters, in-character cannot be selected and Post stays body-gated only.
-  await expect(discussion.getByRole('checkbox', { name: 'In character' }).last()).not.toBeChecked();
+  await expect(inCharacter).toBeEnabled();
+  await inCharacter.check();
+  const refreshedSpeakerSelect = discussion.getByRole('combobox', { name: /Speaking as/ }).last();
+  await expect(refreshedSpeakerSelect.locator(`option[value="${character.id}"]`)).toHaveCount(0);
+  await expect(refreshedSpeakerSelect).not.toHaveValue(String(character.id));
 });
