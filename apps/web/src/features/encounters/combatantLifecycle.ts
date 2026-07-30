@@ -40,13 +40,12 @@ export function isCurrentCombatantUndoEncounter(requestEncounterId: number, acti
   return requestEncounterId === activeEncounterId;
 }
 
-/** A post-trash read must first observe the deletion before a changed row can prove restoration. */
+/** A newer row after our successful DELETE proves that another client restored it. */
 export function hasRestoredTrashedEncounter(
   trashedRevision: string | undefined,
-  deletionObserved: boolean,
   encounterRevision: string,
 ): boolean {
-  return trashedRevision !== undefined && deletionObserved && trashedRevision !== encounterRevision;
+  return trashedRevision !== undefined && trashedRevision !== encounterRevision;
 }
 
 export const REMOVE_COMBATANT_CONFIRM_BODY =

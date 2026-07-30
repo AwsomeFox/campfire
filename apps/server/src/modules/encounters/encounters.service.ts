@@ -4344,6 +4344,9 @@ export class EncountersService {
           const resumed = advanceTurn(advanceRoster, combatantId, freshEncounter.round);
           lairResumeCombatantId = resumed.currentCombatantId;
           wrappedToNextRound = resumed.round > freshEncounter.round;
+          // No eligible actor means there is no lair slot to resume. Exit it now
+          // rather than letting the next advance use the lair helper's raw fallback.
+          if (resumed.currentCombatantId === null) turnPhase = 'combatant';
         }
       }
       let afterEncounter = {

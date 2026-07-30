@@ -1295,7 +1295,6 @@ export default function RunSessionPage() {
     const trashedRevision = trashedEncounterRevisionsRef.current.get(encounter.id);
     if (hasRestoredTrashedEncounter(
       trashedRevision,
-      trashedEncounterDeletionObservedRef.current.has(encounter.id),
       encounter.updatedAt,
     )) {
       trashedEncounterIdsRef.current.delete(encounter.id);

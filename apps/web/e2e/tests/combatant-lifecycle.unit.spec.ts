@@ -115,9 +115,9 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     expect(REMOVE_COMBATANT_CONFIRM_BODY).toContain('undo it immediately');
   });
 
-  test('a changed encounter revision proves restoration only after a post-trash 404', () => {
-    expect(hasRestoredTrashedEncounter('before-trash', false, 'late-pre-trash-read')).toBe(false);
-    expect(hasRestoredTrashedEncounter('before-trash', true, 'after-restore')).toBe(true);
+  test('a changed encounter revision proves restoration after the successful local delete', () => {
+    expect(hasRestoredTrashedEncounter('before-trash', 'after-restore')).toBe(true);
+    expect(hasRestoredTrashedEncounter('before-trash', 'before-trash')).toBe(false);
   });
 
   test('replacement undo tokens remount, survive older undo completions, and cannot cross encounter routes', () => {
