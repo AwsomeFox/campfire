@@ -964,6 +964,50 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0149 (issue #701): ensures every soft-deletable entity table carries `deleted_at`.
+ * Registered in MIGRATIONS so runMigrations executes it and records it in __migrations.
+ */
+function migrateEnsureSoftDeleteColumns701(sqlite: Database.Database): void {
+  ensureSoftDeleteColumns(sqlite);
+}
+
+/**
+ * Idempotent schema safety guard: ensures every soft-deletable entity table carries
+ * `deleted_at`. Guarantees that even if a database recorded migration 0090/0031
+ * prior to a table being created or upgraded, booting the server automatically
+ * backfills missing `deleted_at` columns on any existing table and logs a warning.
+ */
+function ensureSoftDeleteColumns(sqlite: Database.Database): void {
+  const tables = [
+    'campaigns',
+    'quests',
+    'npcs',
+    'locations',
+    'sessions',
+    'notes',
+    'characters',
+    'timeline_events',
+    'factions',
+    'story_arcs',
+    'story_beats',
+    'encounters',
+    'comments',
+    'inventory_items',
+  ];
+  for (const table of tables) {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) continue;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'deleted_at')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+      dbLog.warn(`backfilled missing deleted_at column on table '${table}'`);
+    }
+  }
+}
+
+/**
  * Migration for DBs created before comment tombstoning (issue #503): the comments
  * table gained `deleted_at` (nullable ISO timestamp — a tombstoned root keeps its
  * row so replies survive) and `deleted_by` (the actor who tombstoned it, same
@@ -4735,6 +4779,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // combatant snapshot after this branch's earlier 0147, so this additive migration
   // takes the next free ordinal 0148 (never recorded on any real database).
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
+  // #701 soft-delete schema safety check: guarantees all 14 entity tables carry `deleted_at`.
+  { name: '0149_ensure_soft_delete_columns_701', run: migrateEnsureSoftDeleteColumns701 },
 ];
 
 /**
@@ -4929,12 +4975,12 @@ export function openDatabase(dataDir: string): {
   // recorded version, and the guard stays meaningful for a subsequent older binary.
   recordAppVersion(sqlite);
 
+  // Ensure soft-delete deleted_at columns exist on all entity tables even if migrations were already recorded.
+  // Runs BEFORE BOOTSTRAP_SQL because BOOTSTRAP_SQL itself creates idx_campaigns_deleted_at, which fails
+  // when campaigns is missing the column.
+  ensureSoftDeleteColumns(sqlite);
+
   sqlite.exec(BOOTSTRAP_SQL);
-  // BOOTSTRAP_SQL runs AFTER the migrations so a just-rebuilt table (e.g. users) is
-  // recreated in its modern shape via CREATE TABLE IF NOT EXISTS only when missing,
-  // and keeps idx_users_oidc_sub in sync. This is also how index-only migrations
-  // reach existing DBs: e.g. #74's idx_audit_campaign_id_desc / idx_audit_created_at
-  // are picked up on the next boot with no bespoke ALTER migration needed.
   const ftsAvailable = setupRuleEntriesFts(sqlite);
   const campaignSearchFtsSetup = setupCampaignSearchFts(sqlite);
   const campaignSearchFtsAvailable = campaignSearchFtsSetup.available;
