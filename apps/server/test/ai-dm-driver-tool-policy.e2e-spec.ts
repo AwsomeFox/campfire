@@ -95,7 +95,7 @@ describe('ai-dm driver — confirm-policy + adversarial regressions (#474, e2e)'
     const pending = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
     expect(pending.status).toBe(200);
     expect(pending.body).toHaveLength(1);
-    const forbiddenKeys = ['retainedActionChain'];
+    const forbiddenKeys = ['retainedActionChain', 'aftermathGrantWindow'];
     for (const key of forbiddenKeys) {
       expect(Object.prototype.hasOwnProperty.call(pending.body[0], key)).toBe(false);
     }

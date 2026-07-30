@@ -1556,6 +1556,7 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- a takeover, or a stuck seat legitimately takes over -- and a mode that vanished when a DM
   -- paused for five minutes would silently restore full autonomy on resume.
   collaborative INTEGER NOT NULL DEFAULT 0,
+  aftermath_grant_window TEXT,
   updated_at TEXT NOT NULL
 );
 

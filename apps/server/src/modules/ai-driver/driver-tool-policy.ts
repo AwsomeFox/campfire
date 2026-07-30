@@ -73,6 +73,11 @@ export interface AiDmPendingToolConfirmation {
    * owner even when an earlier confirmation performed the false-to-true transition.
    */
   retainedActionChain?: { encounterId: number; chainId: string };
+  /**
+   * Internal marker of which aftermath window identity (encounterId + endedAt) this confirmation
+   * was queued against (#1781 / #1495).
+   */
+  aftermathGrantWindow?: { encounterId: number; endedAt: string };
 }
 
 /** Tool-name prefixes the driver seat may never call — every hard delete, even proposed. */
@@ -90,6 +95,16 @@ export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
  * DM's own writes).
  */
 export const DRIVER_INVENTORY_GRANT_MAX_QTY = 100;
+/**
+ * Cumulative cap on treasury granted (summed across every denomination and every
+ * `adjust_treasury` call) during one `aftermath` window (#1781 / #1495).
+ */
+export const DRIVER_TREASURY_SESSION_GRANT_CAP = 50_000;
+/**
+ * Cumulative cap on inventory `qty` granted (summed across every `add_inventory_item` and
+ * `update_inventory_item` call) during one `aftermath` window (#1781 / #1495).
+ */
+export const DRIVER_INVENTORY_SESSION_GRANT_CAP = 1_000;
 /**
  * Recency window for the post-combat `aftermath` profile (#1495). An encounter's `endedAt`
  * must fall within this many milliseconds of "now" for the driver to still treat play as the

@@ -2506,6 +2506,56 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0153 adds the aftermath_grant_window column to ai_driver_control_state when upgrading (#1781)', () => {
+    expect(MIGRATION_NAMES).toContain('0153_ai_driver_aftermath_grant_window_1781');
+
+    dataDir = makeTempDataDir();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      // Simulate legacy ai_driver_control_state schema prior to 0153
+      legacy.exec(`
+        CREATE TABLE IF NOT EXISTS __migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL);
+        CREATE TABLE ai_driver_control_state (
+          campaign_id INTEGER PRIMARY KEY,
+          status TEXT NOT NULL,
+          state TEXT NOT NULL,
+          scene TEXT,
+          last_narration TEXT,
+          last_turn_at TEXT,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          stuck TEXT,
+          acting_dm TEXT,
+          vote TEXT,
+          takeover_requested_by TEXT,
+          last_input TEXT,
+          announced_recovery TEXT,
+          secret_read_approvals TEXT,
+          pending_tool_confirmations TEXT,
+          phase TEXT NOT NULL DEFAULT 'active',
+          collaborative INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      expect(columnNames(legacy, 'ai_driver_control_state')).not.toContain('aftermath_grant_window');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'ai_driver_control_state')).toContain('aftermath_grant_window');
+      expect(
+        (
+          upgraded.sqlite
+            .prepare('SELECT name FROM __migrations WHERE name = ?')
+            .get('0153_ai_driver_aftermath_grant_window_1781') as { name?: string }
+        )?.name,
+      ).toBe('0153_ai_driver_aftermath_grant_window_1781');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
   it('ensureSoftDeleteColumns backfills missing deleted_at columns on boot even if __migrations recorded all migrations', () => {
     dataDir = makeTempDataDir();
     const { sqlite } = openDatabase(dataDir);

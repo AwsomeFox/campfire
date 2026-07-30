@@ -1851,6 +1851,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   phase: text('phase').notNull().default('active'),
   /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
   collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
+  /** #1781 / #1495 — cumulative aftermath economy-grant budget window state. */
+  aftermathGrantWindow: text('aftermath_grant_window'),
   updatedAt: text('updated_at').notNull(),
 });
 
