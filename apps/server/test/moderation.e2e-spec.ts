@@ -321,6 +321,42 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
       expect(foreign.status).toBe(404);
     });
 
+    it('keeps an attributed safety-hold notification non-resolvable for moderation actions', async () => {
+      const sqlite = openDb();
+      let safetyNotificationId: number;
+      try {
+        const inserted = sqlite
+          .prepare(
+            `INSERT INTO notifications (user_id, campaign_id, type, title, body, entity_type, entity_id, comment_id, data, actor_name, actor_user_id, read_at, created_at)
+             VALUES (?, ?, 'safety_hold', ?, ?, NULL, NULL, NULL, NULL, ?, ?, NULL, ?)`,
+          )
+          .run(
+            victimId,
+            campaignId,
+            'The table is paused',
+            'A participant used the safety hold.',
+            'mod-abuser',
+            String(abuserId),
+            new Date().toISOString(),
+          );
+        safetyNotificationId = Number(inserted.lastInsertRowid);
+      } finally {
+        sqlite.close();
+      }
+
+      const report = await fileReport(victim, {
+        targetType: 'notification',
+        targetId: safetyNotificationId!,
+        reason: 'harassment',
+      });
+      expect(report.status).toBe(201);
+      expect(report.body.subjectUserId).toBe('');
+      const mute = await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'mute' });
+      expect(mute.status).toBe(400);
+    });
+
     it('rejects reporter-supplied content for a server-captured target, and vice versa', async () => {
       const commentId = await postComment(abuser, 'a perfectly ordinary comment golf');
       const withContent = await fileReport(victim, {

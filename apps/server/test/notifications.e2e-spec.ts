@@ -12,6 +12,7 @@ describe('notifications (e2e)', () => {
   let ctx: TestAppContext;
   let dm: ReturnType<typeof request.agent>; // user A — campaign creator/dm
   let player: ReturnType<typeof request.agent>; // user B — player
+  let dmId: number;
   let playerId: number;
   let campaignId: number;
 
@@ -41,7 +42,8 @@ describe('notifications (e2e)', () => {
 
     const adminAgent = request.agent(server);
     await adminAgent.post('/api/v1/auth/setup').send({ username: 'notif-admin', password: 'admin-password-1' });
-    await adminAgent.post('/api/v1/users').send({ username: 'notif-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    const createDm = await adminAgent.post('/api/v1/users').send({ username: 'notif-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    dmId = createDm.body.id;
     const createPlayer = await adminAgent
       .post('/api/v1/users')
       .send({ username: 'notif-player', password: 'password-pl-1', displayName: 'Pat Player' });
@@ -101,6 +103,22 @@ describe('notifications (e2e)', () => {
     expect(markRead.status).toBe(201);
     const afterRead = await player.get('/api/v1/notifications/unread-count');
     expect(afterRead.body.membershipChanged).toBe(false);
+  });
+
+  it('hides attributed safety-hold notices from a member who blocked the actor', async () => {
+    const block = await player.post(`/api/v1/campaigns/${campaignId}/safety/blocks`).send({ targetUserId: String(dmId) });
+    expect(block.status).toBe(201);
+
+    const hold = await dm.post(`/api/v1/campaigns/${campaignId}/safety/hold`).send({ anonymous: false });
+    expect(hold.status).toBe(200);
+
+    const blocked = (await listFor(player)).filter((notification) => notification.type === 'safety_hold');
+    expect(blocked).toHaveLength(0);
+
+    const released = await dm.post(`/api/v1/campaigns/${campaignId}/safety/release`).send({ recovery: 'resume' });
+    expect(released.status).toBe(200);
+    const lifted = await player.delete(`/api/v1/campaigns/${campaignId}/safety/controls/${block.body.id}`);
+    expect(lifted.status).toBe(200);
   });
 
   it('recap_posted: creating a session with a recap notifies members, not the author', async () => {
@@ -1219,4 +1237,3 @@ describe('Issue #550: notification pagination, filtering, bulk operations & undo
     expect(invalid.status).toBe(400);
   });
 });
-

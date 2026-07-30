@@ -764,7 +764,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
     return or(
       isNull(notifications.actorUserId),
-      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
+      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES]),
       notInArray(notifications.actorUserId, blockedActorIds),
     )!;
   }

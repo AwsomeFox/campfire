@@ -36,6 +36,8 @@ const IMPORTED_AUTHOR = OLD_LABEL;
 const STALE_LOCAL_LABEL = 'Earlier local label';
 const NEUTRAL_NOTIFICATION_TITLE = 'Campaign activity';
 const NEUTRAL_NOTIFICATION_BODY = 'This notification has updated attribution.';
+const LIFECYCLE_NOTIFICATION_TITLE = 'A campaign you were in was deleted';
+const LIFECYCLE_NOTIFICATION_BODY = 'Your campaign access has changed.';
 
 /**
  * #842 — public display copies are synchronized by their durable user id.
@@ -193,8 +195,13 @@ describe('account historical attribution privacy (e2e)', () => {
     for (const row of [...rows.immediate, ...rows.deferred]) {
       expect(row.actorName).toBe(label);
       if (options.expectNeutralNotificationCopy) {
-        expect(row.title).toBe(NEUTRAL_NOTIFICATION_TITLE);
-        expect(row.body).toBe(NEUTRAL_NOTIFICATION_BODY);
+        if (row.type === 'campaign_trashed') {
+          expect(row.title).toBe(LIFECYCLE_NOTIFICATION_TITLE);
+          expect(row.body).toBe(LIFECYCLE_NOTIFICATION_BODY);
+        } else {
+          expect(row.title).toBe(NEUTRAL_NOTIFICATION_TITLE);
+          expect(row.body).toBe(NEUTRAL_NOTIFICATION_BODY);
+        }
       }
     }
   }
@@ -299,7 +306,7 @@ describe('account historical attribution privacy (e2e)', () => {
       db
         .select()
         .from(moderationEvidence)
-        .where(eq(moderationEvidence.authorUserId, String(memberId)))
+        .where(eq(moderationEvidence.campaignId, campaignId))
         .all()
         .some((row) => row.targetType === 'notification' && row.content.includes(OLD_LABEL)),
     ).toBe(true);
@@ -327,6 +334,8 @@ describe('account historical attribution privacy (e2e)', () => {
     db.insert(proposals).values({ campaignId, entityType: 'note', entityId: null, action: 'create', payload: '{}', proposer: OLD_LABEL, proposerUserId: String(memberId), proposerToken: null, status: 'pending', resolvedBy: '', note: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(notifications).values({ userId: adminId, campaignId, type: 'note_created', title: `${OLD_LABEL} left Old Handlex intact`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'note', entityId: noteId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();
     db.insert(notificationDigestQueue).values({ userId: adminId, campaignId, type: 'schedule_rsvp', title: `${OLD_LABEL} at Old Handlex`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'scheduled_session', entityId: schedule.body.id, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), reason: 'digest', createdAt: ts }).run();
+    db.insert(notifications).values({ userId: adminId, campaignId, type: 'campaign_trashed', title: LIFECYCLE_NOTIFICATION_TITLE, body: LIFECYCLE_NOTIFICATION_BODY, entityType: 'campaign', entityId: campaignId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();
+    db.insert(notificationDigestQueue).values({ userId: adminId, campaignId, type: 'campaign_trashed', title: LIFECYCLE_NOTIFICATION_TITLE, body: LIFECYCLE_NOTIFICATION_BODY, entityType: 'campaign', entityId: campaignId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), reason: 'digest', createdAt: ts }).run();
 
     // These model rows from before #842, when a prior rename changed only users.display_name.
     // Legacy migration defaults their marker to false, so a later rename/deletion still protects
@@ -367,6 +376,17 @@ describe('account historical attribution privacy (e2e)', () => {
       .find((row) => row.type === 'safety_hold' && row.userId === adminId);
     expect(safetyNotification?.actorName).toBe(RENAMED_LABEL);
     expect(safetyNotification?.body).toContain(OLD_LABEL);
+    const preferenceAudit = db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.entityId, memberId))
+      .all()
+      .find((row) => row.action === 'user.preferences.update');
+    expect(preferenceAudit).toMatchObject({
+      actor: String(memberId),
+      actorRole: 'player',
+      detail: `user:${memberId}: displayName`,
+    });
   });
 
   it('uses the same transaction policy for a bulk-roster display-name change', async () => {

@@ -1519,9 +1519,10 @@ export class ModerationService implements OnApplicationBootstrap {
     return {
       targetType: 'notification',
       targetId,
-      // Preserve the durable actor id when the notification has one. System and
-      // anonymous notifications remain intentionally un-attributed.
-      authorUserId: row.actorUserId ?? '',
+      // A safety hold must never become a moderation-mute target merely because
+      // its notification retained attribution for later relabeling. System and
+      // anonymous notifications remain intentionally un-attributed as well.
+      authorUserId: row.type === 'safety_hold' ? '' : (row.actorUserId ?? ''),
       authorName: row.actorName,
     };
   }
@@ -1609,7 +1610,7 @@ export class ModerationService implements OnApplicationBootstrap {
           targetId: row.id,
           reason: 'report',
           source: 'server_capture',
-          authorUserId: row.actorUserId ?? '',
+          authorUserId: row.type === 'safety_hold' ? '' : (row.actorUserId ?? ''),
           authorName: row.actorName,
           recipientUserId: String(row.userId),
           anchorEntityType: row.entityType,

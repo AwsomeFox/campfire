@@ -1,15 +1,14 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, like, ne, or } from 'drizzle-orm';
+import { and, count, eq, like, ne, notInArray, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
+  CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
   CampaignDmRepair,
   PreferencesUpdate,
   UserCreate,
   UserUpdate,
-  type MembershipIntegrityCampaign,
-  type MembershipIntegrityReport,
-  type User,
 } from '@campfire/schema';
+import type { MembershipIntegrityCampaign, MembershipIntegrityReport, User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   users,
@@ -213,12 +212,22 @@ export class UsersService {
 
     if (pseudonymizeRenderedCopy) {
       tx.update(notifications)
-        .set({ actorName: nextLabel, title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .set({ actorName: nextLabel })
         .where(eq(notifications.actorUserId, stableUserId))
         .run();
       tx.update(notificationDigestQueue)
-        .set({ actorName: nextLabel, title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .set({ actorName: nextLabel })
         .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+        .run();
+      // Lifecycle rows deliberately carry actor-free access information. Keep their
+      // rendered explanation while pseudonymizing structured attribution everywhere.
+      tx.update(notifications)
+        .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES])))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES])))
         .run();
     } else {
       tx.update(notifications).set({ actorName: nextLabel }).where(eq(notifications.actorUserId, stableUserId)).run();
@@ -372,6 +381,16 @@ export class UsersService {
       if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
+      if (input.displayName !== undefined && input.displayName !== existing.displayName) {
+        this.audit.logInTx(tx, {
+          actor: String(id),
+          actorRole: existing.serverRole === 'admin' ? 'admin' : 'player',
+          action: 'user.preferences.update',
+          entityType: 'user',
+          entityId: id,
+          detail: `user:${id}: displayName`,
+        });
+      }
       return toDomain(row);
     });
   }
