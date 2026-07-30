@@ -196,9 +196,12 @@ test.describe('CSS custom-property validation (issue #882)', () => {
     expect(definitionMatch, '--cf-layer-modal must be defined as a numeric layer value').not.toBeNull();
     const modalLayer = Number(definitionMatch![1]);
 
-    // Must sit above every other documented tier so the decorative,
-    // pointer-events:none overlay stays visible over dialogs and the snackbar.
-    expect(modalLayer).toBeGreaterThan(60);
+    // Must be the documented value exactly (issue #791's scale: tabbar 40,
+    // dialog/notification 50, snackbar 60, dice overlay 70) — a mere
+    // lower-bound check (e.g. "greater than 60") would still pass for the
+    // very regression this guards against: the old undefined-token fallback
+    // was 1200, which is also greater than 60.
+    expect(modalLayer).toBe(70);
 
     // The call site must resolve the real token rather than fall back to a
     // stale, undocumented magic number.
