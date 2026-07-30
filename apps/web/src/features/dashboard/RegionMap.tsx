@@ -396,7 +396,7 @@ export function RegionMap({
       mode: 'replace',
       previewUrl,
       pendingFile: file,
-      defaultAlignment: 'reset',
+      defaultAlignment: 'preserve',
     });
   }
 

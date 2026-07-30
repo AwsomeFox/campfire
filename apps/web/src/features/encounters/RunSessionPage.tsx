@@ -4127,7 +4127,7 @@ export function BattleMap({
       mode: 'replace',
       previewUrl: URL.createObjectURL(file),
       pendingFile: file,
-      defaultAlignment: 'reset',
+      defaultAlignment: 'preserve',
     });
   }
 

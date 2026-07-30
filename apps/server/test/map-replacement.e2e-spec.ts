@@ -397,7 +397,7 @@ describe('map replacement lifecycle (issue #870)', () => {
       expect(row[0]?.gridScale).toBeNull();
       expect(row[0]?.gridOffsetX).toBe(0);
       expect(row[0]?.gridOffsetY).toBe(0);
-      expect(row[0]?.fog).toBeNull();
+      expect(row[0]?.fog).toBe('{"enabled":true,"revealed":[]}');
       expect(row[0]?.aoe).toBe('[]');
 
       const token = await db.select().from(combatants).where(eq(combatants.id, combatant.id)).limit(1);

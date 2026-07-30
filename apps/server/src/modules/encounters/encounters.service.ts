@@ -1625,6 +1625,8 @@ export class EncountersService {
     }
     const mapAttachmentIdChanging =
       input.mapAttachmentId !== undefined && input.mapAttachmentId !== encounterRow.mapAttachmentId;
+    const previousFog = parseFog(encounterRow.fog);
+    const resetFog = previousFog?.enabled ? { enabled: true, revealed: [] } : null;
     if (input.mapAttachmentId !== undefined) {
       // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
       // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
@@ -1648,7 +1650,9 @@ export class EncountersService {
           set.gridCellHeight = null;
           set.gridRotation = 0;
           set.gridOpacity = 0.35;
-          set.fog = null;
+          // Fog is intentionally *not* disabled; `null` means "never configured" (fully visible).
+          // Reset clears the revealed mask while keeping fog enabled, so the new map stays hidden.
+          set.fog = resetFog ? toJsonText(resetFog) : null;
           set.aoe = toJsonText([]);
         }
       }
@@ -1674,7 +1678,7 @@ export class EncountersService {
           gridOpacity: 0.35,
         }
       : encounterRow;
-    const fogBaseline = resetApplied ? null : parseFog(encounterRow.fog);
+    const fogBaseline = resetApplied ? resetFog : previousFog;
     const aoeBaseline = resetApplied ? [] : parseAoe(encounterRow.aoe);
 
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
