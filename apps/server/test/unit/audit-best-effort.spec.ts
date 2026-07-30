@@ -9,13 +9,26 @@ import type { AuditService } from '../../src/modules/audit/audit.service';
  * must not be relabelled a failure), always log loudly at error level with the stack,
  * and hand back a short note the caller MAY attach to an operator-facing result.
  */
+// Issue #1527: the double is typed against `Pick<AuditService, 'log'>` rather than
+// cast blind with `as unknown as AuditService` — a missing or renamed `log` method is
+// then a compile error at the object literal, not a runtime `TypeError` discovered only
+// when `auditBestEffort` actually calls it. The final `as unknown as AuditService` is
+// still needed to satisfy `AuditService`'s private constructor-injected fields, which no
+// plain object literal can structurally provide.
+type AuditServiceDouble = Pick<AuditService, 'log'>;
+
+function fakeAudit(log: AuditServiceDouble['log']): AuditService {
+  const double: AuditServiceDouble = { log };
+  return double as unknown as AuditService;
+}
+
 describe('auditBestEffort (#1581)', () => {
   function fakeLogger() {
     return { error: jest.fn() } as unknown as import('@nestjs/common').Logger;
   }
 
   it('returns null and never logs when the audit write succeeds', async () => {
-    const audit = { log: jest.fn(async () => undefined) } as unknown as AuditService;
+    const audit = fakeAudit(jest.fn(async () => undefined));
     const logger = fakeLogger();
 
     const note = await auditBestEffort(
@@ -30,7 +43,7 @@ describe('auditBestEffort (#1581)', () => {
   });
 
   it('never rethrows: a failing audit write does not propagate to the caller', async () => {
-    const audit = { log: jest.fn(async () => { throw new Error('audit table is unavailable'); }) } as unknown as AuditService;
+    const audit = fakeAudit(jest.fn(async () => { throw new Error('audit table is unavailable'); }));
     const logger = fakeLogger();
 
     await expect(
@@ -40,7 +53,7 @@ describe('auditBestEffort (#1581)', () => {
 
   it('logs at error level with the caller-supplied message and the error stack', async () => {
     const boom = new Error('audit table is unavailable');
-    const audit = { log: jest.fn(async () => { throw boom; }) } as unknown as AuditService;
+    const audit = fakeAudit(jest.fn(async () => { throw boom; }));
     const logger = fakeLogger();
 
     await auditBestEffort(
@@ -57,7 +70,7 @@ describe('auditBestEffort (#1581)', () => {
   });
 
   it('returns a non-null note on failure, for callers that attach it to a result', async () => {
-    const audit = { log: jest.fn(async () => { throw new Error('nope'); }) } as unknown as AuditService;
+    const audit = fakeAudit(jest.fn(async () => { throw new Error('nope'); }));
     const logger = fakeLogger();
 
     const note = await auditBestEffort(audit, logger, { actor: 'a', actorRole: 'dm', action: 'x', detail: '' }, () => 'msg');
@@ -68,14 +81,14 @@ describe('auditBestEffort (#1581)', () => {
   it('attempts each of several independent writes rather than short-circuiting on the first failure', async () => {
     // Mirrors decideExportRequest's two mirrors (#1546/#1581): one failing must not
     // suppress the other, since a partial trail beats no trail.
-    const audit = {
-      log: jest
-        .fn()
+    const audit = fakeAudit(
+      jest
+        .fn<AuditServiceDouble['log']>()
         .mockImplementationOnce(async () => {
           throw new Error('first mirror down');
         })
         .mockImplementationOnce(async () => undefined),
-    } as unknown as AuditService;
+    );
     const logger = fakeLogger();
 
     const notes = await Promise.all([

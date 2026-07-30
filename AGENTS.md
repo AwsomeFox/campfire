@@ -65,6 +65,30 @@ Run the smallest relevant checks while iterating. Run all checks affected by the
 final diff before handoff. GitHub's aggregate required check is named `ci`.
 Non-required browser jobs still matter when the branch caused their failure.
 
+`npm run typecheck` covers `apps/server/test/**` and the `apps/web` Playwright
+tree, and the `lint` job runs it — a broken service constructor/method
+signature fails there in under two minutes, not ~20 minutes later in
+`coverage` (issue #1527/#1535). Before that landed, `apps/server`'s typecheck
+covered `src/**` only, so a test-only compile error surfaced solely in
+`coverage`, reported as `N suites failed, 0 tests failed` — easy to misread as
+a flaky or threshold-miss failure rather than a compile error. If you ever see
+that shape locally with an out-of-date checkout, rerun `npm run typecheck`
+first.
+
+When hand-rolling a test double for a service dependency, type it against
+`Pick<RealService, 'methodsActuallyUsed'>` instead of a blind
+`{...} as unknown as RealService` with no shape check at all — see
+`apps/server/test/unit/audit-best-effort.spec.ts` and
+`export-controller-streaming.spec.ts` for the pattern. A double missing (or
+misspelling) a method the real service now requires is then a compile error
+where the double is declared, not a runtime `TypeError` the first time
+production code actually calls it (issue #1527, originally hit in #1426). The
+final cast to the concrete class is usually still required — most services
+carry private constructor-injected fields no plain object literal can
+structurally satisfy — but everything up to that single, narrow cast is
+checked. This is a per-double convention, not a lint rule: most existing
+doubles in `apps/server/test/**` have not been converted.
+
 ## Change and review discipline
 
 - Keep one coherent issue per PR and use `Fixes #<issue>` when the merge should
