@@ -1272,6 +1272,11 @@ export class EncountersService {
     return result;
   }
 
+  async getEventsHeadId(id: number): Promise<number | null> {
+    const row = await this.db.select({ id: encounterEvents.id }).from(encounterEvents).where(eq(encounterEvents.encounterId, id)).orderBy(desc(encounterEvents.id)).limit(1).get();
+    return row?.id ?? null;
+  }
+
   async listEvents(encounterId: number, viewerRole?: Role, afterId?: number): Promise<EncounterEvent[]> {
     const row = await this.getRowOrThrow(encounterId);
     if (viewerRole !== undefined && !isVisibleTo({ hidden: row.hidden }, viewerRole)) {

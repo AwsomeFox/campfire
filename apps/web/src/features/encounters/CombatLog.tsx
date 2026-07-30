@@ -1,6 +1,7 @@
 import React, { useRef, useState, useMemo, useCallback, useLayoutEffect } from 'react';
 import type { EncounterEvent } from '@campfire/schema';
 import { Card } from '../../components/Card';
+import { useTranslation } from 'react-i18next';
 import { GameIcon, UI_ICON_SIZE } from '../../components/GameIcon';
 import {
   groupCombatLogEvents,
@@ -22,6 +23,7 @@ const EVENT_ICON: Record<string, string> = {
 };
 
 export const CombatLog = React.memo(function CombatLog({ events }: { events: EncounterEvent[] }) {
+  const { t } = useTranslation('encounters');
   const headingId = 'combat-log-heading';
   const logRef = useRef<HTMLDivElement>(null);
   const preservedScrollTopRef = useRef(0);
