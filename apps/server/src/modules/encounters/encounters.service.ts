@@ -83,6 +83,7 @@ type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: num
 type CombatantTransactionHook = (
   tx: SyncDb,
   fresh: typeof combatants.$inferSelect,
+  freshEncounter: typeof encounters.$inferSelect,
 ) => void;
 type EncounterEventFields = {
   actor?: string | null;
@@ -3192,6 +3193,9 @@ export class EncountersService {
     // A retained trashed row is sufficient to authorize an existing keyed replay;
     // fresh writes still fail in updateCombatant's transaction-local mutable check.
     const encounter = await this.getRowOrThrow(encounterId, true);
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     const operationFingerprint = { combatantId };
     const deathSaveClaim: EncounterOpClaim = {
       actorId: user.id,
@@ -3257,9 +3261,12 @@ export class EncountersService {
           // The d20 is server generated inside the transaction. Bind the key to the action
           // target, not that random face, so the same intent replays before any new RNG work.
           operationFingerprint,
-          beforeWriteInTransaction: (tx, fresh) => {
+          beforeWriteInTransaction: (tx, fresh, freshEncounter) => {
             this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
             this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
+            if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+              throw new NotFoundException(`Encounter ${encounterId} not found`);
+            }
             // A concurrent first roll cannot leave a second request applying a face to a
             // no-longer-dying combatant. This code is deliberately after the prior-claim
             // lookup, so a lost-response retry returns its stored outcome instead.
@@ -3657,7 +3664,7 @@ export class EncountersService {
         // fresh lifecycle read but before this mutation. A failure rolls both it and
         // the ensuing combatant write back. Used only for #1462's mandatory dice-log
         // evidence, which must never diverge from its death-save outcome.
-        options?.beforeWriteInTransaction?.(tx, fresh);
+        options?.beforeWriteInTransaction?.(tx, fresh, freshEncounter);
         beforeHp = fresh.hpCurrent;
         beforeTemp = fresh.hpTemp;
         beforeDeath = fresh.deathState;
