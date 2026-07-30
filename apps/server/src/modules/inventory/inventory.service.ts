@@ -29,7 +29,9 @@ export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Bind an idempotency key to one qty operation *and* its accompanying mutable
- * fields so key reuse with a different payload 409s (qty, move, name, notes, icon).
+ * fields so key reuse with a different payload 409s (qty, move, name, notes, icon,
+ * equip — issue #1326 review: a combined "spend a charge and equip this" retry must
+ * not silently drop a changed equip instruction just because qty/name/etc. match).
  */
 function qtyFingerprint(input: InventoryItemUpdateInput): string {
   const qtyPart =
@@ -44,6 +46,9 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
     iconSlug: input.iconSlug ?? null,
     ownerType: input.ownerType ?? null,
     characterId: input.characterId ?? null,
+    equipped: input.equipped ?? null,
+    equipSlot: input.equipSlot ?? null,
+    equippedAction: input.equippedAction ?? null,
   });
   return `${qtyPart}|${restPart}`;
 }
@@ -385,9 +390,16 @@ export class InventoryService {
     // Field-level checks run here; the slot-conflict check runs inside the transaction
     // below (against the freshly-read row) so two concurrent equips into the same slot
     // serialize through SQLite rather than racing on a pre-transaction snapshot.
+    //
+    // Review (Codex/Devin): a move to a DIFFERENT owner — party OR another character —
+    // must never silently carry the OLD equipped=true forward. Left unguarded, that
+    // either raises a bogus 409 against a recipient who never asked to equip anything,
+    // or silently arms them with an action they never chose. So on ANY ownership change
+    // the item lands UNEQUIPPED unless this SAME request explicitly asks to equip it
+    // (equipped:true + equipSlot) for the new owner — never inherited from the old state.
     const equipTouched = input.equipped !== undefined || input.equipSlot !== undefined;
-    let nextEquipped = input.equipped !== undefined ? input.equipped : existing.equipped;
-    let nextEquipSlot: string | null = input.equipSlot !== undefined ? input.equipSlot : existing.equipSlot;
+    let nextEquipped = moved ? input.equipped === true : (input.equipped !== undefined ? input.equipped : existing.equipped);
+    let nextEquipSlot: string | null = input.equipSlot !== undefined ? input.equipSlot : moved ? null : existing.equipSlot;
     if (finalOwnerType !== 'character') {
       // An explicit request to equip a party-stash item is rejected outright — it is
       // never valid, whether the item was already party-owned or is moving there in
@@ -395,9 +407,9 @@ export class InventoryService {
       if (input.equipped === true) {
         throw new BadRequestException('Only character-owned items may be equipped');
       }
-      // Otherwise: moving an equipped item OFF its owning character (or an already
-      // party-owned item) auto-unequips it rather than leaving a dangling equip/slot
-      // state — a party item can never legitimately be equipped=true.
+      // Otherwise: moving an item OFF a character (or an already party-owned item)
+      // auto-unequips it rather than leaving a dangling equip/slot state — a party
+      // item can never legitimately be equipped=true.
       nextEquipped = false;
       nextEquipSlot = null;
     } else if (nextEquipped) {
@@ -409,7 +421,7 @@ export class InventoryService {
     } else {
       nextEquipSlot = null;
     }
-    const equipWillChange = equipTouched || (moved && existing.equipped);
+    const equipWillChange = equipTouched || moved;
 
     // Issue #782: quantity writes — atomic delta (preferred) or absolute CAS set.
     const hasQtyDelta = input.qtyDelta !== undefined;
@@ -670,11 +682,20 @@ export class InventoryService {
       iconSlug: existing.iconSlug,
       ownerType: existing.ownerType,
       characterId: existing.characterId,
+      equipped: existing.equipped,
+      equipSlot: existing.equipSlot,
     };
 
     const [row] = await this.db
       .update(inventoryItems)
-      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts })
+      // Issue #1326 review (Codex/Devin): trashing an equipped item must clear its equip
+      // state, not merely tombstone it. Left untouched, a trashed "worn" row could sit
+      // behind a replacement that took its slot, and restore() puts the item back with NO
+      // owner/slot validation of its own — so an equipped-and-trashed item reappearing
+      // unequipped (frees the slot up front) is what keeps every invariant `update()`
+      // enforces (character-only equip, one equipped item per slot) true across a
+      // trash/restore round trip without restore() having to re-run that validation.
+      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
       .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
       .returning();
     if (!row) {

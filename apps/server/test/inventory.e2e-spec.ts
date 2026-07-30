@@ -739,6 +739,141 @@ describe('inventory & treasury (e2e)', () => {
       expect(moved.body.equipped).toBe(false);
       expect(moved.body.equipSlot).toBeNull();
     });
+
+    it('moving an equipped item to a DIFFERENT character auto-unequips it rather than arming the recipient or 409ing on their slots (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Unique slot strings throughout: this describe block shares ownCharacterId/
+      // dmCharacterId (and never unequips) across earlier tests in this file, so
+      // reusing a common name like 'main-hand' here would collide with THEIR leftover
+      // equipped items rather than exercising the scenario this test targets.
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Handed-down sword', ownerType: 'character', characterId: ownCharacterId });
+      const sourceEquip = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-move-slot' });
+      expect(sourceEquip.status).toBe(200);
+
+      // The recipient (dmCharacterId) already has something equipped in the same slot
+      // string — a plain move (no equip requested) must NOT be rejected as a slot
+      // conflict, because the caller never asked to equip anything for the recipient.
+      const recipientIncumbent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Recipient shield', ownerType: 'character', characterId: dmCharacterId });
+      const recipientEquip = await request(server)
+        .patch(`/api/v1/inventory/${recipientIncumbent.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'review-move-slot' });
+      expect(recipientEquip.status).toBe(200);
+
+      const moved = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(dm)
+        .send({ ownerType: 'character', characterId: dmCharacterId });
+      expect(moved.status).toBe(200);
+      // Not silently armed on the new owner...
+      expect(moved.body.equipped).toBe(false);
+      expect(moved.body.equipSlot).toBeNull();
+
+      // ...and the recipient's own equipped item is untouched.
+      const recipientCheck = await request(server).get(`/api/v1/inventory/${recipientIncumbent.body.id}`).set(dm);
+      expect(recipientCheck.body.equipped).toBe(true);
+      expect(recipientCheck.body.equipSlot).toBe('review-move-slot');
+    });
+
+    it('a move + explicit equip in the SAME request is honored against the new owner\'s slots', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Gifted dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const moveAndEquip = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(dm)
+        .send({ ownerType: 'character', characterId: dmCharacterId, equipped: true, equipSlot: 'review-move-and-equip-slot' });
+      expect(moveAndEquip.status).toBe(200);
+      expect(moveAndEquip.body.characterId).toBe(dmCharacterId);
+      expect(moveAndEquip.body.equipped).toBe(true);
+      expect(moveAndEquip.body.equipSlot).toBe('review-move-and-equip-slot');
+    });
+
+    it('reusing an idempotencyKey with the same qtyDelta but a different equip payload is rejected, not silently replayed (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Charged wand', ownerType: 'character', characterId: ownCharacterId, qty: 3 });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'wand-use-and-equip', equipped: true, equipSlot: 'review-idempotency-slot' });
+      expect(first.status).toBe(200);
+      expect(first.body.equipped).toBe(true);
+
+      // Same key, same qtyDelta, but a DIFFERENT equip instruction — must 409, not replay.
+      const reused = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'wand-use-and-equip', equipped: false });
+      expect(reused.status).toBe(409);
+      expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The original equip from the first call is still intact — the reuse attempt
+      // neither replayed silently nor mutated the item.
+      const getRes = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(player);
+      expect(getRes.body.equipped).toBe(true);
+      expect(getRes.body.qty).toBe(2);
+    });
+
+    it('trashing an equipped item clears its equip state, so restoring it never resurrects a slot conflict (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Old shield', ownerType: 'character', characterId: ownCharacterId });
+      const originalEquip = await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-restore-slot' });
+      expect(originalEquip.status).toBe(200);
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(player);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.equipped).toBe(false);
+      expect(deleteRes.body.equipSlot).toBeNull();
+
+      // A replacement now claims the same slot while the original sits in the trash.
+      const replacement = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'New shield', ownerType: 'character', characterId: ownCharacterId });
+      const equipReplacement = await request(server)
+        .patch(`/api/v1/inventory/${replacement.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-restore-slot' });
+      expect(equipReplacement.status).toBe(200);
+
+      // Restoring the original does NOT resurrect a two-items-one-slot conflict — it
+      // comes back unequipped, because remove() already cleared its equip state.
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(player);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+
+      // The replacement remains equipped in that slot, undisturbed.
+      const replacementCheck = await request(server).get(`/api/v1/inventory/${replacement.body.id}`).set(player);
+      expect(replacementCheck.body.equipped).toBe(true);
+      expect(replacementCheck.body.equipSlot).toBe('review-trash-restore-slot');
+    });
   });
 
   describe('treasury', () => {
