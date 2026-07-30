@@ -53,29 +53,25 @@ jobs:
 
           resp=$(gh api "repos/${REPO}/commits/main/check-runs?per_page=100")
 
-          count=$(echo "$resp" | jq '.check_runs | length')
-          if [ "$count" -eq 0 ]; then
-            echo "No check-runs exist for main yet — nothing to do."
-            exit 0
-          fi
-
-          sha=$(echo "$resp" | jq -r '.check_runs[0].head_sha // empty')
-          if ! [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "Latest check-runs returned an invalid commit SHA; refusing to reconcile issues." >&2
-            exit 1
-          fi
-
           # The repository's aggregate required check is named `ci`. We only act
           # on that verdict to avoid both false alarms from non-required checks
           # and false all-clear when a docs-only push (paths-ignore in ci.yml)
-          # produces no real CI check-runs at all.
+          # produces no real CI check-runs at all. We also derive the commit SHA
+          # from the `ci` run itself so we never rely on the ordering of the
+          # returned check-run array.
           ci_run=$(echo "$resp" | jq --arg name "ci" '
             [ .check_runs[] | select(.name == $name) ] | first // empty
           ')
 
           if [ -z "$ci_run" ] || [ "$ci_run" = "null" ]; then
-            echo "No aggregate 'ci' check-run on ${sha}; no verdict available."
+            echo "No aggregate 'ci' check-run on main yet; no verdict available."
             exit 0
+          fi
+
+          sha=$(echo "$ci_run" | jq -r '.head_sha // empty')
+          if ! [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Aggregate 'ci' check-run returned an invalid commit SHA; refusing to reconcile issues." >&2
+            exit 1
           fi
 
           ci_status=$(echo "$ci_run" | jq -r '.status')
@@ -115,7 +111,10 @@ jobs:
               fi
 
               # Idempotent update: only touch the issue if this is a NEW
-              # failing commit since the last time we recorded one.
+              # failing commit since the last time we recorded one. Re-running
+              # every 15 minutes against the same still-broken sha must not
+              # post a fresh comment each time, or this gets muted within a day
+              # exactly like the issue warns.
               last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
                 --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-fA-F]*' | cut -d= -f2 || true)
 
