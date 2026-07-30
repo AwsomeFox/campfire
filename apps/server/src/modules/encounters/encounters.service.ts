@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, isNull, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
@@ -86,6 +86,15 @@ type CombatantTransactionHook = (
   fresh: typeof combatants.$inferSelect,
   freshEncounter: typeof encounters.$inferSelect,
 ) => void;
+type TurnTickCombatantSnapshot = {
+  combatantId: number;
+  conditionInstances: ConditionInstance[];
+  activeEffects: ActiveEffect[];
+};
+type TurnTickSnapshot = {
+  ending?: TurnTickCombatantSnapshot;
+  starting?: TurnTickCombatantSnapshot;
+};
 type EncounterEventFields = {
   actor?: string | null;
   target?: string | null;
@@ -96,7 +105,7 @@ type EncounterEventFields = {
   parentEventId?: number | null;
   phase?: EncounterEventPhase | null;
   performedBy?: EncounterEventPerformedBy | null;
-  metadata?: EncounterEventMetadata;
+  metadata?: EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot };
 };
 /** Narrow extension point for an action whose idempotent response is not just a combatant. */
 type CombatantUpdateTransactionOptions = {
@@ -470,6 +479,10 @@ function encounterHasLairSlotFromStatblocks(statblocks: Map<number, ReturnType<R
 }
 
 function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent {
+  // The turn-advance snapshot is server-internal: it is read directly from
+  // metadataJson for undo, but never returned in public combat-log responses.
+  const metadata = row.metadataJson ? (JSON.parse(row.metadataJson) as Record<string, unknown>) : {};
+  delete metadata.turnTickSnapshot;
   return {
     id: row.id,
     encounterId: row.encounterId,
@@ -484,7 +497,7 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
     parentEventId: row.parentEventId ?? null,
     phase: (row.phase as EncounterEventPhase | null) ?? null,
     performedBy: row.performedByJson ? (JSON.parse(row.performedByJson) as EncounterEventPerformedBy) : null,
-    metadata: row.metadataJson ? (JSON.parse(row.metadataJson) as EncounterEventMetadata) : {},
+    metadata: metadata as EncounterEventMetadata,
     createdAt: row.createdAt,
   };
 }
@@ -5065,6 +5078,7 @@ export class EncountersService {
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
+    const turnTickSnapshot: TurnTickSnapshot = {};
 
     try {
       this.db.transaction((tx) => {
@@ -5146,6 +5160,11 @@ export class EncountersService {
           freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
         if (ending) {
           endedName = ending.name;
+          turnTickSnapshot.ending = {
+            combatantId: ending.id,
+            conditionInstances: ending.conditionInstances ?? [],
+            activeEffects: ending.activeEffects ?? [],
+          };
           const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
           if (expired.length > 0) {
             for (const e of expired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
@@ -5189,6 +5208,11 @@ export class EncountersService {
         const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
         if (starting) {
           newCurrentName = starting.name;
+          turnTickSnapshot.starting = {
+            combatantId: starting.id,
+            conditionInstances: starting.conditionInstances ?? [],
+            activeEffects: starting.activeEffects ?? [],
+          };
           const reset = resetTurnStateForStart(starting.turnState);
           const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
@@ -5260,6 +5284,12 @@ export class EncountersService {
     // makes "did the turn advance twice?" answerable from the log alone: two turn markers
     // carrying the SAME operationId would be a double-advance, two markers with different
     // ids are two legitimate advances.
+    const turnMeta: EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot } = opts.idempotencyKey
+      ? { operationId: opts.idempotencyKey }
+      : {};
+    if (turnTickSnapshot.ending || turnTickSnapshot.starting) {
+      turnMeta.turnTickSnapshot = turnTickSnapshot;
+    }
     await this.appendEvent(encounterId, newRound, 'turn', {
       actor: newCurrentName,
       target: newCurrentName,
@@ -5271,7 +5301,7 @@ export class EncountersService {
           : newCurrentName === 'Lair'
             ? 'Lair action (initiative 20)'
             : '',
-      metadata: opts.idempotencyKey ? { operationId: opts.idempotencyKey } : undefined,
+      metadata: turnMeta,
     });
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -5326,10 +5356,9 @@ export class EncountersService {
   /**
    * DM undo of the last turn advance (issue #413). Steps the pointer BACKWARD over the sorted
    * order (see {@link retreatTurn}), decrementing the round when unwrapping past the top.
-   * Serialized like advanceCurrentTurn so it can't race a concurrent advance. Effect ticks
-   * applied on the way forward are NOT reversed — undo restores the turn pointer, and the DM
-   * re-applies any effect corrections manually (surfaced in the log). DM-only (enforced by the
-   * controller's `dm` role gate).
+   * Serialized like advanceCurrentTurn so it can't race a concurrent advance. Timed condition
+   * and effect ticks applied on the way forward are replayed from a snapshot stored in the
+   * advance event's metadata (issue #1445). DM-only (enforced by the controller's `dm` role gate).
    */
   async undoTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -5343,6 +5372,26 @@ export class EncountersService {
     let newCurrentName: string | null = null;
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
+    let restoredLogEntries: Array<{
+      combatantId: number;
+      combatantName: string;
+      conditionNames: string[];
+      effectNames: string[];
+    }> = [];
+
+    // Issue #1445: the turn-advance event carries a snapshot of the ending/starting combatant
+    // conditionInstances and activeEffects from before they were ticked. Read it directly from
+    // metadataJson (not the public event-to-domain mapping) so undo can restore state.
+    const [lastTurnEvent] = await this.db
+      .select()
+      .from(encounterEvents)
+      .where(and(eq(encounterEvents.encounterId, encounterId), eq(encounterEvents.type, 'turn')))
+      .orderBy(desc(encounterEvents.id))
+      .limit(1);
+    const turnMeta = lastTurnEvent?.metadataJson
+      ? (JSON.parse(lastTurnEvent.metadataJson) as EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot })
+      : undefined;
+    const snapshot = turnMeta?.turnTickSnapshot;
 
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
@@ -5393,6 +5442,56 @@ export class EncountersService {
         }
       }
 
+      // Issue #1445: restore the conditionInstances and activeEffects that nextTurn ticked on
+      // the ending and starting combatants. If a combatant was removed between the advance and
+      // the undo, the row will not be found and the snapshot is skipped (safe, not throw).
+      const restoredLog: Array<{
+        combatantId: number;
+        combatantName: string;
+        conditionNames: string[];
+        effectNames: string[];
+      }> = [];
+      if (snapshot) {
+        for (const side of ['ending', 'starting'] as const) {
+          const entry = snapshot[side];
+          if (!entry) continue;
+          const row = rows.find((r) => r.id === entry.combatantId);
+          if (!row) continue;
+
+          const currentConditions = parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, []));
+          const currentEffects = parseActiveEffects(row.activeEffects);
+          const restoredConditionNames: string[] = [];
+          for (const c of entry.conditionInstances) {
+            const match = currentConditions.find((cc) => cc.id === c.id);
+            if (!match || !isDeepStrictEqual(match, c)) {
+              restoredConditionNames.push(c.name);
+            }
+          }
+          const restoredEffectNames: string[] = [];
+          for (const e of entry.activeEffects) {
+            const match = currentEffects.find((ee) => ee.id === e.id);
+            if (!match || !isDeepStrictEqual(match, e)) {
+              restoredEffectNames.push(e.name);
+            }
+          }
+          if (restoredConditionNames.length > 0 || restoredEffectNames.length > 0) {
+            restoredLog.push({
+              combatantId: entry.combatantId,
+              combatantName: row.name,
+              conditionNames: restoredConditionNames,
+              effectNames: restoredEffectNames,
+            });
+          }
+
+          const writeSet: Partial<typeof combatants.$inferInsert> = {
+            activeEffects: toJsonText(entry.activeEffects),
+            ...conditionWriteSetFromInstances(entry.conditionInstances),
+          };
+          tx.update(combatants).set(writeSet).where(eq(combatants.id, entry.combatantId)).run();
+        }
+      }
+      restoredLogEntries = restoredLog;
+
       const restored =
         phase === 'combatant' && currentCombatantId !== null
           ? sorted.find((c) => c.id === currentCombatantId)
@@ -5431,6 +5530,25 @@ export class EncountersService {
         metadata: { escalationDie: escalationValue },
       });
     }
+
+    // Issue #1445: log what timed state was restored, mirroring how expiry is logged.
+    for (const entry of restoredLogEntries) {
+      for (const name of entry.conditionNames) {
+        await this.appendEvent(encounterId, newRound, 'condition', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: `condition restored: ${name}`,
+        });
+      }
+      for (const name of entry.effectNames) {
+        await this.appendEvent(encounterId, newRound, 'effect', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: `effect restored: ${name}`,
+        });
+      }
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
