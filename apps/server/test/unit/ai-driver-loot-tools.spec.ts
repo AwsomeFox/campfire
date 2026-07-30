@@ -10,6 +10,7 @@ import {
   DRIVER_TREASURY_SESSION_GRANT_CAP,
   DRIVER_INVENTORY_SESSION_GRANT_CAP,
 } from '../../src/modules/ai-driver/ai-driver.service';
+import { DRIVER_AFTERMATH_WINDOW_MS } from '../../src/modules/ai-driver/driver-tool-policy';
 
 /**
  * #1021: Verify that the AI Driver can award loot, treasury, and items during live play.
@@ -301,27 +302,55 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
   });
 
   it('#1781 / #1495: syncAftermathGrantWindow opens a fresh budget for a DIFFERENT encounter identity even with no observed profile edge', () => {
+    const t1 = '2026-01-01T00:00:00.000Z';
+    const now1 = Date.parse(t1) + 1000;
+    const t2 = '2026-01-02T00:00:00.000Z';
+    const now2 = Date.parse(t2) + 1000;
+
     const session = {
       aftermathGrantWindow: grantWindow({
         encounterId: 10,
-        endedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: t1,
         treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
         inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
       }),
     };
 
-    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: '2026-01-01T00:00:00.000Z' });
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: t1 }, now1);
     expect(session.aftermathGrantWindow).toEqual(
       grantWindow({
         encounterId: 10,
-        endedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: t1,
         treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
         inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
       }),
     );
 
-    syncAftermathGrantWindow(session, { encounterId: 11, endedAt: '2026-01-02T00:00:00.000Z' });
-    expect(session.aftermathGrantWindow).toEqual(grantWindow({ encounterId: 11, endedAt: '2026-01-02T00:00:00.000Z' }));
+    syncAftermathGrantWindow(session, { encounterId: 11, endedAt: t2 }, now2);
+    expect(session.aftermathGrantWindow).toEqual(grantWindow({ encounterId: 11, endedAt: t2 }));
+  });
+
+  it('#1781 / #1495: syncAftermathGrantWindow clears aftermath grant window when encounter endedAt is outside DRIVER_AFTERMATH_WINDOW_MS', () => {
+    const now = Date.parse('2026-01-01T12:00:00.000Z');
+    const freshEndedAt = new Date(now - 1000).toISOString();
+    const expiredEndedAt = new Date(now - (DRIVER_AFTERMATH_WINDOW_MS + 1000)).toISOString();
+
+    const session: { aftermathGrantWindow?: any } = {
+      aftermathGrantWindow: grantWindow({
+        encounterId: 10,
+        endedAt: freshEndedAt,
+        treasuryGranted: 500,
+        inventoryQtyGranted: 10,
+      }),
+    };
+
+    // While still in window, sync retains/updates window
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: freshEndedAt }, now);
+    expect(session.aftermathGrantWindow).toBeDefined();
+
+    // When endedAt is beyond DRIVER_AFTERMATH_WINDOW_MS, sync clears aftermathGrantWindow
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: expiredEndedAt }, now);
+    expect(session.aftermathGrantWindow).toBeUndefined();
   });
 
   it('#1781 / #1495: adjust_treasury enforces a cumulative grant cap regardless of call count', () => {

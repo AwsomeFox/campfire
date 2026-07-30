@@ -916,8 +916,12 @@ export function isStoredAftermathGrantWindow(val: unknown): val is AftermathGran
 export function syncAftermathGrantWindow(
   session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
   latestEndedEncounter: { encounterId: number; endedAt: string } | null,
+  now: number = Date.now(),
 ): void {
-  if (!latestEndedEncounter) return;
+  if (!latestEndedEncounter || !isWithinAftermathWindow(latestEndedEncounter.endedAt, now)) {
+    session.aftermathGrantWindow = undefined;
+    return;
+  }
   const current = session.aftermathGrantWindow;
   if (
     !current ||
