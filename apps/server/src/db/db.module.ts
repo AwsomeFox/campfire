@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { APP_VERSION } from '../common/build-metadata';
 import { BOOTSTRAP_SQL, CAMPAIGN_MODULES_DDL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { warnCampaignSearchFtsUnavailable } from './campaign-search-fts-mode';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
 
@@ -113,13 +114,12 @@ function setupRuleEntriesFts(sqlite: Database.Database): boolean {
   }
 }
 
-function setupCampaignSearchFts(sqlite: Database.Database): boolean {
+function setupCampaignSearchFts(sqlite: Database.Database): { available: boolean; error?: string } {
   try {
     sqlite.exec(CAMPAIGN_SEARCH_FTS_SQL);
-    return true;
+    return { available: true };
   } catch (err) {
-    dbLog.warn(`campaign search FTS setup failed; falling back to LIKE/full scan search: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    return { available: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -4909,7 +4909,11 @@ export function openDatabase(dataDir: string): {
   // reach existing DBs: e.g. #74's idx_audit_campaign_id_desc / idx_audit_created_at
   // are picked up on the next boot with no bespoke ALTER migration needed.
   const ftsAvailable = setupRuleEntriesFts(sqlite);
-  const campaignSearchFtsAvailable = setupCampaignSearchFts(sqlite);
+  const campaignSearchFtsSetup = setupCampaignSearchFts(sqlite);
+  const campaignSearchFtsAvailable = campaignSearchFtsSetup.available;
+  // Issue #1481: surface a single, explicit warning when search degrades to the
+  // full-scan fallback so a silently-different deployment is diagnosable.
+  warnCampaignSearchFtsUnavailable(campaignSearchFtsAvailable, campaignSearchFtsSetup.error);
 
   // Enable foreign-key enforcement for every subsequent write on this connection
   // (issue #69). Fresh DBs created from BOOTSTRAP_SQL now carry the declared

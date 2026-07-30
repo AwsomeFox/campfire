@@ -6845,6 +6845,16 @@ export const ServerInstance = z.object({
   instanceId: z.string().min(1),
   /** Monotonic integer bumped on every whole-server restore. */
   dataGeneration: z.number().int().nonnegative(),
+  /**
+   * Which full-text search backend this install booted with (issue #1481):
+   * `'fts5'` when SQLite's FTS5 extension is available (the fast, prefix-token
+   * index), `'fallback'` when it is not (a JS full-scan with the same matching
+   * semantics). Surfaced on `/me` so a deployment whose search silently degraded
+   * to the fallback is diagnosable without shell access. Optional only so older
+   * clients / fixtures that pre-date the field keep parsing; the server always
+   * sets it.
+   */
+  searchMode: z.enum(['fts5', 'fallback']).optional(),
 });
 export type ServerInstance = z.infer<typeof ServerInstance>;
 
@@ -11697,9 +11707,23 @@ export const SearchResult = z.object({
 });
 export type SearchResult = z.infer<typeof SearchResult>;
 
+// The total/truncated fields (issue #1481) surface silent truncation: `results`
+// is already sliced to the request limit, so a campaign with 200 matches is
+// indistinguishable from one with exactly `limit` without them. `total` is the
+// number of matches the server actually found within the (possibly bounded)
+// scan, before slicing; `truncated` is true whenever the returned page does not
+// contain every existing match — either because `total > results.length`
+// (paging a known set), or because a scan/index cap was hit (the FTS candidate
+// LIMIT, a fallback per-collection scan cap, or a fallback bounded projection
+// cap) and more matches may exist that were never examined. In that capped case
+// `total` is a lower bound, so `truncated` is the authoritative “this list may
+// be incomplete” signal regardless of mode; clients must not treat `total` as a
+// complete count when `truncated` is true.
 export const SearchResponse = z.object({
   query: z.string(),
   results: z.array(SearchResult),
+  total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
 });
 export type SearchResponse = z.infer<typeof SearchResponse>;
 

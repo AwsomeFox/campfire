@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
-import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
+import { compareSearchText, firstTokenMatchIndex, foldForSearch, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { notDeleted } from '../../common/soft-delete';
 import { anchorVisibilitySql } from '../../common/anchor-visibility';
 import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
@@ -40,11 +40,29 @@ import { SchedulingService } from '../sessions/scheduling.service';
 
 /** Max results returned from one search (keeps a broad query bounded). */
 const DEFAULT_LIMIT = 50;
+/**
+ * Hard cap on how many rows of EACH collection the LIKE/full-scan fallback
+ * scans (issue #1481). The fallback loads whole collections and matches in JS,
+ * so without a cap a campaign with tens of thousands of one entity type would
+ * do an unbounded scan on every keystroke — the exact O(n) walk #533 removed for
+ * the FTS path. Generous enough that a normal campaign never hits it (so the
+ * fallback still returns the same set as FTS); when it IS hit the response is
+ * marked `truncated` so the user knows the list may be incomplete.
+ */
+const FALLBACK_COLLECTION_SCAN_CAP = 1000;
 /** Characters of context to show on each side of a body/recap match in the snippet. */
 const SNIPPET_PAD = 60;
 
-/** One searchable field of an entity: which field it is, and its text. */
-type Field = { field: string; text: string };
+/**
+ * One searchable field of an entity: which field it is, its display `text` (used
+ * for the snippet, original spelling preserved), and an optional `matchText`
+ * that overrides only what the query is matched against. `matchText` lets a field
+ * match against a tokenized form that differs from its display value — e.g. a
+ * scheduled-session date matches the space-separated token composite the FTS5
+ * aux column stores, while the snippet still shows the clean ISO timestamp
+ * (issue #1481).
+ */
+type Field = { field: string; text: string; matchText?: string };
 type Candidate = { type: SearchResultType; id: number; rank: number };
 type HitInput = {
   type: SearchResultType;
@@ -66,7 +84,13 @@ const FTS_DM_COLUMNS = '{title name body aux dm_secret title_fold name_fold body
  * The returned snippet always slices the original `text` so spelling is preserved.
  */
 function makeSnippet(text: string, foldedNeedle: string): string {
-  const idx = foldedIndexOf(text, foldedNeedle);
+  // Center on the first token-prefix match (what matchesSearchQuery actually
+  // matched). A contiguous indexOf can land on a NON-matching occurrence — e.g.
+  // query "ex" inside the word "context" — so the token-aware index is primary;
+  // the contiguous indexOf is only a defensive fallback for a needle that did
+  // not match as a token (issue #1481).
+  let idx = firstTokenMatchIndex(text, foldedNeedle);
+  if (idx < 0) idx = foldedIndexOf(text, foldedNeedle);
   if (idx < 0) return text.slice(0, SNIPPET_PAD * 2).trim();
   // Folded index is exact when NFKC is length-stable; clamp for compatibility forms.
   const approx = Math.min(Math.max(0, idx), text.length);
@@ -143,22 +167,32 @@ export class SearchService {
 
   async search(campaignId: number, user: RequestUser, role: Role, q: string, limit = DEFAULT_LIMIT): Promise<SearchResponse> {
     const needle = foldForSearch(q.trim());
-    if (!needle) return { query: q, results: [] };
+    if (!needle) return this.toResponse(q, [], limit);
     if (!this.campaignSearchFtsAvailable) {
       return this.searchFallback(campaignId, user, role, q, limit);
     }
 
     const ftsQuery = toFtsQuery(needle);
-    if (!ftsQuery) return { query: q, results: [] };
+    if (!ftsQuery) return this.toResponse(q, [], limit);
 
     const candidateLimit = Math.max(limit * 8, 100);
+    // Each candidate query fetches one extra row as a cap sentinel (issue #1481):
+    // treating "we retrieved exactly candidateLimit" as proof of a cap produced
+    // false truncation reports when the index held exactly that many matches and
+    // hydration rejected them all. The flag is raised only when a query actually
+    // returned more than its cap, and the sentinel is trimmed before hydration.
     const titleCandidates = this.searchFtsCandidates(campaignId, role, user, `${FTS_TITLE_COLUMNS}: ${ftsQuery}`, candidateLimit);
     const fullColumns = role === 'dm' ? FTS_DM_COLUMNS : FTS_PUBLIC_COLUMNS;
     const fullCandidates = this.searchFtsCandidates(campaignId, role, user, `${fullColumns}: ${ftsQuery}`, candidateLimit);
+    const titleCapHit = titleCandidates.length > candidateLimit;
+    const fullCapHit = fullCandidates.length > candidateLimit;
+    const candidateCapHit = titleCapHit || fullCapHit;
+    const titleBase = titleCapHit ? titleCandidates.slice(0, candidateLimit) : titleCandidates;
+    const fullBase = fullCapHit ? fullCandidates.slice(0, candidateLimit) : fullCandidates;
 
     const seen = new Set<string>();
     const candidates: Candidate[] = [];
-    for (const candidate of [...titleCandidates, ...fullCandidates]) {
+    for (const candidate of [...titleBase, ...fullBase]) {
       const key = candidateKey(candidate.type, candidate.id);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -169,7 +203,21 @@ export class SearchService {
     results.sort(
       (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
     );
-    return { query: q, results: results.slice(0, limit) };
+    return this.toResponse(q, results, limit, candidateCapHit);
+  }
+
+  /**
+   * Build a {@link SearchResponse} with honest truncation accounting (issue #1481).
+   * `allResults` is the FULL ordered match list BEFORE slicing; `total` reports
+   * that count and `truncated` is true when even one more match exists than is
+   * returned, OR when `forceTruncated` says the scan/index was itself bounded
+   * (fallback per-collection cap hit, or FTS candidate LIMIT hit) and more
+   * matches may exist that were never examined.
+   */
+  private toResponse(q: string, allResults: SearchResult[], limit: number, forceTruncated = false): SearchResponse {
+    const total = allResults.length;
+    const results = allResults.slice(0, Math.max(0, limit));
+    return { query: q, results, total, truncated: forceTruncated || total > results.length };
   }
 
   private async searchFallback(
@@ -181,9 +229,23 @@ export class SearchService {
   ): Promise<SearchResponse> {
     // Fold once; encounter/schedule helpers receive this same folded needle (#624).
     const needle = foldForSearch(q.trim());
-    if (!needle) return { query: q, results: [] };
+    if (!needle) return this.toResponse(q, [], limit);
 
     const isDm = role === 'dm';
+    // Bound the per-collection full scan (issue #1481): each generic collection
+    // is loaded whole and matched in JS, so cap how many rows of each we actually
+    // scan. Generous (normal campaigns never hit it); when any collection exceeds
+    // it, `scanCapped` flags the response truncated because matches beyond the cap
+    // were never examined.
+    let scanCapped = false;
+    const capScan = <T>(p: Promise<T[]>): Promise<T[]> =>
+      p.then((rows) => {
+        if (rows.length > FALLBACK_COLLECTION_SCAN_CAP) {
+          scanCapped = true;
+          return rows.slice(0, FALLBACK_COLLECTION_SCAN_CAP);
+        }
+        return rows;
+      });
     const [
       quests,
       npcs,
@@ -199,26 +261,53 @@ export class SearchService {
       scheduledSessionHits,
       sessionHits,
     ] = await Promise.all([
-      this.quests.listForCampaign(campaignId, role),
-      this.npcs.listForCampaign(campaignId, role),
-      this.factions.listForCampaign(campaignId, role),
-      this.locations.listForCampaign(campaignId, role),
-      this.characters.listForCampaign(campaignId, user, role),
-      this.notes.listAllForCampaign(campaignId, user, role, {}),
-      this.timeline.listEvents(campaignId, role),
-      this.inventory.listForCampaign(campaignId),
-      this.comments.listForCampaign(campaignId, role),
+      capScan(this.quests.listForCampaign(campaignId, role)),
+      capScan(this.npcs.listForCampaign(campaignId, role)),
+      capScan(this.factions.listForCampaign(campaignId, role)),
+      capScan(this.locations.listForCampaign(campaignId, role)),
+      capScan(this.characters.listForCampaign(campaignId, user, role)),
+      capScan(this.notes.listAllForCampaign(campaignId, user, role, {})),
+      capScan(this.timeline.listEvents(campaignId, role)),
+      capScan(this.inventory.listForCampaign(campaignId)),
+      capScan(this.comments.listForCampaign(campaignId, role)),
       // Story arcs/beats are DM-only prep content (issue #27) — never fetch them
       // for a non-DM, so a player's search can't surface a planned twist.
-      isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([]),
+      capScan(isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([])),
+      // The bounded search projections self-cap (min(limit, 50)), so they need no
+      // further cap here; their own ordering/visibility is authoritative.
       this.encounters.searchForCampaign(campaignId, role, needle, limit),
       this.scheduling.searchForCampaign(campaignId, needle, limit),
       this.sessions.searchForCampaign(campaignId, role, needle, limit),
     ]);
+    // The bounded search projections (encounters / scheduled sessions / sessions)
+    // self-cap at min(limit, 50) and return one extra row as a cap sentinel, so
+    // the fallback can detect that cap and propagate truncation without a second
+    // count (issue #1481): if any projection returned more than its cap, more
+    // matches exist than were kept and the response must be flagged incomplete.
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    const encounterCapped = encounterHits.length > boundedLimit;
+    const scheduledSessionCapped = scheduledSessionHits.length > boundedLimit;
+    const sessionCapped = sessionHits.length > boundedLimit;
+    if (encounterCapped || scheduledSessionCapped || sessionCapped) {
+      scanCapped = true;
+    }
+    const encounterRows = encounterCapped ? encounterHits.slice(0, boundedLimit) : encounterHits;
+    const scheduledSessionRows = scheduledSessionCapped ? scheduledSessionHits.slice(0, boundedLimit) : scheduledSessionHits;
+    const sessionRows = sessionCapped ? sessionHits.slice(0, boundedLimit) : sessionHits;
 
     const results: SearchResult[] = [];
     const push = (type: SearchResultType, id: number, title: string, fields: Field[], extra?: Partial<SearchResult>) => {
-      const hit = fields.find((f) => f.text && foldedIncludes(f.text, needle));
+      // Prefix-token match (matchesSearchQuery) keeps the fallback on the SAME
+      // semantics as the FTS5 index, so a query returns the same set on either
+      // backend (issue #1481) — plain substring (foldedIncludes) used to make
+      // "ex" match "Vexley" only here, never on FTS. Matching reads `matchText`
+      // when present (the token form) but the snippet always renders `text` (the
+      // clean display value, e.g. a raw ISO date rather than its space-separated
+      // twin).
+      const hit = fields.find((f) => {
+        const candidateText = f.matchText ?? f.text;
+        return candidateText && matchesSearchQuery(candidateText, needle);
+      });
       if (!hit) return;
       results.push({
         type,
@@ -276,7 +365,7 @@ export class SearchService {
         { field: 'dmSecret', text: ch.dmSecret },
       ]);
     }
-    for (const s of sessionHits) {
+    for (const s of sessionRows) {
       const title = s.title.trim() || `Session ${s.number}`;
       push('session', s.id, title, [
         { field: 'title', text: title },
@@ -285,7 +374,7 @@ export class SearchService {
         { field: 'dmSecret', text: s.dmSecret },
       ]);
     }
-    for (const encounter of encounterHits) {
+    for (const encounter of encounterRows) {
       push('encounter', encounter.id, encounter.name, [
         { field: 'name', text: encounter.name },
         { field: 'location', text: encounter.locationLabel },
@@ -293,12 +382,17 @@ export class SearchService {
         { field: 'session', text: encounter.sessionLabel },
       ]);
     }
-    for (const scheduled of scheduledSessionHits) {
+    for (const scheduled of scheduledSessionRows) {
       const title = scheduled.title.trim()
         || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
+      // Match against the SAME composite scheduling.searchForCampaign (and the
+      // FTS5 aux column) use — else a date/time query the bounded read matched
+      // would be dropped here because "19" is buried in the raw "20T19" token
+      // (issue #1481) — but keep the raw ISO as the display/snippet text so the
+      // rendered snippet is the clean timestamp, not the doubled composite.
       push('scheduled_session', scheduled.id, title, [
         { field: 'title', text: scheduled.title },
-        { field: 'scheduledAt', text: scheduled.scheduledAt },
+        { field: 'scheduledAt', text: scheduled.scheduledAt, matchText: scheduledAtSearchText(scheduled.scheduledAt) },
         { field: 'notes', text: scheduled.notes },
       ]);
     }
@@ -350,7 +444,7 @@ export class SearchService {
     results.sort(
       (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
     );
-    return { query: q, results: results.slice(0, limit) };
+    return this.toResponse(q, results, limit, scanCapped);
   }
 
   private campaignSearchVisibilitySql(role: Role, user: RequestUser) {
@@ -457,7 +551,9 @@ export class SearchService {
         AND campaign_search_fts MATCH ${matchQuery}
         AND ${this.campaignSearchVisibilitySql(role, user)}
       ORDER BY campaign_search_fts.rank, campaign_search_fts.rowid
-      LIMIT ${limit}
+      -- +1 sentinel row so the caller proves the cap was hit rather than guessing
+      -- from an exact-length result (issue #1481).
+      LIMIT ${limit + 1}
     `);
     return rows.map((r) => ({ type: r.type as SearchResultType, id: Number(r.id), rank: Number(r.rank) }));
   }
@@ -771,7 +867,10 @@ export class SearchService {
           || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
         addHit({ type: 'scheduled_session', id: scheduled.id, title, fields: [
           { field: 'title', text: scheduled.title },
-          { field: 'scheduledAt', text: scheduled.scheduledAt },
+          // matchText mirrors the FTS5 aux column (space-separated date tokens)
+          // so a date/time candidate the index matched survives the prefix-token
+          // re-check; text stays the raw ISO for a clean snippet (issue #1481).
+          { field: 'scheduledAt', text: scheduled.scheduledAt, matchText: scheduledAtSearchText(scheduled.scheduledAt) },
           { field: 'notes', text: scheduled.notes },
         ] });
       }
@@ -784,7 +883,16 @@ export class SearchService {
       if (pushed.has(key)) continue;
       const hit = byKey.get(key);
       if (!hit) continue;
-      const matched = hit.fields.find((f) => f.text && foldedIncludes(f.text, needle));
+      // Same prefix-token predicate as the fallback push (issue #1481): the FTS5
+      // index matches an order-independent token AND, so re-checking with a
+      // contiguous-substring test (foldedIncludes) dropped every multi-token
+      // candidate whose query words were not adjacent in a single field (e.g.
+      // "find ledger" vs "Find the Vex Ledger"), making the default FTS path
+      // return a different set than the fallback for the same query.
+      const matched = hit.fields.find((f) => {
+        const candidateText = f.matchText ?? f.text;
+        return candidateText && matchesSearchQuery(candidateText, needle);
+      });
       if (!matched) continue;
       pushed.add(key);
       results.push({

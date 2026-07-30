@@ -78,11 +78,14 @@ export default function SearchPage() {
   const [data, setData] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState<SearchResult['type'] | 'all'>('all');
   const resultRefs = useRef<Array<HTMLAnchorElement | null>>([]);
   useRestoreListOriginScroll();
 
   useEffect(() => {
     setInput(q);
+    // A new query invalidates the previous type filter (issue #1481).
+    setTypeFilter('all');
   }, [q]);
 
   useEffect(() => {
@@ -118,9 +121,18 @@ export default function SearchPage() {
     return groups;
   }, [data]);
 
+  // Type filter (issue #1481): narrows the returned set by entity type so a
+  // truncated list ("Showing 50 of 200") can still be scoped to "just NPCs". The
+  // filter is client-side over the page of results the server returned.
+  const presentTypes = useMemo(() => typeOrder.filter((t) => grouped.has(t)), [grouped]);
+  const visibleTypes = useMemo(
+    () => presentTypes.filter((t) => typeFilter === 'all' || t === typeFilter),
+    [presentTypes, typeFilter],
+  );
+
   const orderedResults = useMemo(
-    () => typeOrder.flatMap((type) => grouped.get(type) ?? []),
-    [grouped],
+    () => visibleTypes.flatMap((type) => grouped.get(type) ?? []),
+    [grouped, visibleTypes],
   );
   const resultIndex = useMemo(
     () => new Map(orderedResults.map((result, index) => [`${result.type}-${result.id}`, index])),
@@ -170,7 +182,7 @@ export default function SearchPage() {
       {loading && <Skeleton lines={5} />}
       {error && <ErrorNote message={error} />}
 
-      {!loading && !error && q.trim() && data && data.results.length === 0 && (
+      {!loading && !error && q.trim() && data && data.results.length === 0 && !data.truncated && (
         <EmptyState
           icon="magnifying-glass"
           title={`No results for “${q}”`}
@@ -178,14 +190,60 @@ export default function SearchPage() {
         />
       )}
 
+      {/* Truncation can leave a page with zero visible hits (issue #1481): a
+          bounded scan/index cap may be hit before any match is returned, so the
+          honest empty state names that possibility instead of a bare “No results”. */}
+      {!loading && !error && q.trim() && data && data.results.length === 0 && data.truncated && (
+        <EmptyState
+          icon="magnifying-glass"
+          title={`No visible results for “${q}”`}
+          hint="The search did not examine every possible match. Add a word to the query, or try a narrower term, to surface results it may have skipped."
+        />
+      )}
+
       {!loading && !error && data && data.results.length > 0 && (
         <div className="space-y-5" data-search-results aria-label="Search results" role="region">
-          <p className="text-xs text-muted">
-            {data.results.length} result{data.results.length === 1 ? '' : 's'} for “{q}”
-          </p>
-          {typeOrder
-            .filter((t) => grouped.has(t))
-            .map((t) => (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 justify-between">
+            <p className="text-xs text-muted">
+              {/* `total` is exact only when the scan was not capped; once the page is
+                  truncated it may be a lower bound, so we surface a “+” floor instead of
+                  a misleading “of {total}”. The visible count reflects the active type
+                  filter, distinct from the server’s unfiltered total (issue #1481). */}
+              {data.truncated
+                ? `Showing ${orderedResults.length}+ results for “${q}” — more may exist`
+                : orderedResults.length < data.total
+                  ? `Showing ${orderedResults.length} of ${data.total} results for “${q}”`
+                  : `${orderedResults.length} result${orderedResults.length === 1 ? '' : 's'} for “${q}”`}
+            </p>
+            <label className="text-xs text-muted inline-flex items-center gap-1">
+              <span>Filter:</span>
+              <select
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as SearchResult['type'] | 'all')}
+                aria-label="Filter results by type"
+                className="text-xs"
+                style={{
+                  minHeight: 30,
+                  padding: '4px 8px',
+                  background: 'var(--color-surface, rgba(255,255,255,0.03))',
+                  border: '1px solid var(--color-divider)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'var(--color-text)',
+                }}
+              >
+                <option value="all">All types</option>
+                {presentTypes.map((t) => (
+                  <option key={t} value={t}>{typeLabel[t]}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {data.truncated && (
+            <p className="text-xs text-muted">
+              Add a word to the query, or use the type filter, to narrow the results.
+            </p>
+          )}
+          {visibleTypes.map((t) => (
               <div key={t} className="space-y-2">
                 <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
                   <span className="inline-flex text-[var(--color-accent)]"><GameIcon slug={typeIcon[t]} size={UI_ICON_SIZE.sm} /></span>

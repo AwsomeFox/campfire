@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import type { ServerInstance } from '@campfire/schema';
-import { DB, type DrizzleDb } from '../../db/db.module';
+import { DB, CAMPAIGN_SEARCH_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { SERVER_META_KEY, serverMeta } from '../../db/schema';
 import { nowIso } from '../../common/time';
 
@@ -34,7 +34,13 @@ import { nowIso } from '../../common/time';
  */
 @Injectable()
 export class ServerMetaService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    // Boot-time capability (issue #1481): whether the FTS5 index is available.
+    // Surfaced on /me so a deployment whose search silently fell back to the
+    // full-scan path is diagnosable without shell access.
+    @Inject(CAMPAIGN_SEARCH_FTS_AVAILABLE) private readonly campaignSearchFtsAvailable: boolean,
+  ) {}
 
   /**
    * Return the singleton row, seeding it (instanceId + generation=0) on the
@@ -85,7 +91,11 @@ export class ServerMetaService {
    */
   async getInstance(): Promise<ServerInstance> {
     const row = await this.getOrCreateRow();
-    return { instanceId: row.instanceId, dataGeneration: row.dataGeneration };
+    return {
+      instanceId: row.instanceId,
+      dataGeneration: row.dataGeneration,
+      searchMode: this.campaignSearchFtsAvailable ? 'fts5' : 'fallback',
+    };
   }
 
   /**

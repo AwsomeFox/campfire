@@ -26,7 +26,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
-import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { foldForSearch, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -532,12 +532,19 @@ export class SchedulingService {
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
-    const matches = rows.filter(
-      (r) =>
-        foldedIncludes(r.title, folded)
-        || foldedIncludes(r.scheduledAt, folded)
-        || foldedIncludes(r.notes, folded),
-    );
+    const matches = rows.filter((r) => {
+      // Per-field predicate, identical to SearchService.push for scheduled_session
+      // (title / scheduledAt composite / notes). Matching a single composite across
+      // those fields would also accept sessions whose query tokens are split across
+      // fields — which push then drops — and on a capped scan those cross-field
+      // false-positives could fill the cap and trim a real per-field match, breaking
+      // FTS/fallback parity (issue #1481). Each field is matched on its own; the
+      // scheduledAt field mirrors the FTS5 aux column's space-separated date tokens
+      // (T/:/- → space) so date/time fragments like "19:30" prefix-match.
+      return matchesSearchQuery(r.title, folded)
+        || matchesSearchQuery(scheduledAtSearchText(r.scheduledAt), folded)
+        || matchesSearchQuery(r.notes, folded);
+    });
     // Same read-time link reconciliation as every other projection: search must not
     // hand back a sessionId pointing at a trashed recap either.
     const liveLinks = await this.liveLinkedSessionIds(matches);
@@ -554,7 +561,9 @@ export class SchedulingService {
         // Cancelled nights stay discoverable where they can be labelled: the Schedule
         // tab's Past list badges them "Cancelled" and offers Restore.
         .filter((s) => s.status !== 'cancelled')
-        .slice(0, boundedLimit)
+        // One extra row is a cap sentinel for the search fallback (issue #1481):
+        // it detects the over-cap length and flags the response truncated.
+        .slice(0, boundedLimit + 1)
     );
   }
 
