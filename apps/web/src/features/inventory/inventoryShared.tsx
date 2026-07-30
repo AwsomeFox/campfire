@@ -2,12 +2,12 @@
  * Shared inventory item UI — used by the campaign Inventory page and character
  * sheet inventory section (issue #454).
  */
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Character, InventoryItem, PartyCharacter } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import type { Character, InventoryItem, PartyCharacter, RuleEntry } from '@campfire/schema';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
-import { Card, Btn } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton } from '../../components/ui';
 import { UIIcon } from '../../components/UIIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Field } from '../../components/Field';
@@ -24,6 +24,8 @@ import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { useDialog } from '../../components/useDialog';
+import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 
 /** Add-item quantity bounds (issue #459). */
 export const ITEM_QTY_MIN = 0;
@@ -386,9 +388,22 @@ export function AddItemForm({
     }
   }
 
+  const [showCompendiumPicker, setShowCompendiumPicker] = useState(false);
+
   return (
     <Card className="space-y-3" data-testid="inventory-add-item">
-      <h2 className="font-bold text-white text-sm">{t('inventory.addItemTitle')}</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="font-bold text-white text-sm">{t('inventory.addItemTitle')}</h2>
+        <Btn
+          density="xs"
+          ghost
+          type="button"
+          className="text-xs text-[var(--color-accent)] hover:underline"
+          onClick={() => setShowCompendiumPicker(true)}
+        >
+          {t('inventory.fromCompendium')}
+        </Btn>
+      </div>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
@@ -483,6 +498,265 @@ export function AddItemForm({
           onClose={() => setPickingIcon(false)}
         />
       )}
+      {showCompendiumPicker && (
+        <CompendiumItemPickerModal
+          campaignId={campaignId}
+          owners={owners}
+          defaultOwner={owner}
+          onClose={() => setShowCompendiumPicker(false)}
+          onCreated={() => {
+            setShowCompendiumPicker(false);
+            onCreated();
+          }}
+        />
+      )}
     </Card>
+  );
+}
+
+export function CompendiumItemPickerModal({
+  campaignId,
+  owners,
+  defaultOwner = 'party',
+  onClose,
+  onCreated,
+}: {
+  campaignId: number;
+  owners: Character[];
+  defaultOwner?: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const { t } = useTranslation();
+  const dialogRef = useDialog({ onClose });
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<RuleEntry[]>([]);
+  const [selectedEntry, setSelectedEntry] = useState<RuleEntry | null>(null);
+  const [owner, setOwner] = useState(defaultOwner);
+  const [qty, setQty] = useState('1');
+  const [notes, setNotes] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [duplicatePrompt, setDuplicatePrompt] = useState(false);
+
+  const search = useCallback(
+    async (q: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await api.get<{ items: RuleEntry[] }>(
+          `${API}/rules/search?campaignId=${campaignId}&type=item&q=${encodeURIComponent(q)}`,
+        );
+        setItems(res.items ?? []);
+      } catch (err) {
+        setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [campaignId, t],
+  );
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      void search(query);
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [query, search]);
+
+  async function acquire(duplicateMode: 'confirm' | 'increment' | 'separate' = 'confirm') {
+    if (!selectedEntry) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const ownerType = owner === 'party' ? 'party' : 'character';
+      const characterId = owner === 'party' ? null : Number(owner);
+      const qtyParsed = Math.max(1, Number(qty) || 1);
+      await api.post(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
+        ruleEntryId: selectedEntry.id,
+        ownerType,
+        characterId,
+        qty: qtyParsed,
+        notes: notes.trim(),
+        duplicateMode,
+      });
+      onCreated();
+      onClose();
+    } catch (err) {
+      const code = err instanceof Error && 'body' in err ? (err as { body?: { code?: string } }).body?.code : '';
+      if (code === 'INVENTORY_COMPENDIUM_DUPLICATE' || (err instanceof ApiError && err.status === 409)) {
+        setDuplicatePrompt(true);
+      } else {
+        setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.addItem' }));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="compendium-picker-title"
+      ref={dialogRef}
+    >
+      <Card
+        className="w-full max-w-xl max-h-[85vh] flex flex-col space-y-4 overflow-hidden"
+        data-testid="compendium-item-picker-modal"
+      >
+        <div className="flex items-center justify-between pb-2 border-b border-[var(--color-neutral-800)]">
+          <h2 id="compendium-picker-title" className="font-bold text-white text-base flex items-center gap-2">
+            <GameIcon slug="backpack" size={UI_ICON_SIZE.sm} />
+            {t('inventory.fromCompendiumTitle')}
+          </h2>
+          <Btn density="xs" ghost onClick={onClose} aria-label={t('common.cancel')}>
+            <UIIcon name="close" size="xs" />
+          </Btn>
+        </div>
+
+        {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
+
+        <div className="space-y-3">
+          <TextInput
+            type="text"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSelectedEntry(null);
+              setDuplicatePrompt(false);
+            }}
+            placeholder={t('inventory.searchCompendiumPlaceholder')}
+            autoFocus
+          />
+        </div>
+
+        <div className="flex-1 overflow-y-auto min-h-[200px] space-y-2 pr-1" style={{ borderColor: 'var(--color-neutral-800)' }}>
+          {loading ? (
+            <Skeleton lines={4} />
+          ) : items.length === 0 ? (
+            <p className="text-sm text-secondary py-8 text-center">{t('inventory.noCompendiumItems')}</p>
+          ) : (
+            <ul className="divide-y divide-[var(--color-neutral-800)]">
+              {items.map((entry) => {
+                const icon = ruleEntryIconSlug(entry);
+                const isSelected = selectedEntry?.id === entry.id;
+                return (
+                  <li key={entry.id} className="py-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedEntry(entry);
+                        setDuplicatePrompt(false);
+                      }}
+                      className={`w-full text-left p-2 rounded-md transition-colors flex items-center gap-3 ${
+                        isSelected
+                          ? 'bg-[var(--color-neutral-800)] border border-[var(--color-accent)]'
+                          : 'hover:bg-[var(--color-neutral-800)]'
+                      }`}
+                    >
+                      <span className="shrink-0 text-[var(--color-accent)]">
+                        <GameIcon slug={icon} size={UI_ICON_SIZE.md} title={entry.name} />
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-white truncate">{entry.name}</p>
+                        {entry.summary && <p className="text-xs text-secondary truncate">{entry.summary}</p>}
+                      </div>
+                      {isSelected ? (
+                        <span className="text-xs font-semibold text-[var(--color-accent)]">{t('inventory.selectItem')} ✓</span>
+                      ) : (
+                        <Btn density="xs" ghost type="button" className="text-xs">
+                          {t('common.select', { defaultValue: 'Select' })}
+                        </Btn>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {selectedEntry && (
+          <div className="pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
+            {duplicatePrompt ? (
+              <div className="p-3 rounded bg-[var(--color-neutral-800)] space-y-2">
+                <p className="text-xs font-semibold text-amber-400">{t('inventory.duplicateConfirmTitle')}</p>
+                <p className="text-xs text-secondary">{t('inventory.duplicateConfirmBody')}</p>
+                <div className="flex gap-2 pt-1">
+                  <Btn density="xs" type="button" disabled={submitting} onClick={() => void acquire('increment')}>
+                    {t('inventory.incrementQty')}
+                  </Btn>
+                  <Btn density="xs" ghost type="button" disabled={submitting} onClick={() => void acquire('separate')}>
+                    {t('inventory.addSeparate')}
+                  </Btn>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field
+                    idPrefix="compendium-picker"
+                    name="owner"
+                    as="select"
+                    label={t('inventory.fields.owner.label')}
+                    value={owner}
+                    onChange={(e) => setOwner(e.target.value)}
+                  >
+                    <option value="party">{t('inventory.partyStash')}</option>
+                    {owners.map((c) => (
+                      <option key={c.id} value={String(c.id)}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </Field>
+                  <Field
+                    idPrefix="compendium-picker"
+                    name="qty"
+                    label={t('inventory.quantity')}
+                    type="text"
+                    inputMode="numeric"
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value)}
+                  />
+                </div>
+                <Field
+                  idPrefix="compendium-picker"
+                  name="notes"
+                  label={t('inventory.fields.notes.label')}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder={t('inventory.notesPlaceholder')}
+                  optional
+                />
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between pt-2 border-t border-[var(--color-neutral-800)]">
+          <a
+            href={`/c/${campaignId}/compendium?type=item`}
+            className="text-xs text-[var(--color-accent)] hover:underline"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t('inventory.browseCompendiumLink')}
+          </a>
+          <div className="flex gap-2">
+            <Btn ghost type="button" onClick={onClose} disabled={submitting}>
+              {t('common.cancel')}
+            </Btn>
+            {selectedEntry && !duplicatePrompt && (
+              <Btn type="button" disabled={submitting} onClick={() => void acquire('confirm')}>
+                {submitting ? t('inventory.adding') : t('inventory.addFromCompendium')}
+              </Btn>
+            )}
+          </div>
+        </div>
+      </Card>
+    </div>
   );
 }

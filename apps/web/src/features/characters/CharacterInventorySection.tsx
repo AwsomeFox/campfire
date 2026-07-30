@@ -10,7 +10,7 @@ import { api, API, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
-import { AddItemForm, ItemSection } from '../inventory/inventoryShared';
+import { AddItemForm, CompendiumItemPickerModal, ItemSection } from '../inventory/inventoryShared';
 
 export function CharacterInventorySection({
   campaignId,
@@ -30,6 +30,7 @@ export function CharacterInventorySection({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [showCompendiumPicker, setShowCompendiumPicker] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -100,9 +101,14 @@ export function CharacterInventorySection({
       ) : (
         <>
           {canManageCharacter && !adding && (
-            <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
-              {t('inventory.addItem')}
-            </Btn>
+            <div className="flex items-center gap-2">
+              <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
+                {t('inventory.addItem')}
+              </Btn>
+              <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setShowCompendiumPicker(true)}>
+                {t('inventory.fromCompendium')}
+              </Btn>
+            </div>
           )}
 
           {adding && canManageCharacter && (
@@ -113,6 +119,19 @@ export function CharacterInventorySection({
               onCancel={() => setAdding(false)}
               onCreated={() => {
                 setAdding(false);
+                void load();
+              }}
+            />
+          )}
+
+          {showCompendiumPicker && canManageCharacter && (
+            <CompendiumItemPickerModal
+              campaignId={campaignId}
+              owners={writableOwners}
+              defaultOwner={String(character.id)}
+              onClose={() => setShowCompendiumPicker(false)}
+              onCreated={() => {
+                setShowCompendiumPicker(false);
                 void load();
               }}
             />
