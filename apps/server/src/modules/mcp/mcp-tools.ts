@@ -4495,8 +4495,7 @@ export class McpToolsService {
       user,
       'undo_turn',
       'DM only: undo the last turn advance (issue #413) — step the turn pointer BACKWARD, decrementing the round when ' +
-        'unwrapping past the top. Effect ticks applied while advancing are not reversed; re-apply any effect ' +
-        'corrections manually.',
+        'unwrapping past the top. Timed conditions and active effects ticked while advancing are restored automatically.',
       { encounterId: Id.describe('Encounter id') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

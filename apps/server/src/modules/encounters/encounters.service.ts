@@ -5245,6 +5245,41 @@ export class EncountersService {
           .where(eq(encounters.id, encounterId))
           .run();
 
+        // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
+        for (const skipped of skippedTurns) {
+          this.appendEventInTransaction(tx, encounterId, skipped.round, 'turn', {
+            actor: skipped.name,
+            target: skipped.name,
+            actorId: skipped.id,
+            targetId: skipped.id,
+            detail: 'skipped (down)',
+          });
+        }
+        // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
+        // name-free so #869 redaction cannot be bypassed by prose. The operation id (#580)
+        // makes "did the turn advance twice?" answerable from the log alone: two turn markers
+        // carrying the SAME operationId would be a double-advance, two markers with different
+        // ids are two legitimate advances.
+        const turnMeta: EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot } = opts.idempotencyKey
+          ? { operationId: opts.idempotencyKey }
+          : {};
+        if (turnTickSnapshot.ending || turnTickSnapshot.starting) {
+          turnMeta.turnTickSnapshot = turnTickSnapshot;
+        }
+        this.appendEventInTransaction(tx, encounterId, newRound, 'turn', {
+          actor: newCurrentName,
+          target: newCurrentName,
+          actorId: newCurrentId,
+          targetId: newCurrentId,
+          detail:
+            opts.endedByPlayer && endedName && endedName !== 'Lair'
+              ? 'ended their turn'
+              : newCurrentName === 'Lair'
+                ? 'Lair action (initiative 20)'
+                : '',
+          metadata: turnMeta,
+        });
+
         // Claim written in the SAME transaction as the pointer move. The response body is
         // the whole role-redacted encounter, which is assembled asynchronously below, so it
         // is backfilled immediately after commit instead of stored here. The atomic part is
@@ -5269,40 +5304,6 @@ export class EncountersService {
     if (replayedEncounter) return replayedEncounter;
     if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
 
-    // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
-    for (const skipped of skippedTurns) {
-      await this.appendEvent(encounterId, skipped.round, 'turn', {
-        actor: skipped.name,
-        target: skipped.name,
-        actorId: skipped.id,
-        targetId: skipped.id,
-        detail: 'skipped (down)',
-      });
-    }
-    // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
-    // name-free so #869 redaction cannot be bypassed by prose. The operation id (#580)
-    // makes "did the turn advance twice?" answerable from the log alone: two turn markers
-    // carrying the SAME operationId would be a double-advance, two markers with different
-    // ids are two legitimate advances.
-    const turnMeta: EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot } = opts.idempotencyKey
-      ? { operationId: opts.idempotencyKey }
-      : {};
-    if (turnTickSnapshot.ending || turnTickSnapshot.starting) {
-      turnMeta.turnTickSnapshot = turnTickSnapshot;
-    }
-    await this.appendEvent(encounterId, newRound, 'turn', {
-      actor: newCurrentName,
-      target: newCurrentName,
-      actorId: newCurrentId,
-      targetId: newCurrentId,
-      detail:
-        opts.endedByPlayer && endedName && endedName !== 'Lair'
-          ? 'ended their turn'
-          : newCurrentName === 'Lair'
-            ? 'Lair action (initiative 20)'
-            : '',
-      metadata: turnMeta,
-    });
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
     for (const ex of expiredEffects) {
@@ -5379,21 +5380,22 @@ export class EncountersService {
       effectNames: string[];
     }> = [];
 
-    // Issue #1445: the turn-advance event carries a snapshot of the ending/starting combatant
-    // conditionInstances and activeEffects from before they were ticked. Read it directly from
-    // metadataJson (not the public event-to-domain mapping) so undo can restore state.
-    const [lastTurnEvent] = await this.db
-      .select()
-      .from(encounterEvents)
-      .where(and(eq(encounterEvents.encounterId, encounterId), eq(encounterEvents.type, 'turn')))
-      .orderBy(desc(encounterEvents.id))
-      .limit(1);
-    const turnMeta = lastTurnEvent?.metadataJson
-      ? (JSON.parse(lastTurnEvent.metadataJson) as EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot })
-      : undefined;
-    const snapshot = turnMeta?.turnTickSnapshot;
-
     this.db.transaction((tx) => {
+      // Issue #1445: the turn-advance event carries a snapshot of the ending/starting combatant
+      // conditionInstances and activeEffects from before they were ticked. Read it directly from
+      // metadataJson (not the public event-to-domain mapping) so undo can restore state.
+      const [lastTurnEvent] = tx
+        .select()
+        .from(encounterEvents)
+        .where(and(eq(encounterEvents.encounterId, encounterId), eq(encounterEvents.type, 'turn')))
+        .orderBy(desc(encounterEvents.id))
+        .limit(1)
+        .all();
+      const turnMeta = lastTurnEvent?.metadataJson
+        ? (JSON.parse(lastTurnEvent.metadataJson) as EncounterEventMetadata & { turnTickSnapshot?: TurnTickSnapshot })
+        : undefined;
+      const snapshot = turnMeta?.turnTickSnapshot;
+
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
       if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
         throw new BadRequestException('Encounter is not running');
@@ -5445,6 +5447,8 @@ export class EncountersService {
       // Issue #1445: restore the conditionInstances and activeEffects that nextTurn ticked on
       // the ending and starting combatants. If a combatant was removed between the advance and
       // the undo, the row will not be found and the snapshot is skipped (safe, not throw).
+      // Merge the snapshot with any condition/effect changes made after advancing, then consume
+      // the snapshot so the next undo selects the previous turn event.
       const restoredLog: Array<{
         combatantId: number;
         combatantName: string;
@@ -5460,20 +5464,37 @@ export class EncountersService {
 
           const currentConditions = parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, []));
           const currentEffects = parseActiveEffects(row.activeEffects);
+
+          const snapshotConditionIds = new Set(entry.conditionInstances.map((c) => c.id));
+          const mergedConditions: ConditionInstance[] = [];
           const restoredConditionNames: string[] = [];
           for (const c of entry.conditionInstances) {
-            const match = currentConditions.find((cc) => cc.id === c.id);
-            if (!match || !isDeepStrictEqual(match, c)) {
+            const current = currentConditions.find((cc) => cc.id === c.id);
+            if (!current || !isDeepStrictEqual(current, c)) {
               restoredConditionNames.push(c.name);
             }
+            mergedConditions.push(c);
           }
+          for (const c of currentConditions) {
+            if (snapshotConditionIds.has(c.id)) continue;
+            mergedConditions.push(c);
+          }
+
+          const snapshotEffectIds = new Set(entry.activeEffects.map((e) => e.id));
+          const mergedEffects: ActiveEffectType[] = [];
           const restoredEffectNames: string[] = [];
           for (const e of entry.activeEffects) {
-            const match = currentEffects.find((ee) => ee.id === e.id);
-            if (!match || !isDeepStrictEqual(match, e)) {
+            const current = currentEffects.find((ee) => ee.id === e.id);
+            if (!current || !isDeepStrictEqual(current, e)) {
               restoredEffectNames.push(e.name);
             }
+            mergedEffects.push(e);
           }
+          for (const e of currentEffects) {
+            if (snapshotEffectIds.has(e.id)) continue;
+            mergedEffects.push(e);
+          }
+
           if (restoredConditionNames.length > 0 || restoredEffectNames.length > 0) {
             restoredLog.push({
               combatantId: entry.combatantId,
@@ -5484,10 +5505,22 @@ export class EncountersService {
           }
 
           const writeSet: Partial<typeof combatants.$inferInsert> = {
-            activeEffects: toJsonText(entry.activeEffects),
-            ...conditionWriteSetFromInstances(entry.conditionInstances),
+            activeEffects: toJsonText(mergedEffects),
+            ...conditionWriteSetFromInstances(mergedConditions),
           };
           tx.update(combatants).set(writeSet).where(eq(combatants.id, entry.combatantId)).run();
+        }
+
+        // Consume the snapshot so a second consecutive undo selects the previous turn.
+        if (lastTurnEvent && turnMeta) {
+          const consumedMeta: Record<string, unknown> = { ...turnMeta };
+          delete consumedMeta.turnTickSnapshot;
+          tx.update(encounterEvents)
+            .set({
+              metadataJson: Object.keys(consumedMeta).length > 0 ? JSON.stringify(consumedMeta) : null,
+            })
+            .where(eq(encounterEvents.id, lastTurnEvent.id))
+            .run();
         }
       }
       restoredLogEntries = restoredLog;

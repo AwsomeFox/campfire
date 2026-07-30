@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionSpec } from '@campfire/schema';
+import { ActionSpec, ConditionInstance } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -104,6 +104,11 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
   function currentId(orm: ReturnType<typeof build>['orm'], encounterId: number): number | null {
     const [row] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
     return row.currentCombatantId;
+  }
+
+  function currentRound(orm: ReturnType<typeof build>['orm'], encounterId: number): number {
+    const [row] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    return row.round;
   }
 
   it('the current combatant owner may end their own turn; it advances to the next actor', async () => {
@@ -433,6 +438,101 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(restored).toHaveLength(1);
       expect(restored[0].roundsRemaining).toBe(2);
       expect(JSON.parse(c1row.conditions ?? '[]')).toEqual(['Slow']);
+    });
+
+    it('supports multiple consecutive undos by consuming the snapshot each time (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c2);
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c1);
+      expect(currentRound(orm, encounterId)).toBe(2);
+
+      const first = await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(first.currentCombatantId).toBe(c2);
+      expect(first.round).toBe(1);
+
+      const second = await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(second.currentCombatantId).toBe(c1);
+      expect(second.round).toBe(1);
+    });
+
+    it('preserves conditions and effects added during the turn while restoring ticked state (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      const startCondition = {
+        id: 'c2-start',
+        name: 'C2 Start',
+        roundsRemaining: 1,
+        timing: 'start-of-turn',
+      };
+      const preEffect = {
+        id: 'c2-effect',
+        name: 'C2 Effect',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([startCondition]),
+          conditions: JSON.stringify(['C2 Start']),
+          activeEffects: JSON.stringify([preEffect]),
+        })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c2);
+
+      // Add a condition and effect during c2's turn.
+      await service.updateCombatant(
+        encounterId,
+        c2,
+        {
+          addConditionInstance: ConditionInstance.parse({
+            id: 'added-cond',
+            name: 'Added Cond',
+            roundsRemaining: 3,
+            timing: 'none',
+          }),
+        },
+        dmUser,
+        'dm',
+      );
+      const [c2rowBeforeUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      const beforeEffects = JSON.parse(c2rowBeforeUndo.activeEffects ?? '[]');
+      const addedEffect = {
+        id: 'added-effect',
+        name: 'Added Effect',
+        kind: 'buff',
+        timing: 'none',
+        roundsRemaining: 5,
+      };
+      orm
+        .update(combatants)
+        .set({ activeEffects: JSON.stringify([...beforeEffects, addedEffect]) })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c1);
+
+      const [c2row] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      const conditionNames = conditionsFrom(c2row);
+      expect(conditionNames).toContain('C2 Start');
+      expect(conditionNames).toContain('Added Cond');
+
+      const effects = JSON.parse(c2row.activeEffects ?? '[]');
+      expect(effects).toHaveLength(2);
+      expect(effects.find((e: any) => e.id === 'added-effect')).toMatchObject(addedEffect);
+      expect(effects.find((e: any) => e.id === 'c2-effect')).toMatchObject(preEffect);
     });
   });
 
