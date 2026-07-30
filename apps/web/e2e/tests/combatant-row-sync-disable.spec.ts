@@ -16,7 +16,7 @@ import { CREDS } from '../global-setup';
  * sees them, sync-blocked or not.
  */
 
-async function seedOwnedCombatant() {
+async function seedOwnedCombatant(hp: { hpCurrent: number; hpMax: number } = { hpCurrent: 24, hpMax: 24 }) {
   const { baseURL, campaignId } = seed();
   const dm = await request.newContext({ baseURL });
   const player = await request.newContext({ baseURL });
@@ -32,8 +32,8 @@ async function seedOwnedCombatant() {
         className: 'Fighter',
         level: 3,
         ownerUserId: playerUserId,
-        hpCurrent: 24,
-        hpMax: 24,
+        hpCurrent: hp.hpCurrent,
+        hpMax: hp.hpMax,
         stats: { STR: 16 },
       },
     })
@@ -169,6 +169,77 @@ test.describe('CombatantRow sync-gate disable, not unmount (issue #1746)', () =>
       await expect(row.getByTestId('hp-steppers')).toHaveCount(0);
       await expect(page.getByTestId(`temp-hp-input-${heroCombatantId}`)).toHaveCount(0);
       await expect(page.getByTestId(`add-condition-toggle-${heroCombatantId}`)).toHaveCount(0);
+    } finally {
+      await playerCtx.dispose();
+      await teardown(baseURL, encounterId, characterId);
+      await context.close();
+    }
+  });
+
+  // Devin review finding on this PR: DeathSaveTracker took its own `canEdit` prop,
+  // which silently changed meaning from "permitted AND not sync-blocked" to
+  // "permitted only" once the mount/disable split landed elsewhere in this file —
+  // the death-save pips and Roll button would have gone from correctly-blocked to
+  // always-live during an outage. Two clients disagreeing about whether a character
+  // died is exactly the corruption the sync gate exists to prevent, so this is
+  // pinned as its own test rather than folded into the generic controls test above.
+  test('death-save controls: disabled while sync-blocked, enabled when live — never unmounted', async ({ browser }) => {
+    // hpCurrent 0 puts the combatant at the death-save threshold (kind 'character',
+    // hpCurrent <= 0) so CombatantRow renders the DeathSaveTracker at all.
+    const { baseURL, campaignId, encounterId, heroCombatantId, characterId, playerCtx } = await seedOwnedCombatant({
+      hpCurrent: 0,
+      hpMax: 24,
+    });
+    const context = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
+    const page = await context.newPage();
+
+    let releaseEvents: () => void = () => {};
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.continue();
+    });
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+
+      const syncChip = page.getByTestId('encounter-sync-chip');
+      await expect(syncChip).toHaveText('Connecting');
+
+      const row = page.getByTestId(`combatant-row-${heroCombatantId}`);
+      await expect(row).toBeVisible();
+
+      const tracker = row.getByTestId('death-save-tracker');
+      await expect(tracker).toBeVisible();
+      const successPip = tracker.getByTestId('death-save-success-pips').getByRole('button').first();
+      const rollBtn = tracker.getByRole('button', { name: 'Roll a death save' });
+
+      // Present (mounted) — the player owns this combatant — but disabled, because
+      // the sync gate is blocking. Asserting disabled, not absence, is the point:
+      // this must not regress to unmounting, and it must not become permanently
+      // live just because it is mounted.
+      await expect(successPip).toBeVisible();
+      await expect(successPip).toBeDisabled();
+      await expect(rollBtn).toBeVisible();
+      await expect(rollBtn).toBeDisabled();
+
+      const describedBy = await successPip.getAttribute('aria-describedby');
+      expect(describedBy, 'expected aria-describedby on the disabled death-save pip').toBeTruthy();
+      const reasonText = await page.locator(`#${describedBy}`).innerText();
+      expect(reasonText).toMatch(/paused|reconnecting/i);
+
+      await successPip.evaluate((el) => el.setAttribute('data-stable-probe', '1'));
+      await rollBtn.evaluate((el) => el.setAttribute('data-stable-probe', '1'));
+
+      releaseEvents();
+      await expect(syncChip).toHaveText('Live', { timeout: 15_000 });
+
+      await expect(successPip).toHaveAttribute('data-stable-probe', '1');
+      await expect(rollBtn).toHaveAttribute('data-stable-probe', '1');
+      await expect(successPip).toBeEnabled();
+      await expect(rollBtn).toBeEnabled();
     } finally {
       await playerCtx.dispose();
       await teardown(baseURL, encounterId, characterId);

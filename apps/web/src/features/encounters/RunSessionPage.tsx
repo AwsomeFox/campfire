@@ -731,7 +731,8 @@ const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Sta
 /**
  * 5e death-save tracker (issue #57): three success pips + three failure pips for a
  * character at 0 HP. Clicking a pip sets the count to that position (clicking the
- * highest-lit pip clears it back down), committing via onSet. Read-only unless canEdit.
+ * highest-lit pip clears it back down), committing via onSet. Read-only unless
+ * `canEditPermission`; also disabled (not unmounted) while `syncBlocked` (issue #1746).
  *
  * Roll button (issue #619): rolls a d20 and posts `deathSaveRoll` to the server, which
  * applies the 5e crit/fumble rules — nat 1 = two failure pips, nat 20 = revive at 1 HP
@@ -758,15 +759,23 @@ function DeathSavePips({
   kind,
   count,
   color,
-  canEdit,
+  canEditPermission,
   busy,
+  syncBlocked,
+  syncBlockedReason,
+  syncBlockedDescribedBy,
   onSet,
 }: {
   kind: 'deathSaveSuccesses' | 'deathSaveFailures';
   count: number;
   color: string;
-  canEdit: boolean;
+  /** Permission alone (issue #1746) — see {@link DeathSaveTracker}'s `canEditPermission` doc. */
+  canEditPermission: boolean;
   busy: boolean;
+  /** Issue #1746: the encounter sync gate is blocking conflict-prone writes right now. */
+  syncBlocked: boolean;
+  syncBlockedReason?: string;
+  syncBlockedDescribedBy?: string;
   onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
 }) {
   return (
@@ -781,13 +790,15 @@ function DeathSavePips({
             className="cf-death-save-pip"
             aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
             aria-pressed={filled}
-            disabled={!canEdit || busy}
+            aria-describedby={syncBlockedDescribedBy}
+            disabled={!canEditPermission || busy || syncBlocked}
+            title={syncBlockedReason}
             onClick={() => onSet({ [kind]: next })}
             style={{
               // Visual pip color via CSS variables; hit area is the 44×44 class (issue #428).
               ['--cf-death-save-pip-color' as string]: color,
               ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
-              cursor: canEdit && !busy ? 'pointer' : 'default',
+              cursor: canEditPermission && !busy && !syncBlocked ? 'pointer' : 'default',
             }}
           />
         );
@@ -799,15 +810,31 @@ function DeathSavePips({
 function DeathSaveTracker({
   successes,
   failures,
-  canEdit,
+  canEditPermission,
   busy,
+  syncBlocked,
+  syncBlockedReason,
+  syncBlockedDescribedBy,
   onSet,
   onRoll,
 }: {
   successes: number;
   failures: number;
-  canEdit: boolean;
+  /**
+   * Permission alone (issue #1746 fix — Devin review finding): this used to be a
+   * combined "permitted AND not sync-blocked" value, which meant marking/clearing a
+   * death save and the Roll button silently went from "blocked during an outage" to
+   * "always live" when the mount/disable split landed elsewhere in this file. Two
+   * clients disagreeing about whether a character died is exactly the corruption the
+   * sync gate exists to prevent, so this tracker now takes its OWN `syncBlocked` and
+   * disables (not unmounts) on it, same as every other write control in the row.
+   */
+  canEditPermission: boolean;
   busy: boolean;
+  /** Issue #1746: the encounter sync gate is blocking conflict-prone writes right now. */
+  syncBlocked: boolean;
+  syncBlockedReason?: string;
+  syncBlockedDescribedBy?: string;
   onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   onRoll: () => void;
 }) {
@@ -818,19 +845,40 @@ function DeathSaveTracker({
     >
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
-        <DeathSavePips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" canEdit={canEdit} busy={busy} onSet={onSet} />
+        <DeathSavePips
+          kind="deathSaveSuccesses"
+          count={successes}
+          color="var(--color-accent)"
+          canEditPermission={canEditPermission}
+          busy={busy}
+          syncBlocked={syncBlocked}
+          syncBlockedReason={syncBlockedReason}
+          syncBlockedDescribedBy={syncBlockedDescribedBy}
+          onSet={onSet}
+        />
       </span>
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
-        <DeathSavePips kind="deathSaveFailures" count={failures} color="#e5484d" canEdit={canEdit} busy={busy} onSet={onSet} />
+        <DeathSavePips
+          kind="deathSaveFailures"
+          count={failures}
+          color="#e5484d"
+          canEditPermission={canEditPermission}
+          busy={busy}
+          syncBlocked={syncBlocked}
+          syncBlockedReason={syncBlockedReason}
+          syncBlockedDescribedBy={syncBlockedDescribedBy}
+          onSet={onSet}
+        />
       </span>
-      {canEdit && (
+      {canEditPermission && (
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
           aria-label="Roll a death save"
-          title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
-          disabled={busy}
+          aria-describedby={syncBlockedDescribedBy}
+          title={syncBlockedReason ?? 'Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)'}
+          disabled={busy || syncBlocked}
           onClick={onRoll}
           style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
         >
@@ -3236,8 +3284,11 @@ export default function RunSessionPage() {
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient
                   // signal passed via `syncBlocked` so the row can render disabled instead of
-                  // unmounting — see CombatantRow's `syncBlocked` prop.
-                  canEdit={canEditCombatantPermission(c)}
+                  // unmounting — see CombatantRow's `syncBlocked` prop. Named `canEditPermission`,
+                  // not `canEdit` (Devin review finding): every write-control consumer inside
+                  // CombatantRow must consult BOTH this and `syncBlocked`, and the old name read
+                  // as if permission alone were sufficient.
+                  canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   canViewStatblock={isDm}
@@ -6337,7 +6388,7 @@ function CombatantRow({
   encounterId,
   combatant,
   isCurrentTurn,
-  canEdit,
+  canEditPermission,
   syncBlocked,
   canEditIdentity,
   canViewStatblock,
@@ -6382,13 +6433,22 @@ function CombatantRow({
   encounterId: number;
   combatant: Combatant;
   isCurrentTurn: boolean;
-  /** Permission to edit this combatant right now — governs whether editing controls mount at all. */
-  canEdit: boolean;
+  /**
+   * Permission to edit this combatant right now — PERMISSION ONLY (issue #1746 —
+   * named explicitly, not `canEdit`, after a Devin review finding: a name that could
+   * be misread as "permitted and not blocked" is exactly how the death-save tracker
+   * silently lost its sync-gate disable when this prop was split out). This governs
+   * whether editing controls MOUNT at all; it never implies the sync gate is clear —
+   * check `syncBlocked` too for any control that writes conflict-prone state.
+   */
+  canEditPermission: boolean;
   /**
    * Issue #1746: the encounter sync gate is currently blocking conflict-prone writes
-   * (`riskyBlocked` at the call site). Distinct from `canEdit` (permission): a
-   * permitted viewer's controls stay mounted and are rendered disabled with an
-   * accessible reason instead of disappearing, so a reconnect never reflows the row.
+   * (`riskyBlocked` at the call site). Distinct from `canEditPermission`: a permitted
+   * viewer's controls stay mounted and are rendered disabled with an accessible
+   * reason instead of disappearing, so a reconnect never reflows the row. EVERY
+   * control that performs a write must consult both — permission for mount, this for
+   * disabled — never `canEditPermission` alone.
    */
   syncBlocked: boolean;
   canEditIdentity: boolean;
@@ -6791,7 +6851,7 @@ function CombatantRow({
                 style={{ gap: 6 }}
               >
                 Conc: {combatant.turnState.concentration}
-                {canEdit && onPatchSourceTurnState && (
+                {canEditPermission && onPatchSourceTurnState && (
                   <button
                     type="button"
                     aria-label={`Clear ${combatant.name} concentration`}
@@ -6840,8 +6900,11 @@ function CombatantRow({
             <DeathSaveTracker
               successes={combatant.deathSaveSuccesses ?? 0}
               failures={combatant.deathSaveFailures ?? 0}
-              canEdit={canEdit}
+              canEditPermission={canEditPermission}
               busy={busy}
+              syncBlocked={syncBlocked}
+              syncBlockedReason={syncBlockedReason}
+              syncBlockedDescribedBy={syncBlockedDescribedBy}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
             />
@@ -6888,7 +6951,7 @@ function CombatantRow({
                       </span>
                     )}
                   </span>
-                  {canEdit && (
+                  {canEditPermission && (
                     <>
                       <button
                         type="button"
@@ -6943,7 +7006,7 @@ function CombatantRow({
             {combatant.conditions.map((cond) => (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
                 {cond}
-                {canEdit && (
+                {canEditPermission && (
                   <button
                     type="button"
                     aria-label={`Remove ${cond}`}
@@ -7057,7 +7120,7 @@ function CombatantRow({
             </button>
           </div>
         )}
-        {canEdit && (
+        {canEditPermission && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
               <form
@@ -7453,7 +7516,7 @@ function CombatantRow({
               <div style={{ fontSize: 11, textAlign: 'right', marginTop: 4, display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }} title="Resolve Points" data-testid="starfinder-rp-indicator">
                 <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em' }}>RP</span>
                 <span style={{ fontSize: 11, fontWeight: 700 }}>{combatant.rpCurrent ?? 0} / {combatant.rpMax}</span>
-                {canEdit && onPatchCombatant && (
+                {canEditPermission && onPatchCombatant && (
                   <span style={{ display: 'inline-flex', gap: 2, marginLeft: 2 }}>
                     <button
                       type="button"
@@ -7490,7 +7553,7 @@ function CombatantRow({
         )}
         {/* Temp-HP setter (issue #57) — grant/clear temporary HP. Same edit gate as
             the HP steppers; hidden for redacted monster rows (hpCurrent null). */}
-        {canEdit && combatant.hpCurrent != null && (
+        {canEditPermission && combatant.hpCurrent != null && (
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', marginTop: 4 }}>
             <input
               type="number"
@@ -7525,7 +7588,7 @@ function CombatantRow({
           monster's HP is banded (hpCurrent null) for non-DM viewers (issue #43),
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
-      {canEdit && combatant.hpCurrent != null && (
+      {canEditPermission && combatant.hpCurrent != null && (
         <div style={{ display: 'flex', gap: 8, flex: 'none' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
