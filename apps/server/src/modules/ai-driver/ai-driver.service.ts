@@ -18,6 +18,7 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
+import { AiDmToolConfirmation } from '@campfire/schema';
 import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
@@ -668,6 +669,25 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     ...rest
   } = session;
   return rest;
+}
+
+/**
+ * Project a pending confirmation to its public REST shape (#1495, review findings :6197/:6632
+ * class). `AiDmPendingToolConfirmation` carries internal-only bookkeeping —
+ * `aftermathGrantWindow` (the reservation's window identity) and `retainedActionChain` (#1451's
+ * action-chain retention marker) — that `listPendingToolConfirmations`/`resolveToolConfirmation`
+ * used to return VERBATIM to `GET /tool-confirmations` and the approval response, even though the
+ * shared `@campfire/schema` `AiDmToolConfirmation` contract deliberately excludes both.
+ *
+ * Deliberately schema-enforced (`AiDmToolConfirmation.parse`, which strips unrecognized keys by
+ * zod's default behaviour) rather than hand-maintained destructuring like
+ * {@link toPublicAiDmSessionState} above: a hand-maintained field list is exactly what let this
+ * recur as a SECOND instance of the same leak class in this one PR — a schema-driven projection
+ * cannot silently start passing a newly added internal field through, because the schema itself
+ * has to be updated (and reviewed) for the field to appear in the public shape at all.
+ */
+export function toPublicAiDmToolConfirmation(pending: AiDmPendingToolConfirmation): AiDmToolConfirmation {
+  return AiDmToolConfirmation.parse(pending);
 }
 
 /**
@@ -6567,16 +6587,13 @@ export class AiDriverService {
     if (!pending) {
       throw new BadRequestException(`No pending tool confirmation ${confirmationId}.`);
     }
-    const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
-    delete pendingMap[key];
-    session.pendingToolConfirmations = pendingMap;
-    // #1042: written before the approve path runs the tool, not after. If the tool call crashes
-    // the process mid-execution, the confirmation must NOT come back pending — a DM answering
-    // it a second time would run an irreversible write twice, which is a worse failure than the
-    // one this issue is about.
-    this.persistControlState(session);
 
     if (action === 'reject') {
+      // No `await` precedes this — safe to remove + persist immediately, as #1042 always did.
+      const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
+      delete pendingMap[key];
+      session.pendingToolConfirmations = pendingMap;
+      this.persistControlState(session);
       this.releaseRetainedActionChain(session, pending);
       // #1495 — the DM rejected it: the grant never happens, so release whatever this
       // confirmation reserved at queue time (a no-op if the window has since moved on).
@@ -6602,8 +6619,6 @@ export class AiDriverService {
       return { confirmation: null };
     }
 
-    const seatPrincipal = this.seatPrincipal(campaignId);
-    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
     // labels are not part of the executable MCP schema. Keep this boundary explicit instead
     // of relying on the action resolver to ignore surplus caller-facing fields.
@@ -6613,19 +6628,20 @@ export class AiDriverService {
         : pending.args;
 
     let executionArgs = baseArgs;
-    // #1495 — an economy tool's amount was RESERVED against a specific window at QUEUE time
-    // (see executeToolCalls), not merely checked. That is what makes this race-free: two
-    // concurrent HTTP approvals of two DIFFERENT confirmations have nothing left to race over
-    // here, because the accounting decision already happened, one call at a time, back when
-    // each was queued inside the single-flight turn loop. Approval only has to verify the
-    // reservation is still good — it must NOT check-then-account again here, because doing the
-    // accounting a second time (after an `await`) is exactly the gap two concurrent APPROVALS of
-    // the SAME kind of grant could race through.
+    // #1495 (:6632) — this whole check runs BEFORE the confirmation is removed from the map or
+    // persisted. `resolveSessionProfile` reads the encounters table and CAN throw (a transient
+    // DB failure is enough); if it does, `pending` is still sitting exactly where it was —
+    // recoverable, retryable — rather than gone from disk with its reservation stuck charged
+    // and no pending confirmation left for hydration to ever release it against. The ONLY
+    // reason #1042 originally deleted-then-persisted before running the tool was to stop the
+    // TOOL CALL itself from executing twice; nothing here has that shape yet, so it is safe to
+    // do all of it first and only commit to "this confirmation is resolved" once it succeeds.
+    let blockedOutcome: { auditDetail: string; resultText: string } | null = null;
     if ('aftermathGrantWindow' in pending) {
-      // This IS an economy tool that was reserved at queue time — `pending.aftermathGrantWindow`
-      // is either the window identity it was reserved against, or `null` if no window was
-      // tracked yet at that moment. Both are checkable, comparable values (see the field comment
-      // on AiDmPendingToolConfirmation): a `null` reservation is stale too if a window has since
+      // An economy tool that was reserved at queue time — `pending.aftermathGrantWindow` is
+      // either the window identity it was reserved against, or `null` if no window was tracked
+      // yet at that moment. Both are checkable, comparable values (see the field comment on
+      // AiDmPendingToolConfirmation): a `null` reservation is stale too if a window has since
       // opened — the campaign's first-ever encounter ending while this sat pending is exactly as
       // much "a different window now" as a second fight replacing the first.
       const reserved = pending.aftermathGrantWindow ?? null;
@@ -6639,33 +6655,12 @@ export class AiDriverService {
         // A LATER fight ended while this sat pending (or one ended for the first time). Reject
         // it rather than silently letting it execute against that fresh budget — a grant
         // requested against one window's remaining allowance must not spend another's instead.
-        releaseDriverEconomyGrant(session, pending.tool, baseArgs, reserved);
-        this.releaseRetainedActionChain(session, pending);
-        this.persistControlState(session);
-        await this.audit.log({
-          actor: pending.actor,
-          actorRole: 'dm',
-          action: 'ai-dm.driver.blocked',
-          entityType: 'ai-dm',
-          campaignId,
-          detail:
+        blockedOutcome = {
+          auditDetail:
             `blocked confirmed ${pending.tool}: stale aftermath window (reserved against ` +
             `${reserved ? `encounter=${reserved.encounterId} endedAt=${reserved.endedAt}` : 'no window'}) ` +
             `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
-        });
-        this.stream.emit({
-          type: 'tool-confirmation',
-          campaignId,
-          action: 'rejected',
-          confirmationId,
-          tool: pending.tool,
-        });
-        return {
-          confirmation: null,
-          result: {
-            isError: true,
-            text: `${pending.tool} was requested against a fight whose aftermath window has since closed. Ask the AI to make the grant again.`,
-          },
+          resultText: `${pending.tool} was requested against a fight whose aftermath window has since closed. Ask the AI to make the grant again.`,
         };
       }
       // Reservation still valid for the current window: no guard re-check needed (and running
@@ -6679,30 +6674,51 @@ export class AiDriverService {
       syncAftermathGrantWindow(session, latestEndedEncounter);
       const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
       if (!recheck.ok) {
-        this.releaseRetainedActionChain(session, pending);
-        this.persistControlState(session);
-        await this.audit.log({
-          actor: pending.actor,
-          actorRole: 'dm',
-          action: 'ai-dm.driver.blocked',
-          entityType: 'ai-dm',
-          campaignId,
-          detail:
+        blockedOutcome = {
+          auditDetail:
             `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
             `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
-        });
-        this.stream.emit({
-          type: 'tool-confirmation',
-          campaignId,
-          action: 'rejected',
-          confirmationId,
-          tool: pending.tool,
-        });
-        return { confirmation: null, result: { isError: true, text: recheck.message } };
+          resultText: recheck.message,
+        };
+      } else {
+        executionArgs = recheck.args;
       }
-      executionArgs = recheck.args;
     }
 
+    // Only now — after the one thing above that could throw has already succeeded — is it safe
+    // to remove the confirmation from the map and persist that removal (#1042's original
+    // reasoning: a DM must never be able to answer the same confirmation twice).
+    const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
+    delete pendingMap[key];
+    session.pendingToolConfirmations = pendingMap;
+    this.persistControlState(session);
+
+    if (blockedOutcome) {
+      if ('aftermathGrantWindow' in pending) {
+        releaseDriverEconomyGrant(session, pending.tool, baseArgs, pending.aftermathGrantWindow);
+      }
+      this.releaseRetainedActionChain(session, pending);
+      this.persistControlState(session);
+      await this.audit.log({
+        actor: pending.actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.blocked',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: blockedOutcome.auditDetail,
+      });
+      this.stream.emit({
+        type: 'tool-confirmation',
+        campaignId,
+        action: 'rejected',
+        confirmationId,
+        tool: pending.tool,
+      });
+      return { confirmation: null, result: { isError: true, text: blockedOutcome.resultText } };
+    }
+
+    const seatPrincipal = this.seatPrincipal(campaignId);
+    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.

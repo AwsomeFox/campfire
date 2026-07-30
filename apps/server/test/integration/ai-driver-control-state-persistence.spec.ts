@@ -1101,5 +1101,52 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
       // worth (200) still counts against the window, not all 21 (210) that were ever queued.
       expect(session.aftermathGrantWindow?.inventoryQtyGranted).toBe(MAX_PENDING_TOOL_CONFIRMATIONS * 10);
     });
+
+    it('#1495: a throwing window lookup during approval leaves the confirmation recoverable and its reservation intact (Codex :6632)', async () => {
+      // Regression for the ordering bug the :6632 finding reported: approval used to delete +
+      // persist the pending confirmation BEFORE the async encounter read that verifies its
+      // window is still current. If that read rejected (a transient DB failure is enough), the
+      // throw propagated past the point where the confirmation could ever be recovered — gone
+      // from the map/disk, its reservation still fully charged, with no pending confirmation
+      // left for hydration to release it against. The fix reorders the read to run FIRST, while
+      // the confirmation is still safely in the map.
+      //
+      // This harness's `makeService()` deliberately leaves `encounters` (Ctor[9]) undefined —
+      // `resolveSessionProfile`'s `this.encounters.listForCampaign(...)` therefore throws
+      // exactly the way a real DB failure would, with no extra stubbing needed to prove it.
+      const first = firstBoot();
+      const session = first.service.getSession(campaignId);
+      session.aftermathGrantWindow = { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z', treasuryGranted: 0, inventoryQtyGranted: 50 };
+      noteDriverEconomyGrant(session, 'add_inventory_item', { name: 'Trinket', qty: 30 });
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(80);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (first.service as any).queueToolConfirmation(
+        session,
+        { id: 'call-1', name: 'add_inventory_item' },
+        { name: 'Trinket', qty: 30 },
+        'live',
+        'confirm',
+        'ai-dm-seat:1',
+        '1',
+        undefined,
+        { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z' },
+      );
+      const queued = Object.values(session.pendingToolConfirmations ?? {});
+      expect(queued).toHaveLength(1);
+      const confirmationId = queued[0].id;
+
+      // Deterministic, unconditional assertion (test-quality rule): the approval call MUST
+      // reject, every time — no early return or conditional skip around it.
+      await expect(first.service.resolveToolConfirmation(campaignId, dm, confirmationId, 'approve', 'dm')).rejects.toThrow();
+
+      // The confirmation is still exactly where it was — recoverable, not silently gone.
+      const stillPending = Object.values(session.pendingToolConfirmations ?? {});
+      expect(stillPending).toHaveLength(1);
+      expect(stillPending[0].id).toBe(confirmationId);
+      // Its reservation is untouched: neither released (which would under-protect a later
+      // legitimate grant this window still has room for) nor double-counted. Still exactly 80.
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(80);
+    });
   });
 });

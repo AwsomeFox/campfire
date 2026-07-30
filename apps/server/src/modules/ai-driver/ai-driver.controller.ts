@@ -28,7 +28,7 @@ import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService, toPublicAiDmSessionState, type AiDmTurnRunResult } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState, toPublicAiDmToolConfirmation, type AiDmTurnRunResult } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
@@ -566,7 +566,9 @@ export class AiDriverController {
   @ApiResponse({ status: 200, description: 'Pending tool confirmations.' })
   async listToolConfirmations(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
-    return this.driver.listPendingToolConfirmations(id);
+    // #1495 — project through the shared public schema; the internal record carries bookkeeping
+    // (aftermathGrantWindow, retainedActionChain) that must never reach an HTTP client.
+    return this.driver.listPendingToolConfirmations(id).map(toPublicAiDmToolConfirmation);
   }
 
   @Post('tool-confirmation')
@@ -583,7 +585,13 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireRole(user, id, 'dm');
-    return this.driver.resolveToolConfirmation(id, user, body.confirmationId, body.action, role);
+    const outcome = await this.driver.resolveToolConfirmation(id, user, body.confirmationId, body.action, role);
+    // #1495 — same projection as GET /tool-confirmations: `outcome.confirmation` is the internal
+    // record (when non-null, on a successful approval) and must not leak its bookkeeping fields.
+    return {
+      confirmation: outcome.confirmation ? toPublicAiDmToolConfirmation(outcome.confirmation) : null,
+      result: outcome.result,
+    };
   }
 
   // ---- Authoritative table transcript (#572) --------------------------------------

@@ -75,6 +75,50 @@ describe('ai-dm driver — confirm-policy + adversarial regressions (#474, e2e)'
     expect(audit.body.some((e: { action: string }) => e.action === 'ai-dm.driver.confirmation.approved')).toBe(true);
   });
 
+  it('#1495: GET /tool-confirmations and the approval response never expose the internal reservation-window field (Codex :6197)', async () => {
+    // Regression: adding `aftermathGrantWindow` to the pending-confirmation record made
+    // `listPendingToolConfirmations`/`resolveToolConfirmation` — which return the internal
+    // record verbatim — serialize it straight through GET /tool-confirmations and the approval
+    // response, even though the shared `AiDmToolConfirmation` schema deliberately omits it. This
+    // is the SAME leak class as :624 (toPublicAiDmSessionState), recurring in a sibling function.
+    // Assert on the raw JSON body (what an HTTP client actually receives), not the TS type — a
+    // type-level omission would pass here even if the runtime projection regressed again.
+    const campaignId = await h.createCampaign('Tool Confirmation Redaction');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    await startLiveEncounter(campaignId);
+
+    h.script({
+      text: 'You find a small trinket.',
+      toolCalls: [{ id: 'redact1', name: 'add_inventory_item', arguments: { campaignId, name: 'Trinket', qty: 1 } }],
+    });
+    const grantRes = await h.sendMessage(campaignId, { input: 'Loot the trinket.' });
+    expect(grantRes.status).toBe(201);
+
+    const pending = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(pending.status).toBe(200);
+    expect(pending.body).toHaveLength(1);
+    const forbiddenKeys = ['aftermathGrantWindow', 'retainedActionChain'];
+    for (const key of forbiddenKeys) {
+      expect(Object.prototype.hasOwnProperty.call(pending.body[0], key)).toBe(false);
+    }
+    // And the projection is not simply empty — real client-facing fields are still there.
+    expect(pending.body[0]).toEqual(
+      expect.objectContaining({ tool: 'add_inventory_item', profile: 'live', policy: 'confirm' }),
+    );
+
+    const confirmationId = pending.body[0].id as string;
+    const approved = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'approve', confirmationId });
+    expect(approved.status).toBe(201);
+    expect(approved.body.confirmation).not.toBeNull();
+    for (const key of forbiddenKeys) {
+      expect(Object.prototype.hasOwnProperty.call(approved.body.confirmation, key)).toBe(false);
+    }
+    expect(approved.body.confirmation).toEqual(expect.objectContaining({ tool: 'add_inventory_item' }));
+  });
+
   it('#474 prompt injection cannot bypass confirm policy for award_xp during live play', async () => {
     const campaignId = await h.createCampaign('Policy XP Injection');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
