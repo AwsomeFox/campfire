@@ -984,6 +984,8 @@ describe('encounters (e2e)', () => {
       const preexistingMismatchRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
       const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
       expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
+      // Keep the shared full-flow encounter eligible for its later HP write-back test.
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)).status).toBe(200);
     });
 
     it('combatant routes 404 when encounterId doesn\'t own the combatant (cross-parent-id pin)', async () => {
