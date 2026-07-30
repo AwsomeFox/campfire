@@ -760,11 +760,14 @@ export class NotificationsService implements OnApplicationBootstrap {
    *
    * A sender-side `mute_sender` is deliberately NOT applied here: a mute means "stop
    * pinging me", not "erase what you already sent me".
+   * Safety holds are likewise exempt: they are always-on table-wide security signals.
+   * Applying an actor block at read time would contradict their dispatch policy and make
+   * attributed and anonymous holds observably different.
    */
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
     return or(
       isNull(notifications.actorUserId),
-      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES]),
+      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
       notInArray(notifications.actorUserId, blockedActorIds),
     )!;
   }

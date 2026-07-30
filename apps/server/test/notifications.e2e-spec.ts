@@ -105,15 +105,16 @@ describe('notifications (e2e)', () => {
     expect(afterRead.body.membershipChanged).toBe(false);
   });
 
-  it('hides attributed safety-hold notices from a member who blocked the actor', async () => {
+  it('shows always-on attributed safety-hold notices despite a block', async () => {
     const block = await player.post(`/api/v1/campaigns/${campaignId}/safety/blocks`).send({ targetUserId: String(dmId) });
     expect(block.status).toBe(201);
 
     const hold = await dm.post(`/api/v1/campaigns/${campaignId}/safety/hold`).send({ anonymous: false });
     expect(hold.status).toBe(200);
 
-    const blocked = (await listFor(player)).filter((notification) => notification.type === 'safety_hold');
-    expect(blocked).toHaveLength(0);
+    const visible = (await listFor(player)).filter((notification) => notification.type === 'safety_hold');
+    expect(visible).toHaveLength(1);
+    expect((await player.get('/api/v1/notifications/unread-count')).body.count).toBe(1);
 
     const released = await dm.post(`/api/v1/campaigns/${campaignId}/safety/release`).send({ recovery: 'resume' });
     expect(released.status).toBe(200);

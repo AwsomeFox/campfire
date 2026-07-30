@@ -362,6 +362,7 @@ export class RevisionsService {
         .set({
           replacedByUserId: actor.userId,
           replacedByName: actor.name,
+          replacedByImported: false,
           replacedBySource: actor.source,
           replacedBySourceDetail: actor.sourceDetail,
           replacedAt: ts,
@@ -386,6 +387,7 @@ export class RevisionsService {
         createdAt: ts,
         replacedByUserId: actor.userId,
         replacedByName: actor.name,
+        replacedByImported: false,
         replacedBySource: actor.source,
         replacedBySourceDetail: actor.sourceDetail,
         replacedAt: ts,

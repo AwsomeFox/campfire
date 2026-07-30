@@ -1,5 +1,8 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { entityRevisions } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 
@@ -30,6 +33,48 @@ describe('revisions + optimistic concurrency (e2e) — #157', () => {
 
   afterAll(async () => {
     await closeTestApp(ctx);
+  });
+
+  it('the legacy record helper marks a locally closed imported tip as local attribution (#842)', async () => {
+    const { RevisionsService } = await import('../src/modules/revisions/revisions.service');
+    const revisions = ctx.app.get(RevisionsService);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const entityId = 9842;
+    const imported = db
+      .insert(entityRevisions)
+      .values({
+        campaignId,
+        entityType: 'quest',
+        entityId,
+        snapshot: JSON.stringify({ body: 'imported prose' }),
+        authorUserId: 'importer-proxy',
+        authorName: 'Source author',
+        authorImported: true,
+        authorSource: 'human',
+        authorSourceDetail: '',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        replacedByUserId: 'importer-proxy',
+        replacedByName: 'Source author',
+        replacedByImported: true,
+        replacedBySource: 'human',
+        replacedBySourceDetail: '',
+        replacedAt: null,
+        restoredFromRevisionId: null,
+        authorshipKnown: true,
+      })
+      .returning()
+      .get();
+
+    await revisions.record({
+      entityType: 'quest',
+      entityId,
+      campaignId,
+      priorProse: 'imported prose',
+      user: { id: 'dev:local-editor', name: 'Local editor', serverRole: 'user', devRole: 'dm' },
+    });
+
+    const closed = db.select().from(entityRevisions).where(eq(entityRevisions.id, imported.id)).get();
+    expect(closed).toMatchObject({ replacedByUserId: 'dev:local-editor', replacedByName: 'Local editor', replacedByImported: false });
   });
 
   describe('sessions (recap)', () => {
