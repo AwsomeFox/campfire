@@ -366,12 +366,12 @@ export default function CharacterPage() {
             {classSummary}Level {character.level} · played by{' '}
             {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}
             {xpProgress?.ready && (
-              <>
+              <span className="cf-print-hide" aria-hidden="true">
                 {' · '}
                 <span className="tag tag-accent text-[9px]" aria-label="Ready to level up">
                   Ready to level up
                 </span>
-              </>
+              </span>
             )}
           </p>
         </div>
