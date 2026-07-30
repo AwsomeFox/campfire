@@ -1315,6 +1315,10 @@ export class ActionResolverService {
       // Issue #1474: check if this resolution was already applied (idempotency key / double-submit guard).
       const existingChain = this.db.select().from(actionApplyChains).where(eq(actionApplyChains.id, req.chainId)).get();
       if (existingChain) {
+        if (existingChain.undoneAt !== null) {
+          this.auditRejectedApply(encounter, req.chainId, user, role, 'already_undone_chain');
+          throw new BadRequestException('This resolution is unknown or has already been applied.');
+        }
         if (existingChain.encounterId !== encounterId) {
           this.auditRejectedApply(encounter, req.chainId, user, role, 'cross_encounter_chain');
           throw new BadRequestException('This chain belongs to a different encounter.');
@@ -1459,7 +1463,7 @@ export class ActionResolverService {
         // Issue #1474: If a concurrent apply request claimed and completed this resolution,
         // return the existing apply chain idempotently instead of failing or double-applying.
         const existingChain = tx.select().from(actionApplyChains).where(eq(actionApplyChains.id, chainId)).get();
-        if (existingChain) {
+        if (existingChain && existingChain.undoneAt === null) {
           return ActionUndoToken.parse({
             encounterId: existingChain.encounterId,
             actorCombatantId: existingChain.actorCombatantId,

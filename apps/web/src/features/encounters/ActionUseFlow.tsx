@@ -245,8 +245,6 @@ export function ActionUsePanel({
               onClick={() => {
                 setStep('targets');
                 setPreview(null);
-                setCommitSubmitted(false);
-                setIsUnconfirmed(false);
               }}
             >
               Back

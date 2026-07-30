@@ -1309,6 +1309,21 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(res2.undoToken.targets).toEqual(res1.undoToken.targets);
   });
 
+  it('#1474: retrying an already-undone chain is rejected', () => {
+    const { service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    service.undo(encounterId, res.undoToken, alice, 'player');
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /unknown or has already been applied/i,
+    );
+  });
+
   // ---------------------------------------------------------------------------
   // Issue #1451 review round — Devin/Codex/Kilo findings on the original PR.
   // ---------------------------------------------------------------------------
