@@ -614,8 +614,6 @@ export class CampaignsService {
     const existing = await this.getOrThrow(id);
     // mapAlignment is a request-time directive (issue #870), not a stored column.
     const { mapAlignment, ...campaignInput } = input;
-    const _mapAttachmentIdChanging =
-      campaignInput.mapAttachmentId !== undefined && campaignInput.mapAttachmentId !== existing.mapAttachmentId;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
