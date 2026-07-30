@@ -1,8 +1,9 @@
 # Shared agent claim protocol
 
-This protocol coordinates Codex, Claude Code, ZCode, and Kimi Code when more
-than one backlog run is active. GitHub comments are the lock. Labels are only a
-human-visible summary and are never sufficient proof of ownership.
+This protocol coordinates Codex, Claude Code, ZCode, Kimi Code, and VS Code
+Copilot when more than one backlog run is active. GitHub comments are the lock.
+Labels are only a human-visible summary and are never sufficient proof of
+ownership.
 
 ## Claim locus and identities
 
@@ -11,7 +12,7 @@ human-visible summary and are never sufficient proof of ownership.
 - For an existing pull request, inspect both the canonical claim locus and the
   pull request for current or legacy workpads before claiming. New claims still
   go on the canonical locus.
-- Use the tool identity `codex`, `claude`, `zcode`, or `kimi`.
+- Use the tool identity `codex`, `claude`, `zcode`, `kimi`, or `copilot`.
 - Generate a unique run ID such as
   `<tool>-<YYYYMMDDTHHMMSSZ>-<random-or-uuid>`.
 - Treat existing nonterminal `## Agent Workpad`, `## Codex Workpad`, and
@@ -37,8 +38,8 @@ these steps succeed:
    winning comment, and does no implementation work.
 7. The winner edits its existing comment to `CLAIMED`, adds `agent: claimed`
    and exactly one owner label (`agent: codex`, `agent: claude`,
-   `agent: zcode`, or `agent: kimi`), then refetches once more before the first
-   code edit, branch creation, worktree creation, or push.
+   `agent: zcode`, `agent: kimi`, or `agent: copilot`), then refetches once
+   more before the first code edit, branch creation, worktree creation, or push.
 
 If two active owners are discovered later, both pause implementation. Apply the
 same deterministic ordering; the later contender releases its own claim and the

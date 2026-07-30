@@ -190,7 +190,7 @@ export function computeAbilityScores(data: DdbCharacterData): Record<string, num
   return out;
 }
 
-/** Total character level = sum of every class's level (min 1, capped at 20 by the schema). */
+/** Total character level = sum of every class's level (min 1; a DDB sheet is 5e, so create() enforces the 5e adapter cap of 20). */
 export function computeTotalLevel(classes: DdbClass[] | null | undefined): number {
   if (!Array.isArray(classes) || classes.length === 0) return 1;
   const total = classes.reduce((sum, c) => sum + (typeof c.level === 'number' ? c.level : 0), 0);

@@ -2170,6 +2170,51 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
   undoneAt: text('undone_at'),
 });
 
+// Issue #1451: server-side snapshot of a RESOLVED (not-yet-necessarily-applied) action chain,
+// keyed on the same chainId `ActionResolverService.resolve()` mints for every resolution. This
+// closes the sibling hole to #1449: before this, `POST /actions/apply` took the FULL
+// `ActionResolution` straight from the request body and applied its `totalDamage`/`healing`/
+// `effects` verbatim — a player could preview a legitimate 6-damage hit, then re-POST that same
+// object to `/actions/apply` with `totalDamage: 999999` (or an injected condition never in the
+// action spec) against a target they were otherwise allowed to hit, one-shotting it. `apply()`
+// now takes `{ chainId }` only and re-reads the resolution FROM THIS TABLE — the caller's copy
+// of the resolution is never consulted, so the numbers that land are always the server's own
+// roll.
+//
+// No `targetsAllow` column (review): unlike `action_apply_chains` — which UNDO deliberately
+// snapshots, because undo restores a thing that already happened under the OLD rule — `apply()`
+// always re-validates targeting against the CURRENT spec, never a resolve-time snapshot.
+//
+// No `consumedAt` column (review): a row is DELETED, not flagged, the instant it is claimed
+// (`applyInternal`'s transaction) — this doubles as the single-use replay guard AND bounds this
+// table's growth. An abandoned (never-applied) row is swept by
+// `ActionResolverService.sweepStalePendingResolutions` on a TTL + per-encounter cap, so growth
+// is bounded even for a preview nobody ever applies.
+//
+// `awaitingConfirmation` (review, second pass): true when this resolution needs a later human
+// decision — either because it was minted under a dm-confirmed/player-declares policy
+// (`!canApply` at resolve time), or because collaborative AI handoff queued its `apply_action`.
+// Such a row is exempt from the age-based TTL entirely (a DM reviewing a queue must never have a
+// legitimate declaration vanish out from under them), though it is still subject to the
+// per-encounter cap — evicting one is audited and never silent, unlike an ordinary abandoned
+// preview. See `sweepStalePendingResolutions`'s doc comment for the full reasoning.
+export const actionPendingResolutions = sqliteTable('action_pending_resolutions', {
+  id: text('id').primaryKey(), // the chain id (see ActionResolverService.resolve)
+  encounterId: integer('encounter_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  actorCombatantId: integer('actor_combatant_id').notNull(),
+  actionName: text('action_name').notNull().default(''),
+  // Sheet/statblock action selected at resolve time. Names and indexes are not immutable on a
+  // sheet, so apply() also compares this fingerprint before it trusts the current spec.
+  actionIndex: integer('action_index'),
+  actionFingerprint: text('action_fingerprint'),
+  awaitingConfirmation: integer('awaiting_confirmation', { mode: 'boolean' }).notNull().default(false),
+  // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
+  // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
+  resolutionJson: text('resolution_json').notNull().default('{}'),
+  createdAt: text('created_at').notNull(),
+});
+
 // Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and
 // turn advancement). The row is written inside the SAME synchronous better-sqlite3
 // transaction as the effect it guards, so claim and effect commit or roll back together.

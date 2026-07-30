@@ -35,6 +35,7 @@ interface Harness {
   audit: { log: jest.Mock };
   stream: { emit: jest.Mock };
   notifications: { memberRoles: jest.Mock; notifyCampaign: jest.Mock };
+  actionResolver: { releasePendingChainForConfirmation: jest.Mock };
 }
 
 /**
@@ -56,6 +57,7 @@ function makeService(orm: DrizzleDb): Harness {
     memberRoles: jest.fn(async () => new Map<number, string>([[1, 'player'], [2, 'player']])),
     notifyCampaign: jest.fn(async () => undefined),
   };
+  const actionResolver = { releasePendingChainForConfirmation: jest.fn() };
   const service = new AiDriverService(
     aiDm as unknown as Ctor[0],
     undefined as unknown as Ctor[1],
@@ -76,8 +78,10 @@ function makeService(orm: DrizzleDb): Harness {
     // failure this spec exists to catch.
     { correctionsForPrompt: async () => [] } as unknown as Ctor[13],
     orm as Ctor[14],
+    undefined as Ctor[15],
+    actionResolver as unknown as Ctor[16],
   );
-  return { service, audit, stream, notifications } as Harness;
+  return { service, audit, stream, notifications, actionResolver } as Harness;
 }
 
 /** Audit actions recorded by a harness, in order. */
@@ -620,6 +624,31 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
       .find((e) => e.type === 'session.reset');
     expect(reset?.confirmationsDiscarded).toBe(1);
     expect(rawRow()?.pending_tool_confirmations).toBeNull();
+  });
+
+  it('#1451: restart-discarding a collaborative action confirmation releases its temporary chain retention', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.pendingToolConfirmations = {
+      'apply_action:call-1': {
+        id: 'confirm-action-1',
+        tool: 'apply_action',
+        args: { encounterId: 7, chainId: 'chain-restart-release' },
+        toolCallId: 'call-1',
+        profile: 'live',
+        policy: 'confirm',
+        requestedAt: '2026-07-26T00:00:00.000Z',
+        actor: `ai-dm-seat:${campaignId}`,
+        triggeredBy: 'player-1',
+        turnNumber: 4,
+        retainedActionChain: { encounterId: 7, chainId: 'chain-restart-release' },
+      },
+    };
+    first.service.setPaused(campaignId, true);
+
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+    expect(restarted.actionResolver.releasePendingChainForConfirmation).toHaveBeenCalledWith(7, 'chain-restart-release');
   });
 
   it('gives a lapsed vote the stream signal it never had', async () => {

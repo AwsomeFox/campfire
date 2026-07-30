@@ -756,8 +756,37 @@ export const ActionResolveResult = z.object({
   canApply: z.boolean(),
   policy: ActionApplyPolicy,
   undoToken: ActionUndoToken.nullable().default(null),
+  /**
+   * Issue #1451: a lookup key into the EXACT resolution the server just computed and
+   * persisted server-side (`action_pending_resolutions`), minted on every resolve regardless
+   * of whether this call also committed it. `/actions/apply` takes this alone — never a
+   * client-echoed resolution — so the applied numbers can only ever be the server's own roll.
+   */
+  chainId: z.string().min(1).max(64),
 });
 export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
+
+/**
+ * Request to apply a previously resolved action chain (issue #414 confirm path; issue #1451).
+ * `chainId` is a LOOKUP KEY only — the server re-reads its own persisted resolution for that
+ * chain (`action_pending_resolutions`, written by `resolve()`) rather than trusting any
+ * resolution the caller supplies, so a player can no longer inflate `totalDamage`, per-target
+ * deltas, or inject `conditionsAfter`/effect payloads that were never in the resolved spec.
+ *
+ * DELIBERATELY chainId-only — no caller-supplied display fields (issue #1451 review, second
+ * pass). An earlier revision added optional `actionName`/`actorCombatantId` here so a queued
+ * `apply_action` DM confirmation could show more than an opaque chain id. That was wrong: the
+ * confirmation prompt is what a human DM approves, and `apply()` executes whatever `chainId`
+ * identifies regardless of what these fields said — a caller could label a damaging chain as a
+ * harmless action by a different actor and obtain approval under a false summary. The
+ * confirmation now derives its label SERVER-SIDE from the persisted `action_pending_resolutions`
+ * row (see `ActionResolverService.describePendingChain` and its call site in
+ * `AiDriverService`), never from anything the request carries.
+ */
+export const ActionApplyRequest = z.object({
+  chainId: z.string().min(1).max(64),
+});
+export type ActionApplyRequest = z.infer<typeof ActionApplyRequest>;
 
 // ---------------------------------------------------------------------------
 // Pure resolver math.

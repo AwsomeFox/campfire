@@ -2,7 +2,7 @@
  * Issue #581 — bounded read timeouts, SW networkTimeoutSeconds, and stale fallback.
  *
  * Run with:
- *   npx playwright test --config pw-unit.config.ts e2e/tests/api-read-timeouts.unit.spec.ts
+ *   npx playwright test --config playwright.unit.config.ts e2e/tests/api-read-timeouts.unit.spec.ts
  */
 import { expect, test } from '@playwright/test';
 import {

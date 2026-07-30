@@ -237,6 +237,7 @@ const COLLECTION_KEY_TYPE: ReadonlyMap<string, GroundingSourceType> = new Map<st
   ['npcs', 'npc'],
   ['quests', 'quest'],
   ['locations', 'location'],
+  ['location', 'location'],
   ['currentLocation', 'location'],
   ['factions', 'faction'],
   ['characters', 'character'],

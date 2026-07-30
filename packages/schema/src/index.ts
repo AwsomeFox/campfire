@@ -519,6 +519,19 @@ export const CharacterResource = z.object({
 });
 export type CharacterResource = z.infer<typeof CharacterResource>;
 
+/**
+ * Issue #1492: the shared schema's hard ceiling on `level`. This is a generous DB-sanity
+ * bound chosen so the most permissive rule-system adapter (Open Legend / an OSR retroclone
+ * reporting `maxLevel: Infinity`) can never reach it in practice, while still keeping a sane
+ * upper guard on the integer column. It mirrors the web form's `Infinity ? 99` convention
+ * (`NewCharacterForm.tsx`). Exported as a named constant so `CharactersService.levelUp` (and
+ * any other server-side ceiling check) reads the same number the schema enforces — without
+ * this, an Infinity-cap campaign leveling a level-99 PC to 100 writes a row the schema then
+ * rejects on the next save, re-bricking the sheet exactly the way the old hardcoded 20 did.
+ * The server takes `min(adapter.maxLevel, MAX_LEVEL)`.
+ */
+export const MAX_LEVEL = 99;
+
 export const Character = z.object({
   id: Id,
   campaignId: Id,
@@ -529,7 +542,19 @@ export const Character = z.object({
   name: z.string().min(1).max(120),
   species: z.string().max(80).default(''),
   className: z.string().max(80).default(''),
-  level: z.number().int().min(1).max(20).default(1),
+  // Issue #1492: the schema cap must not conflict with a rule system whose adapter allows
+  // past 20 (Open Legend / an OSR retroclone report `maxLevel: Infinity`). The per-system
+  // ceiling stays authoritative — `CharactersService.create`/`update`/`levelUp` reject a level
+  // above `adapter.maxLevel` (5e=20, 13th Age=10, …) — so this bound is a generous DB-sanity
+  // ceiling that the most permissive adapter can never exceed in practice. It mirrors the web
+  // form's `Infinity ? 99` convention (`NewCharacterForm.tsx`), so REST, MCP and the sheet all
+  // agree on what an uncapped system may reach, without re-bricking the sheet on the next edit.
+  // `MAX_LEVEL` is the single exported source for this bound so `levelUp`'s own ceiling check
+  // reads the same number the schema enforces — otherwise an Infinity-cap campaign advancing
+  // a level-99 PC to 100 would write a row the schema then rejects on every subsequent save
+  // (the exact brick this widened bound was meant to end). The server takes the minimum of the
+  // adapter cap and `MAX_LEVEL` so an uncapped system still stops here.
+  level: z.number().int().min(1).max(MAX_LEVEL).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
   // Lifecycle state (issue #115, #719). `active` is the only status auto-added as a combatant
@@ -586,13 +611,16 @@ export type Character = z.infer<typeof Character>;
 // `conditionInstances` is omitted here (issue #1643): it's a READ projection Character
 // exposes so a client can see a leveled condition's `stacks`, not a general write surface —
 // writes go through the dedicated POST :id/conditions (names) and POST :id/conditions/level
-// (a leveled track's level) endpoints, same division as `resources` (read via GET
-// :id/resource-vocabulary + the Character.resources projection, written via POST
-// :id/resources, never the general update). Also a real necessity, not just tidiness: its
-// `z.lazy()` (see the field's own doc comment on `Character`) makes zod-to-json-schema emit
-// a `$ref` for any tool whose input schema spreads `CharacterUpdate.shape` — some MCP
-// clients don't resolve `$ref`, which is exactly what upsert_character's own test asserts
-// never happens (`test/mcp.e2e-spec.ts`, "no tool schema may contain a $ref at all").
+// (a leveled track's level) endpoints. `resources` (read via GET :id/resource-vocabulary +
+// the Character.resources projection) is writable through BOTH the dedicated POST :id/resources
+// spend path (transactional single-pool adjust, issue #1039) AND the general update since
+// issue #1492 — the general update MERGES supplied pools over the existing map (so a partial
+// send preserves the rest) and rejects an overspend the same way the dedicated path does.
+// Also a real necessity, not just tidiness: its `z.lazy()` (see the field's own doc comment on
+// `Character`) makes zod-to-json-schema emit a `$ref` for any tool whose input schema spreads
+// `CharacterUpdate.shape` — some MCP clients don't resolve `$ref`, which is exactly what
+// upsert_character's own test asserts never happens (`test/mcp.e2e-spec.ts`, "no tool schema
+// may contain a $ref at all").
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true, conditionInstances: true })
   .partial()
   .required({ name: true });

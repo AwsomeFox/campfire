@@ -17,6 +17,8 @@ import {
   encounterSyncChipLabel,
   encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
+  ENCOUNTER_SYNC_BANNER_TESTID,
+  ENCOUNTER_SYNC_CHIP_TESTID,
   isConnectingGraceElapsed,
   revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
@@ -93,11 +95,18 @@ test.describe('encounter sync state (issue #471)', () => {
   });
 
   test('RunSessionPage wires encounter sync state and guarded actions', () => {
+    // Asserts against the exported pure-helper IDENTIFIERS (issue #1453) rather than
+    // independently re-typed literals: the sync-chip/banner testids come from
+    // ENCOUNTER_SYNC_CHIP_TESTID / ENCOUNTER_SYNC_BANNER_TESTID (checked for VALUE
+    // below), so a rename only requires updating the shared constant, not this file
+    // and the page's JSX in lockstep.
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     expect(source).toMatch(/deriveEncounterSyncState/);
     expect(source).toMatch(/encounterActionsBlocked/);
-    expect(source).toMatch(/data-testid="encounter-sync-chip"/);
-    expect(source).toMatch(/data-testid="encounter-sync-banner"/);
+    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_CHIP_TESTID\}/);
+    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_BANNER_TESTID\}/);
+    expect(ENCOUNTER_SYNC_CHIP_TESTID).toBe('encounter-sync-chip');
+    expect(ENCOUNTER_SYNC_BANNER_TESTID).toBe('encounter-sync-banner');
     expect(source).toMatch(/setResyncPending\(true\)/);
     // Issue #1446: the override affordance and its persistence must be wired, not just defined.
     expect(source).toMatch(/data-testid="encounter-sync-override-prompt"/);

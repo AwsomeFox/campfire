@@ -201,6 +201,8 @@ import {
   encounterSyncChipLabel,
   encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
+  ENCOUNTER_SYNC_BANNER_TESTID,
+  ENCOUNTER_SYNC_CHIP_TESTID,
   isConnectingGraceElapsed,
   revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
@@ -2570,7 +2572,7 @@ export default function RunSessionPage() {
         {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
           className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
-          data-testid="encounter-sync-chip"
+          data-testid={ENCOUNTER_SYNC_CHIP_TESTID}
           title={encounterSyncLastSyncTitle}
         >
           {encounterSyncChip}
@@ -2726,7 +2728,7 @@ export default function RunSessionPage() {
       {encounterSyncBanner && (
         <p
           className="text-muted"
-          data-testid="encounter-sync-banner"
+          data-testid={ENCOUNTER_SYNC_BANNER_TESTID}
           style={{ fontSize: 12, margin: 0 }}
           role="status"
           aria-live="polite"
