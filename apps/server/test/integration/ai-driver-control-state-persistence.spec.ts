@@ -8,6 +8,7 @@ import {
   GREETING_PROMPT,
   WRAP_UP_PROMPT,
   lifecyclePhaseForInput,
+  toPublicAiDmSessionState,
 } from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
@@ -908,5 +909,105 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     // Durability is best-effort: losing the write must not fail the pause the DM just asked for.
     expect(() => first.service.setPaused(campaignId, true)).not.toThrow();
     expect(first.service.getSession(campaignId).state).toBe('paused');
+  });
+
+  // #1495 — the autonomous seat's aftermath economy-grant budget must survive a restart mid-
+  // window, or a restart-to-refill becomes a trivial cap bypass (the exact defect reported).
+  describe('aftermath economy-grant budget persistence (#1495)', () => {
+    /** Force a persistControlState write through a PUBLIC lever (setPaused), matching every
+     * other test in this file — persistControlState always writes whatever is currently on the
+     * session object, so mutating aftermathGrantWindow first and pausing second is a faithful,
+     * privileged-method-free way to get it onto disk. */
+    function persistWindow(h: Harness, window: {
+      encounterId: number;
+      endedAt: string;
+      treasuryGranted: number;
+      inventoryQtyGranted: number;
+    }) {
+      const session = h.service.getSession(campaignId);
+      session.aftermathGrantWindow = window;
+      h.service.setPaused(campaignId, true);
+    }
+
+    it('survives a restart mid-window: the exact totals round-trip, not reset to undefined', () => {
+      const first = firstBoot();
+      const window = { encounterId: 42, endedAt: '2026-07-26T00:10:00.000Z', treasuryGranted: 400, inventoryQtyGranted: 25 };
+      persistWindow(first, window);
+
+      expect(rawRow()?.aftermath_grant_window).toEqual(JSON.stringify(window));
+
+      // "Restart": close the handle, reopen the same file, build a brand-new service instance —
+      // the exact simulated-restart shape every other test in this file uses.
+      const restarted = boot();
+      const restoredSession = restarted.service.getSession(campaignId);
+      // Deterministic, unconditional assertion (test-quality rule: no early return / conditional
+      // skip here) — this is the P1 bug: before #1495's persistence fix, this field was entirely
+      // absent from persistControlState/loadPersistedControlState, so it silently came back
+      // `undefined` on every restart no matter what was written, and the very next economy grant
+      // reopened a full, unearned budget.
+      expect(restoredSession.aftermathGrantWindow).toEqual(window);
+    });
+
+    it('a malformed persisted window is dropped (fails closed to no tracked window, never to a wrong one)', () => {
+      const first = firstBoot();
+      persistWindow(first, { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z', treasuryGranted: 0, inventoryQtyGranted: 0 });
+      // Corrupt the column directly, bypassing the service — simulates a hand-edited DB or a
+      // future incompatible shape.
+      const db = new Database(dbFilePath(dataDir));
+      try {
+        db
+          .prepare('UPDATE ai_driver_control_state SET aftermath_grant_window = ? WHERE campaign_id = ?')
+          .run(JSON.stringify({ encounterId: 'not-a-number', endedAt: 42 }), campaignId);
+      } finally {
+        db.close();
+      }
+      const restored = boot().service.getSession(campaignId);
+      expect(restored.aftermathGrantWindow).toBeNull();
+    });
+
+    it('member-facing session payload never includes the aftermath grant window or the other internal guard fields', () => {
+      // Regression for the Codex :624 finding: a TypeScript `Omit` only narrows the STATIC type,
+      // it does not remove a runtime object key. Assert on the SERIALIZED object (JSON round-
+      // trip, exactly what an HTTP client receives), not on the TypeScript type, or this test
+      // would pass even if toPublicAiDmSessionState's destructuring silently dropped a field
+      // again — which is precisely how the bug shipped the first time.
+      const first = firstBoot();
+      persistWindow(first, { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z', treasuryGranted: 50, inventoryQtyGranted: 3 });
+      const session = first.service.getSession(campaignId);
+      // Seed every private guard field with a truthy value so a destructuring omission for ANY
+      // of them would show up as an unwanted key below, not just the three #1495 added.
+      session.secretReadApprovals = { 'get_npc:1': { tool: 'get_npc', entityId: 1, grantedBy: '9', grantedAt: '2026-01-01T00:00:00.000Z', note: null, consumed: false } };
+      session.driverGeneratedMapIds = [7];
+      session.driverAuthoredEncounterIds = [8];
+      session.generateMapCallsThisTurn = 1;
+      session.confirmToolAttemptsThisTurn = 1;
+      session.policyViolationsThisTurn = 1;
+      session.pendingToolConfirmations = {
+        'adjust_treasury:tc1': {
+          id: 'confirm-1', tool: 'adjust_treasury', args: { delta: { gp: 10 } }, toolCallId: 'tc1',
+          profile: 'live', policy: 'confirm', requestedAt: '2026-01-01T00:00:00.000Z', actor: 'ai-dm-seat:1',
+          triggeredBy: '1', turnNumber: 1,
+        },
+      };
+
+      const publicSession = toPublicAiDmSessionState(session);
+      const serialized = JSON.parse(JSON.stringify(publicSession)) as Record<string, unknown>;
+      const forbiddenKeys = [
+        'aftermathGrantWindow',
+        'secretReadApprovals',
+        'driverGeneratedMapIds',
+        'driverAuthoredEncounterIds',
+        'generateMapCallsThisTurn',
+        'confirmToolAttemptsThisTurn',
+        'policyViolationsThisTurn',
+        'pendingToolConfirmations',
+        'detached',
+      ];
+      for (const key of forbiddenKeys) {
+        expect(Object.prototype.hasOwnProperty.call(serialized, key)).toBe(false);
+      }
+      // And the projection is not simply empty — real member-visible fields are still there.
+      expect(serialized.campaignId).toBe(campaignId);
+    });
   });
 });

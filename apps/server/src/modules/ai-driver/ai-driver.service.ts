@@ -499,6 +499,21 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
+/**
+ * Identity + running totals for the CURRENT `aftermath` economy-grant budget (#1495). Keyed to
+ * the SPECIFIC ended encounter (its id and `endedAt`) whose post-combat window the totals
+ * belong to — see {@link AiDmSessionState.aftermathGrantWindow} for the full rationale and
+ * {@link syncAftermathGrantWindow} for how the identity comparison opens a fresh window.
+ */
+export interface AiDmAftermathGrantWindow {
+  encounterId: number;
+  endedAt: string;
+  /** Cumulative treasury granted (summed across every denomination and every adjust_treasury call) this window. */
+  treasuryGranted: number;
+  /** Cumulative inventory qty granted (add_inventory_item + update_inventory_item) this window. */
+  inventoryQtyGranted: number;
+}
+
 export interface AiDmSessionState {
   campaignId: number;
   status: AiDmSessionStatus;
@@ -575,29 +590,32 @@ export interface AiDmSessionState {
   /** Policy violations (deny / guard / rate-limit) this turn (#474). */
   policyViolationsThisTurn?: number;
   /**
-   * The session profile as of the last-checked turn (#1495). Used only to detect a FRESH
-   * transition INTO `aftermath` — see {@link treasuryGrantTotalThisSession} below for why that
-   * transition matters. Not a policy input on its own.
+   * The autonomous seat's cumulative economy-grant budget (#1495), keyed to the SPECIFIC ended
+   * encounter (id + `endedAt`) whose loot/treasury it belongs to — the campaign's most recently
+   * ended encounter, WHATEVER IT IS, not to an observed `aftermath` profile transition and not
+   * gated by the profile's own time-boxed recency window (see
+   * `AiDriverService.resolveSessionProfile`'s `latestEndedEncounter` for why those are kept
+   * separate). Two failure modes that keying to a transient "was the last profile aftermath" bit
+   * had, both closed by keying to durable window identity instead:
+   *  - EDGE LOSS ACROSS A RESTART: an in-memory "last profile" bit resets to unknown on every
+   *    restart, so a restart mid-window silently reopened a fresh budget. This field is
+   *    PERSISTED (`persistControlState`/`loadPersistedControlState`) and RESTORED, not revoked
+   *    like `secretReadApprovals`/`pendingToolConfirmations` — it is a spend counter, not a
+   *    grant of authority, so restoring it can only make the seat MORE restrictive, never less.
+   *  - EDGE LOSS ACROSS AN UNOBSERVED TRANSITION: an edge is only visible if a turn runs while
+   *    the profile flips. If a fight's aftermath spends its allowance and no AI turn runs before
+   *    a LATER fight ends, no edge is ever observed and the new fight would inherit the old
+   *    one's exhausted totals. Comparing the tracked `encounterId`/`endedAt` against the CURRENT
+   *    most-recently-ended encounter (see {@link syncAftermathGrantWindow}) detects this even
+   *    with no edge at all: a different encounter identity is always a fresh window.
+   *  - STALE TOTAL ACROSS CONCURRENT APPROVALS: `resolveToolConfirmation` re-syncs this field and
+   *    RE-RUNS the guard immediately before dispatching an approved confirmation, not only when
+   *    the call was first queued, so several queued grants cannot each pass against the same
+   *    stale total.
+   *
+   * `null` only when the campaign has never had an encounter end.
    */
-  lastSessionProfile?: DriverSessionProfile;
-  /**
-   * Cumulative treasury granted (summed across every denomination and every `adjust_treasury`
-   * call) during the CURRENT `aftermath` window (#1495). Deliberately NOT reset per turn like
-   * {@link generateMapCallsThisTurn} — bounding a single call's `delta`
-   * (DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) does nothing to stop a long run of
-   * individually-small `auto`-executed grants from adding up to an unlimited total while the
-   * profile stays `aftermath`. Reset to 0 whenever a NEW `aftermath` window opens (a later
-   * fight's aftermath gets its own budget instead of inheriting an earlier one's), tracked via
-   * {@link lastSessionProfile}.
-   */
-  treasuryGrantTotalThisSession?: number;
-  /**
-   * Cumulative inventory `qty` granted (summed across every `add_inventory_item` and
-   * `update_inventory_item` call) during the CURRENT `aftermath` window (#1495). Same
-   * not-reset-per-turn / reset-on-new-aftermath-window rule as
-   * {@link treasuryGrantTotalThisSession}.
-   */
-  inventoryGrantQtyTotalThisSession?: number;
+  aftermathGrantWindow?: AiDmAftermathGrantWindow | null;
   /**
    * Pending DM confirmations for irreversible live-play tools (#474). Keyed
    * `${tool}:${toolCallId}`; each entry executes once when a DM approves it.
@@ -619,16 +637,23 @@ type AiDmSessionPrivateGuardFields =
   | 'generateMapCallsThisTurn'
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
-  | 'lastSessionProfile'
-  | 'treasuryGrantTotalThisSession'
-  | 'inventoryGrantQtyTotalThisSession'
+  | 'aftermathGrantWindow'
   | 'pendingToolConfirmations'
   | 'detached';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
 
-/** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
+/**
+ * Strip internal execution-guard bookkeeping before serializing session state to API clients.
+ *
+ * #1495 review finding: a TypeScript `Omit` (see {@link AiDmPublicSessionState}) only narrows
+ * the STATIC type — it does not remove a runtime object key. The actual redaction is this
+ * destructuring, and every name in {@link AiDmSessionPrivateGuardFields} MUST be destructured
+ * out here too, or the field is silently serialized to member-facing session endpoints despite
+ * being typed as absent. `aftermathGrantWindow` was added to the type list without a matching
+ * entry here — this is that fix.
+ */
 export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
   const {
     secretReadApprovals: _approvals,
@@ -637,6 +662,7 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     generateMapCallsThisTurn: _mapCalls,
     confirmToolAttemptsThisTurn: _confirmAttempts,
     policyViolationsThisTurn: _violations,
+    aftermathGrantWindow: _aftermathGrantWindow,
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
     ...rest
@@ -874,6 +900,26 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && Number.isInteger(rec.turnNumber)
     && (retainedActionChain === undefined
       || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'));
+}
+
+/**
+ * Validate a persisted `aftermath_grant_window` blob (#1495) before restoring it. Unlike
+ * {@link isStoredPendingConfirmation}/`isStoredSecretApproval`, a validation failure here still
+ * fails CLOSED in the safe direction: `loadPersistedControlState` treats an invalid/missing blob
+ * as `null` (no tracked window), which only means the NEXT economy grant opens a fresh budget —
+ * never a restored one that is silently wrong in a way that grants more than it should.
+ */
+function isStoredAftermathGrantWindow(value: unknown): value is AiDmAftermathGrantWindow {
+  const rec = recordOf(value);
+  return !!rec
+    && Number.isInteger(rec.encounterId)
+    && typeof rec.endedAt === 'string'
+    && typeof rec.treasuryGranted === 'number'
+    && Number.isFinite(rec.treasuryGranted)
+    && rec.treasuryGranted >= 0
+    && typeof rec.inventoryQtyGranted === 'number'
+    && Number.isFinite(rec.inventoryQtyGranted)
+    && rec.inventoryQtyGranted >= 0;
 }
 
 /** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
@@ -1508,16 +1554,52 @@ export function formatDriverLootCombatLogDetail(toolName: string, args: Record<s
 }
 
 /**
- * Record a SUCCESSFUL economy grant against the per-session cumulative caps (#1495):
+ * Keep the economy-grant budget keyed to the ACTUAL most-recently-ended encounter (#1495), not
+ * to an observed `aftermath` profile edge. See {@link AiDmSessionState.aftermathGrantWindow} for
+ * the failure modes this closes. `current` is `resolveSessionProfile`'s `latestEndedEncounter` —
+ * deliberately NOT gated by the profile's own time-boxed recency window or by whether the
+ * profile is `aftermath` right now, because a `confirm`-queued economy grant (queued during
+ * `prep`/`live`/`downtime`, since these tools are never queued in `aftermath` — there they are
+ * `auto`) can be approved arbitrarily later and must still draw against and be bounded by the
+ * fight it actually belongs to.
+ *
+ * A no-op when `current` is null: the campaign has never had an encounter end, so there is
+ * nothing yet to key a budget to.
+ */
+export function syncAftermathGrantWindow(
+  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
+  current: { encounterId: number; endedAt: string } | null,
+): void {
+  if (!current) return;
+  const existing = session.aftermathGrantWindow;
+  if (!existing || existing.encounterId !== current.encounterId || existing.endedAt !== current.endedAt) {
+    session.aftermathGrantWindow = {
+      encounterId: current.encounterId,
+      endedAt: current.endedAt,
+      treasuryGranted: 0,
+      inventoryQtyGranted: 0,
+    };
+  }
+}
+
+/**
+ * Record a SUCCESSFUL economy grant against the current window's cumulative caps (#1495):
  * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}.
  * Called only after the tool actually executed (auto, or a DM-approved confirmation) — a
  * rejected or errored call never reserved any of the budget, so it must not consume it either.
+ *
+ * A no-op when there is no tracked window (`aftermathGrantWindow` is null): the grant still
+ * happened, but with nothing to attribute it to — see {@link syncAftermathGrantWindow}, which
+ * every caller runs first and which is what actually opens the window this function accumulates
+ * into.
  */
 export function noteDriverEconomyGrant(
-  session: Pick<AiDmSessionState, 'treasuryGrantTotalThisSession' | 'inventoryGrantQtyTotalThisSession'>,
+  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
   toolName: string,
   args: Record<string, unknown>,
 ): void {
+  const window = session.aftermathGrantWindow;
+  if (!window) return;
   if (toolName === 'adjust_treasury') {
     const delta = args.delta;
     if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return;
@@ -1526,19 +1608,17 @@ export function noteDriverEconomyGrant(
       const v = rec[d];
       return typeof v === 'number' && v > 0 ? sum + v : sum;
     }, 0);
-    if (total > 0) session.treasuryGrantTotalThisSession = (session.treasuryGrantTotalThisSession ?? 0) + total;
+    if (total > 0) window.treasuryGranted += total;
     return;
   }
   if (toolName === 'add_inventory_item') {
     const qty = typeof args.qty === 'number' && args.qty > 0 ? args.qty : 1;
-    session.inventoryGrantQtyTotalThisSession = (session.inventoryGrantQtyTotalThisSession ?? 0) + qty;
+    window.inventoryQtyGranted += qty;
     return;
   }
   if (toolName === 'update_inventory_item') {
     const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
-    if (qtyDelta > 0) {
-      session.inventoryGrantQtyTotalThisSession = (session.inventoryGrantQtyTotalThisSession ?? 0) + qtyDelta;
-    }
+    if (qtyDelta > 0) window.inventoryQtyGranted += qtyDelta;
   }
 }
 
@@ -1643,11 +1723,7 @@ export function guardDriverLivePlayArgs(
   args: Record<string, unknown>,
   session: Pick<
     AiDmSessionState,
-    | 'driverGeneratedMapIds'
-    | 'generateMapCallsThisTurn'
-    | 'driverAuthoredEncounterIds'
-    | 'treasuryGrantTotalThisSession'
-    | 'inventoryGrantQtyTotalThisSession'
+    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds' | 'aftermathGrantWindow'
   >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
@@ -1793,9 +1869,9 @@ export function guardDriverLivePlayArgs(
       }
     }
     // #1495 — the per-call bound above stops one big grant; it does nothing to stop a long run
-    // of small ones. Bound the SESSION total too (see AiDmSessionState.treasuryGrantTotalThisSession).
+    // of small ones. Bound the WINDOW total too (see AiDmSessionState.aftermathGrantWindow).
     const callTotal = entries.reduce((sum, [, value]) => sum + (value as number), 0);
-    const sessionTotal = session.treasuryGrantTotalThisSession ?? 0;
+    const sessionTotal = session.aftermathGrantWindow?.treasuryGranted ?? 0;
     if (sessionTotal + callTotal > DRIVER_TREASURY_SESSION_GRANT_CAP) {
       return {
         ok: false,
@@ -1840,7 +1916,7 @@ export function guardDriverLivePlayArgs(
         message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
       };
     }
-    const sessionQty = session.inventoryGrantQtyTotalThisSession ?? 0;
+    const sessionQty = session.aftermathGrantWindow?.inventoryQtyGranted ?? 0;
     if (sessionQty + qty > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
       return {
         ok: false,
@@ -1879,9 +1955,9 @@ export function guardDriverLivePlayArgs(
           message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
         };
       }
-      // #1495 — shares add_inventory_item's per-session grant cap: both tools mint party
-      // inventory, so a session budget that only watched one of them would not bound anything.
-      const sessionQty = session.inventoryGrantQtyTotalThisSession ?? 0;
+      // #1495 — shares add_inventory_item's per-window grant cap: both tools mint party
+      // inventory, so a budget that only watched one of them would not bound anything.
+      const sessionQty = session.aftermathGrantWindow?.inventoryQtyGranted ?? 0;
       if (sessionQty + delta > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
         return {
           ok: false,
@@ -2515,6 +2591,12 @@ export class AiDriverService {
     // #1051: the MODE is restored before the ladder value is reconciled, because the
     // reconciliation below needs to know whether `running` should read as `collaborative`.
     fresh.collaborative = row.collaborative === true;
+    // #1495 — RESTORED, not revoked (contrast the two grant maps above at #1042): this is a
+    // spend counter, not a grant of authority, so restoring it can only make the seat MORE
+    // restrictive after a restart, never less. A restart mid-window silently refilling the
+    // budget was the exact bug this closes.
+    const aftermathGrantWindow = fromJsonText<unknown>(row.aftermathGrantWindow, null);
+    fresh.aftermathGrantWindow = isStoredAftermathGrantWindow(aftermathGrantWindow) ? aftermathGrantWindow : null;
     // These two drop an impossible ladder value back to the baseline; `deriveLadderState` at the
     // end of this block is what turns that baseline back into `collaborative` when the mode is on.
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
@@ -2845,6 +2927,10 @@ export class AiDriverService {
       pendingToolConfirmations: nonEmptyJson(session.pendingToolConfirmations),
       phase: session.phase, // #1043
       collaborative: session.collaborative, // #1051
+      // #1495 — persisted and RESTORED (not revoked) on hydration; see the column comment on
+      // the schema and the field comment on AiDmSessionState.aftermathGrantWindow for why this
+      // one is different from the two grant maps above.
+      aftermathGrantWindow: session.aftermathGrantWindow ? toJsonText(session.aftermathGrantWindow) : null,
       updatedAt: ts,
     };
 
@@ -2875,6 +2961,7 @@ export class AiDriverService {
             pendingToolConfirmations: values.pendingToolConfirmations,
             phase: values.phase,
             collaborative: values.collaborative,
+            aftermathGrantWindow: values.aftermathGrantWindow,
             updatedAt: values.updatedAt,
           },
         })
@@ -3487,26 +3574,46 @@ export class AiDriverService {
   }
 
   /**
-   * Resolve the driver session profile from encounter state (#474 / #1495).
+   * Resolve the driver session profile from encounter state (#474 / #1495), AND separately
+   * identify the economy-grant budget's window identity.
    *
    * `ended` still lists the campaign's full ended-encounter history (no cheap DB-level date
-   * filter exists for it), but `aftermath` no longer follows from that history being
-   * non-empty: only an encounter whose `endedAt` falls within
-   * {@link isWithinAftermathWindow}'s recency window counts. Once every ended encounter has
-   * aged out of that window, this returns `downtime` instead of clinging to `aftermath`.
+   * filter exists for it), but `profile` no longer follows from that history being non-empty:
+   * only an encounter whose `endedAt` falls within {@link isWithinAftermathWindow}'s recency
+   * window makes the profile `aftermath`. Once every ended encounter has aged out of that
+   * window, this resolves `downtime` instead of clinging to `aftermath`.
+   *
+   * `latestEndedEncounter` is DELIBERATELY a separate, un-windowed concept from the profile: it
+   * is simply the most recently ended encounter in the campaign, however long ago, and it is
+   * what {@link syncAftermathGrantWindow} keys the economy-grant budget to (#1495). Decoupling it
+   * from the profile's time-boxed window matters for `resolveToolConfirmation`: a `confirm`
+   * queued during `prep`/`live`/`downtime` play (which is when economy tools are ever queued —
+   * they are `auto` and never queued in `aftermath`) can be approved arbitrarily later, and it
+   * must still draw against and be bounded by the same fight's budget, not by nothing just
+   * because the recency window has since elapsed or the profile has moved on.
    */
-  private async resolveSessionProfile(campaignId: number): Promise<DriverSessionProfile> {
+  private async resolveSessionProfile(
+    campaignId: number,
+  ): Promise<{ profile: DriverSessionProfile; latestEndedEncounter: { encounterId: number; endedAt: string } | null }> {
     const [running, preparing, ended] = await Promise.all([
       this.encounters.listForCampaign(campaignId, 'running', 'dm'),
       this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
       this.encounters.listForCampaign(campaignId, 'ended', 'dm'),
     ]);
     const now = Date.now();
-    return resolveDriverSessionProfile({
+    const profile = resolveDriverSessionProfile({
       hasRunningEncounter: running.length > 0,
       hasPreparingEncounter: preparing.length > 0,
       hasRecentlyEndedEncounter: ended.some((encounter) => isWithinAftermathWindow(encounter.endedAt, now)),
     });
+    let latestEndedEncounter: { encounterId: number; endedAt: string } | null = null;
+    for (const encounter of ended) {
+      if (!encounter.endedAt) continue;
+      if (!latestEndedEncounter || Date.parse(encounter.endedAt) > Date.parse(latestEndedEncounter.endedAt)) {
+        latestEndedEncounter = { encounterId: encounter.id, endedAt: encounter.endedAt };
+      }
+    }
+    return { profile, latestEndedEncounter };
   }
 
   private policyForTool(
@@ -3869,16 +3976,12 @@ export class AiDriverService {
     // registry per call from classifyDriverRead + the on-file approvals.
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
-    const sessionProfile = await this.resolveSessionProfile(campaignId);
-    // #1495 — a FRESH transition into `aftermath` opens a new economy-grant budget: a later
-    // fight's post-combat aftermath must not inherit whatever an earlier fight's aftermath
-    // already spent. Staying in `aftermath` across successive turns keeps accumulating (it is
-    // still the same post-combat window); only the prep/live/downtime -> aftermath edge resets.
-    if (sessionProfile === 'aftermath' && session.lastSessionProfile !== 'aftermath') {
-      session.treasuryGrantTotalThisSession = 0;
-      session.inventoryGrantQtyTotalThisSession = 0;
-    }
-    session.lastSessionProfile = sessionProfile;
+    const { profile: sessionProfile, latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+    // #1495 — key the economy-grant budget to the most recently ended encounter's actual
+    // identity (id + endedAt), not to an observed profile edge: a DIFFERENT encounter is always
+    // a fresh budget, whether or not a turn ran to "see" the transition. See
+    // syncAftermathGrantWindow / AiDmSessionState.aftermathGrantWindow for the full rationale.
+    syncAftermathGrantWindow(session, latestEndedEncounter);
     // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
     // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
     // denied live-play tools are withheld from the schema. Execution still enforces the same
@@ -6349,20 +6452,63 @@ export class AiDriverService {
     // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
     // labels are not part of the executable MCP schema. Keep this boundary explicit instead
     // of relying on the action resolver to ignore surplus caller-facing fields.
-    const executionArgs =
+    const baseArgs =
       pending.tool === 'apply_action'
         ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
         : pending.args;
+
+    // #1495 — re-run the execution-time guard IMMEDIATELY BEFORE dispatch, against CURRENT
+    // session state, not the state at queue time. The guard already ran once when this call was
+    // first queued, but an approval can land arbitrarily later — after OTHER queued
+    // confirmations already spent part of the same economy-grant budget, which the queue-time
+    // check could not have known about (it would otherwise let every queued call pass against
+    // the same stale total, e.g. eleven queued `qty: 100` inventory grants all approved and
+    // executing 1,100 items despite a 1,000-item cap). Re-sync the budget's window identity
+    // first (a later fight may have ended since this was queued) so the guard checks the right
+    // window's running total.
+    const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+    syncAftermathGrantWindow(session, latestEndedEncounter);
+    const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
+    if (!recheck.ok) {
+      this.releaseRetainedActionChain(session, pending);
+      await this.audit.log({
+        actor: pending.actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.blocked',
+        entityType: 'ai-dm',
+        campaignId,
+        detail:
+          `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
+          `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
+      });
+      this.stream.emit({
+        type: 'tool-confirmation',
+        campaignId,
+        action: 'rejected',
+        confirmationId,
+        tool: pending.tool,
+      });
+      // Persist the (possibly freshly re-keyed) budget window even on a blocked recheck — the
+      // window identity itself may have changed since this call was queued, and that must not be
+      // lost if the process restarts before the next unrelated persistControlState call.
+      this.persistControlState(session);
+      return { confirmation: null, result: { isError: true, text: recheck.message } };
+    }
+    const executionArgs = recheck.args;
     const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
     if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
-      // #1495 — a DM-approved confirmation still counts against the per-session economy cap;
-      // see the auto-execute call site in executeToolCalls for the same accounting.
-      noteDriverEconomyGrant(session, pending.tool, pending.args);
-      const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
+      // #1495 — a DM-approved confirmation still counts against the economy-grant budget; see
+      // the auto-execute call site in executeToolCalls for the same accounting. Uses the
+      // GUARDED args (post-recheck), matching what actually executed.
+      noteDriverEconomyGrant(session, pending.tool, executionArgs);
+      // Persist the updated running total immediately — a restart before the next unrelated
+      // persistControlState call must not silently forget a grant that already committed.
+      this.persistControlState(session);
+      const detail = formatDriverLootCombatLogDetail(pending.tool, executionArgs);
       if (detail) {
         try {
           await this.encounters.appendActiveEncounterNote(campaignId, detail);

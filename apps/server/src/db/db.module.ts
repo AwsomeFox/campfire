@@ -1814,6 +1814,32 @@ function migrateAiDriverCollaborative1051(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #1495 — the autonomous seat's persisted `aftermath` economy-grant budget on
+ * `ai_driver_control_state`.
+ *
+ * Additive, nullable TEXT column: an upgraded install with no row yet, or a row that predates
+ * this column, reads back as no active budget (a fresh window opens the next time the driver
+ * observes one), which is the same behaviour every campaign already has today. Unlike
+ * `secret_read_approvals`/`pending_tool_confirmations`, this column is RESTORED on hydration,
+ * not revoked — see the column comment on the schema and `loadPersistedControlState`.
+ *
+ * A separate, never-before-recorded migration name rather than a widening of #559's
+ * `migrateAiDriverControlStateTable`, for the same reason #1051's collaborative-handoff
+ * migration above gives: a database that already recorded the CREATE never re-runs it, so a
+ * column folded in there would stay missing forever.
+ */
+function migrateAiDriverAftermathGrantWindow1495(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'aftermath_grant_window')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN aftermath_grant_window TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -4735,6 +4761,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // combatant snapshot after this branch's earlier 0147, so this additive migration
   // takes the next free ordinal 0148 (never recorded on any real database).
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
+  { name: '0149_ai_driver_aftermath_grant_window_1495', run: migrateAiDriverAftermathGrantWindow1495 },
 ];
 
 /**

@@ -4,6 +4,7 @@ import {
   guardDriverLivePlayArgs,
   formatDriverLootCombatLogDetail,
   noteDriverEconomyGrant,
+  syncAftermathGrantWindow,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
   DRIVER_INVENTORY_SESSION_GRANT_CAP,
@@ -194,25 +195,34 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     });
   });
 
-  it('#1495: add_inventory_item and update_inventory_item share a cumulative per-session grant cap', () => {
+  /** A tracked economy-grant window for a given ended encounter (#1495). */
+  const grantWindow = (overrides: Partial<{ encounterId: number; endedAt: string; treasuryGranted: number; inventoryQtyGranted: number }> = {}) => ({
+    encounterId: 1,
+    endedAt: '2026-01-01T00:00:00.000Z',
+    treasuryGranted: 0,
+    inventoryQtyGranted: 0,
+    ...overrides,
+  });
+
+  it('#1495: add_inventory_item and update_inventory_item share a cumulative grant cap keyed to the aftermath window', () => {
     const session = {
       driverGeneratedMapIds: [] as number[],
       generateMapCallsThisTurn: 0,
-      inventoryGrantQtyTotalThisSession: DRIVER_INVENTORY_SESSION_GRANT_CAP - 5,
+      aftermathGrantWindow: grantWindow({ inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP - 5 }),
     };
 
-    // still 5 qty of room left in the session budget: a grant of 5 fits exactly...
+    // still 5 qty of room left in the window's budget: a grant of 5 fits exactly...
     expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 5 }, session)).toEqual({
       ok: true,
       args: { name: 'Torch', qty: 5 },
     });
-    // ...but one more than that overflows the session cap, even though it is well under the
-    // per-call cap on its own.
+    // ...but one more than that overflows the cap, even though it is well under the per-call
+    // cap on its own.
     expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 6 }, session)).toMatchObject({
       ok: false,
       code: 'forbidden_inventory_session_cap',
     });
-    // update_inventory_item draws on the SAME session budget (#1495) — a qtyDelta that would
+    // update_inventory_item draws on the SAME window budget (#1495) — a qtyDelta that would
     // overflow it is rejected even though the per-call qtyDelta bound has no upper limit.
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 6 }, session)).toMatchObject({
       ok: false,
@@ -224,13 +234,57 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     });
   });
 
-  it('#1495: adjust_treasury enforces a cumulative per-session treasury grant cap regardless of call count', () => {
+  it('#1495: without a tracked aftermath window (campaign has never had an encounter end), the cumulative cap is inert but per-call caps still apply', () => {
+    const session = { driverGeneratedMapIds: [] as number[], generateMapCallsThisTurn: 0, aftermathGrantWindow: null };
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 5 }, session)).toEqual({
+      ok: true,
+      args: { name: 'Torch', qty: 5 },
+    });
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: DRIVER_INVENTORY_GRANT_MAX_QTY + 1 }, session),
+    ).toMatchObject({ ok: false, code: 'forbidden_inventory_grant_limit' });
+  });
+
+  it('#1495: syncAftermathGrantWindow opens a fresh budget for a DIFFERENT encounter identity even with no observed profile edge', () => {
+    // Regression for the Codex :3881 finding: if a fight's aftermath spends its allowance and no
+    // AI turn runs while that window expires, then a LATER fight ends, an edge-detection reset
+    // (only firing on a non-aftermath -> aftermath TRANSITION) would never fire if this session
+    // never observed anything but `aftermath` in between. Keying to the actual encounter
+    // identity instead closes it: a different id/endedAt is always a fresh window, whether or
+    // not any turn ran to see the transition.
+    const session = {
+      aftermathGrantWindow: grantWindow({
+        encounterId: 10,
+        endedAt: '2026-01-01T00:00:00.000Z',
+        treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
+        inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
+      }),
+    };
+    // The SAME encounter identity observed again keeps the exhausted totals (still the same
+    // window — nothing should reset just because this function ran again).
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: '2026-01-01T00:00:00.000Z' });
+    expect(session.aftermathGrantWindow).toEqual(
+      grantWindow({
+        encounterId: 10,
+        endedAt: '2026-01-01T00:00:00.000Z',
+        treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
+        inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
+      }),
+    );
+
+    // A LATER fight's identity — a different encounter id — opens a fresh, zeroed budget, with
+    // no non-aftermath profile ever having been observed in between.
+    syncAftermathGrantWindow(session, { encounterId: 11, endedAt: '2026-01-02T00:00:00.000Z' });
+    expect(session.aftermathGrantWindow).toEqual(grantWindow({ encounterId: 11, endedAt: '2026-01-02T00:00:00.000Z' }));
+  });
+
+  it('#1495: adjust_treasury enforces a cumulative grant cap regardless of call count', () => {
     const session = {
       driverGeneratedMapIds: [] as number[],
       generateMapCallsThisTurn: 0,
-      treasuryGrantTotalThisSession: 0,
+      aftermathGrantWindow: grantWindow(),
     };
-    // Simulate many small, individually-legal grants accumulating toward the session cap.
+    // Simulate many small, individually-legal grants accumulating toward the cap.
     const perCallGrant = 1_000;
     const callsToFillCap = Math.floor(DRIVER_TREASURY_SESSION_GRANT_CAP / perCallGrant);
     for (let i = 0; i < callsToFillCap; i++) {
@@ -238,9 +292,9 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       expect(result.ok).toBe(true);
       noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: perCallGrant } });
     }
-    expect(session.treasuryGrantTotalThisSession).toBe(callsToFillCap * perCallGrant);
-    // The next call, however small, is rejected once the cumulative session cap is reached —
-    // this is the "regardless of call count" requirement: no single call exceeded
+    expect(session.aftermathGrantWindow.treasuryGranted).toBe(callsToFillCap * perCallGrant);
+    // The next call, however small, is rejected once the cumulative cap is reached — this is
+    // the "regardless of call count" requirement: no single call exceeded
     // DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION, yet the sequence is still bounded.
     expect(guardDriverLivePlayArgs('adjust_treasury', { delta: { gp: 1 } }, session)).toMatchObject({
       ok: false,
@@ -248,20 +302,53 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     });
   });
 
+  it('#1495: two queued grants approved back-to-back cannot both pass against the same stale total (guardDriverLivePlayArgs + noteDriverEconomyGrant compose like resolveToolConfirmation)', () => {
+    // Regression for the Codex :6364 finding: eleven queued qty:100 grants each individually
+    // legal, all approved, would total 1,100 against a 1,000-item cap if the guard were only
+    // consulted once at QUEUE time. This test drives the same two-call sequence
+    // resolveToolConfirmation now performs — guard, then note — for EVERY approval, proving the
+    // second grant sees the first one's already-recorded total.
+    const session = {
+      driverGeneratedMapIds: [] as number[],
+      generateMapCallsThisTurn: 0,
+      aftermathGrantWindow: grantWindow({ inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP - 100 }),
+    };
+    const grantArgs = { name: 'Potion of Healing', qty: 100 };
+
+    // First approval: exactly fills the remaining budget.
+    const first = guardDriverLivePlayArgs('add_inventory_item', grantArgs, session);
+    expect(first.ok).toBe(true);
+    noteDriverEconomyGrant(session, 'add_inventory_item', grantArgs);
+    expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(DRIVER_INVENTORY_SESSION_GRANT_CAP);
+
+    // Second approval of the SAME queued qty:100 grant, rechecked against the now-updated
+    // total: this is what closes the "eleven queued grants" bypass — no early return skips this
+    // assertion, and the outcome does not depend on any random roll.
+    const second = guardDriverLivePlayArgs('add_inventory_item', grantArgs, session);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.code).toBe('forbidden_inventory_session_cap');
+  });
+
   it('noteDriverEconomyGrant accumulates treasury and inventory grants and ignores non-economy tools', () => {
-    const session: { treasuryGrantTotalThisSession?: number; inventoryGrantQtyTotalThisSession?: number } = {};
+    const session = { aftermathGrantWindow: grantWindow() };
     noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: 25, sp: 10 } });
-    expect(session.treasuryGrantTotalThisSession).toBe(35);
+    expect(session.aftermathGrantWindow.treasuryGranted).toBe(35);
     noteDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 3 });
-    expect(session.inventoryGrantQtyTotalThisSession).toBe(3);
+    expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(3);
     noteDriverEconomyGrant(session, 'update_inventory_item', { itemId: 1, qtyDelta: 2 });
-    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
+    expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(5);
     // a negative/absent qtyDelta must not decrement or otherwise touch the counter
     noteDriverEconomyGrant(session, 'update_inventory_item', { itemId: 1, qtyDelta: -1 });
-    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
+    expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(5);
     noteDriverEconomyGrant(session, 'roll_dice', { expr: '1d20' });
-    expect(session.treasuryGrantTotalThisSession).toBe(35);
-    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
+    expect(session.aftermathGrantWindow.treasuryGranted).toBe(35);
+    expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(5);
+  });
+
+  it('noteDriverEconomyGrant is a no-op with no tracked window (nothing to attribute the grant to)', () => {
+    const session: { aftermathGrantWindow: ReturnType<typeof grantWindow> | null } = { aftermathGrantWindow: null };
+    noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: 25 } });
+    expect(session.aftermathGrantWindow).toBeNull();
   });
 
   it('formatDriverLootCombatLogDetail summarizes treasury and inventory grants for the combat log', () => {

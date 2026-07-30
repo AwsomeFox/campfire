@@ -18,7 +18,7 @@
  * only owns caching, dedupe, polling, and optimistic writes on top of it.
  */
 import { QueryClient, useQuery, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
-import type { AiDmSeat, TableSafetyHold } from '@campfire/schema';
+import type { AiDmSeat, AiDmToolConfirmation, TableSafetyHold } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 
 /**
@@ -212,19 +212,14 @@ export function useAiDmSeat(campaignId: number | undefined): UseQueryResult<AiDm
 /**
  * One confirm-policy tool call waiting on a DM (#474), as returned by
  * GET /campaigns/:id/ai-dm/tool-confirmations. DM-only server-side.
+ *
+ * #1495 — re-exported from `@campfire/schema` rather than redefined here: this used to be a
+ * web-only literal union for `profile`/`policy` that independently listed the same values the
+ * server's `DriverSessionProfile`/`DriverToolPolicyClass` list, so a server-side profile change
+ * could compile while this copy silently drifted out of sync (AGENTS.md: shared domain shapes
+ * live in the schema package, not redefined in the server or web app).
  */
-export interface AiDmToolConfirmation {
-  id: string;
-  tool: string;
-  args: Record<string, unknown>;
-  toolCallId: string;
-  profile: 'prep' | 'live' | 'aftermath' | 'downtime';
-  policy: 'auto' | 'confirm' | 'propose' | 'deny';
-  requestedAt: string;
-  actor: string;
-  triggeredBy: string;
-  turnNumber: number;
-}
+export type { AiDmToolConfirmation };
 
 /**
  * Watch the pending tool-confirmation queue (#1558).

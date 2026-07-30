@@ -1545,6 +1545,12 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- a takeover, or a stuck seat legitimately takes over -- and a mode that vanished when a DM
   -- paused for five minutes would silently restore full autonomy on resume.
   collaborative INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1495: the autonomous seat's cumulative aftermath economy-grant budget, keyed to the
+  -- SPECIFIC ended encounter (id + endedAt) whose post-combat window it belongs to. Unlike the
+  -- two grant maps above, this is RESTORED on hydration, not revoked -- it is a spend counter,
+  -- not a grant of authority, so restoring it can only make the seat MORE restrictive after a
+  -- restart, never less. Losing it let a restart mid-window silently refill the budget.
+  aftermath_grant_window TEXT,
   updated_at TEXT NOT NULL
 );
 

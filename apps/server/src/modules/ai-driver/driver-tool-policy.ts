@@ -1,15 +1,17 @@
+import type { DriverSessionProfile, DriverToolPolicyClass } from '@campfire/schema';
 import type { DriverTool } from '../mcp/mcp-tools';
 
-/** How the driver may commit a tool call under the campaign policy (#474). */
-export type DriverToolPolicyClass = 'auto' | 'confirm' | 'propose' | 'deny';
+// #1495 — DriverSessionProfile / DriverToolPolicyClass are defined in @campfire/schema (not
+// here) because the web tool-confirmation queue also needs them: AGENTS.md requires shared
+// domain shapes to live in the schema package rather than be redefined independently on each
+// side, which is exactly what let the web's copy silently drift out of sync with this file's.
+// Re-exported so every existing import of these two names from THIS module keeps working.
+export type { DriverSessionProfile, DriverToolPolicyClass };
 
 /**
- * Session phase for per-profile policy (#474): prep, live combat, a brief post-fight
- * aftermath, or neutral downtime (#1495) — no encounter running, prepping, or recently ended.
  * `aftermath` is intentionally NOT the campaign's steady state: see
  * {@link resolveDriverSessionProfile} and {@link DRIVER_AFTERMATH_WINDOW_MS}.
  */
-export type DriverSessionProfile = 'prep' | 'live' | 'aftermath' | 'downtime';
 
 /** Inputs for resolving the active session profile from encounter state. */
 export interface DriverSessionProfileInput {

@@ -675,7 +675,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // All FOUR additive migrations on this table are un-recorded, not just the one under
         // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
         // column comparison below only holds if all of them re-run against the legacy shape.
         // Un-recording only one leaves a sibling's column missing and fails the comparison for a
@@ -683,6 +683,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
+        // #1495 — the aftermath economy-grant budget column, same reasoning as the three above.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0149_ai_driver_aftermath_grant_window_1495');
       } finally {
         seeded.sqlite.close();
       }
@@ -1108,7 +1110,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // All FOUR additive migrations on this table are un-recorded, not just the one under
         // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
         // column comparison below only holds if all of them re-run against the legacy shape.
         // Un-recording only one leaves a sibling's column missing and fails the comparison for a
@@ -1116,6 +1118,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
+        // #1495 — the aftermath economy-grant budget column, same reasoning as the three above.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0149_ai_driver_aftermath_grant_window_1495');
       } finally {
         seeded.sqlite.close();
       }
@@ -1193,7 +1197,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // All FOUR additive migrations on this table are un-recorded, not just the one under
         // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
         // column comparison below only holds if all of them re-run against the legacy shape.
         // Un-recording only one leaves a sibling's column missing and fails the comparison for a
@@ -1201,6 +1205,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
+        // #1495 — the aftermath economy-grant budget column, same reasoning as the three above.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0149_ai_driver_aftermath_grant_window_1495');
       } finally {
         seeded.sqlite.close();
       }
