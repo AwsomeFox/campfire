@@ -3553,12 +3553,13 @@ export class CampaignsService {
     // in particular is still unbounded (`listEvents` has no LIMIT, unlike the
     // `listEventsPage` beside it), and bounding it would change a payload that MCP and
     // the AI driver also read — a contract decision, not a hot-path cleanup.
-    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryCount, commentCount, scheduleNow] =
+    const [questList, npcList, locationList, characterList, partyRoster, sessionList, encounterDigest, timelineList, treasury, inventoryCount, commentCount, scheduleNow] =
       await Promise.all([
         this.quests.listForCampaignWithObjectives(id, role),
         this.npcs.listForCampaign(id, role),
         this.locations.listForCampaign(id, role),
         this.characters.listForCampaign(id, user, role),
+        this.characters.partyRosterForCampaign(id),
         this.sessions.listForCampaign(id, role),
         this.encounters.digestForCampaign(id, role),
         // Newer systems (issue #257): each applies its own role redaction (timeline strips
@@ -3589,6 +3590,7 @@ export class CampaignsService {
       npcs: npcList,
       locations: locationList,
       characters: characterList,
+      party: partyRoster,
       sessions: sessionList,
       encounters: encounterDigest,
       timeline: timelineList,

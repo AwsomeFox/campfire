@@ -53,11 +53,11 @@ export interface CampaignOnboardingPlan {
 
 type SummaryInput = Pick<
   CampaignSummary,
-  'campaign' | 'characters' | 'quests' | 'locations' | 'encounters' | 'sessions' | 'inventoryCount' | 'treasury'
+  'campaign' | 'characters' | 'party' | 'quests' | 'locations' | 'encounters' | 'sessions' | 'inventoryCount' | 'treasury'
 >;
 
 function hasParty(summary: SummaryInput): boolean {
-  return summary.characters.some((character) => character.status === 'active');
+  return summary.party.some((character) => character.status === 'active');
 }
 
 function hasAdventureSeed(summary: SummaryInput): boolean {

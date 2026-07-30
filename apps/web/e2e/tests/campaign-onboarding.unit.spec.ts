@@ -12,6 +12,7 @@ function summary(overrides: Partial<SummaryInput> = {}): SummaryInput {
   return {
     campaign: { ruleSystem: '' },
     characters: [],
+    party: [],
     quests: [],
     locations: [],
     encounters: [],
@@ -81,6 +82,7 @@ test.describe('campaign one-shot onboarding derivation (#507)', () => {
   test('detects completion through party, adventure, encounter, reward, and recap state', () => {
     const plan = deriveCampaignOnboarding(summary({
       characters: [{ status: 'active', xp: 0, level: 1 }],
+      party: [{ id: 1, name: 'Aria', status: 'active' }],
       quests: [{ title: 'A one-shot hook' }],
       encounters: [{ status: 'ended' }],
       sessions: [{ recapExcerpt: 'The party saved the lighthouse.' }],

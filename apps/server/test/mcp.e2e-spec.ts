@@ -2964,6 +2964,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(party.some((character) => character.id === created.body.id)).toBe(false);
       const direct = await viewerClient.callTool({ name: 'get_character', arguments: { characterId: created.body.id } });
       expect((direct as { isError?: boolean }).isError).toBe(true);
+      const summary = parseResult(await viewerClient.callTool({ name: 'get_campaign_summary', arguments: { campaignId } })) as {
+        characters: Array<{ id: number }>;
+        party: Array<{ id: number; name: string; spellSlots?: unknown; actions?: unknown }>;
+      };
+      expect(summary.characters.some((character) => character.id === created.body.id)).toBe(false);
+      const roster = summary.party.find((character) => character.id === created.body.id);
+      expect(roster).toEqual(expect.objectContaining({ id: created.body.id, name: 'MCP private sheet' }));
+      expect(roster).not.toHaveProperty('spellSlots');
+      expect(roster).not.toHaveProperty('actions');
+
+      const resource = await viewerClient.readResource({ uri: `campfire://campaign/${campaignId}/summary` });
+      const resourceSummary = JSON.parse((resource.contents[0] as { text: string }).text) as typeof summary;
+      expect(resourceSummary.characters.some((character) => character.id === created.body.id)).toBe(false);
+      expect(resourceSummary.party.some((character) => character.id === created.body.id)).toBe(true);
     });
 
     it('list_quests returns an array', async () => {

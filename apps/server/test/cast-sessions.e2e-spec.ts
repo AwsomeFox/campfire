@@ -188,6 +188,10 @@ describe('Player Display cast sessions (e2e)', () => {
     expect(summary.body.quests.some((q: { title: string }) => q.title === 'Hidden coup')).toBe(false);
     expect(summary.body.npcs.some((n: { name: string }) => n.name === 'Hidden Assassin')).toBe(false);
     expect(summary.body.locations.some((l: { name: string }) => l.name === 'Secret Vault')).toBe(false);
+    expect(summary.body.characters).toEqual([]);
+    expect(summary.body.party).toEqual([expect.objectContaining({ name: 'Ember', hpCurrent: 12, hpMax: 12 })]);
+    expect(summary.body.party[0]).not.toHaveProperty('dmSecret');
+    expect(summary.body.party[0]).not.toHaveProperty('actions');
 
     const running = await request(server).get(`/api/v1/cast/${token}/encounters?status=running`);
     expect(running.status).toBe(200);

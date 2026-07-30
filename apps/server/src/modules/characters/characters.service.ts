@@ -5,6 +5,7 @@ import type { z } from 'zod';
 import {
   CharacterCreate,
   CharacterUpdate,
+  PartyCharacter,
   HpPatch,
   ConditionsPatch,
   SpellSlotPatch,
@@ -248,6 +249,31 @@ export class CharactersService {
           : and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, user.id), notDeleted(characters.deletedAt)),
       );
     return redactSecrets(rows.map(toDomain), role);
+  }
+
+  /**
+   * Return the table-safe roster used by campaign aggregates and cast displays.
+   * This query is intentionally an explicit column allowlist rather than a redacted
+   * `Character` row: it never loads private sheet mechanics or DM-only material.
+   */
+  async partyRosterForCampaign(campaignId: number): Promise<PartyCharacter[]> {
+    const rows = await this.db
+      .select({
+        id: characters.id,
+        name: characters.name,
+        species: characters.species,
+        className: characters.className,
+        level: characters.level,
+        status: characters.status,
+        ac: characters.ac,
+        hpCurrent: characters.hpCurrent,
+        hpMax: characters.hpMax,
+        conditions: characters.conditions,
+        portraitUrl: characters.portraitUrl,
+      })
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+    return rows.map((row) => PartyCharacter.parse({ ...row, conditions: fromJsonText<string[]>(row.conditions, []) }));
   }
 
   /**

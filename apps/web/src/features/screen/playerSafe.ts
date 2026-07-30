@@ -15,7 +15,7 @@
  */
 import type {
   AoeTemplate,
-  Character,
+  PartyCharacter,
   Combatant,
   CombatantKind,
   EncounterWithCombatants,
@@ -45,44 +45,9 @@ export function safeLocation(loc: Location | null | undefined): SafeLocation | n
 }
 
 // ---------------------------------------------------------------------------
-// Party — characters' HP is shared table info (party members see each other's
-// sheets), so exact HP is fine here; only the DM-only `dmSecret`/prep notes are
-// dropped by never copying them across.
-//
-// Lifecycle status (issue #115 / #824) IS player-safe table info — the Cast view
-// needs it to hide dead/retired/inactive PCs by default and to label alumni when
-// the producer opts them back in. dmSecret/notes stay omitted.
-
-export interface SafeCharacter {
-  id: number;
-  name: string;
-  species: string;
-  className: string;
-  level: number;
-  /** Lifecycle status — active / dead / retired / inactive (issue #824). */
-  status: Character['status'];
-  ac: number | null;
-  hpCurrent: number;
-  hpMax: number;
-  conditions: string[];
-  portraitUrl: string | null;
-}
-
-export function safeCharacter(c: Character): SafeCharacter {
-  return {
-    id: c.id,
-    name: c.name,
-    species: c.species,
-    className: c.className,
-    level: c.level,
-    status: c.status,
-    ac: c.ac,
-    hpCurrent: c.hpCurrent,
-    hpMax: c.hpMax,
-    conditions: c.conditions,
-    portraitUrl: c.portraitUrl,
-  };
-}
+// Party — the server supplies this explicit PartyCharacter allowlist on campaign
+// summaries, so Cast and dashboard code never receives another player's full sheet.
+// Lifecycle status remains table-safe info used to hide alumni by default.
 
 export interface SafePartyOptions {
   /**
@@ -109,11 +74,11 @@ function asIdSet(
 }
 
 /**
- * Player-safe party projection for the Cast / Player Display (issue #824).
+ * Filters the server-produced safe roster for the Cast / Player Display (issue #824).
  * Defaults to active PCs; during combat prefers participating character combatants;
  * with `includeAlumni` returns the full undeleted roster (status preserved for labels).
  */
-export function safeParty(characters: Character[], options: SafePartyOptions = {}): SafeCharacter[] {
+export function safeParty(characters: PartyCharacter[], options: SafePartyOptions = {}): PartyCharacter[] {
   const includeAlumni = options.includeAlumni === true;
   const participating = includeAlumni ? null : asIdSet(options.participatingCharacterIds);
 
@@ -123,7 +88,7 @@ export function safeParty(characters: Character[], options: SafePartyOptions = {
       if (participating) return participating.has(c.id);
       return c.status === 'active';
     })
-    .map(safeCharacter);
+    .map((character) => ({ ...character }));
 }
 
 // ---------------------------------------------------------------------------

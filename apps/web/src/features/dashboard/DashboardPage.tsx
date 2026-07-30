@@ -341,7 +341,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <PartyCard campaignId={id} characters={summary.characters} />
+          <PartyCard campaignId={id} characters={summary.party} accessibleCharacterIds={new Set(summary.characters.map((character) => character.id))} />
           <NpcGrid campaignId={id} npcs={summary.npcs} />
           <HandoutsCard campaignId={id} />
           <DiceWidget campaignId={id} />
