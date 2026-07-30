@@ -2902,7 +2902,14 @@ export default function RunSessionPage() {
             {lifecycle.undoTurn && (
               <Btn
                 ghost
-                disabled={headerBusy || riskyBlocked}
+                disabled={
+                  headerBusy ||
+                  riskyBlocked ||
+                  (encounter.round <= 1 &&
+                    (encounter.turnPhase ?? 'combatant') === 'combatant' &&
+                    orderedCombatants.length > 0 &&
+                    encounter.currentCombatantId === orderedCombatants[0].id)
+                }
                 onClick={undoTurn}
                 title="Undo turn"
               >
