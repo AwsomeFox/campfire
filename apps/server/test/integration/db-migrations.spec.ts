@@ -1148,6 +1148,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const legacy = new Database(dbFilePath(dataDir));
     try {
       legacy.exec('ALTER TABLE session_shares DROP COLUMN created_by_user_id');
+      legacy.pragma('foreign_keys = OFF'); // the fixture needs only the retained creator copy, not its parents
+      legacy
+        .prepare(
+          `INSERT INTO session_shares
+             (session_id, campaign_id, label, created_by, token_hash, token_prefix, expires_at, access_count, first_accessed_at, last_accessed_at, created_at, updated_at)
+           VALUES (1, 1, 'legacy share', 'Legacy creator', 'legacy-share-hash', 'cf_share_leg', NULL, 0, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0154_session_shares_creator_842');
     } finally {
       legacy.close();
@@ -1159,6 +1167,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const info = (upgraded.sqlite.pragma('table_info(session_shares)') as Array<{ name: string; notnull: number }>)
         .find((entry) => entry.name === 'created_by_user_id');
       expect(info).toMatchObject({ notnull: 0 });
+      expect(
+        upgraded.sqlite.prepare(`SELECT created_by, created_by_user_id FROM session_shares WHERE token_hash = 'legacy-share-hash'`).get(),
+      ).toEqual({ created_by: 'Legacy creator', created_by_user_id: null });
     } finally {
       upgraded.sqlite.close();
     }
@@ -1186,6 +1197,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const legacy = new Database(dbFilePath(dataDir));
     try {
       legacy.exec('ALTER TABLE cast_sessions DROP COLUMN created_by_user_id');
+      legacy.pragma('foreign_keys = OFF'); // the fixture needs only the retained creator copy, not its parent
+      legacy
+        .prepare(
+          `INSERT INTO cast_sessions
+             (campaign_id, label, created_by, token_hash, token_prefix, exit_pin_hash, expires_at, access_count, first_accessed_at, last_accessed_at, created_at, updated_at)
+           VALUES (1, 'legacy cast', 'Legacy creator', 'legacy-cast-hash', 'cf_cast_leg', 'legacy-pin-hash', '2027-01-01T00:00:00.000Z', 0, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0155_cast_sessions_creator_842');
     } finally {
       legacy.close();
@@ -1197,6 +1216,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const info = (upgraded.sqlite.pragma('table_info(cast_sessions)') as Array<{ name: string; notnull: number }>)
         .find((entry) => entry.name === 'created_by_user_id');
       expect(info).toMatchObject({ notnull: 0 });
+      expect(
+        upgraded.sqlite.prepare(`SELECT created_by, created_by_user_id FROM cast_sessions WHERE token_hash = 'legacy-cast-hash'`).get(),
+      ).toEqual({ created_by: 'Legacy creator', created_by_user_id: null });
     } finally {
       upgraded.sqlite.close();
     }
