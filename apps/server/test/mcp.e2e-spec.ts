@@ -1105,7 +1105,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'MCP Retry Nyx', hpCurrent: 8, hpMax: 8 });
     expect(character.status).toBe(201);
-    const encounter = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Death Save Retry' });
+    const encounter = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'MCP Death Save Retry', hidden: false });
     expect(encounter.status).toBe(201);
     const combatantId = (encounter.body.combatants as Array<{ id: number; characterId: number | null }>).find(
       (combatant) => combatant.characterId === character.body.id,

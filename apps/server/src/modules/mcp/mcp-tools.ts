@@ -4328,10 +4328,22 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
-        deathSaveRoll: z.never({ message: 'deathSaveRoll is removed; use roll_death_save instead' }).optional().describe('Removed: use roll_death_save instead'),
         ...CombatantUpdate.shape,
+        deathSaveRoll: z.number().optional().describe('Removed: use roll_death_save instead'),
       },
-      async ({ encounterId, combatantId, ...fields }) => {
+      async ({ encounterId, combatantId, deathSaveRoll, ...fields }) => {
+        if (deathSaveRoll !== undefined) {
+          throw new BadRequestException({
+            code: 'validation_failed',
+            message: 'deathSaveRoll is removed; use roll_death_save instead',
+            errors: [
+              {
+                field: 'deathSaveRoll',
+                message: 'deathSaveRoll is removed; use roll_death_save instead',
+              },
+            ],
+          });
+        }
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantUpdate.parse(fields);
