@@ -15,6 +15,7 @@ export function VisibleToPlayersBar({
   visible,
   onHide,
   onUndoHide,
+  onReveal,
 }: {
   /** Whether the entity is currently player-visible. */
   visible: boolean;
@@ -22,40 +23,88 @@ export function VisibleToPlayersBar({
   onHide: () => Promise<void>;
   /** Re-reveal after Hide (Undo). */
   onUndoHide: () => Promise<void>;
+  /** Reveal when currently hidden (issue #1475). */
+  onReveal?: () => Promise<void>;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [pendingUndo, setPendingUndo] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'hide' | 'reveal' | null>(null);
+  const [pendingUndo, setPendingUndo] = useState<'hide' | 'reveal' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function hide() {
-    if (busy) return;
-    setBusy(true);
+    if (pendingAction) return;
+    setPendingAction('hide');
     setError(null);
     try {
       await onHide();
-      setPendingUndo(true);
+      setPendingUndo('hide');
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't hide from players.");
     } finally {
-      setBusy(false);
+      setPendingAction(null);
     }
   }
 
-  if (pendingUndo) {
+  async function reveal() {
+    if (pendingAction || !onReveal) return;
+    setPendingAction('reveal');
+    setError(null);
+    try {
+      await onReveal();
+      setPendingUndo('reveal');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't reveal to players.");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  if (pendingUndo === 'hide') {
     return (
       <UndoSnackbar
         message="Hidden from players."
         successMessage="Visible to players again."
         onUndo={async () => {
           await onUndoHide();
-          setPendingUndo(false);
+          setPendingUndo(null);
         }}
-        onExpire={() => setPendingUndo(false)}
+        onExpire={() => setPendingUndo(null)}
       />
     );
   }
 
-  if (!visible) return null;
+  if (pendingUndo === 'reveal') {
+    return (
+      <UndoSnackbar
+        message="Visible to players again."
+        successMessage="Hidden from players."
+        onUndo={async () => {
+          await onHide();
+          setPendingUndo(null);
+        }}
+        onExpire={() => setPendingUndo(null)}
+      />
+    );
+  }
+
+  if (!visible) {
+    if (!onReveal) return null;
+    return (
+      <div
+        role="status"
+        data-testid="hidden-from-players-bar"
+        className="flex items-center gap-3 flex-wrap rounded border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+      >
+        <span className="font-semibold">Hidden from players</span>
+        <span className="text-xs text-amber-200/80 flex-1 min-w-[12rem]">
+          This encounter is hidden; players won't see it. Reveal when you are ready.
+        </span>
+        {error && <span className="text-xs text-rose-300">{error}</span>}
+        <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void reveal()}>
+          {pendingAction === 'reveal' ? 'Revealing…' : pendingAction === 'hide' ? 'Hiding…' : 'Reveal now'}
+        </Btn>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -68,8 +117,8 @@ export function VisibleToPlayersBar({
         They can see this in lists, search, and links. Hide to make it DM-only again.
       </span>
       {error && <span className="text-xs text-rose-300">{error}</span>}
-      <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => void hide()}>
-        {busy ? 'Hiding…' : 'Hide'}
+      <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void hide()}>
+        {pendingAction === 'hide' ? 'Hiding…' : pendingAction === 'reveal' ? 'Revealing…' : 'Hide'}
       </Btn>
     </div>
   );

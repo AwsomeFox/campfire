@@ -4472,9 +4472,10 @@ export class EncountersService {
       campaignId,
     });
 
-    this.emitEncounterEvent('encounter.updated', campaignId, encounterId, encounterRow.hidden);
+    const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterId, snapshot.hidden);
 
-    return this.getWithCombatantsOrThrow(encounterId, role);
+    return snapshot;
   }
 
   /**
