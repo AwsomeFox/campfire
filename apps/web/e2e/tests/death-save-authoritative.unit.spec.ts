@@ -35,6 +35,6 @@ test('an ambiguous death-save outcome reconciles before allowing another roll', 
 });
 
 test('terminal death-save states retain pips without exposing an invalid roll action', () => {
-  expect(runSessionSource).toContain("canRoll={combatant.deathState === 'dying'}");
+  expect(runSessionSource).toContain("canRoll={combatant.deathState !== 'dead'}");
   expect(runSessionSource).toContain('{canEditPermission && canRoll && (');
 });

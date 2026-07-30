@@ -6904,7 +6904,7 @@ function CombatantRow({
               successes={combatant.deathSaveSuccesses ?? 0}
               failures={combatant.deathSaveFailures ?? 0}
               canEditPermission={canEditPermission}
-              canRoll={combatant.deathState === 'dying'}
+              canRoll={combatant.deathState !== 'dead'}
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}
