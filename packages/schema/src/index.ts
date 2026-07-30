@@ -179,6 +179,15 @@ export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 export const AiExternalContentPolicy = z.enum(['disabled', 'member_consent']);
 export type AiExternalContentPolicy = z.infer<typeof AiExternalContentPolicy>;
 
+/**
+ * Map replacement lifecycle (issue #870). When a world or battle map is replaced or
+ * removed, the caller chooses whether to keep the old alignment (preserve) or clear
+ * the dependent spatial state (reset). Default omitted = preserve, so existing API/MCP
+ * callers do not lose data.
+ */
+export const MapAlignment = z.enum(['preserve', 'reset']);
+export type MapAlignment = z.infer<typeof MapAlignment>;
+
 export const Campaign = z.object({
   id: Id,
   name: z.string().min(1).max(120),
@@ -235,7 +244,11 @@ export const Campaign = z.object({
 });
 export type Campaign = z.infer<typeof Campaign>;
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true });
-export const CampaignUpdate = CampaignCreate.partial();
+export const CampaignUpdate = CampaignCreate.partial().extend({
+  // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
+  // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
+  mapAlignment: MapAlignment.optional(),
+});
 
 /**
  * DELETE /campaigns/:id/purge body (issue #867). Purge is irreversible and refused
@@ -9026,6 +9039,9 @@ export const EncounterUpdate = z.object({
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
   mapAttachmentId: Id.nullable().optional(),
+  // Map replacement lifecycle (issue #870). 'reset' clears grid, fog, AoE, and token
+  // coordinates in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
+  mapAlignment: MapAlignment.optional(),
   // VTT grid config (issue #40, phase 2) — dm only, enforced server-side. null clears a
   // field (gridSize: null turns the grid off); omitting leaves it unchanged.
   gridSize: z.number().min(1).max(100).nullable().optional(),
@@ -9107,6 +9123,7 @@ export const GenerateMapParams = z.object({
   theme: MapTheme.optional(),
   gridScale: z.number().positive().max(1000).optional(),
   gridUnit: z.string().min(1).max(12).optional(),
+  mapAlignment: MapAlignment.optional(),
 });
 export type GenerateMapParams = z.infer<typeof GenerateMapParams>;
 
@@ -9434,6 +9451,7 @@ export const AttachGeneratedMapRequest = z.object({
   previewId: z.string().min(1),
   encounterId: Id.optional(),
   filename: z.string().max(160).optional(),
+  mapAlignment: MapAlignment.optional(),
 });
 export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
 

@@ -142,6 +142,7 @@ export class MapsService {
       encounterId,
       {
         mapAttachmentId: result.attachmentId,
+        mapAlignment: params.mapAlignment,
         gridSize: result.gridConfig.gridSize,
         gridScale: result.gridConfig.gridScale,
         gridUnit: result.gridConfig.gridUnit,

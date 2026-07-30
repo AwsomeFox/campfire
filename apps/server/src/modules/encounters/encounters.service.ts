@@ -1689,72 +1689,137 @@ export class EncountersService {
         changedPredicates.push(sql`${encounters.sessionId} IS NOT ${input.sessionId}`);
       }
     }
+    const mapAttachmentIdChanging =
+      input.mapAttachmentId !== undefined && input.mapAttachmentId !== encounterRow.mapAttachmentId;
+    const previousFog = parseFog(encounterRow.fog);
+    const resetFog = previousFog?.enabled ? { enabled: true, revealed: [] } : null;
+    const resetApplied =
+      input.mapAlignment === 'reset' && (encounterRow.mapAttachmentId != null || input.mapAttachmentId != null);
+
     if (input.mapAttachmentId !== undefined) {
       // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
       // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
       // canvas still gets it via the file route's encounter-map exception.
       await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
-      if (input.mapAttachmentId !== encounterRow.mapAttachmentId) {
+      if (mapAttachmentIdChanging) {
         set.mapAttachmentId = input.mapAttachmentId;
         changedPredicates.push(sql`${encounters.mapAttachmentId} IS NOT ${input.mapAttachmentId}`);
       }
     }
+
+    // Issue #870: when the map is being reset (with or without changing attachment id),
+    // clear every piece of dependent spatial state in the same transaction so old
+    // tokens/grid/fog/AoE don't reappear on the new (or re-selected) image.
+    if (resetApplied) {
+      set.gridSize = null;
+      set.gridScale = null;
+      set.gridUnit = null;
+      set.gridSnap = false;
+      set.gridType = 'square';
+      set.hexOrientation = 'pointy';
+      set.gridOffsetX = 0;
+      set.gridOffsetY = 0;
+      set.gridCellHeight = null;
+      set.gridRotation = 0;
+      set.gridOpacity = 0.35;
+      // Fog is intentionally *not* disabled; `null` means "never configured" (fully visible).
+      // Reset clears the revealed mask while keeping fog enabled, so the new map stays hidden.
+      set.fog = resetFog ? toJsonText(resetFog) : null;
+      set.aoe = toJsonText([]);
+
+      if (set.gridSize !== encounterRow.gridSize) changedPredicates.push(sql`${encounters.gridSize} IS NOT ${set.gridSize}`);
+      if (set.gridScale !== encounterRow.gridScale) changedPredicates.push(sql`${encounters.gridScale} IS NOT ${set.gridScale}`);
+      if (set.gridUnit !== encounterRow.gridUnit) changedPredicates.push(sql`${encounters.gridUnit} IS NOT ${set.gridUnit}`);
+      if (set.gridSnap !== encounterRow.gridSnap) changedPredicates.push(sql`${encounters.gridSnap} IS NOT ${set.gridSnap ? 1 : 0}`);
+      if (set.gridType !== (encounterRow.gridType ?? 'square')) changedPredicates.push(sql`${encounters.gridType} IS NOT ${set.gridType}`);
+      if (set.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${set.hexOrientation}`);
+      if (set.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${set.gridOffsetX}`);
+      if (set.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${set.gridOffsetY}`);
+      if (set.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${set.gridCellHeight}`);
+      if (set.gridRotation !== (encounterRow.gridRotation ?? 0)) changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${set.gridRotation}`);
+      if (set.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${set.gridOpacity}`);
+      if (!isDeepStrictEqual(set.fog, encounterRow.fog)) changedPredicates.push(sql`${encounters.fog} IS NOT ${set.fog}`);
+      if (!isDeepStrictEqual(set.aoe, encounterRow.aoe)) changedPredicates.push(sql`${encounters.aoe} IS NOT ${set.aoe}`);
+    }
+
+    // When the map is being reset, the per-field grid/fog/AoE guards below must compare
+    // against the reset defaults (not the old row), otherwise explicit inputs equal to the
+    // old values are skipped and the reset null/default survives into the UPDATE.
+    const baseline = resetApplied
+      ? {
+          ...encounterRow,
+          gridSize: null as number | null,
+          gridScale: null as number | null,
+          gridUnit: null as string | null,
+          gridSnap: false,
+          gridType: 'square' as const,
+          hexOrientation: 'pointy' as const,
+          gridOffsetX: 0,
+          gridOffsetY: 0,
+          gridCellHeight: null as number | null,
+          gridRotation: 0,
+          gridOpacity: 0.35,
+        }
+      : encounterRow;
+    const fogBaseline = resetApplied ? resetFog : previousFog;
+    const aoeBaseline = resetApplied ? [] : parseAoe(encounterRow.aoe);
+
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
-    if (input.gridSize !== undefined && input.gridSize !== encounterRow.gridSize) {
+    if (input.gridSize !== undefined && input.gridSize !== baseline.gridSize) {
       set.gridSize = input.gridSize;
       changedPredicates.push(sql`${encounters.gridSize} IS NOT ${input.gridSize}`);
     }
-    if (input.gridScale !== undefined && input.gridScale !== encounterRow.gridScale) {
+    if (input.gridScale !== undefined && input.gridScale !== baseline.gridScale) {
       set.gridScale = input.gridScale;
       changedPredicates.push(sql`${encounters.gridScale} IS NOT ${input.gridScale}`);
     }
-    if (input.gridUnit !== undefined && input.gridUnit !== encounterRow.gridUnit) {
+    if (input.gridUnit !== undefined && input.gridUnit !== baseline.gridUnit) {
       set.gridUnit = input.gridUnit;
       changedPredicates.push(sql`${encounters.gridUnit} IS NOT ${input.gridUnit}`);
     }
-    if (input.gridSnap !== undefined && input.gridSnap !== encounterRow.gridSnap) {
+    if (input.gridSnap !== undefined && input.gridSnap !== baseline.gridSnap) {
       set.gridSnap = input.gridSnap;
       changedPredicates.push(sql`${encounters.gridSnap} IS NOT ${input.gridSnap ? 1 : 0}`);
     }
-    if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
+    if (input.gridType !== undefined && input.gridType !== (baseline.gridType ?? 'square')) {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
     }
-    if (input.hexOrientation !== undefined && input.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) {
+    if (input.hexOrientation !== undefined && input.hexOrientation !== (baseline.hexOrientation ?? 'pointy')) {
       set.hexOrientation = input.hexOrientation;
       changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${input.hexOrientation}`);
     }
     // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
     // nullable (null restores square cells); the others carry non-null defaults. Same
     // null-safe no-op guard as the fields above so an unchanged write produces no audit/SSE.
-    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) {
+    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (baseline.gridOffsetX ?? 0)) {
       set.gridOffsetX = input.gridOffsetX;
       changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${input.gridOffsetX}`);
     }
-    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) {
+    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (baseline.gridOffsetY ?? 0)) {
       set.gridOffsetY = input.gridOffsetY;
       changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${input.gridOffsetY}`);
     }
-    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) {
+    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (baseline.gridCellHeight ?? null)) {
       set.gridCellHeight = input.gridCellHeight;
       changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${input.gridCellHeight}`);
     }
-    if (input.gridRotation !== undefined && input.gridRotation !== (encounterRow.gridRotation ?? 0)) {
+    if (input.gridRotation !== undefined && input.gridRotation !== (baseline.gridRotation ?? 0)) {
       set.gridRotation = input.gridRotation;
       changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${input.gridRotation}`);
     }
-    if (input.gridOpacity !== undefined && input.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) {
+    if (input.gridOpacity !== undefined && input.gridOpacity !== (baseline.gridOpacity ?? 0.35)) {
       set.gridOpacity = input.gridOpacity;
       changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${input.gridOpacity}`);
     }
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
-    if (input.fog !== undefined && !isDeepStrictEqual(input.fog, parseFog(encounterRow.fog))) {
+    if (input.fog !== undefined && !isDeepStrictEqual(input.fog, fogBaseline)) {
       const fog = input.fog === null ? null : toJsonText(input.fog);
       set.fog = fog;
       changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, parseAoe(encounterRow.aoe))) {
+    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, aoeBaseline)) {
       const aoe = toJsonText(input.aoe);
       set.aoe = aoe;
       changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
@@ -1775,10 +1840,25 @@ export class EncountersService {
     // The null-safe predicates make the semantic no-op check atomic. Two clients may both
     // observe missing defaults, but after the first write the second UPDATE changes zero rows
     // and therefore produces no duplicate audit entry or SSE invalidation (#865).
-    const result = await this.db
-      .update(encounters)
-      .set(set)
-      .where(and(eq(encounters.id, encounterId), or(...changedPredicates)));
+    const shouldResetTokens = resetApplied;
+
+    // Issue #870: run the encounter update and (when resetting) token clearing inside
+    // one SQLite transaction so a map swap cannot commit without its dependent state.
+    const result = this.db.transaction((tx) => {
+      const result = tx
+        .update(encounters)
+        .set(set)
+        .where(and(eq(encounters.id, encounterId), or(...changedPredicates)))
+        .run();
+      const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
+      if (rowsChanged > 0 && shouldResetTokens) {
+        tx.update(combatants)
+          .set({ tokenX: null, tokenY: null })
+          .where(eq(combatants.encounterId, encounterId))
+          .run();
+      }
+      return result;
+    });
     const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
     if (rowsChanged === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -1788,8 +1868,13 @@ export class EncountersService {
     // a handout, restage the raw attachment immediately. The raw-file route also
     // checks fog dynamically (defense in depth), so even a failure here cannot leak
     // source pixels; this keeps the attachment metadata/UI consistent as well.
-    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
-    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    let effectiveMapId = set.mapAttachmentId !== undefined ? set.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog =
+      set.fog !== undefined
+        ? parseFog(set.fog)
+        : input.fog !== undefined
+          ? input.fog
+          : parseFog(encounterRow.fog);
     if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
       // Reusing the campaign region-map attachment as a fogged battle map would
       // block players from GET /attachments/:id/file (RegionMap has no fog-safe

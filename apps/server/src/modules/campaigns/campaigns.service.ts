@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
@@ -612,6 +612,10 @@ export class CampaignsService {
     opts?: { revokeInvites?: boolean },
   ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
+    // mapAlignment is a request-time directive (issue #870), not a stored column.
+    const { mapAlignment, ...campaignInput } = input;
+    const shouldResetPins =
+      mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
@@ -633,26 +637,16 @@ export class CampaignsService {
     // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
     // Fog-protected encounter maps cannot be the region background: players load
     // RegionMap via /attachments/:id/file, which must stay a full-source URL.
-    if (input.mapAttachmentId != null) {
+    if (campaignInput.mapAttachmentId != null) {
       const fogRows = await this.db
         .select({ fog: encounters.fog })
         .from(encounters)
-        .where(and(eq(encounters.mapAttachmentId, input.mapAttachmentId), eq(encounters.campaignId, id)));
+        .where(and(eq(encounters.mapAttachmentId, campaignInput.mapAttachmentId), eq(encounters.campaignId, id)));
       if (fogRows.some((row) => persistedFogConcealsPixels(row.fog))) {
         throw new ConflictException(
           'This attachment is protecting a fogged encounter map — use a separate image for the campaign region map, or disable fog first',
         );
       }
-      await this.db
-        .update(attachments)
-        .set({ hidden: false, updatedAt: nowIso() })
-        .where(
-          and(
-            eq(attachments.id, input.mapAttachmentId),
-            eq(attachments.campaignId, id),
-            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
-          ),
-        );
     }
 
     const archiving =
@@ -663,19 +657,46 @@ export class CampaignsService {
     // while the campaign stays active (#857 Bugbot).
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
-      const { row, revoked, wasEnabled } = this.db.transaction((tx) => {
+      const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
           .where(eq(campaigns.id, id))
           .limit(1)
           .get();
+        if (campaignInput.mapAttachmentId != null) {
+          tx.update(attachments)
+            .set({ hidden: false, updatedAt: ts })
+            .where(
+              and(
+                eq(attachments.id, campaignInput.mapAttachmentId),
+                eq(attachments.campaignId, id),
+                eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+              ),
+            )
+            .run();
+        }
         const row = tx
           .update(campaigns)
-          .set({ ...input, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
+        let pinsCleared = 0;
+        if (shouldResetPins) {
+          const reset = tx
+            .update(locations)
+            .set({ mapX: null, mapY: null, updatedAt: ts })
+            .where(
+              and(
+                eq(locations.campaignId, id),
+                notDeleted(locations.deletedAt),
+                or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
+              ),
+            )
+            .run();
+          pinsCleared = (reset as unknown as { changes?: number }).changes ?? 0;
+        }
         const deleted = tx
           .delete(campaignInvites)
           .where(eq(campaignInvites.campaignId, id))
@@ -685,6 +706,7 @@ export class CampaignsService {
           row,
           revoked: deleted.length,
           wasEnabled: Boolean(before?.publicInvitesEnabled),
+          pinsCleared,
         };
       });
       await this.audit.log({
@@ -694,6 +716,7 @@ export class CampaignsService {
         entityType: 'campaign',
         entityId: id,
         campaignId: id,
+        detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
       });
       if (wasEnabled) {
         await this.audit.log({
@@ -718,11 +741,74 @@ export class CampaignsService {
       return toDomain(row);
     }
 
-    const [row] = await this.db
-      .update(campaigns)
-      .set({ ...input, updatedAt: nowIso() })
-      .where(eq(campaigns.id, id))
-      .returning();
+    const ts = nowIso();
+
+    // Issue #870: replacing/removing the world map can optionally reset every location
+    // pin in the same transaction, so an unrelated image never inherits old coordinates.
+    let updatedRow: typeof campaigns.$inferSelect | undefined;
+    let pinsCleared = 0;
+    if (shouldResetPins) {
+      const resetResult = this.db.transaction((tx) => {
+        if (campaignInput.mapAttachmentId != null) {
+          tx.update(attachments)
+            .set({ hidden: false, updatedAt: ts })
+            .where(
+              and(
+                eq(attachments.id, campaignInput.mapAttachmentId),
+                eq(attachments.campaignId, id),
+                eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+              ),
+            )
+            .run();
+        }
+        const row = tx
+          .update(campaigns)
+          .set({ ...campaignInput, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        if (!row) throw new NotFoundException(`Campaign ${id} not found`);
+        const reset = tx
+          .update(locations)
+          .set({ mapX: null, mapY: null, updatedAt: ts })
+          .where(
+            and(
+              eq(locations.campaignId, id),
+              notDeleted(locations.deletedAt),
+              or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
+            ),
+          )
+          .run();
+        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0 };
+      });
+      updatedRow = resetResult.row;
+      pinsCleared = resetResult.changes;
+    }
+
+    if (updatedRow === undefined) {
+      // Reveal the chosen map whenever a non-null id is supplied; attachments default
+      // to DM-only (issue #97), and re-selecting the same hidden map must still make
+      // it visible to players again (#870 review).
+      if (campaignInput.mapAttachmentId != null) {
+        await this.db
+          .update(attachments)
+          .set({ hidden: false, updatedAt: ts })
+          .where(
+            and(
+              eq(attachments.id, campaignInput.mapAttachmentId),
+              eq(attachments.campaignId, id),
+              eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+            ),
+          );
+      }
+
+      [updatedRow] = await this.db
+        .update(campaigns)
+        .set({ ...campaignInput, updatedAt: ts })
+        .where(eq(campaigns.id, id))
+        .returning();
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -730,15 +816,16 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: id,
       campaignId: id,
+      detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
     });
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
     if (archiving) {
       await this.invites.suspendForCampaign(id, user, 'archive');
       const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
-      return toDomain(fresh ?? row);
+      return toDomain(fresh ?? updatedRow);
     }
-    return toDomain(row);
+    return toDomain(updatedRow);
   }
 
   /**
