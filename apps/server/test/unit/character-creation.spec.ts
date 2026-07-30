@@ -33,6 +33,19 @@ describe('character-creation (issue #719)', () => {
     it('keeps non-minimal API creates active for backward compatibility', () => {
       expect(resolveCharacterCreateStatus({ name: 'Hero', hpMax: 20 } as never, Dnd5eAdapter)).toBe('active');
     });
+
+    it('derives dead lifecycle status when deathState is dead and status is omitted (issue #1757)', () => {
+      expect(resolveCharacterCreateStatus({ name: 'Fallen', hpMax: 20, deathState: 'dead' } as never, Dnd5eAdapter)).toBe(
+        'dead',
+      );
+      expect(resolveCharacterCreateStatus({ name: 'Ghost', deathState: 'dead' } as never, Dnd5eAdapter)).toBe('dead');
+    });
+
+    it('preserves explicit status even when deathState is dead (issue #1757)', () => {
+      expect(
+        resolveCharacterCreateStatus({ name: 'Fallen', hpMax: 20, deathState: 'dead', status: 'active' } as never, Dnd5eAdapter),
+      ).toBe('active');
+    });
   });
 
   describe('starterTemplatesForAdapter', () => {
