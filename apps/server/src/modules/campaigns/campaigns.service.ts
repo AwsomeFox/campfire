@@ -616,7 +616,8 @@ export class CampaignsService {
     const { mapAlignment, ...campaignInput } = input;
     const mapAttachmentIdChanging =
       campaignInput.mapAttachmentId !== undefined && campaignInput.mapAttachmentId !== existing.mapAttachmentId;
-    const shouldResetPins = mapAttachmentIdChanging && mapAlignment === 'reset';
+    const shouldResetPins =
+      mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.

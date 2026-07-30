@@ -470,5 +470,70 @@ describe('map replacement lifecycle (issue #870)', () => {
       expect(token[0]?.tokenX).toBeNull();
       expect(token[0]?.tokenY).toBeNull();
     });
+
+    it('resets tokens, grid, fog, and AoE when mapAlignment is reset on the same attachment', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const mapA = await uploadMap(server, 'enc-f.png');
+
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Battle D', hidden: false });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id;
+
+      const [combatant] = await db
+        .insert(combatants)
+        .values({
+          encounterId,
+          kind: 'monster',
+          name: 'Goblin',
+          initiative: 10,
+          hpCurrent: 10,
+          hpMax: 10,
+          tokenX: 30,
+          tokenY: 40,
+          tokenSize: 'medium',
+          conditions: '[]',
+        })
+        .returning();
+
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({
+          mapAttachmentId: mapA,
+          gridSize: 5,
+          gridScale: 5,
+          gridUnit: 'ft',
+          gridOffsetX: 1,
+          gridOffsetY: 2,
+          fog: { enabled: true, revealed: [{ x: 10, y: 10, w: 10, h: 10 }] },
+          aoe: [{ id: 't1', shape: 'circle', x: 50, y: 50, sizeFt: 5, angleDeg: 0, color: '#fff' }],
+        })
+        .expect(200);
+
+      // Reset the same attachment — the attachment id does not change, but
+      // overlays should still be cleared.
+      const replace = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ mapAttachmentId: mapA, mapAlignment: 'reset' });
+      expect(replace.status).toBe(200);
+
+      const row = await db.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1);
+      expect(row[0]?.mapAttachmentId).toBe(mapA);
+      expect(row[0]?.gridSize).toBeNull();
+      expect(row[0]?.gridScale).toBeNull();
+      expect(row[0]?.gridOffsetX).toBe(0);
+      expect(row[0]?.gridOffsetY).toBe(0);
+      expect(row[0]?.fog).toBe('{"enabled":true,"revealed":[]}');
+      expect(row[0]?.aoe).toBe('[]');
+
+      const token = await db.select().from(combatants).where(eq(combatants.id, combatant.id)).limit(1);
+      expect(token[0]?.tokenX).toBeNull();
+      expect(token[0]?.tokenY).toBeNull();
+    });
   });
 });

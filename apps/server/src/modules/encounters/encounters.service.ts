@@ -1627,6 +1627,9 @@ export class EncountersService {
       input.mapAttachmentId !== undefined && input.mapAttachmentId !== encounterRow.mapAttachmentId;
     const previousFog = parseFog(encounterRow.fog);
     const resetFog = previousFog?.enabled ? { enabled: true, revealed: [] } : null;
+    const resetApplied =
+      input.mapAlignment === 'reset' && (encounterRow.mapAttachmentId != null || input.mapAttachmentId != null);
+
     if (input.mapAttachmentId !== undefined) {
       // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
       // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
@@ -1635,33 +1638,47 @@ export class EncountersService {
       if (mapAttachmentIdChanging) {
         set.mapAttachmentId = input.mapAttachmentId;
         changedPredicates.push(sql`${encounters.mapAttachmentId} IS NOT ${input.mapAttachmentId}`);
-
-        // Issue #870: when the image changes, optionally clear every piece of dependent
-        // spatial state in the same transaction so old tokens/grid/fog/AoE don't reappear.
-        if (input.mapAlignment === 'reset') {
-          set.gridSize = null;
-          set.gridScale = null;
-          set.gridUnit = null;
-          set.gridSnap = false;
-          set.gridType = 'square';
-          set.hexOrientation = 'pointy';
-          set.gridOffsetX = 0;
-          set.gridOffsetY = 0;
-          set.gridCellHeight = null;
-          set.gridRotation = 0;
-          set.gridOpacity = 0.35;
-          // Fog is intentionally *not* disabled; `null` means "never configured" (fully visible).
-          // Reset clears the revealed mask while keeping fog enabled, so the new map stays hidden.
-          set.fog = resetFog ? toJsonText(resetFog) : null;
-          set.aoe = toJsonText([]);
-        }
       }
+    }
+
+    // Issue #870: when the map is being reset (with or without changing attachment id),
+    // clear every piece of dependent spatial state in the same transaction so old
+    // tokens/grid/fog/AoE don't reappear on the new (or re-selected) image.
+    if (resetApplied) {
+      set.gridSize = null;
+      set.gridScale = null;
+      set.gridUnit = null;
+      set.gridSnap = false;
+      set.gridType = 'square';
+      set.hexOrientation = 'pointy';
+      set.gridOffsetX = 0;
+      set.gridOffsetY = 0;
+      set.gridCellHeight = null;
+      set.gridRotation = 0;
+      set.gridOpacity = 0.35;
+      // Fog is intentionally *not* disabled; `null` means "never configured" (fully visible).
+      // Reset clears the revealed mask while keeping fog enabled, so the new map stays hidden.
+      set.fog = resetFog ? toJsonText(resetFog) : null;
+      set.aoe = toJsonText([]);
+
+      if (set.gridSize !== encounterRow.gridSize) changedPredicates.push(sql`${encounters.gridSize} IS NOT ${set.gridSize}`);
+      if (set.gridScale !== encounterRow.gridScale) changedPredicates.push(sql`${encounters.gridScale} IS NOT ${set.gridScale}`);
+      if (set.gridUnit !== encounterRow.gridUnit) changedPredicates.push(sql`${encounters.gridUnit} IS NOT ${set.gridUnit}`);
+      if (set.gridSnap !== encounterRow.gridSnap) changedPredicates.push(sql`${encounters.gridSnap} IS NOT ${set.gridSnap ? 1 : 0}`);
+      if (set.gridType !== (encounterRow.gridType ?? 'square')) changedPredicates.push(sql`${encounters.gridType} IS NOT ${set.gridType}`);
+      if (set.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${set.hexOrientation}`);
+      if (set.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${set.gridOffsetX}`);
+      if (set.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${set.gridOffsetY}`);
+      if (set.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${set.gridCellHeight}`);
+      if (set.gridRotation !== (encounterRow.gridRotation ?? 0)) changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${set.gridRotation}`);
+      if (set.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${set.gridOpacity}`);
+      if (!isDeepStrictEqual(set.fog, encounterRow.fog)) changedPredicates.push(sql`${encounters.fog} IS NOT ${set.fog}`);
+      if (!isDeepStrictEqual(set.aoe, encounterRow.aoe)) changedPredicates.push(sql`${encounters.aoe} IS NOT ${set.aoe}`);
     }
 
     // When the map is being reset, the per-field grid/fog/AoE guards below must compare
     // against the reset defaults (not the old row), otherwise explicit inputs equal to the
     // old values are skipped and the reset null/default survives into the UPDATE.
-    const resetApplied = mapAttachmentIdChanging && input.mapAlignment === 'reset';
     const baseline = resetApplied
       ? {
           ...encounterRow,
@@ -1757,10 +1774,7 @@ export class EncountersService {
     // The null-safe predicates make the semantic no-op check atomic. Two clients may both
     // observe missing defaults, but after the first write the second UPDATE changes zero rows
     // and therefore produces no duplicate audit entry or SSE invalidation (#865).
-    const shouldResetTokens =
-      input.mapAttachmentId !== undefined &&
-      input.mapAttachmentId !== encounterRow.mapAttachmentId &&
-      input.mapAlignment === 'reset';
+    const shouldResetTokens = resetApplied;
 
     // Issue #870: run the encounter update and (when resetting) token clearing inside
     // one SQLite transaction so a map swap cannot commit without its dependent state.
