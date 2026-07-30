@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
-import type { Character } from '@campfire/schema';
-import { safeCharacter, safeParty } from '../../src/features/screen/playerSafe';
+import type { PartyCharacter } from '@campfire/schema';
+import { safeParty } from '../../src/features/screen/playerSafe';
 
 /**
  * Issue #824 — Player Display Party filters inactive/retired/dead PCs by default,
@@ -8,42 +8,16 @@ import { safeCharacter, safeParty } from '../../src/features/screen/playerSafe';
  * can be labeled when the producer opts them back in.
  */
 
-function pc(partial: Partial<Character> & Pick<Character, 'id' | 'name' | 'status'>): Character {
+function pc(partial: Partial<PartyCharacter> & Pick<PartyCharacter, 'id' | 'name' | 'status'>): PartyCharacter {
   return {
-    campaignId: 1,
-    ownerUserId: null,
     species: '',
     className: 'Fighter',
     level: 3,
-    xp: 0,
-    background: '',
-    stats: {},
     ac: 15,
-    eac: null,
-    kac: null,
-    spCurrent: 0,
-    spMax: 0,
-    rpCurrent: 0,
-    rpMax: 0,
     hpCurrent: 20,
     hpMax: 20,
-    hpTemp: 0,
-    deathState: 'none',
-    deathSaveSuccesses: 0,
-    deathSaveFailures: 0,
     conditions: [],
-    conditionInstances: [],
-    saveProficiencies: [],
-    skills: {},
-    actions: [],
-    spellSlots: {},
-    resources: {},
     portraitUrl: null,
-    ddbId: null,
-    notes: '',
-    dmSecret: 'never leak',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
   };
 }
@@ -63,8 +37,8 @@ test.describe('safeParty — Player Display party filter (issue #824)', () => {
     expect(party.every((c) => c.status === 'active')).toBe(true);
   });
 
-  test('preserves status on the player-safe projection (alumni labels need it)', () => {
-    const projected = safeCharacter(roster[2]!);
+  test('preserves status on the server-produced roster (alumni labels need it)', () => {
+    const projected = safeParty([roster[2]!], { includeAlumni: true })[0]!;
     expect(projected.status).toBe('dead');
     expect(projected).not.toHaveProperty('dmSecret');
     expect(projected).not.toHaveProperty('notes');

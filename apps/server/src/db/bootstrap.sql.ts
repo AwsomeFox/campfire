@@ -1287,6 +1287,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
+  turn_version INTEGER NOT NULL DEFAULT 0,
   escalation_die INTEGER NOT NULL DEFAULT 0,
   escalation_die_held INTEGER NOT NULL DEFAULT 0,
   escalation_die_override INTEGER,
@@ -2234,6 +2235,8 @@ CREATE TABLE IF NOT EXISTS action_pending_resolutions (
   id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
   action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+  turn_round INTEGER NOT NULL DEFAULT 0,
+  turn_version INTEGER NOT NULL DEFAULT -1,
   resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);

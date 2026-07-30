@@ -230,7 +230,7 @@ export class InboxSweepService {
     const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
     const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
 
-    const summary = await this.campaigns.summary(campaignId, 'dm');
+    const summary = await this.campaigns.summary(campaignId, user, role);
     const context: InboxSweepContext = {
       campaignId,
       quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),

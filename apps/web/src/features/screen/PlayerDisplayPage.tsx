@@ -30,6 +30,7 @@ import type {
   EncounterWithCombatants,
   HpBand,
   MapPing,
+  PartyCharacter,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -58,7 +59,6 @@ import {
   safeNpcs,
   safeParty,
   safeQuests,
-  type SafeCharacter,
   type SafeCombatant,
   type SafeNpc,
   type SafeQuest,
@@ -424,7 +424,7 @@ export default function PlayerDisplayPage() {
     // During a live fight, prefer PCs seated as combatants over the full active
     // roster (issue #824); monster-only fights fall back to active-only.
     const participatingCharacterIds = participatingIdsFromEncounter(encounter);
-    const party = safeParty(summary.characters, { includeAlumni, participatingCharacterIds });
+    const party = safeParty(summary.party, { includeAlumni, participatingCharacterIds });
     const quests = safeQuests(summary.quests);
     const npcs = safeNpcs(summary.npcs);
     const combatants = encounter ? safeCombatants(encounter.combatants) : [];
@@ -1329,7 +1329,7 @@ function PartyScene({
   includeAlumni,
   tick,
 }: {
-  party: SafeCharacter[];
+  party: PartyCharacter[];
   includeAlumni: boolean;
   tick: number;
 }) {

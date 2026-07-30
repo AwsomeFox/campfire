@@ -1462,6 +1462,9 @@ export const encounters = sqliteTable('encounters', {
   name: text('name').notNull(),
   status: text('status').notNull().default('preparing'),
   round: integer('round').notNull().default(0),
+  // Internal monotonic token for a logical turn. Unlike round/index it also changes
+  // when a DM undoes back to the same combatant, invalidating banked player previews.
+  turnVersion: integer('turn_version').notNull().default(0),
   escalationDie: integer('escalation_die').notNull().default(0),
   escalationDieHeld: integer('escalation_die_held', { mode: 'boolean' }).notNull().default(false),
   escalationDieOverride: integer('escalation_die_override'),
@@ -2209,6 +2212,12 @@ export const actionPendingResolutions = sqliteTable('action_pending_resolutions'
   actionIndex: integer('action_index'),
   actionFingerprint: text('action_fingerprint'),
   awaitingConfirmation: integer('awaiting_confirmation', { mode: 'boolean' }).notNull().default(false),
+  // Player-owned previews are bound to the server's current encounter round. This lives only
+  // in the pending row: clients submit the opaque chain id, never turn metadata they could forge.
+  turnRound: integer('turn_round').notNull().default(0),
+  // Bound at resolve time with the opaque chain. Legacy previews use -1 and fail
+  // closed for players after the 0146 upgrade.
+  turnVersion: integer('turn_version').notNull().default(-1),
   // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
   // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
   resolutionJson: text('resolution_json').notNull().default('{}'),

@@ -5,6 +5,7 @@ import type { z } from 'zod';
 import {
   CharacterCreate,
   CharacterUpdate,
+  PartyCharacter,
   HpPatch,
   ConditionsPatch,
   SpellSlotPatch,
@@ -233,9 +234,46 @@ export class CharactersService {
     this.events.emit({ type: 'character.updated', campaignId, characterId, userId });
   }
 
-  async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
-    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+  /**
+   * List only sheets the caller may read in full. Character sheets include private
+   * mechanical state (actions, resources, and slots), so non-DMs receive their own
+   * sheets only; UI filtering is not an authorization boundary.
+   */
+  async listForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<Character[]> {
+    const rows = await this.db
+      .select()
+      .from(characters)
+      .where(
+        role === 'dm'
+          ? and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt))
+          : and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, user.id), notDeleted(characters.deletedAt)),
+      );
     return redactSecrets(rows.map(toDomain), role);
+  }
+
+  /**
+   * Return the table-safe roster used by campaign aggregates and cast displays.
+   * This query is intentionally an explicit column allowlist rather than a redacted
+   * `Character` row: it never loads private sheet mechanics or DM-only material.
+   */
+  async partyRosterForCampaign(campaignId: number): Promise<PartyCharacter[]> {
+    const rows = await this.db
+      .select({
+        id: characters.id,
+        name: characters.name,
+        species: characters.species,
+        className: characters.className,
+        level: characters.level,
+        status: characters.status,
+        ac: characters.ac,
+        hpCurrent: characters.hpCurrent,
+        hpMax: characters.hpMax,
+        conditions: characters.conditions,
+        portraitUrl: characters.portraitUrl,
+      })
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+    return rows.map((row) => PartyCharacter.parse({ ...row, conditions: fromJsonText<string[]>(row.conditions, []) }));
   }
 
   /**
@@ -271,9 +309,29 @@ export class CharactersService {
     return row;
   }
 
-  async getOrThrow(id: number, role: Role): Promise<Character> {
+  async getOrThrow(id: number, user: RequestUser, role: Role): Promise<Character> {
     const row = await this.getRowOrThrow(id);
+    if (role !== 'dm' && row.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only view your own character sheet.');
+    }
     return redactSecret(toDomain(row), role);
+  }
+
+  /**
+   * Resolve the shared full-sheet read boundary for derived sheet data. Roll catalogs
+   * and resource vocabularies expose private stats/mechanics, so membership alone is
+   * insufficient even when the caller learned an id from the safe party roster.
+   */
+  async assertCharacterReadable(
+    characterId: number,
+    user: RequestUser,
+  ): Promise<{ row: typeof characters.$inferSelect; role: Role }> {
+    const row = await this.getRowOrThrow(characterId);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (role !== 'dm' && row.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only view your own character sheet.');
+    }
+    return { row, role };
   }
 
   /** dm or owner may write; others 403 */
@@ -325,8 +383,8 @@ export class CharactersService {
    * Issue #415: the roll catalog for a character — every rollable check (ability checks,
    * skills incl. unproficient, saves, initiative) with an authoritative modifier and a
    * transparent breakdown, sourced from the campaign's RuleSystemAdapter. Favorites first.
-   * The catalog reads only public sheet numbers (level/stats/saves/skills), so no dmSecret
-   * redaction is needed — it never touches the secret field.
+   * The catalog derives authoritative private sheet mechanics (level/stats/saves/skills),
+   * so callers must pass {@link assertCharacterReadable} before reaching this method.
    */
   async listChecks(id: number): Promise<RollCheckDefinition[]> {
     const row = await this.getRowOrThrow(id);

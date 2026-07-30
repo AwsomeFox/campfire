@@ -817,7 +817,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        return this.campaigns.summary(campaignId as number, role);
+        return this.campaigns.summary(campaignId as number, user, role);
       },
     );
 
@@ -984,23 +984,23 @@ export class McpToolsService {
     this.tool(
       server,
       'get_character',
-      'Get a character sheet by id. Ids come from get_party or get_campaign_summary.',
+      'Get a character sheet by id. DMs may read any party sheet; other members may read only sheets they own. Ids come from get_party or get_campaign_summary.',
       { characterId: Id.describe('Character id') },
       async ({ characterId }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireMember(user, row.campaignId);
-        return this.characters.getOrThrow(characterId as number, role);
+        return this.characters.getOrThrow(characterId as number, user, role);
       },
     );
 
     this.tool(
       server,
       'get_party',
-      'List all characters (the party) in a campaign.',
+      'List visible character sheets: the DM receives the party, while other members receive only sheets they own.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        return this.characters.listForCampaign(campaignId as number, role);
+        return this.characters.listForCampaign(campaignId as number, user, role);
       },
     );
 
@@ -2959,8 +2959,7 @@ export class McpToolsService {
         'this list to create a homebrew resource, so this is for DISCOVERING the adapter-declared ones, not gating them.',
       { characterId: Id.describe('Character id — from list_members, get_party, or list_characters') },
       async ({ characterId }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        await this.access.requireMember(user, character.campaignId);
+        await this.characters.assertCharacterReadable(characterId as number, user);
         return this.characters.listResourceVocabulary(characterId as number);
       },
     );
@@ -3954,8 +3953,7 @@ export class McpToolsService {
         characterId: Id.describe('Character id — from list_members, get_party, or list_characters'),
       },
       async ({ characterId }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        await this.access.requireMember(user, character.campaignId);
+        await this.characters.assertCharacterReadable(characterId as number, user);
         return this.characters.listChecks(characterId as number);
       },
     );
@@ -4487,7 +4485,7 @@ export class McpToolsService {
         'compare vs AC / DC, classify the outcome (5e hit/miss/crit or PF2e degrees), and return a per-target PREVIEW ' +
         'with player-safe text separated from DM-only mechanics. Identify the action by actionName/actionIndex on the ' +
         'actor\'s sheet (see list_usable_actions) OR pass an inline `spec` for a monster / ad-hoc action. A player may ' +
-        'resolve only their OWN character\'s action (a monster/NPC action is DM-only) but may target anyone — so a ' +
+        'resolve only their OWN active character\'s action (a monster/NPC action is DM-only) but may target anyone — so a ' +
         'player can finish an attack against a monster end-to-end. Pass commit:true to apply atomically in the same ' +
         'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
         'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
@@ -4511,7 +4509,7 @@ export class McpToolsService {
       'Apply a resolved action chain (issue #414 confirm path): pass the `chainId` returned by resolve_action — a ' +
         'LOOKUP KEY only (issue #1451). The server re-reads the exact resolution it computed and persisted at resolve ' +
         'time, so a caller cannot inflate damage, alter a per-target delta, or inject a condition/effect never in the ' +
-        'resolved spec. The DM may apply any resolution; a player only their own character\'s action under an ' +
+        'resolved spec. The DM may apply any resolution; a player only their own active character\'s action under an ' +
         'automatic policy. Returns an undo token that reverses the whole apply. Under collaborative handoff this call ' +
         'may be queued for DM confirmation; the confirmation prompt describes it from the server\'s own persisted ' +
         'resolution, never from anything this call passes.',
@@ -5273,17 +5271,17 @@ export class McpToolsService {
       },
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
-        return this.campaigns.summary(campaignId, role);
+        return this.campaigns.summary(campaignId, user, role);
       },
     );
 
     perCampaign(
       'campaign-party',
       'party',
-      { title: 'Party', description: 'Every character (the party) in a campaign — the resource form of get_party.' },
+      { title: 'Party', description: 'Character sheets visible to the caller — the resource form of get_party.' },
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
-        return this.characters.listForCampaign(campaignId, role);
+        return this.characters.listForCampaign(campaignId, user, role);
       },
     );
 

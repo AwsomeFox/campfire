@@ -18,41 +18,16 @@ import { CREDS } from '../global-setup';
  * their OWN character therefore failed outright whenever a monster held the turn —
  * about half of all runs, which got written off as flakiness.
  *
- * Both turn orders are now pinned explicitly and asserted separately, so the case that
- * used to fail runs on every CI run instead of every other one.
+ * The player-owned turn is pinned explicitly so this spec exercises the allowed action.
  */
 
-/** Explicit initiatives plus the exact combat-log phrasing each turn order must produce. */
-const TURN_ORDERS = [
-  {
-    label: 'a monster holds the turn',
-    brixiInitiative: 4,
-    dummyInitiative: 20,
-    // Straw Dummy is the current-turn combatant and is NOT the target, so the server
-    // derives the attribution and renders "<actor> to <target>: <detail>". This is the
-    // combination that used to 403: the old client sent `actorId` here. The player now
-    // omits it and the server derives the identical actor from the current turn.
-    expected: /Straw Dummy to Brixi Applybar: took \d+ damage/i,
-    // The unattributed phrasing would mean the current-turn fallback didn't happen.
-    // (It cannot false-match the attributed line above, which has a colon after the name.)
-    forbidden: /Brixi Applybar took \d+ damage/i,
-  },
-  {
-    label: 'the player’s own character holds the turn',
-    brixiInitiative: 20,
-    dummyInitiative: 4,
-    // Brixi is both the current-turn combatant and the target, so attribution collapses
-    // to the established target-only phrasing "<target> <detail>" (issue #620). This is
-    // the half that always passed — kept as the regression guard.
-    expected: /Brixi Applybar took \d+ damage/i,
-    forbidden: /Straw Dummy to Brixi Applybar/i,
-  },
-] as const;
+const OWN_TURN = { brixi: 20, dummy: 4 } as const;
 
 interface Drill {
   encounterId: number;
   brixiCombatantId: number;
   characterId: number;
+  otherCharacterId: number | null;
 }
 
 /**
@@ -64,6 +39,7 @@ async function startDrill(
   campaignId: number | string,
   playerUserId: string,
   initiative: { brixi: number; dummy: number },
+  options: { otherCharacterOwnerUserId?: string } = {},
 ): Promise<Drill> {
   // A player-owned character with a 2d6+4 attack — always rolls >= 6, so a damage
   // total is always positive and the apply bar always appears.
@@ -86,6 +62,25 @@ async function startDrill(
   ).json();
   expect(character.id).toBeTruthy();
   const characterId = character.id as number;
+  let otherCharacterId: number | null = null;
+  if (options.otherCharacterOwnerUserId) {
+    const otherCharacter = await (
+      await dm.post(`/api/v1/campaigns/${campaignId}/characters`, {
+        data: {
+          name: 'Rival Sheet',
+          className: 'Rogue',
+          level: 5,
+          ownerUserId: options.otherCharacterOwnerUserId,
+          ac: 15,
+          hpCurrent: 32,
+          hpMax: 32,
+          stats: { DEX: 18 },
+          actions: [{ name: 'Rival Rapier', kind: 'melee', toHit: '+7', damage: '1d8+4 piercing', notes: '' }],
+        },
+      })
+    ).json();
+    otherCharacterId = otherCharacter.id as number;
+  }
 
   // A fresh encounter auto-adds the active character; add a monster the player can't edit.
   // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
@@ -148,7 +143,7 @@ async function startDrill(
   const expectedCurrent = initiative.brixi > initiative.dummy ? brixiCombatantId : dummyCombatantId;
   expect(started.currentCombatantId, 'the pinned initiative must decide the current turn').toBe(expectedCurrent);
 
-  return { encounterId, brixiCombatantId, characterId };
+  return { encounterId, brixiCombatantId, characterId, otherCharacterId };
 }
 
 async function teardownDrill(dm: APIRequestContext, drill: Drill | null): Promise<void> {
@@ -158,6 +153,7 @@ async function teardownDrill(dm: APIRequestContext, drill: Drill | null): Promis
     await dm.post(`/api/v1/encounters/${drill.encounterId}/end`).catch(() => undefined);
     await dm.delete(`/api/v1/encounters/${drill.encounterId}`).catch(() => undefined);
     await dm.delete(`/api/v1/characters/${drill.characterId}`).catch(() => undefined);
+    if (drill.otherCharacterId != null) await dm.delete(`/api/v1/characters/${drill.otherCharacterId}`).catch(() => undefined);
   }
   // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
   // start; restore it so the combat-tracker suite finds it RUNNING again.
@@ -167,8 +163,7 @@ async function teardownDrill(dm: APIRequestContext, drill: Drill | null): Promis
 test.describe('encounter dice — apply rolled damage', () => {
   test.use({ storageState: stateFor('player') });
 
-  for (const order of TURN_ORDERS) {
-    test(`a player rolls damage from their card and one-taps it onto an editable target — ${order.label}`, async ({ page }) => {
+  test('a player rolls damage from their card and one-taps it onto an editable target on their turn', async ({ page }) => {
       const { baseURL, campaignId } = seed();
 
       const playerCtx = await request.newContext({ baseURL });
@@ -180,10 +175,7 @@ test.describe('encounter dice — apply rolled damage', () => {
         const playerUserId = String(me.user.id);
 
         await dm.post('/api/v1/auth/login', { data: CREDS.dm });
-        drill = await startDrill(dm, campaignId, playerUserId, {
-          brixi: order.brixiInitiative,
-          dummy: order.dummyInitiative,
-        });
+        drill = await startDrill(dm, campaignId, playerUserId, OWN_TURN);
 
         await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
         await expect(page.getByText('Running', { exact: true })).toBeVisible();
@@ -210,9 +202,7 @@ test.describe('encounter dice — apply rolled damage', () => {
         await brixiTarget.click();
         await expect(applyBar).toHaveCount(0);
 
-        // The write must SUCCEED. Before #1478 the monster-holds-the-turn case 403'd here
-        // and the apply bar still dismissed, so the only visible difference was a log line
-        // that never arrived. Assert no error banner as well as the log entry, so a
+        // The write must SUCCEED. Assert no error banner as well as the log entry, so a
         // regression shows up as a failure with a readable cause instead of a timeout.
         // Target the error banner specifically. `getByRole('alert')` would also match the
         // app's other live regions — the empty announcement region on every page, and the
@@ -223,21 +213,72 @@ test.describe('encounter dice — apply rolled damage', () => {
         const combatLog = page.getByRole('log', { name: 'Combat log' });
         await expect(combatLog).toBeVisible();
         await expect
-          .poll(async () => order.expected.test((await combatLog.textContent()) ?? ''), {
-            message: `combat log should contain ${order.expected}`,
+          .poll(async () => /Brixi Applybar took \d+ damage/i.test((await combatLog.textContent()) ?? ''), {
+            message: 'combat log should contain Brixi damage',
           })
           .toBe(true);
-        // Assert the OTHER turn order's phrasing is absent, so neither case can quietly
-        // satisfy the other's assertion the way the old "accept either form" check did.
-        expect(order.forbidden.test((await combatLog.textContent()) ?? '')).toBe(false);
       } finally {
         await teardownDrill(dm, drill);
         // Dispose the API contexts so they don't leak across the worker.
         await playerCtx.dispose();
         await dm.dispose();
       }
-    });
-  }
+  });
+
+  test('players see only their own sheet and cannot roll before their turn, while the DM can', async ({ page, browser }) => {
+    const { baseURL, campaignId } = seed();
+    const playerCtx = await request.newContext({ baseURL });
+    const dm = await request.newContext({ baseURL });
+    const dmBrowserContext = await browser.newContext({ storageState: stateFor('dm') });
+    const dmPage = await dmBrowserContext.newPage();
+    let drill: Drill | null = null;
+    try {
+      await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+      const playerMe = await (await playerCtx.get('/api/v1/me')).json();
+      await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+      const dmMe = await (await dm.get('/api/v1/me')).json();
+      drill = await startDrill(
+        dm,
+        campaignId,
+        String(playerMe.user.id),
+        { brixi: 4, dummy: 20 },
+        { otherCharacterOwnerUserId: String(dmMe.user.id) },
+      );
+
+      await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toHaveCount(0);
+
+      await page.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
+      const playerBrixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
+      await expect(playerBrixiCard).toBeVisible();
+      await expect(playerBrixiCard.getByTestId('check-roll-ability:STR')).toHaveCount(0);
+      await expect(playerBrixiCard.getByTestId('attack-roll-control')).toHaveCount(0);
+
+      await dmPage.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await expect(dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" })).toBeVisible();
+      await expect(dmPage.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toBeVisible();
+      await dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
+      const dmBrixiCard = dmPage.getByRole('region', { name: /Brixi Applybar character sheet/i });
+      await expect(dmBrixiCard.getByTestId('attack-roll-control')).toBeVisible();
+      await dmBrixiCard.getByTestId('attack-roll-control').click();
+      await expect(dmPage.getByTestId('roll-result-toast')).toBeVisible();
+
+      await page.getByRole('button', { name: "Collapse Brixi Applybar's character sheet" }).click();
+      await expect(playerBrixiCard).toHaveCount(0);
+
+      const advanceRes = await dm.post(`/api/v1/encounters/${drill.encounterId}/next-turn`);
+      expect(advanceRes.ok(), `advance to Brixi: ${await advanceRes.text()}`).toBeTruthy();
+      await expect(page.getByTestId(`combatant-row-${drill.brixiCombatantId}`)).toHaveAttribute('data-current-turn', 'true');
+      await expect(playerBrixiCard.getByTestId('check-roll-ability:STR')).toBeVisible();
+      await expect(playerBrixiCard.getByTestId('attack-roll-control')).toBeVisible();
+    } finally {
+      await teardownDrill(dm, drill);
+      await dmBrowserContext.close();
+      await playerCtx.dispose();
+      await dm.dispose();
+    }
+  });
 
   /**
    * Issue #1478: a failed apply must be VISIBLE. The apply bar dismisses on click
@@ -262,7 +303,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       const playerUserId = String(me.user.id);
 
       await dm.post('/api/v1/auth/login', { data: CREDS.dm });
-      drill = await startDrill(dm, campaignId, playerUserId, { brixi: 4, dummy: 20 });
+      drill = await startDrill(dm, campaignId, playerUserId, OWN_TURN);
 
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();

@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Character, InventoryItem, Treasury } from '@campfire/schema';
+import type { Character, InventoryItem, PartyCharacter, Treasury } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -45,7 +45,10 @@ export default function InventoryPage() {
   const [trashItems, setTrashItems] = useState<InventoryItem[] | null>(null);
   const [showTrash, setShowTrash] = useState(false);
   const [treasury, setTreasury] = useState<Treasury | null>(null);
-  const [characters, setCharacters] = useState<Character[]>([]);
+  // Keep full sheets only for ownership/write decisions. Display groups use the
+  // table-safe roster so a player's view still names every character's pack.
+  const [fullCharacters, setFullCharacters] = useState<Character[]>([]);
+  const [party, setParty] = useState<PartyCharacter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(() => searchParams.get('action') === 'add-item');
@@ -77,14 +80,16 @@ export default function InventoryPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [itemList, coins, chars] = await Promise.all([
+      const [itemList, coins, chars, roster] = await Promise.all([
         api.get<InventoryItem[]>(`${API}/campaigns/${id}/inventory`),
         api.get<Treasury>(`${API}/campaigns/${id}/treasury`),
         api.get<Character[]>(`${API}/campaigns/${id}/characters`),
+        api.get<PartyCharacter[]>(`${API}/campaigns/${id}/characters/roster`),
       ]);
       setItems(itemList);
       setTreasury(coins);
-      setCharacters(chars);
+      setFullCharacters(chars);
+      setParty(roster);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     } finally {
@@ -143,10 +148,10 @@ export default function InventoryPage() {
   const ownsCharacter = useCallback(
     (characterId: number | null) => {
       if (characterId == null || myUserId == null) return false;
-      const c = characters.find((ch) => ch.id === characterId);
+      const c = fullCharacters.find((ch) => ch.id === characterId);
       return c?.ownerUserId === myUserId;
     },
-    [characters, myUserId],
+    [fullCharacters, myUserId],
   );
 
   const canEditItem = useCallback(
@@ -161,22 +166,22 @@ export default function InventoryPage() {
   // Move/add destinations this user may write to: the party stash, plus every
   // character for the dm, or only the player's own character(s).
   const writableOwners = useMemo(() => {
-    const chars = isDm ? characters : characters.filter((c) => myUserId != null && c.ownerUserId === myUserId);
+    const chars = isDm ? fullCharacters : fullCharacters.filter((c) => myUserId != null && c.ownerUserId === myUserId);
     return chars;
-  }, [characters, isDm, myUserId]);
+  }, [fullCharacters, isDm, myUserId]);
 
   const partyItems = items.filter((i) => i.ownerType === 'party');
   const characterGroups = useMemo(() => {
-    const groups: { character: Character | null; label: string; items: InventoryItem[] }[] = [];
-    for (const c of characters) {
+    const groups: { character: PartyCharacter | null; label: string; items: InventoryItem[] }[] = [];
+    for (const c of party) {
       const owned = items.filter((i) => i.ownerType === 'character' && i.characterId === c.id);
       if (owned.length > 0) groups.push({ character: c, label: c.name, items: owned });
     }
-    const knownIds = new Set(characters.map((c) => c.id));
+    const knownIds = new Set(party.map((c) => c.id));
     const orphans = items.filter((i) => i.ownerType === 'character' && (i.characterId == null || !knownIds.has(i.characterId)));
     if (orphans.length > 0) groups.push({ character: null, label: t('inventory.unassigned'), items: orphans });
     return groups;
-  }, [items, characters]);
+  }, [items, party, t]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -242,7 +247,7 @@ export default function InventoryPage() {
                 title={t('inventory.partyStash')}
                 icon="backpack"
                 items={partyItems}
-                characters={characters}
+                characters={party}
                 writableOwners={writableOwners}
                 canEditItem={canEditItem}
                 onChanged={load}
@@ -254,7 +259,7 @@ export default function InventoryPage() {
                   title={group.label}
                   icon="elf-helmet"
                   items={group.items}
-                  characters={characters}
+                  characters={party}
                   writableOwners={writableOwners}
                   canEditItem={canEditItem}
                   onChanged={load}
@@ -282,7 +287,7 @@ export default function InventoryPage() {
           {showTrash && (
             <TrashSection
               items={trashItems}
-              characters={characters}
+              characters={party}
               onChanged={() => {
                 void load();
                 void loadTrash();
@@ -641,7 +646,7 @@ function TrashSection({
   onChanged,
 }: {
   items: InventoryItem[] | null;
-  characters: Character[];
+  characters: Pick<PartyCharacter, 'id' | 'name'>[];
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
@@ -680,7 +685,7 @@ function TrashedItemRow({
   onChanged,
 }: {
   item: InventoryItem;
-  characters: Character[];
+  characters: Pick<PartyCharacter, 'id' | 'name'>[];
   onChanged: () => void;
 }) {
   const { t } = useTranslation();

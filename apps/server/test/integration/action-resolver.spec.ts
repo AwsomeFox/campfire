@@ -678,6 +678,116 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [] }), bob, 'player')).toThrow(/own character/i);
   });
 
+  it('a player may resolve or apply only on their active turn, while the DM may override', async () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    const request = ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false });
+
+    // A direct resolve after the turn advances is refused even though Alice still owns the actor.
+    orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+    expect(() => service.resolve(encounterId, request, alice, 'player')).toThrow(/active turn/i);
+
+    // A preview opened on Alice's turn cannot be applied after the turn advances.
+    orm.update(encounters).set({ currentCombatantId: actor }).where(eq(encounters.id, encounterId)).run();
+    const preview = service.resolve(encounterId, request, alice, 'player');
+    orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+    expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/active turn/i);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rejected = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')))
+      .all();
+    expect(rejected.some((row) => JSON.parse(row.detail).reason === 'not_active_turn' && JSON.parse(row.detail).chainId === preview.chainId)).toBe(true);
+
+    // DM override remains available for the same stale resolution.
+    expect(service.apply(encounterId, { chainId: preview.chainId }, dmUser, 'dm').undoToken).toBeDefined();
+  });
+
+  it('keeps a player preview valid when initiative is re-sorted during that same turn', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    // Re-sorting initiative can change the positional index without changing the active
+    // combatant or round. A preview remains tied to this actor's current turn, not its index.
+    orm.update(encounters).set({ turnIndex: 1 }).where(eq(encounters.id, encounterId)).run();
+
+    expect(service.apply(encounterId, { chainId: preview.chainId }, alice, 'player').undoToken).toBeDefined();
+  });
+
+  it('rechecks a player turn inside the apply transaction before writing consequences or resources', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(
+      orm
+        .select({ turnRound: actionPendingResolutions.turnRound, turnVersion: actionPendingResolutions.turnVersion })
+        .from(actionPendingResolutions)
+        .where(eq(actionPendingResolutions.id, preview.chainId))
+        .get(),
+    ).toEqual({ turnRound: 1, turnVersion: 0 });
+    const internals = service as unknown as { applyInternal: (...args: unknown[]) => unknown };
+    const originalApplyInternal = internals.applyInternal;
+    internals.applyInternal = (...args) => {
+      // Model the DM advancing between apply's outer authorization and its write transaction.
+      orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+      return originalApplyInternal.apply(service, args);
+    };
+
+    try {
+      expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/active turn/i);
+    } finally {
+      internals.applyInternal = originalApplyInternal;
+    }
+
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}').used?.action ?? 0).toBe(0);
+    expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)).toEqual({ '3': { max: 2, used: 0 } });
+  });
+
+  it('rechecks a player preview round inside the apply transaction before writing consequences or resources', async () => {
+    const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const internals = service as unknown as { applyInternal: (...args: unknown[]) => unknown };
+    const originalApplyInternal = internals.applyInternal;
+    internals.applyInternal = (...args) => {
+      // Model every other combatant completing their turn before the write transaction starts.
+      orm.update(encounters).set({ currentCombatantId: actor, round: 2 }).where(eq(encounters.id, encounterId)).run();
+      return originalApplyInternal.apply(service, args);
+    };
+
+    try {
+      expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/previous turn/i);
+    } finally {
+      internals.applyInternal = originalApplyInternal;
+    }
+
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}').used?.action ?? 0).toBe(0);
+    expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)).toEqual({ '3': { max: 2, used: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rejected = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')))
+      .all();
+    expect(rejected.some((row) => JSON.parse(row.detail).reason === 'stale_preview_round' && JSON.parse(row.detail).chainId === preview.chainId)).toBe(true);
+  });
+
   it('the DM resolves a monster action against a player via an inline spec', () => {
     const { orm, service, encounterId, drake, bob: bobCombat } = seed();
     const res = service.resolve(

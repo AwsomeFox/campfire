@@ -263,6 +263,6 @@ export class CampaignsController {
   @ApiResponse({ status: 200, description: 'Aggregate campaign summary.' })
   async summary(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, id);
-    return this.campaigns.summary(id, role);
+    return this.campaigns.summary(id, user, role);
   }
 }

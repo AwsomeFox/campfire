@@ -182,6 +182,31 @@ describe('Issue #1479: roll_check / saving_throw MCP tools enforce dm-or-owner (
     });
   });
 
+  describe('sheet-derived read tools', () => {
+    it.each(['viewer', 'non-owner player'])('%s cannot list a teammate\'s checks or resource vocabulary', async (label) => {
+      // Tokens are minted in beforeAll, so resolve them inside the test rather than
+      // capturing undefined values while Jest registers this parameterized case.
+      const token = label === 'viewer' ? viewerToken : otherPlayerToken;
+      // MCP closes an unauthorized stream after the first tool error, so each denial
+      // uses its own authenticated transport to exercise both tool boundaries.
+      const checks = await (await mcpClient(token)).callTool({ name: 'list_checks', arguments: { characterId } });
+      const resources = await (await mcpClient(token)).callTool({ name: 'list_character_resources', arguments: { characterId } });
+      expect(checks.isError).toBe(true);
+      expect(resources.isError).toBe(true);
+    });
+
+    it('the owning player and dm retain access to their allowed sheet-derived reads', async () => {
+      const ownerClient = await mcpClient(ownerToken);
+      const dmClient = await mcpClient(dmToken);
+      const [checks, resources] = await Promise.all([
+        ownerClient.callTool({ name: 'list_checks', arguments: { characterId } }),
+        dmClient.callTool({ name: 'list_character_resources', arguments: { characterId } }),
+      ]);
+      expect(checks.isError).toBeFalsy();
+      expect(resources.isError).toBeFalsy();
+    });
+  });
+
   describe('saving_throw', () => {
     it('a viewer may not roll a save for a character — isError, nothing persisted', async () => {
       const before = await rollCount();

@@ -4340,6 +4340,7 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
       id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
       action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+      turn_round INTEGER NOT NULL DEFAULT 0,
       resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
@@ -4379,6 +4380,28 @@ function migrateActionPendingFingerprint1451(sqlite: Database.Database): void {
     // They are disposable previews/declarations, never applied state, so fail closed rather
     // than allowing the same-named replacement ambiguity this migration closes.
     sqlite.exec('DELETE FROM action_pending_resolutions WHERE action_fingerprint IS NULL');
+  }
+}
+
+/**
+ * Issue #1316: bind player action previews to the server's logical turn, not merely its round.
+ * `turn_version` advances on every pointer advance and undo, so returning to the same actor in
+ * the same round cannot revive a banked player preview. This tail migration evolves the
+ * unshipped 0146 migration as one coherent contract. Legacy pending rows receive -1 and fail
+ * closed for players while preserving the DM's existing declaration authority.
+ */
+function migrateActionPendingTurnVersion1316(sqlite: Database.Database): void {
+  const encounterColumns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (encounterColumns.length > 0 && !encounterColumns.some((column) => column.name === 'turn_version')) {
+    sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_version INTEGER NOT NULL DEFAULT 0');
+  }
+  const pendingColumns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
+  if (pendingColumns.length === 0) return;
+  if (!pendingColumns.some((column) => column.name === 'turn_round')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN turn_round INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!pendingColumns.some((column) => column.name === 'turn_version')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN turn_version INTEGER NOT NULL DEFAULT -1');
   }
 }
 
@@ -4675,6 +4698,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
   // safely acquire this later ALTER in place.
   { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
+  { name: '0146_action_pending_turn_version_1316', run: migrateActionPendingTurnVersion1316 },
 ];
 
 /**

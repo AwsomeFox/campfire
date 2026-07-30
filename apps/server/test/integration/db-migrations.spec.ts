@@ -389,6 +389,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
       expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
+      // Migrations run before bootstrap on an empty DATA_DIR, so new pending-resolution
+      // columns must be present in the bootstrap DDL as well as the upgrade migration.
+      expect(columnNames(sqlite, 'action_pending_resolutions')).toEqual(expect.arrayContaining(['turn_round', 'turn_version']));
+      expect(columnNames(sqlite, 'encounters')).toContain('turn_version');
       expect(
         sqlite
           .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attachments'")
@@ -2142,6 +2146,50 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         upgraded.sqlite.prepare("SELECT id FROM action_pending_resolutions WHERE id = 'legacy-awaiting-row'").get(),
       ).toBeUndefined();
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('adds server-owned turn versions after 0145 is already recorded (#1316)', () => {
+    expect(MIGRATION_NAMES).toContain('0146_action_pending_turn_version_1316');
+
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN turn_round');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN turn_version');
+      legacy.exec('ALTER TABLE encounters DROP COLUMN turn_version');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0146_action_pending_turn_version_1316');
+      legacy
+        .prepare(
+          `INSERT INTO action_pending_resolutions
+            (id, encounter_id, campaign_id, actor_combatant_id, action_name, action_index, action_fingerprint, awaiting_confirmation, resolution_json, created_at)
+           VALUES ('legacy-pending-round', 1, 1, 1, 'Greatsword', 0, 'fingerprint', 0, '{}', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      expect(columnNames(legacy, 'action_pending_resolutions')).not.toContain('turn_round');
+      expect(columnNames(legacy, 'action_pending_resolutions')).not.toContain('turn_version');
+      expect(columnNames(legacy, 'encounters')).not.toContain('turn_version');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'action_pending_resolutions')).toEqual(expect.arrayContaining(['turn_round', 'turn_version']));
+      expect(columnNames(upgraded.sqlite, 'encounters')).toContain('turn_version');
+      expect(
+        upgraded.sqlite.prepare("SELECT turn_round, turn_version FROM action_pending_resolutions WHERE id = 'legacy-pending-round'").get(),
+      ).toEqual({ turn_round: 0, turn_version: -1 });
+      expect(
+        (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0146_action_pending_turn_version_1316') as { name?: string })
+          ?.name,
+      ).toBe('0146_action_pending_turn_version_1316');
     } finally {
       upgraded.sqlite.close();
     }

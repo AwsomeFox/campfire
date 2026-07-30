@@ -127,8 +127,9 @@ test.describe('semantic reading preferences', () => {
     // Poll: character pages can mount before computed styles settle (NaN fontSize flake on CI).
     await expect.poll(async () => (await typography(characterReading)).fontSize).toBe(18);
     // Issue #646: inactive tabpanels are hidden, so Build-only edit controls are not
-    // visible on the default Play tab. Player fixture views a DM-owned nav character
-    // (read-only); DetailPageWayfinding's back link still uses legacy `.btn`.
+    // visible on the default Play tab. This player-owned navigation sheet keeps the
+    // owner-scoped full-sheet read authorized; DetailPageWayfinding's back link still
+    // uses legacy `.btn`.
     const characterControl = page.locator('.btn').first();
     await expect(characterControl).toBeVisible();
     expect((await typography(characterControl)).fontSize).toBeLessThan(18);

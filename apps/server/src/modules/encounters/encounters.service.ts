@@ -3837,6 +3837,9 @@ export class EncountersService {
           currentCombatantId: newCurrentId,
           turnIndex,
           round,
+          // Only removal of the active combatant changes the logical turn. Removing
+          // someone else and initiative re-sorts keep active player previews valid.
+          ...(encounterRow.currentCombatantId === combatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
           updatedAt: nowIso(),
@@ -4041,6 +4044,7 @@ export class EncountersService {
         .set({
           status: 'running',
           round: 1,
+          turnVersion: sql`${encounters.turnVersion} + 1`,
           turnIndex,
           currentCombatantId,
           turnPhase,
@@ -4415,6 +4419,7 @@ export class EncountersService {
           .set({
             turnIndex,
             round,
+            turnVersion: sql`${encounters.turnVersion} + 1`,
             currentCombatantId,
             turnPhase: phase,
             lairResumeCombatantId,
@@ -4611,6 +4616,7 @@ export class EncountersService {
         .set({
           turnIndex,
           round,
+          turnVersion: sql`${encounters.turnVersion} + 1`,
           currentCombatantId,
           turnPhase: phase,
           lairResumeCombatantId,
@@ -5528,6 +5534,9 @@ export class EncountersService {
           status: 'running',
           endedAt: null,
           aftermathDismissedAt: null,
+          // A resumed encounter begins a fresh logical turn even if its pointer was
+          // still valid, so player previews banked before End cannot be replayed.
+          turnVersion: sql`${encounters.turnVersion} + 1`,
           // Issue #489: persist the re-validated pointer with the status flip.
           currentCombatantId,
           turnIndex,

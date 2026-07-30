@@ -2,6 +2,19 @@ import { expect, test, type Request } from '@playwright/test';
 import { stateFor } from './seed';
 
 const TOKEN = `cf_cast_${'a'.repeat(48)}`;
+const CAST_PARTY = [{
+  id: 1,
+  name: 'Ember',
+  species: 'Human',
+  className: 'Fighter',
+  level: 3,
+  status: 'active',
+  ac: 16,
+  hpCurrent: 12,
+  hpMax: 12,
+  conditions: [],
+  portraitUrl: null,
+}];
 
 function expectCastFetchWithoutCookies(request: Request) {
   expect(request.headers().authorization).toBe(`Bearer ${TOKEN}`);
@@ -33,6 +46,7 @@ test.describe('Player Display cast sessions', () => {
           npcs: [],
           locations: [],
           characters: [],
+          party: CAST_PARTY,
           sessions: [],
           encounters: [],
           timeline: [],
@@ -58,8 +72,10 @@ test.describe('Player Display cast sessions', () => {
       return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
     });
 
+    await page.addInitScript(() => localStorage.setItem('cf.screen.scene.7', 'party'));
     await page.goto(`/cast/7/${TOKEN}`);
     await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
     await expect(page.getByTestId('cf-cockpit')).toHaveCount(0);
     expect(normalCampaignCalls).toEqual([]);
     expect(castCalls.some((url) => url.endsWith(`/api/v1/cast/${TOKEN}/summary`))).toBe(true);
@@ -178,6 +194,7 @@ function castSummary() {
     npcs: [],
     locations: [],
     characters: [],
+    party: CAST_PARTY,
     sessions: [],
     encounters: [],
     timeline: [],

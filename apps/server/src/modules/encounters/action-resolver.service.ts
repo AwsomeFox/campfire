@@ -397,6 +397,17 @@ export class ActionResolverService {
     return character !== null && character.ownerUserId === user.id;
   }
 
+  /** A player may act only with their owned character while it holds the live combat turn. */
+  private assertPlayerActiveTurn(encounter: typeof encounters.$inferSelect, actor: typeof combatants.$inferSelect, role: Role): void {
+    if (!this.isPlayerActiveTurn(encounter, actor, role)) {
+      throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+    }
+  }
+
+  private isPlayerActiveTurn(encounter: typeof encounters.$inferSelect, actor: typeof combatants.$inferSelect, role: Role): boolean {
+    return role === 'dm' || (encounter.status === 'running' && encounter.turnPhase === 'combatant' && encounter.currentCombatantId === actor.id);
+  }
+
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
   private resolveSpec(
     actor: typeof combatants.$inferSelect,
@@ -525,7 +536,7 @@ export class ActionResolverService {
   /**
    * Resolve an action into a full preview, and — when `commit` is set and the caller is
    * authorized under the policy — apply it atomically in the same call. A monster/NPC-actor
-   * action is DM-only; a player may only act with their own PC (issue #414 authorization).
+   * action is DM-only; a player may act only with their own PC on its active turn.
    */
   resolve(encounterId: number, req: ActionResolveRequest, user: RequestUser, role: Role): ActionResolveResult {
     const encounter = this.encounterRowOrThrow(encounterId);
@@ -537,6 +548,7 @@ export class ActionResolverService {
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
         throw new ForbiddenException('Only the DM may resolve a monster/NPC action; a player may act only with their own character.');
       }
+      this.assertPlayerActiveTurn(encounter, actor, role);
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
@@ -589,7 +601,7 @@ export class ActionResolverService {
     // initially automatic preview into that same kind of pending human decision; the driver marks
     // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply, encounter.round, encounter.turnVersion);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -599,7 +611,7 @@ export class ActionResolverService {
       // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
       // silently commit a number the spec itself could never have rolled.
       this.assertResolutionWithinSpecBounds(spec, resolution);
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round, encounter.turnVersion);
       applied = true;
     }
     return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
@@ -1086,6 +1098,8 @@ export class ActionResolverService {
     actionIndex: number | null,
     actionFingerprint: string | null,
     awaitingConfirmation: boolean,
+    turnRound: number,
+    turnVersion: number,
   ): void {
     this.db
       .insert(actionPendingResolutions)
@@ -1098,6 +1112,8 @@ export class ActionResolverService {
         actionIndex,
         actionFingerprint,
         awaitingConfirmation,
+        turnRound,
+        turnVersion,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
       })
@@ -1315,6 +1331,10 @@ export class ActionResolverService {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
       }
+      if (!this.isPlayerActiveTurn(encounter, actor, role)) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'not_active_turn');
+        throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+      }
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
       if (!canApply) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'policy_forbids');
@@ -1357,7 +1377,7 @@ export class ActionResolverService {
       throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
     }
 
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id);
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id, pending.turnRound, pending.turnVersion);
     return { undoToken };
   }
 
@@ -1381,8 +1401,11 @@ export class ActionResolverService {
      * entries for a single resolve/apply. Claimed (marked consumed) inside this transaction.
      */
     chainId: string,
+    /** The resolve-time round stored with the opaque pending chain, never client input. */
+    turnRound: number,
+    /** Monotonic server-owned turn version, invalidated by advance and undo. */
+    turnVersion: number,
   ): ActionUndoToken {
-    const round = encounter.round;
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
     const ruleSystem = adapter.id;
@@ -1390,6 +1413,7 @@ export class ActionResolverService {
     let concentrationBefore: string | null = null;
     let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
+    let committedEncounter = encounter;
 
     this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
@@ -1406,6 +1430,25 @@ export class ActionResolverService {
       if (claimed.changes === 0) {
         throw new BadRequestException('This resolution is unknown or has already been applied.');
       }
+
+      // The outer authorize check improves feedback for previews, but cannot authorize a
+      // write: another request can advance the encounter between that check and this
+      // transaction. Re-read the turn inside the transaction before any consequence or
+      // resource mutation so a stale player action is atomically rejected.
+      const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
+      if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
+      if (role !== 'dm' && (turnRound !== liveEncounter.round || turnVersion !== liveEncounter.turnVersion)) {
+        // Defer this durable, best-effort write until after the transaction rolls back.
+        // Writing it on the same handle while the transaction is open would make the
+        // audit row part of the rollback instead of recording the rejected attempt.
+        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, turnRound !== liveEncounter.round ? 'stale_preview_round' : 'stale_preview_turn_version'));
+        throw new ForbiddenException('Action preview is from a previous turn.');
+      }
+      if (!this.isPlayerActiveTurn(liveEncounter, actor, role)) {
+        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, 'not_active_turn'));
+        throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+      }
+      committedEncounter = liveEncounter;
 
       // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,
       // saves, conditions) is written. `patchSpellSlots` (the standalone spend path, #1039)
@@ -1500,7 +1543,7 @@ export class ActionResolverService {
             conditionInstances: combatants.conditionInstances,
           })
           .from(combatants)
-          .where(eq(combatants.encounterId, encounter.id))
+          .where(eq(combatants.encounterId, liveEncounter.id))
           .all();
         for (const candidate of encounterCombatants) {
           if (fromJsonText<{ concentration?: string | null }>(candidate.turnState, {}).concentration != null) {
@@ -1598,7 +1641,7 @@ export class ActionResolverService {
           .run();
 
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
-        if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
+        if (fresh.kind === 'character' && fresh.characterId !== null && liveEncounter.status !== 'ended') {
           const sheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
@@ -1686,7 +1729,7 @@ export class ActionResolverService {
     });
 
     // Persist correlated combat-log chain after commit (a log failure must not roll back the apply).
-    this.persistActionChain(encounter, round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
+    this.persistActionChain(committedEncounter, committedEncounter.round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
 
     void this.audit
       .log({
@@ -1695,15 +1738,15 @@ export class ActionResolverService {
         action: 'encounter.action.resolve',
         entityType: 'combatant',
         entityId: actor.id,
-        campaignId: encounter.campaignId,
+        campaignId: committedEncounter.campaignId,
         detail: JSON.stringify({ action: resolution.actionName, targets: resolution.targets.map((t) => t.combatantId) }),
       })
       .catch(() => undefined);
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id });
 
     return ActionUndoToken.parse({
-      encounterId: encounter.id,
+      encounterId: committedEncounter.id,
       actorCombatantId: actor.id,
       actionName: resolution.actionName,
       chainId,

@@ -2831,7 +2831,7 @@ export default function RunSessionPage() {
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
           onUseSuggestedAction={
-            isDm && currentCombatantId != null
+            currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
                   const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
                   if (!actor || !spec) return;
@@ -3022,14 +3022,36 @@ export default function RunSessionPage() {
                   canRemove={canDmWrite}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
-                  character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
-                  openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
-                  // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
-                  campaignId={sheetsInteractive ? cid : undefined}
+                  character={
+                    c.characterId != null && (isDm || ownedCharacterIds.has(c.characterId))
+                      ? charactersById.get(c.characterId) ?? null
+                      : null
+                  }
+                  openCardByDefault={
+                    c.characterId != null &&
+                    c.id === currentCombatantId &&
+                    (isDm || ownedCharacterIds.has(c.characterId))
+                  }
+                  openCardOnActiveTurn={
+                    c.characterId != null &&
+                    c.id === currentCombatantId &&
+                    (isDm || ownedCharacterIds.has(c.characterId))
+                  }
+                  // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421),
+                  // and until a player's own character has the active turn. The DM may always override.
+                  campaignId={
+                    sheetsInteractive &&
+                    canEditCombatant(c) &&
+                    (canDmWrite || (encounter.status === 'running' && c.id === currentCombatantId))
+                      ? cid
+                      : undefined
+                  }
                   onRollError={surfaceActionError}
                   onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
                   onUseAction={
-                    canEditCombatant(c) && c.characterId != null
+                    c.characterId != null &&
+                    canEditCombatant(c) &&
+                    (canDmWrite || (encounter.status === 'running' && c.id === currentCombatantId))
                       ? (actionIndex) => {
                           const ch = charactersById.get(c.characterId!);
                           const act = ch?.actions[actionIndex];
@@ -6097,6 +6119,7 @@ function CombatantRow({
   running,
   character,
   openCardByDefault,
+  openCardOnActiveTurn,
   campaignId,
   onRollError,
   onApplyDamage,
@@ -6143,8 +6166,10 @@ function CombatantRow({
   character: Character | null;
   /** Start the character card expanded — used for the viewer's own character. */
   openCardByDefault: boolean;
+  /** Open the character card when this row becomes the active, visible character. */
+  openCardOnActiveTurn: boolean;
   /**
-   * Campaign id — enables click-to-roll on the card for combatants the viewer controls.
+   * Campaign id — enables click-to-roll for an active owned character, or any DM-visible character.
    * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
    */
   campaignId: number | undefined;
@@ -7083,17 +7108,16 @@ function CombatantRow({
             />
           </details>
         )}
-        {/* Character card (in-encounter sheet): a player sees their own combat stats —
-            abilities, saves, skills, actions, spell slots — without leaving the tracker,
-            and the DM sees the whole party's. Character data is party-visible (dmSecret is
-            stripped server-side and never shown here), so it renders for every viewer. */}
+        {/* Character card (in-encounter sheet): a player sees only their own combat stats,
+            while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
           <CharacterStatCard
             character={character}
             ruleSystem={ruleSystem}
             defaultOpen={openCardByDefault}
-            /* Click-to-roll only from a card the viewer controls (their own PC, or any for the DM). */
-            campaignId={canEdit ? campaignId : undefined}
+            openOnActiveTurn={openCardOnActiveTurn}
+            /* Click-to-roll only from an active owned card, or any card for the DM. */
+            campaignId={campaignId}
             onError={onRollError}
             onApplyDamage={onApplyDamage}
             onUseAction={onUseAction}

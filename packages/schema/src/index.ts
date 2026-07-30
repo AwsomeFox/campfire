@@ -6111,13 +6111,37 @@ export const EncounterDigest = z.object({
   monstersDefeated: z.number().int().nonnegative(), // kind='monster' at 0 HP / dead
 });
 export type EncounterDigest = z.infer<typeof EncounterDigest>;
+
+/**
+ * Table-safe character roster entry for campaign aggregates and the Player Display.
+ * This is deliberately not a partial `Character`: it is an explicit allowlist that
+ * never carries sheet mechanics, ownership, notes, actions, resources, or dmSecret.
+ */
+export const PartyCharacter = z.object({
+  id: Id,
+  name: z.string().min(1).max(120),
+  species: z.string().max(80).default(''),
+  className: z.string().max(80).default(''),
+  level: z.number().int().min(1).max(MAX_LEVEL).default(1),
+  status: CharacterStatus.default('active'),
+  ac: z.number().int().nullable().default(null),
+  hpCurrent: z.number().int(),
+  hpMax: z.number().int().min(0),
+  conditions: z.array(z.string().max(40)).default([]),
+  portraitUrl: z.string().max(500).nullable().default(null),
+});
+export type PartyCharacter = z.infer<typeof PartyCharacter>;
+
 export const CampaignSummary = z.object({
   campaign: Campaign,
   currentLocation: Location.nullable(),
   quests: z.array(Quest.extend({ objectives: z.array(QuestObjective) })),
   npcs: z.array(Npc),
   locations: z.array(Location),
+  // Full sheets remain caller-scoped (DM: party; other members: own sheets only).
   characters: z.array(Character),
+  // Table-safe roster is independently projected by the server for dashboard/cast use.
+  party: z.array(PartyCharacter),
   sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
   encounters: z.array(EncounterDigest), // combat digest (issue #126) — makes fights visible to the continuity layer
   // Newer systems (issue #257) — bring the summary up to parity with what shipped.

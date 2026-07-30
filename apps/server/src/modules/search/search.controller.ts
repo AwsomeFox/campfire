@@ -47,6 +47,6 @@ export class SearchController {
   @ApiResponse({ status: 200, description: 'Linkable entities visible to the caller.' })
   async mentions(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.search.mentions(campaignId, role);
+    return this.search.mentions(campaignId, user, role);
   }
 }
