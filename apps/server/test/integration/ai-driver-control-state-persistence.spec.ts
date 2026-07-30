@@ -9,7 +9,9 @@ import {
   WRAP_UP_PROMPT,
   lifecyclePhaseForInput,
   toPublicAiDmSessionState,
+  noteDriverEconomyGrant,
 } from '../../src/modules/ai-driver/ai-driver.service';
+import { MAX_PENDING_TOOL_CONFIRMATIONS } from '../../src/modules/ai-driver/driver-tool-policy';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -1008,6 +1010,96 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
       }
       // And the projection is not simply empty — real member-visible fields are still there.
       expect(serialized.campaignId).toBe(campaignId);
+    });
+
+    it('#1495: a confirmation discarded during hydration on restart releases its queue-time reservation', () => {
+      // Regression for the Codex :5761 finding (over-charging half): pendingToolConfirmations is
+      // discarded WHOLESALE on restart (#1042 — a queued confirmation is a grant of authority the
+      // server can no longer verify), but the ECONOMY RESERVATION it made at queue time already
+      // landed in the persisted window before this restart and IS restored. Without releasing it,
+      // discarded loot that never executed would keep consuming the campaign's allowance.
+      const first = firstBoot();
+      const session = first.service.getSession(campaignId);
+      session.aftermathGrantWindow = { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z', treasuryGranted: 0, inventoryQtyGranted: 50 };
+      // Reserve 30 more for a confirmation that is about to be "discarded" by a restart before a
+      // DM ever resolves it.
+      noteDriverEconomyGrant(session, 'add_inventory_item', { name: 'Trinket', qty: 30 });
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(80);
+      session.pendingToolConfirmations = {
+        'add_inventory_item:call-1': {
+          id: 'confirm-1',
+          tool: 'add_inventory_item',
+          args: { name: 'Trinket', qty: 30 },
+          toolCallId: 'call-1',
+          profile: 'live',
+          policy: 'confirm',
+          requestedAt: '2026-01-01T00:00:00.000Z',
+          actor: 'ai-dm-seat:1',
+          triggeredBy: '1',
+          turnNumber: 1,
+          aftermathGrantWindow: { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z' },
+        },
+      };
+      first.service.setPaused(campaignId, true); // forces the CURRENT session (window=80, 1 pending) to disk
+
+      // "Restart": close the handle, reopen the same file, build a brand-new service instance.
+      const restored = boot().service.getSession(campaignId);
+      // The confirmation itself is gone (discarded per #1042, never restored)...
+      expect(restored.pendingToolConfirmations).toEqual({});
+      // ...and its 30-qty reservation was released from the restored window: back to 50, not
+      // left at 80 where it would keep consuming the allowance until another encounter ends.
+      expect(restored.aftermathGrantWindow?.inventoryQtyGranted).toBe(50);
+    });
+
+    it('#1495: an evicted confirmation (past the 20-entry pending-queue cap) releases its reservation', () => {
+      // Regression for the Codex :5761 finding (over-charging half, eviction side): queueing
+      // charges the window immediately, but the queue itself is capped at
+      // MAX_PENDING_TOOL_CONFIRMATIONS — the oldest entry is evicted once a 21st arrives. An
+      // evicted confirmation never executes either, so its reservation must release the same as
+      // an explicit reject.
+      const first = firstBoot();
+      const session = first.service.getSession(campaignId);
+      session.aftermathGrantWindow = { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z', treasuryGranted: 0, inventoryQtyGranted: 0 };
+
+      // `queueToolConfirmation` is private and reservation happens at its call site
+      // (executeToolCalls), not inside it — there is no public surface for "queue N confirm-
+      // policy economy calls without running N real AI turns" (each turn queues at most
+      // DRIVER_CONFIRM_TOOL_ATTEMPTS_PER_TURN=3), so this reaches into both directly. Fake timers
+      // give each call a strictly increasing `requestedAt` (queueToolConfirmation's own eviction
+      // order key), so which entry is "oldest" is deterministic rather than depending on how fast
+      // this loop happens to run.
+      jest.useFakeTimers();
+      try {
+        jest.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
+        for (let i = 0; i < MAX_PENDING_TOOL_CONFIRMATIONS + 1; i++) {
+          const args = { name: 'Trinket', qty: 10 };
+          noteDriverEconomyGrant(session, 'add_inventory_item', args);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (first.service as any).queueToolConfirmation(
+            session,
+            { id: `call-${i}`, name: 'add_inventory_item' },
+            args,
+            'live',
+            'confirm',
+            'ai-dm-seat:1',
+            '1',
+            undefined,
+            { encounterId: 1, endedAt: '2026-01-01T00:00:00.000Z' },
+          );
+          jest.setSystemTime(new Date(Date.now() + 1));
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+
+      // Exactly MAX_PENDING_TOOL_CONFIRMATIONS remain: the oldest (call-0) was evicted.
+      const remaining = Object.values(session.pendingToolConfirmations ?? {});
+      expect(remaining).toHaveLength(MAX_PENDING_TOOL_CONFIRMATIONS);
+      expect(remaining.some((c) => c.toolCallId === 'call-0')).toBe(false);
+
+      // The evicted confirmation's reservation was released: only the REMAINING 20 grants'
+      // worth (200) still counts against the window, not all 21 (210) that were ever queued.
+      expect(session.aftermathGrantWindow?.inventoryQtyGranted).toBe(MAX_PENDING_TOOL_CONFIRMATIONS * 10);
     });
   });
 });

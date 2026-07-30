@@ -1583,16 +1583,40 @@ export function syncAftermathGrantWindow(
 }
 
 /**
- * Record a SUCCESSFUL economy grant against the current window's cumulative caps (#1495):
- * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}.
- * Called only after the tool actually executed (auto, or a DM-approved confirmation) — a
- * rejected or errored call never reserved any of the budget, so it must not consume it either.
+ * THE ECONOMY-GRANT RESERVATION INVARIANT (#1495).
  *
- * A no-op when there is no tracked window (`aftermathGrantWindow` is null): the grant still
- * happened, but with nothing to attribute it to — see {@link syncAftermathGrantWindow}, which
- * every caller runs first and which is what actually opens the window this function accumulates
- * into.
+ * A reservation ({@link noteDriverEconomyGrant}) is created EXACTLY ONCE, BEFORE the write it
+ * authorises — on both the `auto` and `confirm` paths — is PERSISTED at creation, and is
+ * released EXACTLY ONCE ({@link releaseDriverEconomyGrant}) on every terminal outcome that is
+ * not a completed grant. The set of terminal outcomes is CLOSED — every one of them is handled
+ * at exactly one site, listed here so the next reader can see nothing is missing:
+ *
+ *   1. Executed successfully           -> no release. The reservation IS the permanent charge.
+ *      (auto: `executeToolCalls`, right after `toolset.call` returns `!isError`; confirm:
+ *      `resolveToolConfirmation`, same shape after `seatToolset.call` returns `!isError`.)
+ *   2. DM explicitly rejects it        -> release. `resolveToolConfirmation`, `action === 'reject'`.
+ *   3. Approved, but execution fails   -> release. `resolveToolConfirmation`, `res.isError`.
+ *   4. Approved, but the window is stale (a different/newer encounter has since ended, or one
+ *      has opened for the first time) -> release. `resolveToolConfirmation`'s window-identity
+ *      check, before dispatch.
+ *   5. Auto-executed, but the tool call itself fails -> release. `executeToolCalls`, right after
+ *      `toolset.call` returns `res.isError`, BEFORE the reservation ever reaches disk unreleased.
+ *   6. Evicted from the pending queue (the {@link MAX_PENDING_TOOL_CONFIRMATIONS}-entry cap)
+ *      -> release. `queueToolConfirmation`'s eviction loop.
+ *   7. Discarded wholesale on restart (`loadPersistedControlState` never restores
+ *      `pendingToolConfirmations` — #1042 — but the window it reserved against WAS persisted
+ *      and IS restored) -> release. `loadPersistedControlState`, immediately after restoring
+ *      `fresh.aftermathGrantWindow`, once per entry in `confirmationsDiscarded`.
+ *
+ * Persisting at creation (not just at release) matters just as much as releasing: the auto path
+ * used to account for a grant only AFTER the write, past awaited identity-resolution and audit
+ * work, with no immediate persist — a crash or restart in that gap left the grant applied while
+ * the durable counter still read its old value, letting the same allowance be spent again
+ * (under-charging). Reserving before dispatch and persisting immediately closes that regardless
+ * of what happens afterward, symmetrically with releasing closing the opposite (over-charging)
+ * direction above.
  */
+
 /**
  * The economy amount a tool call would grant, as {treasury, inventoryQty} deltas — the same
  * computation `noteDriverEconomyGrant` (reserve) and `releaseDriverEconomyGrant` (release) both
@@ -1623,14 +1647,15 @@ function driverEconomyGrantAmount(toolName: string, args: Record<string, unknown
 
 /**
  * RESERVE a tool call's economy amount against the CURRENT window's cumulative caps (#1495):
- * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}.
- *
- * Called at two points, both synchronous (no `await` between the guard's cap check and this
- * call): immediately after a successful AUTO execution, and immediately when a `confirm`-policy
- * economy tool is QUEUED (not when it is later approved — see
- * {@link AiDmPendingToolConfirmation.aftermathGrantWindow} for why the reservation moved to
- * queue time). A no-op with no tracked window: the grant/reservation still "happened", but with
- * nothing to attribute it to.
+ * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}. Part
+ * of the reservation invariant documented above — called synchronously, BEFORE the tool
+ * actually dispatches, on both paths: right before `toolset.call` on the `auto` path
+ * (`executeToolCalls`), and right before `queueToolConfirmation` on the `confirm` path (which
+ * also snapshots the window identity onto the pending record — see
+ * {@link AiDmPendingToolConfirmation.aftermathGrantWindow}). Never called again later for the
+ * SAME call/confirmation: a completed grant's reservation simply stands as the permanent charge.
+ * A no-op with no tracked window: the grant/reservation still "happened", but with nothing to
+ * attribute it to.
  */
 export function noteDriverEconomyGrant(
   session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
@@ -1645,14 +1670,14 @@ export function noteDriverEconomyGrant(
 }
 
 /**
- * RELEASE a previously-reserved economy amount (#1495) — the DM rejected the confirmation, or
- * approved execution itself failed, so the grant never actually happened and must not keep
+ * RELEASE a previously-reserved economy amount (#1495) — one of the reservation invariant's
+ * non-success terminal outcomes (see the enumeration above) happened, so the grant never
+ * actually happened (or, for an eviction/hydration-discard, never will) and must not keep
  * consuming budget. `reservedWindow` is the identity the amount was reserved against (captured
- * on the pending confirmation at queue time); the release is applied only if
- * `session.aftermathGrantWindow` STILL matches it. If a later fight's window has since replaced
- * it, there is nothing live left to credit back into — the old window's counters no longer
- * exist in session state, which is harmless: nothing will ever check that superseded window's
- * budget again either.
+ * at reservation time); the release is applied only if `session.aftermathGrantWindow` STILL
+ * matches it. If a later fight's window has since replaced it, there is nothing live left to
+ * credit back into — the old window's counters no longer exist in session state, which is
+ * harmless: nothing will ever check that superseded window's budget again either.
  */
 export function releaseDriverEconomyGrant(
   session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
@@ -2643,6 +2668,17 @@ export class AiDriverService {
     // budget was the exact bug this closes.
     const aftermathGrantWindow = fromJsonText<unknown>(row.aftermathGrantWindow, null);
     fresh.aftermathGrantWindow = isStoredAftermathGrantWindow(aftermathGrantWindow) ? aftermathGrantWindow : null;
+    // #1495 — every discarded confirmation above (`confirmationsDiscarded`) that reserved an
+    // economy-grant amount at queue time must release it now, against the window just restored.
+    // `pendingToolConfirmations` is discarded wholesale on restart (never restored — see the
+    // comment above `confirmationsDiscarded`), but its RESERVATIONS already landed in the
+    // persisted window before this restart, so leaving them in place would let discarded loot
+    // that never executed keep consuming the campaign's allowance until another encounter ends
+    // (over-charging). Each release is a no-op if the window has since moved on, exactly like
+    // every other release call.
+    for (const discarded of confirmationsDiscarded) {
+      releaseDriverEconomyGrant(fresh, discarded.tool, discarded.args, discarded.aftermathGrantWindow);
+    }
     // These two drop an impossible ladder value back to the baseline; `deriveLadderState` at the
     // end of this block is what turns that baseline back into `collaborative` when the mode is on.
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
@@ -5874,8 +5910,37 @@ export class AiDriverService {
       if (canPropose) args.propose = true;
       const proposed = canPropose;
 
+      // #1495 — RESERVE an auto-executed economy grant's amount BEFORE dispatch, synchronously,
+      // and PERSIST immediately — mirroring the confirm-path reservation (see the queueing
+      // branch above) and for the identical reason. The domain write below (`toolset.call`) is
+      // the actual grant; accounting for it only AFTER that call — and after the identity
+      // resolution and audit-log work that used to sit between the write and the counter update
+      // — left a gap where a throw in that later work, or a restart before this turn's next
+      // unrelated `persistControlState`, would leave the grant applied while the durable counter
+      // still read its OLD value: the same allowance could then be spent again (under-charging).
+      // Reserving here and persisting immediately closes that gap the same way the confirm path
+      // closes its own. Safe against the turn-serialization lock (#381) exactly like the confirm
+      // path's reservation is: only one runTurn can be in flight per campaign, so this call's
+      // reserve-then-dispatch never races another auto-execute for the same window.
+      let autoEconomyGrantWindow: { encounterId: number; endedAt: string } | null | undefined;
+      if (tool?.mutating && policyDecision?.policy === 'auto' && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        autoEconomyGrantWindow = session.aftermathGrantWindow
+          ? { encounterId: session.aftermathGrantWindow.encounterId, endedAt: session.aftermathGrantWindow.endedAt }
+          : null;
+        noteDriverEconomyGrant(session, call.name, args);
+        this.persistControlState(session);
+      }
+
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
+      if (autoEconomyGrantWindow !== undefined && res.isError) {
+        // The reserved grant never actually happened — release it immediately (rather than
+        // leaving it to the existing "(7)" block below, which only runs `!res.isError`) so a
+        // legitimate later grant this turn is not short-changed by a reservation for a call that
+        // failed.
+        releaseDriverEconomyGrant(session, call.name, args, autoEconomyGrantWindow);
+        this.persistControlState(session);
+      }
 
       if (call.name === 'generate_map' && !res.isError) {
         try {
@@ -5980,9 +6045,9 @@ export class AiDriverService {
       // combat log so awards survive reload (toast alone is not enough). Best-effort:
       // a log failure must not fail the grant that already committed.
       if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
-        // #1495 — count this grant against the per-session economy cap. Only reached once the
-        // tool actually executed, so a call the guard already rejected never gets here.
-        noteDriverEconomyGrant(session, call.name, args);
+        // #1495 — the economy-cap accounting already happened BEFORE dispatch (see the
+        // reservation just before `toolset.call` earlier in this loop iteration); nothing to
+        // note here. This block now only owns the combat-log note.
         const detail = formatDriverLootCombatLogDetail(call.name, args);
         if (detail) {
           try {
@@ -6148,7 +6213,15 @@ export class AiDriverService {
       // queues roughly four per combat turn, so five turns of an inattentive DM now silently
       // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
       // row naming the call, and a signal that reconciles the DM's queue.
-      if (evicted) this.announceEvictedConfirmation(session, evicted);
+      if (evicted) {
+        // #1495 — an evicted confirmation never executes, so any economy-grant amount it
+        // reserved at queue time must be released now — otherwise discarded loot keeps
+        // consuming the campaign's allowance until another encounter opens a fresh window
+        // (over-charging). A no-op for a non-economy tool (no reserved key at all) or one
+        // reserved against a window that has since moved on.
+        releaseDriverEconomyGrant(session, evicted.tool, evicted.args, evicted.aftermathGrantWindow);
+        this.announceEvictedConfirmation(session, evicted);
+      }
     }
     // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
     // dies before the DM answers, the next boot has to be able to tell them it was discarded —

@@ -1,4 +1,6 @@
 import request from 'supertest';
+import Database from 'better-sqlite3';
+import { dbFilePath } from '../src/db/db.module';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
 
 /**
@@ -205,6 +207,54 @@ describe('ai-dm driver — confirm-policy + adversarial regressions (#474, e2e)'
     // concurrent dispatch.
     expect(locket).toEqual(expect.objectContaining({ name: 'Silver Locket', qty: 60 }));
     expect(compass).toEqual(expect.objectContaining({ name: 'Brass Compass', qty: 70 }));
+  });
+
+  it('#1495: an auto-executed aftermath economy grant persists its reservation immediately, not after dispatch', async () => {
+    // Regression for the Codex :5985 finding: the auto (aftermath) path used to account for a
+    // grant only AFTER the domain write committed — past awaited identity-resolution and audit
+    // work, with no immediate persist. A crash or restart in that gap left the grant applied
+    // while the durable counter still read its OLD value, letting the same allowance be spent
+    // again. Reserving BEFORE dispatch and persisting immediately means: by the moment the tool
+    // call has actually executed, the reservation is ALREADY durable — reading the raw row right
+    // after this call returns is exactly what a restart at that instant would see.
+    const campaignId = await h.createCampaign('Auto Aftermath Persistence');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const encounterId = await startLiveEncounter(campaignId);
+    const ended = await request(h.server).post(`/api/v1/encounters/${encounterId}/end`).set(dm).send({});
+    expect(ended.status).toBe(201);
+
+    // Nothing else is running/preparing, and the fight just ended: profile is `aftermath`, so
+    // add_inventory_item is `auto` here (not `confirm`) — this is the path :5985 is about.
+    h.script({
+      text: 'You find a healing potion among the goblin\'s effects.',
+      toolCalls: [{ id: 'auto1', name: 'add_inventory_item', arguments: { campaignId, name: 'Healing Potion', qty: 40 } }],
+    });
+    const grantRes = await h.sendMessage(campaignId, { input: 'Loot the potion.' });
+    expect(grantRes.status).toBe(201);
+    // Executed directly — no confirmation queued.
+    expect(grantRes.body.toolCalls).toEqual([{ name: 'add_inventory_item', isError: false, proposed: false }]);
+
+    const inventory = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(inventory.status).toBe(200);
+    expect((inventory.body as Array<{ name: string; qty: number }>).find((i) => i.name === 'Healing Potion')).toEqual(
+      expect.objectContaining({ name: 'Healing Potion', qty: 40 }),
+    );
+
+    // Read the RAW persisted row directly — no service call, no cache — exactly what the next
+    // process boot would read from disk. This is the durability half of the invariant: the
+    // reservation is already on disk, matching what was actually granted, not lagging behind it.
+    const db = new Database(dbFilePath(h.ctx.dataDir), { readonly: true });
+    let rawWindow: { inventoryQtyGranted: number } | null = null;
+    try {
+      const row = db
+        .prepare('SELECT aftermath_grant_window FROM ai_driver_control_state WHERE campaign_id = ?')
+        .get(campaignId) as { aftermath_grant_window: string | null } | undefined;
+      rawWindow = row?.aftermath_grant_window ? JSON.parse(row.aftermath_grant_window) : null;
+    } finally {
+      db.close();
+    }
+    expect(rawWindow).toEqual(expect.objectContaining({ inventoryQtyGranted: 40 }));
   });
 
   it('#474 repeated forbidden tool spam triggers emergency pause', async () => {
