@@ -1,5 +1,5 @@
-import AxeBuilder from '@axe-core/playwright';
 import { expect, request, test } from '@playwright/test';
+import { assertAxeClean, createAxeBuilder } from '../lib/axe';
 import { CREDS } from '../global-setup';
 import {
   XP_AWARD_HELP,
@@ -123,11 +123,11 @@ test.describe('character sheet accessibility (issue #448)', () => {
         'character-xp',
         'character-hp-editor',
       ]) {
-        const scan = await new AxeBuilder({ page })
+        const scan = await createAxeBuilder(page)
           .include(`[data-testid="${testId}"]`)
           .disableRules(['color-contrast'])
           .analyze();
-        expect(scan.violations, testId).toEqual([]);
+        assertAxeClean(scan);
       }
     });
   });

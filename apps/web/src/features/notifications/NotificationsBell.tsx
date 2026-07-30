@@ -845,7 +845,7 @@ export function NotificationsBell() {
             height: 15,
             padding: '0 3px',
             fontSize: 9,
-            background: 'var(--color-accent)',
+            background: 'var(--color-accent-700)',
             color: '#fff',
           }}
         >
