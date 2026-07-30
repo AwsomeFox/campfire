@@ -964,10 +964,18 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0149 (issue #701): ensures every soft-deletable entity table carries `deleted_at`.
+ * Registered in MIGRATIONS so runMigrations executes it and records it in __migrations.
+ */
+function migrateEnsureSoftDeleteColumns701(sqlite: Database.Database): void {
+  ensureSoftDeleteColumns(sqlite);
+}
+
+/**
  * Idempotent schema safety guard: ensures every soft-deletable entity table carries
  * `deleted_at`. Guarantees that even if a database recorded migration 0090/0031
  * prior to a table being created or upgraded, booting the server automatically
- * backfills missing `deleted_at` columns on any existing table.
+ * backfills missing `deleted_at` columns on any existing table and logs a warning.
  */
 function ensureSoftDeleteColumns(sqlite: Database.Database): void {
   const tables = [
@@ -993,6 +1001,7 @@ function ensureSoftDeleteColumns(sqlite: Database.Database): void {
     if (!exists) continue;
     const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === 'deleted_at')) {
+      console.warn(`[Database] Backfilled missing deleted_at column on table '${table}'`);
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
     }
   }
@@ -4770,6 +4779,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // combatant snapshot after this branch's earlier 0147, so this additive migration
   // takes the next free ordinal 0148 (never recorded on any real database).
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
+  // #701 soft-delete schema safety check: guarantees all 14 entity tables carry `deleted_at`.
+  { name: '0149_ensure_soft_delete_columns_701', run: migrateEnsureSoftDeleteColumns701 },
 ];
 
 /**

@@ -431,6 +431,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0086_encounters_boss_turn_phase');
       expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(MIGRATION_NAMES).toContain('0090_trash_soft_delete_701');
+      expect(MIGRATION_NAMES).toContain('0149_ensure_soft_delete_columns_701');
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
