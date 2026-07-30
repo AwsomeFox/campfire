@@ -143,6 +143,11 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
 
     // Re-installing the same slug+sections is an in-place Open5e refresh: outcome
     // 'updated' with added:0 (everything already exists) rather than a duplicate or 409.
+    // The mutated row stands in for data an OLDER importer (pre-#621) wrote, which predates
+    // manifest-hash tracking (#1518) — so the pack has no trusted manifest hash, and the
+    // re-import must run the full transactional classification (detecting changed:1) rather
+    // than short-circuit. Clearing the hash models exactly that old→new upgrade path.
+    db.update(rulePacks).set({ manifestHash: '' }).where(eq(rulePacks.id, packId)).run();
     const reJob = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
@@ -434,6 +439,12 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       })
       .returning()
       .all();
+    // A previous import that landed this row would have maintained entryCount to match the
+    // real row count. The raw insert above bypasses that bookkeeping, so restore it — without
+    // it the #1518 short-circuit's entryCount gate (entryCount === manifest size) would
+    // wrongly conclude there is nothing to remove. This mirrors what the import flow leaves
+    // behind, not extra test-only state.
+    db.update(rulePacks).set({ entryCount: total + 1 }).where(eq(rulePacks.id, first.pack.id)).run();
 
     const second = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(second.status).toBe('completed');
@@ -2488,5 +2499,136 @@ describe('rules search pagination (issue #613)', () => {
     await request(server).delete(`/api/v1/rules/packs/${packB}`).set(dm);
     await request(server).delete(`/api/v1/rules/packs/${packC}`).set(dm);
     await request(server).delete(`/api/v1/rules/packs/${packD}`).set(dm);
+  });
+});
+
+/**
+ * Issue #1518: a rule-pack re-import whose fetched manifest is byte-identical to the
+ * installed one must NOT re-read and re-sha256 every entry inside one synchronous
+ * better-sqlite3 transaction (which blocks the event loop — including the install-job
+ * polling endpoint the admin UI renders the import's progress through). The fix stamps a
+ * manifest content hash on the pack row and short-circuits the classification transaction
+ * when the fetched hash matches it, while preserving #500's single-transaction atomicity
+ * and read-stable classification for every genuinely-changed manifest.
+ */
+describe('rules / rule packs — identical re-import short-circuit (#1518)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5e();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'sc-1518-dm' };
+  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1; // spells + creatures + magicitems + conditions + classes + species + feats
+
+  it('stamps the manifest hash on install and short-circuits a byte-identical re-import to a no-op', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const first = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(first.status).toBe('completed');
+    expect(first.pack.entryCount).toBe(TOTAL);
+    const packId = first.pack.id;
+
+    // The install stamped a full 64-hex sha256 manifest hash on the pack row.
+    const [afterInstall] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    expect(afterInstall?.manifestHash).toMatch(/^[a-f0-9]{64}$/);
+
+    // The fetched manifest is byte-identical, so the sync must short-circuit: the pack's
+    // tracked manifest hash matches the fetched one and the classification transaction is
+    // skipped, returning a zero-change result without reading or hashing a single entry.
+    const reJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(reJob.status).toBe('completed');
+    expect(reJob.outcome).toBe('updated');
+    expect(reJob.added).toBe(0);
+    expect(reJob.changed).toBe(0);
+    expect(reJob.removed).toBe(0);
+    expect(reJob.preview).toMatchObject({ added: 0, changed: 0, removed: 0, unchanged: TOTAL });
+    expect(reJob.pack.entryCount).toBe(TOTAL);
+    // Same manifest → same hash; the short-circuit leaves the pack row (and its hash) as-is.
+    expect(reJob.preview.sourceHash).toBe(afterInstall!.manifestHash);
+    const [afterReimport] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    expect(afterReimport?.manifestHash).toBe(afterInstall!.manifestHash);
+
+    // A third identical re-import is still a no-op (the hash stays stable across short-circuits).
+    const third = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(third.added).toBe(0);
+    expect(third.changed).toBe(0);
+    expect(third.removed).toBe(0);
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+
+  it('a genuinely-changed manifest still falls through to the full transactional classification', async () => {
+    // Guards against the short-circuit over-firing. A partial add (one section) stamps a hash
+    // for that section's manifest only; a subsequent full re-import fetches a DIFFERENT
+    // manifest, so its hash cannot match and the full classification must run, adding the
+    // remaining sections. (#500 atomicity/read-stability are exercised by this same path.)
+    const server = ctx.app.getHttpServer();
+
+    const partial = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(partial.status).toBe('completed');
+    expect(partial.pack.entryCount).toBe(4);
+    const packId = partial.pack.id;
+
+    const full = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(full.status).toBe('completed');
+    expect(full.outcome).toBe('updated');
+    expect(full.added).toBe(TOTAL - 4); // every section except the already-present conditions
+    expect(full.changed).toBe(0);
+    expect(full.removed).toBe(0);
+    expect(full.pack.entryCount).toBe(TOTAL);
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+
+  it('an identical re-import skips the per-entry re-hash and trusts the tracked manifest hash', async () => {
+    // The no-op result above is also producible by the full classification path, so on its
+    // own it cannot prove the short-circuit ran. This test pins that the optimization is
+    // actually taken: it changes an installed entry's content via a path the manifest hash
+    // does NOT cover (a direct DB write, standing in for the only-in-test divergence), then
+    // re-imports the byte-identical manifest. Because the pack's tracked hash still matches
+    // the fetched one, the short-circuit fires and the per-entry re-hash is skipped — so the
+    // divergence is reported as unchanged rather than changed. This is the #1518 contract:
+    // the short-circuit trusts a manifest hash that only the import flow maintains, which is
+    // sound in production because no other path mutates global rule-entry content fields. (If
+    // the short-circuit were ever removed, this re-import would re-hash and report changed: 1,
+    // failing the assertion — which is exactly the regression guard we want.)
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const first = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(first.status).toBe('completed');
+    const packId = first.pack.id;
+    const [packRow] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    const trackedHash = packRow!.manifestHash;
+    expect(trackedHash).not.toBe('');
+
+    // Mutate a content field the entry hash covers, directly in the DB (NOT via the import
+    // flow). The tracked manifest hash is unchanged by this.
+    const [anEntry] = db.select().from(ruleEntries).where(eq(ruleEntries.packId, packId)).limit(1).all();
+    expect(anEntry).toBeDefined();
+    db.update(ruleEntries)
+      .set({ body: `${anEntry!.body} [directly mutated, outside the import flow]`, updatedAt: new Date().toISOString() })
+      .where(eq(ruleEntries.id, anEntry!.id))
+      .run();
+    const [stillTracked] = db.select().from(rulePacks).where(eq(rulePacks.id, packId)).all();
+    expect(stillTracked!.manifestHash).toBe(trackedHash);
+
+    // Byte-identical re-import: the short-circuit fires and the re-hash is skipped.
+    const reJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: fake.baseUrl });
+    expect(reJob.status).toBe('completed');
+    expect(reJob.changed).toBe(0);
+    expect(reJob.added).toBe(0);
+    expect(reJob.removed).toBe(0);
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
 });

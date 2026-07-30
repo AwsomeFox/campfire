@@ -1339,6 +1339,16 @@ export const rulePacks = sqliteTable('rule_packs', {
   sourceUrl: text('source_url').notNull().default(''),
   installedAt: text('installed_at').notNull(),
   entryCount: integer('entry_count').notNull().default(0),
+  // sha256 of the pack's full manifest (provenance + every entry's content hash) as
+  // computed by packManifestHash, stamped on every successful install/sync. Lets a
+  // re-import whose fetched manifest is byte-identical short-circuit the per-entry
+  // read+sha256 classification (issue #1518). '' on packs installed before this column
+  // existed means "no tracked manifest" — the short-circuit treats that as a miss and
+  // runs the full transactional classification, re-stamping the real hash. The hash
+  // never gates correctness on its own: it only authorises skipping work that would
+  // itself be a no-op, because global rule-entry content only ever changes through the
+  // import flow that re-stamps it.
+  manifestHash: text('manifest_hash').notNull().default(''),
 });
 
 export const ruleEntries = sqliteTable('rule_entries', {

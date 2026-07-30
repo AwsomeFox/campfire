@@ -1419,6 +1419,29 @@ function migrateRuleEntriesTableForLicensing(sqlite: Database.Database): void {
   if (!has('source_url')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
 }
 
+/**
+ * Migration for DBs created before rule_packs recorded its manifest content hash
+ * (issue #1518): `rule_packs.manifest_hash` didn't exist. Plain NOT NULL DEFAULT ''
+ * ADD COLUMN — no table rebuild, same idiom as migrateRuleEntriesTableForLicensing
+ * (0050). Existing packs get '' (no tracked manifest); the re-import short-circuit in
+ * RulesService.syncExistingPack treats '' as a miss and runs the full transactional
+ * classification, which re-stamps the real hash on the next install/sync — so behaviour
+ * on an upgraded DB is unchanged until a pack is re-imported, and is byte-identical to a
+ * fresh install thereafter. No backfill is possible: the manifest hash was never recorded.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateRulePacksTableForManifestHash(sqlite: Database.Database): void {
+  const hasRulePacksTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_packs'")
+    .get();
+  if (!hasRulePacksTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(rule_packs)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'manifest_hash')) return;
+
+  sqlite.exec("ALTER TABLE rule_packs ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''");
+}
+
 /** Campaign-private compendium rows and their immutable edit history (issue #741). */
 function migrateCampaignHomebrew741(sqlite: Database.Database): void {
   const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'").get();
@@ -4708,6 +4731,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0146_action_pending_turn_version_1316', run: migrateActionPendingTurnVersion1316 },
   // 0146 is now owned by #1316; this never-shipped combatant snapshot follows it.
   { name: '0147_combatants_npc_disposition_snapshot_1454', run: migrateCombatantsTableForNpcDispositionSnapshot },
+  // #1518 rule-pack manifest-hash short-circuit. Main claimed 0147 for the #1454
+  // combatant snapshot after this branch's earlier 0147, so this additive migration
+  // takes the next free ordinal 0148 (never recorded on any real database).
+  { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
 ];
 
 /**

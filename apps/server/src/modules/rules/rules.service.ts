@@ -2051,6 +2051,7 @@ export class RulesService implements OnModuleInit {
             sourceUrl: meta.sourceUrl,
             installedAt: ts,
             entryCount: entries.length,
+            manifestHash: sourceHash,
           })
           .returning()
           .all();
@@ -2176,6 +2177,47 @@ export class RulesService implements OnModuleInit {
         // Do not hoist these out of the transaction.
         const [currentPack] = tx.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).all();
         const before = currentPack ?? packRow;
+
+        // Issue #1518 short-circuit. `sourceHash` (packManifestHash) is a full content
+        // fingerprint of the pack's provenance plus every fetched entry's content hash. If
+        // it is byte-identical to the manifest hash the LAST successful install/sync stamped
+        // on this pack row, every fetched entry is already installed byte-for-byte: global
+        // rule-entry content only ever changes through THIS import flow (campaign homebrew is
+        // campaign-scoped, and the only global edit path — updateEntry — touches iconSlug/
+        // updatedAt, which the content hash excludes), and that flow always re-stamps the
+        // hash. So the add/change classification below would be all-unchanged, and the only
+        // remaining work a full pass could do is REMOVE installed rows the manifest omits —
+        // which only a removeMissing pass attempts, so gate it on entryCount (the import flow
+        // maintains entryCount == global row count): if it already equals the manifest size
+        // there is nothing to remove, and manifestUnchanged guarantees no fetched entry is
+        // missing either. Under those conditions the pack-row update below is provably a
+        // no-op too (version/provenance already match — verified by provenanceAlreadySet, and
+        // canonicalLicense is idempotent for an already-merged label), so we return without
+        // reading or hashing a single entry. That keeps a large identical re-import from
+        // monopolising the single Node thread — including the install-job poll the admin UI
+        // renders this very import's progress through. Atomicity/read-stability are preserved:
+        // a no-op classification has nothing to roll back, and any genuinely-changed manifest
+        // (different sourceHash) falls through to the full transactional classification below.
+        const manifestUnchanged = before.manifestHash !== '' && before.manifestHash === sourceHash;
+        const nothingToRemove = !options.removeMissing || before.entryCount === fetchedEntries.length;
+        const provenanceAlreadySet =
+          !options.rewritePackProvenance ||
+          (before.name === meta.name && before.sourceUrl === meta.sourceUrl && before.license === meta.license);
+        if (manifestUnchanged && nothingToRemove && provenanceAlreadySet) {
+          return {
+            pack: before,
+            before,
+            preview: {
+              added: 0,
+              changed: 0,
+              removed: 0,
+              unchanged: fetchedEntries.length,
+              sourceHash,
+              sourceVersion: meta.version,
+            } satisfies RulePackUpdatePreview,
+          };
+        }
+
         const nextName = options.rewritePackProvenance ? meta.name : before.name;
         const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : before.sourceUrl;
         const nextLicense = options.rewritePackProvenance
@@ -2262,6 +2304,7 @@ export class RulesService implements OnModuleInit {
             license: nextLicense,
             sourceUrl: nextSourceUrl,
             entryCount: nextEntryCount,
+            manifestHash: sourceHash,
           })
           .where(eq(rulePacks.id, packRow.id))
           .returning()

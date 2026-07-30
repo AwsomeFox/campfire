@@ -1145,7 +1145,8 @@ CREATE TABLE IF NOT EXISTS rule_packs (
   license TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
   installed_at TEXT NOT NULL,
-  entry_count INTEGER NOT NULL DEFAULT 0
+  entry_count INTEGER NOT NULL DEFAULT 0,
+  manifest_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS rule_entries (
