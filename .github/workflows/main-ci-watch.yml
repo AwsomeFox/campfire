@@ -61,20 +61,36 @@ jobs:
           # If HEAD itself has no `ci` check-run (e.g. a docs-only commit), walk
           # back the most recent main commits until we find the latest one with a
           # `ci` run, so a red code commit is not silently dropped behind a
-          # CI-skipping push.
+          # CI-skipping push. Paginate through commit history (up to a reasonable
+          # cap) rather than stopping at an arbitrary per-page limit.
           find_latest_ci_run() {
+            local page=1
+            local max_pages=2
             local commits_json sha ci_run_for_sha
-            commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=20")
 
-            while IFS= read -r sha; do
-              [ -n "$sha" ] || continue
-              ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" \
-                | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty')
-              if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
-                echo "$ci_run_for_sha"
-                return 0
+            while [ "$page" -le "$max_pages" ]; do
+              commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=100&page=${page}")
+
+              local found_this_page=0
+              while IFS= read -r sha; do
+                [ -n "$sha" ] || continue
+                found_this_page=$((found_this_page + 1))
+                ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" \
+                  | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty')
+                if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
+                  echo "$ci_run_for_sha"
+                  return 0
+                fi
+              done <<< "$(echo "$commits_json" | jq -r '.[].sha')"
+
+              # If the page was not full, there are no older commits to check.
+              if [ "$found_this_page" -lt 100 ]; then
+                break
               fi
-            done <<< "$(echo "$commits_json" | jq -r '.[].sha')"
+
+              page=$((page + 1))
+            done
+
             return 1
           }
 
@@ -92,7 +108,7 @@ jobs:
 
           ci_status=$(echo "$ci_run" | jq -r '.status')
           ci_conclusion=$(echo "$ci_run" | jq -r '.conclusion')
-          ci_url=$(echo "$ci_run" | jq -r '.html_url')
+          ci_url=$(echo "$ci_run" | jq -r '.html_url // empty')
           [ -n "$ci_url" ] || ci_url="https://github.com/${REPO}/actions"
 
           if [ "$ci_status" != "completed" ]; then
