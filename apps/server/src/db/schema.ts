@@ -515,6 +515,7 @@ export const castSessions = sqliteTable('cast_sessions', {
   campaignId: integer('campaign_id').notNull(),
   label: text('label').notNull().default(''),
   createdBy: text('created_by').notNull().default(''),
+  createdByUserId: text('created_by_user_id'),
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
   exitPinHash: text('exit_pin_hash').notNull(),

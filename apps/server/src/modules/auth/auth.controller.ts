@@ -309,7 +309,7 @@ export class MeController {
     if (user.id.startsWith('dev:')) {
       throw new UnauthorizedException('Account deletion is not available for dev-auth users');
     }
-    await this.usersService.remove(Number(user.id));
+    await this.usersService.remove(Number(user.id), user);
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   }
 }

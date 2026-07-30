@@ -1,6 +1,9 @@
 import zlib from 'node:zlib';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { castSessions } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'cast-dm' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'cast-player' };
@@ -155,6 +158,8 @@ describe('Player Display cast sessions (e2e)', () => {
     expect(created.body.session.tokenPrefix).toBe(created.body.token.slice(0, 12));
     expect(created.body.session.tokenHash).toBeUndefined();
     expect(created.body.session.exitPinHash).toBeUndefined();
+    const stored = ctx.app.get<DrizzleDb>(DB).select().from(castSessions).where(eq(castSessions.id, created.body.session.id)).get();
+    expect(stored?.createdByUserId).toBe('dev:cast-dm');
 
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/cast-sessions`).set(dm);
     expect(list.status).toBe(200);

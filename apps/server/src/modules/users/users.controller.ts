@@ -163,16 +163,7 @@ export class UsersController {
   @ApiResponse({ status: 204, description: 'Deleted.' })
   @ApiResponse({ status: 409, description: 'Last enabled admin, or last enabled DM of one or more campaigns.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: RequestUser) {
-    await this.users.remove(id);
-    // #23: server-wide admin trail — stable target id, never a deleted account label.
-    await this.audit.log({
-      actor: auditActor(actor),
-      actorRole: auditActorRole(actor),
-      action: 'user.delete',
-      entityType: 'user',
-      entityId: id,
-      detail: `user:${id}`,
-    });
+    await this.users.remove(id, actor);
   }
 
   @Post(':id/password')

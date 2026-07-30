@@ -8,6 +8,7 @@ import {
   characters,
   checkRequests,
   comments,
+  castSessions,
   diceRolls,
   entityRevisions,
   moderationEvidence,
@@ -105,6 +106,7 @@ describe('account historical attribution privacy (e2e)', () => {
       checkRequests: db.select().from(checkRequests).where(eq(checkRequests.requestedByUserId, stableUserId)).all(),
       transcript: db.select().from(aiDmTranscriptEvents).where(eq(aiDmTranscriptEvents.actorUserId, stableUserId)).all(),
       proposals: db.select().from(proposals).where(eq(proposals.proposerUserId, stableUserId)).all(),
+      castSessions: db.select().from(castSessions).where(eq(castSessions.createdByUserId, stableUserId)).all(),
       immediate: db.select().from(notifications).where(eq(notifications.actorUserId, stableUserId)).all(),
       deferred: db
         .select()
@@ -166,6 +168,7 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.checkRequests).not.toHaveLength(0);
     expect(rows.transcript).not.toHaveLength(0);
     expect(rows.proposals).not.toHaveLength(0);
+    expect(rows.castSessions).not.toHaveLength(0);
     expect(rows.immediate).not.toHaveLength(0);
     expect(rows.deferred).not.toHaveLength(0);
     expect(rows.notes.every((row) => row.authorName === label)).toBe(true);
@@ -192,6 +195,7 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.checkRequests.every((row) => row.requestedByName === label)).toBe(true);
     expect(rows.transcript.every((row) => row.actorName === label)).toBe(true);
     expect(rows.proposals.every((row) => row.proposer === label)).toBe(true);
+    expect(rows.castSessions.every((row) => row.createdBy === label)).toBe(true);
     for (const row of [...rows.immediate, ...rows.deferred]) {
       expect(row.actorName).toBe(label);
       if (options.expectNeutralNotificationCopy) {
@@ -332,6 +336,7 @@ describe('account historical attribution privacy (e2e)', () => {
     db.insert(checkRequests).values({ campaignId, characterId, encounterId: null, checkId: 'save:DEX', checkLabel: 'DEX save', mode: 'flat', dc: null, consequence: '', status: 'pending', requestedByUserId: String(memberId), requestedByName: OLD_LABEL, rollId: null, createdAt: ts, resolvedAt: null }).run();
     db.insert(aiDmTranscriptEvents).values({ campaignId, seq: 99, eventId: 'account-attribution-transcript', kind: 'player.action', actorUserId: String(memberId), actorName: OLD_LABEL, clientRef: null, turnId: null, payload: '{}', visibility: 'all', createdAt: ts }).run();
     db.insert(proposals).values({ campaignId, entityType: 'note', entityId: null, action: 'create', payload: '{}', proposer: OLD_LABEL, proposerUserId: String(memberId), proposerToken: null, status: 'pending', resolvedBy: '', note: '', createdAt: ts, updatedAt: ts }).run();
+    db.insert(castSessions).values({ campaignId, label: 'Attribution cast', createdBy: OLD_LABEL, createdByUserId: String(memberId), tokenHash: 'attribution-cast-token-hash', tokenPrefix: 'cst_attribution', exitPinHash: 'attribution-cast-pin-hash', expiresAt: '2099-12-31T00:00:00.000Z', accessCount: 0, firstAccessedAt: null, lastAccessedAt: null, createdAt: ts, updatedAt: ts }).run();
     db.insert(notifications).values({ userId: adminId, campaignId, type: 'note_created', title: `${OLD_LABEL} left Old Handlex intact`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'note', entityId: noteId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();
     db.insert(notificationDigestQueue).values({ userId: adminId, campaignId, type: 'schedule_rsvp', title: `${OLD_LABEL} at Old Handlex`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'scheduled_session', entityId: schedule.body.id, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), reason: 'digest', createdAt: ts }).run();
     db.insert(notifications).values({ userId: adminId, campaignId, type: 'campaign_trashed', title: LIFECYCLE_NOTIFICATION_TITLE, body: LIFECYCLE_NOTIFICATION_BODY, entityType: 'campaign', entityId: campaignId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();

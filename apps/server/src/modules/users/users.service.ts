@@ -37,11 +37,12 @@ import {
   notifications,
   notificationDigestQueue,
   sessionShares,
+  castSessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
-import { auditActor, type RequestUser } from '../../common/user.types';
+import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
@@ -207,6 +208,7 @@ export class UsersService {
     tx.update(tableSafetyHolds).set({ activatedByName: nextLabel }).where(eq(tableSafetyHolds.activatedByUserId, stableUserId)).run();
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
     tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
+    tx.update(castSessions).set({ createdBy: nextLabel }).where(eq(castSessions.createdByUserId, stableUserId)).run();
 
     // Moderation evidence is an integrity-protected incident snapshot. Every public
     // attribution field it carries is covered by its stored hashes, so account
@@ -397,7 +399,7 @@ export class UsersService {
     });
   }
 
-  async remove(id: number): Promise<void> {
+  async remove(id: number, actor: RequestUser): Promise<void> {
     this.db.transaction((tx) => {
       const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
       if (!existing) throw new NotFoundException(`User ${id} not found`);
@@ -437,6 +439,14 @@ export class UsersService {
         .where(eq(characters.ownerUserId, String(id)))
         .run();
       tx.delete(users).where(eq(users.id, id)).run();
+      this.audit.logInTx(tx, {
+        actor: auditActor(actor),
+        actorRole: auditActorRole(actor),
+        action: 'user.delete',
+        entityType: 'user',
+        entityId: id,
+        detail: `user:${id}`,
+      });
     });
   }
 

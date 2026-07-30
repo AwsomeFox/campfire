@@ -115,6 +115,7 @@ export class CastService {
           campaignId,
           label: input.label,
           createdBy: user.name,
+          createdByUserId: user.id,
           tokenHash: hashCastToken(token),
           tokenPrefix: castTokenPrefix(token),
           exitPinHash: hashPassword(exitPin),
