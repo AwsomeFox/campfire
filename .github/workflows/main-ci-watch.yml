@@ -65,94 +65,80 @@ jobs:
             exit 1
           fi
 
-          # Exclude this workflow's own job (`watch`) so its in-progress run
-          # does not block verdicts while it is executing.
-          failing_b64=$(echo "$resp" | jq -r --arg self "watch" '
-            .check_runs[]
-            | select(.name != $self)
-            | select(.status == "completed" and (
-                .conclusion == "failure" or
-                .conclusion == "cancelled" or
-                .conclusion == "timed_out" or
-                .conclusion == "action_required"
-              ))
-            | {name, conclusion, html_url}
-            | @base64
-          ' | grep -v '^$' || true)
+          # The repository's aggregate required check is named `ci`. We only act
+          # on that verdict to avoid both false alarms from non-required checks
+          # and false all-clear when a docs-only push (paths-ignore in ci.yml)
+          # produces no real CI check-runs at all.
+          ci_run=$(echo "$resp" | jq --arg name "ci" '
+            [ .check_runs[] | select(.name == $name) ] | first // empty
+          ')
 
-          active_names=$(echo "$resp" | jq -r --arg self "watch" '
-            .check_runs[]
-            | select(.name != $self)
-            | select(.status != "completed")
-            | .name
-          ' | grep -v '^$' | sort -u || true)
+          if [ -z "$ci_run" ] || [ "$ci_run" = "null" ]; then
+            echo "No aggregate 'ci' check-run on ${sha}; no verdict available."
+            exit 0
+          fi
+
+          ci_status=$(echo "$ci_run" | jq -r '.status')
+          ci_conclusion=$(echo "$ci_run" | jq -r '.conclusion')
+          ci_url=$(echo "$ci_run" | jq -r '.html_url')
+
+          if [ "$ci_status" != "completed" ]; then
+            echo "Aggregate 'ci' check is still ${ci_status} for ${sha}; no verdict yet."
+            exit 0
+          fi
 
           existing=$(gh issue list --repo "$REPO" --label "$TRACKING_LABEL" --state open \
             --json number --jq '.[0].number // empty')
 
-          if [ -n "$failing_b64" ]; then
-            failing_json=$(for b in $failing_b64; do echo "$b" | base64 -d; done | jq -s .)
-            failing_list=$(echo "$failing_json" | jq -r '.[] | "- **\(.name)**: \(.conclusion) — <\(.html_url)>"')
+          case "$ci_conclusion" in
+            failure|cancelled|timed_out|action_required)
+              body=$(printf '%s\n' \
+                "Main has a failing aggregate CI run on its latest tested commit." \
+                "" \
+                "- Commit: \`${sha}\`" \
+                "- Commit link: https://github.com/${REPO}/commit/${sha}" \
+                "- CI run: <${ci_url}>" \
+                "- Conclusion: \`${ci_conclusion}\`" \
+                "" \
+                "This issue is maintained automatically by \`.github/workflows/main-ci-watch.yml\`." \
+                "It will close after a later commit on \`main\` has a green aggregate \`ci\` check-run." \
+                "" \
+                "<!-- main-ci-watch:last-failing-sha=${sha} -->")
 
-            body=$(printf '%s\n' \
-              "Main has failing check-runs on its latest tested commit." \
-              "" \
-              "- Commit: \`${sha}\`" \
-              "- Commit link: https://github.com/${REPO}/commit/${sha}" \
-              "" \
-              "Failing checks:" \
-              "" \
-              "${failing_list}" \
-              "" \
-              "This issue is maintained automatically by \`.github/workflows/main-ci-watch.yml\`." \
-              "It will close after a later commit on \`main\` has all required check-runs green." \
-              "" \
-              "<!-- main-ci-watch:last-failing-sha=${sha} -->")
+              if [ -z "$existing" ]; then
+                echo "Opening a new tracking issue for ${sha}."
+                gh issue create --repo "$REPO" \
+                  --title "main check-runs are red (${sha:0:10})" \
+                  --label "$TRACKING_LABEL" \
+                  --body "$body"
+                exit 0
+              fi
 
-            if [ -z "$existing" ]; then
-              echo "Opening a new tracking issue for ${sha}."
-              gh issue create --repo "$REPO" \
-                --title "main check-runs are red (${sha:0:10})" \
-                --label "$TRACKING_LABEL" \
-                --body "$body"
+              # Idempotent update: only touch the issue if this is a NEW
+              # failing commit since the last time we recorded one.
+              last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
+                --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-fA-F]*' | cut -d= -f2 || true)
+
+              if [ "$last_recorded" = "$sha" ]; then
+                echo "Issue #${existing} already tracks ${sha} — nothing to update."
+                exit 0
+              fi
+
+              echo "Updating existing issue #${existing}: still red, now at ${sha}."
+              gh issue edit "$existing" --repo "$REPO" --body "$body"
               exit 0
-            fi
-
-            # Idempotent update: only touch the issue if this is a NEW
-            # failing commit since the last time we recorded one. Re-running
-            # every 15 minutes against the same still-broken sha must not
-            # post a fresh comment each time, or this gets muted within a day.
-            last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
-              --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-fA-F]*' | cut -d= -f2 || true)
-
-            if [ "$last_recorded" = "$sha" ]; then
-              echo "Issue #${existing} already tracks ${sha} — nothing to update."
+              ;;
+            success)
+              if [ -n "$existing" ]; then
+                echo "Aggregate 'ci' is green on ${sha} — closing tracking issue #${existing}."
+                gh issue close "$existing" --repo "$REPO" \
+                  --comment "Aggregate 'ci' check is green again on ${sha} (${ci_url}). Closing."
+              else
+                echo "Aggregate 'ci' is green on ${sha} and no open tracking issue — nothing to do."
+              fi
+              ;;
+            *)
+              echo "Aggregate 'ci' check has unexpected conclusion '${ci_conclusion}' for ${sha}; taking no action." >&2
               exit 0
-            fi
-
-            echo "Updating existing issue #${existing}: still red, now at ${sha}."
-            gh issue edit "$existing" --repo "$REPO" --body "$body"
-            exit 0
-          fi
-
-          if [ -n "$active_names" ]; then
-            echo "Check-runs still in progress for ${sha}; no verdict yet."
-            echo "Active checks: $(echo "$active_names" | tr '\n' ' ')"
-            exit 0
-          fi
-
-          # All non-self check-runs completed and none failed.
-          if [ -n "$existing" ]; then
-            green_run=$(echo "$resp" | jq -r --arg self "watch" '
-              first(.check_runs[]
-                | select(.name != $self)
-                | select(.status == "completed" and .conclusion == "success")
-                | .html_url) // empty
-            ')
-            [ -n "$green_run" ] || green_run="https://github.com/${REPO}/actions"
-            echo "All check-runs are green on ${sha} — closing tracking issue #${existing}."
-            gh issue close "$existing" --repo "$REPO" \
-              --comment "Check-runs are green again on ${sha} (${green_run}). Closing."
-          else
-            echo "All check-runs green on ${sha} and no open tracking issue — nothing to do."
-          fi
+              ;;
+          esac
