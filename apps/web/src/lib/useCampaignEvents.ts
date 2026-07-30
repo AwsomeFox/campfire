@@ -20,6 +20,7 @@
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
+import { useAuth } from '../app/auth';
 import { API } from './api';
 import { getSessionResumeEpoch, subscribeSessionResume } from './sessionExpiry';
 import { startSseReconnectLoop, type SseStreamStatus } from './sseReconnect';
@@ -117,6 +118,20 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
+  // Issue #1446 review fix (round 6): the stream's lifecycle is (identity × campaign), not
+  // campaign alone. `resumeEpoch` only bumps after a PROVEN 401 (see sessionExpiry.ts) —
+  // it does not cover an AuthProvider `/me` refresh that swaps the signed-in account
+  // without an intervening 401 (e.g. a dev-auth identity flip, or any future in-place
+  // reauth). Without `userId` in this effect's key, that kind of account switch leaves the
+  // OLD identity's authenticated connection running: the new account sees a false
+  // "never connects" (no restart means no fresh `connected`), AND — the serious half — the
+  // tab keeps consuming campaign frames delivered on the PREVIOUS account's authenticated
+  // request, which is cross-account data reaching a session that should no longer receive
+  // it. Clearing a page-local status variable (RunSessionPage's `eventStatus`) cannot fix
+  // this; the underlying stream itself has to tear down and re-establish under the new
+  // credentials, which only this hook's own effect can do.
+  const { me } = useAuth();
+  const userId = me?.user.id ?? null;
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -143,5 +158,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
     });
 
     return () => loop.dispose();
-  }, [campaignId, resumeEpoch]);
+  }, [campaignId, resumeEpoch, userId]);
 }
