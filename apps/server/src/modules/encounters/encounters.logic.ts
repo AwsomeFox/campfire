@@ -509,7 +509,7 @@ export function shouldEnterLairAfterCombatant(combatant: Combatant, sorted: Comb
 
 /** Lair fires before anyone when no combatant rolled initiative 20+. */
 export function lairLeadsRound(sorted: Combatant[]): boolean {
-  return !sorted.some((c) => c.initiative !== null && c.initiative >= LAIR_INITIATIVE_COUNT);
+  return !sorted.some((c) => !shouldSkipTurnOnAdvance(c) && c.initiative !== null && c.initiative >= LAIR_INITIATIVE_COUNT);
 }
 
 /**
@@ -596,18 +596,29 @@ export function initialEncounterTurnState(
   if (sorted.length === 0) {
     return { turnIndex: 0, currentCombatantId: null, phase: 'combatant', lairResumeCombatantId: null };
   }
+  
+  let firstIdx = 0;
+  while (firstIdx < sorted.length && shouldSkipTurnOnAdvance(sorted[firstIdx])) {
+    firstIdx++;
+  }
+  
+  if (firstIdx >= sorted.length) {
+    // All combatants skip
+    return { turnIndex: 0, currentCombatantId: null, phase: 'combatant', lairResumeCombatantId: null };
+  }
+
   if (hasLairSlot && lairLeadsRound(sorted)) {
-    const first = sorted[0];
+    const first = sorted[firstIdx];
     return {
-      turnIndex: 0,
+      turnIndex: firstIdx,
       currentCombatantId: null,
       phase: 'lair',
       lairResumeCombatantId: first.id,
     };
   }
   return {
-    turnIndex: 0,
-    currentCombatantId: sorted[0].id,
+    turnIndex: firstIdx,
+    currentCombatantId: sorted[firstIdx].id,
     phase: 'combatant',
     lairResumeCombatantId: null,
   };

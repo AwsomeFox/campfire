@@ -4067,7 +4067,7 @@ export class EncountersService {
             hpCurrent: fresh.hpCurrent,
             hpMax: effectiveHpMax,
             hpTemp: fresh.hpTemp,
-            deathState: fresh.deathState as CombatantHpState['deathState'],
+            deathState: patch.deathState !== undefined ? (patch.deathState as CombatantHpState['deathState']) : (fresh.deathState as CombatantHpState['deathState']),
             deathSaveSuccesses: fresh.deathSaveSuccesses,
             deathSaveFailures: fresh.deathSaveFailures,
             isConcentrating:
@@ -4125,6 +4125,9 @@ export class EncountersService {
             deathSaveFailures: patch.deathSaveFailures,
             deathSaveRoll: patch.deathSaveRoll,
           });
+          if (patch.deathState !== undefined) {
+            result.deathState = patch.deathState as any;
+          }
           if (shouldCheckConcentration && result.concentrationCheck) {
             const queued = enqueueConcentrationCheck(turnState, {
               id: `damage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -4144,7 +4147,7 @@ export class EncountersService {
                 rpCurrent: fresh.rpCurrent,
                 rpMax: fresh.rpMax,
                 hpTemp: fresh.hpTemp,
-                deathState: fresh.deathState as any,
+                deathState: patch.deathState !== undefined ? (patch.deathState as any) : (fresh.deathState as any),
               },
               -effectiveHpDelta,
             );
@@ -4152,13 +4155,13 @@ export class EncountersService {
             writeSet.rpCurrent = sfResult.rpCurrent;
             result.hpCurrent = sfResult.hpCurrent;
             result.hpTemp = sfResult.hpTemp;
-            result.deathState = sfResult.deathState;
+            result.deathState = patch.deathState !== undefined ? patch.deathState : sfResult.deathState;
           }
 
           if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
           writeSet.hpCurrent = result.hpCurrent;
           writeSet.hpTemp = result.hpTemp;
-          writeSet.deathState = result.deathState;
+          writeSet.deathState = patch.deathState !== undefined ? patch.deathState : result.deathState;
           writeSet.deathSaveSuccesses = result.deathSaveSuccesses;
           writeSet.deathSaveFailures = result.deathSaveFailures;
         }
@@ -4579,7 +4582,6 @@ export class EncountersService {
           // are skipped rather than using the lair helper's legacy raw fallback.
           const resumed = advanceTurn(advanceRoster, combatantId, freshEncounter.round);
           lairResumeCombatantId = resumed.currentCombatantId;
-          wrappedToNextRound = resumed.round > freshEncounter.round;
           // No eligible actor means there is no lair slot to resume. Exit it now
           // rather than letting the next advance use the lair helper's raw fallback.
           if (resumed.currentCombatantId === null) turnPhase = 'combatant';
@@ -5059,6 +5061,27 @@ export class EncountersService {
           .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
           .run();
       }
+
+      const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
+      if (currentCombatantId !== null) {
+        const starting = sorted.find((c) => c.id === currentCombatantId);
+        if (starting) {
+          const reset = resetTurnStateForStart(starting.turnState);
+          const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+          const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
+          if (
+            condTick.expired.length > 0 ||
+            condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
+          ) {
+            for (const c of condTick.expired) {
+              expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
+            }
+            Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+          }
+          tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
+        }
+      }
+
       tx.update(encounters)
         .set({
           status: 'running',
@@ -5075,6 +5098,14 @@ export class EncountersService {
         .where(eq(encounters.id, encounterId))
         .run();
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
+      
+      for (const e of expiredConditions) {
+        this.appendEventInTransaction(tx, encounterId, 1, 'condition', {
+          target: e.combatantName,
+          targetId: e.combatantId,
+          detail: `${e.conditionName} ended`,
+        });
+      }
     });
 
     // Seed the combat log with the opening turn (issue #61). Detail stays name-free

@@ -11,6 +11,7 @@ import {
   sortEncountersForList,
   turnIndexFor,
   advanceTurn,
+  initialEncounterTurnState,
   retreatTurn,
   shouldSkipTurnOnAdvance,
   hpBandFor,
@@ -959,5 +960,33 @@ describe('encounters — redactEncounterEventsForViewer (issue #869)', () => {
     const [redacted] = redactEncounterEventsForViewer(events, combatants, new Set([99]));
     expect(redacted.metadata?.dmText).toBeUndefined();
     expect(redacted.metadata?.playerText).toContain(UNKNOWN_COMBATANT_LABEL);
+  });
+});
+
+describe('initialEncounterTurnState (issue #1459)', () => {
+  it('skips dead/downed combatants at start of initiative', () => {
+    const sorted = [
+      { id: 1, initiative: 25, deathState: 'dead', kind: 'character' },
+      { id: 2, initiative: 20, deathState: 'none', kind: 'monster', hpCurrent: 50 },
+      { id: 3, initiative: 15, deathState: 'none', kind: 'character' },
+    ] as any;
+    
+    const result = initialEncounterTurnState(sorted, false);
+    
+    expect(result.currentCombatantId).toBe(2);
+    expect(result.turnIndex).toBe(1);
+    expect(result.phase).toBe('combatant');
+  });
+  
+  it('skips all if all are dead', () => {
+    const sorted = [
+      { id: 1, initiative: 25, deathState: 'dead', kind: 'character' },
+    ] as any;
+    
+    const result = initialEncounterTurnState(sorted, false);
+    
+    expect(result.currentCombatantId).toBe(null);
+    expect(result.turnIndex).toBe(0);
+    expect(result.phase).toBe('combatant');
   });
 });

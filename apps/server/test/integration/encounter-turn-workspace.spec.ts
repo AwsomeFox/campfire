@@ -905,7 +905,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(afterRemoval).toMatchObject({ turnPhase: 'combatant', currentCombatantId: null, lairResumeCombatantId: null });
   });
 
-  it('removing the final lair resume target carries the round wrap', async () => {
+  it('removing the final lair resume target shifts without round wrap', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();
     const { encounterId, c1, c2 } = seed(orm);
@@ -917,7 +917,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     await service.removeCombatant(encounterId, c2, dmUser, 'dm');
 
     const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
-    expect(afterRemoval).toMatchObject({ round: 2, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
+    expect(afterRemoval).toMatchObject({ round: 1, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
   });
 
   it('undoing an active removal restores the combatant phase after entering a lair slot', async () => {
