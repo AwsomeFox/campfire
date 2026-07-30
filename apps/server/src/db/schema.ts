@@ -687,6 +687,8 @@ export const sessionRsvps = sqliteTable('session_rsvps', {
   scheduledSessionId: integer('scheduled_session_id').notNull(),
   userId: text('user_id').notNull(),
   userName: text('user_name').notNull().default(''),
+  // Imported RSVP ownership is a local proxy; preserve its source name on account relabeling.
+  userImported: integer('user_imported', { mode: 'boolean' }).notNull().default(false),
   status: text('status').notNull(), // 'yes' | 'no' | 'maybe'
   note: text('note').notNull().default(''),
   createdAt: text('created_at').notNull(),
@@ -698,6 +700,8 @@ export const notes = sqliteTable('notes', {
   campaignId: integer('campaign_id').notNull(),
   authorUserId: text('author_user_id').notNull(),
   authorName: text('author_name').notNull().default(''),
+  // Imported ownership is a local proxy; the copied name remains source provenance.
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   kind: text('kind').notNull().default('note'),
   visibility: text('visibility').notNull().default('private'),
   entityType: text('entity_type'),
@@ -746,6 +750,8 @@ export const comments = sqliteTable('comments', {
   parentId: integer('parent_id'),
   authorUserId: text('author_user_id').notNull(),
   authorName: text('author_name').notNull().default(''),
+  // Imported ownership is a local proxy; the copied name remains source provenance.
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
   // Immutable creation-time character attribution (issue #787). character_id is
@@ -800,12 +806,14 @@ export const entityRevisions = sqliteTable('entity_revisions', {
   // Version author (issue #813). Empty when authorship_known=0 (legacy rows).
   authorUserId: text('author_user_id').notNull().default(''),
   authorName: text('author_name').notNull().default(''),
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   authorSource: text('author_source').notNull().default('human'), // 'human' | 'ai' | 'tool'
   authorSourceDetail: text('author_source_detail').notNull().default(''),
   createdAt: text('created_at').notNull().default(''), // authored-at; '' when unknown (legacy)
   // Replacing actor/time — null replaced_at marks the current tip (still live).
   replacedByUserId: text('replaced_by_user_id').notNull().default(''),
   replacedByName: text('replaced_by_name').notNull().default(''),
+  replacedByImported: integer('replaced_by_imported', { mode: 'boolean' }).notNull().default(false),
   replacedBySource: text('replaced_by_source').notNull().default('human'),
   replacedBySourceDetail: text('replaced_by_source_detail').notNull().default(''),
   replacedAt: text('replaced_at'),

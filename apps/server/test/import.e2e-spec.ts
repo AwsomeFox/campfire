@@ -7,7 +7,13 @@ import type { ConditionInstance } from '@campfire/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { MembersService } from '../src/modules/membership/members.service';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { characters as charactersTable } from '../src/db/schema';
+import {
+  characters as charactersTable,
+  comments,
+  entityRevisions,
+  notes,
+  sessionRsvps,
+} from '../src/db/schema';
 import { sheetConditionWriteSetFromInstances } from '../src/common/conditions';
 
 // Minimal valid 1x1 PNG — same fixture as attachments/export specs.
@@ -40,6 +46,7 @@ async function getBuffer(agent: ReturnType<typeof request.agent>, url: string) {
  */
 describe('campaign import (e2e, real cookie sessions)', () => {
   let ctx: TestAppContext;
+  let db: DrizzleDb;
   let dmAgent: ReturnType<typeof request.agent>;
   let playerAgent: ReturnType<typeof request.agent>;
   let campaignId: number;
@@ -55,6 +62,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
+    db = ctx.app.get(DB);
     const server = ctx.app.getHttpServer();
 
     dmAgent = request.agent(server);
@@ -303,6 +311,28 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       authorName: 'import-player',
     });
     expect(reply!.parentId).toBe(spoken!.id);
+
+    // #842: copied attribution is deliberately marked as import-local provenance,
+    // rather than inferred later from a name that may collide with a real account.
+    const [noteAttribution, commentAttribution, rsvpAttribution, revisionAttribution] = await Promise.all([
+      db.select({ imported: notes.authorImported }).from(notes).where(eq(notes.campaignId, imported.id)),
+      db.select({ imported: comments.authorImported }).from(comments).where(eq(comments.campaignId, imported.id)),
+      db
+        .select({ imported: sessionRsvps.userImported })
+        .from(sessionRsvps)
+        .where(eq(sessionRsvps.scheduledSessionId, importedHeist.id)),
+      db
+        .select({ authorImported: entityRevisions.authorImported, replacedByImported: entityRevisions.replacedByImported })
+        .from(entityRevisions)
+        .where(eq(entityRevisions.campaignId, imported.id)),
+    ]);
+    expect(noteAttribution).not.toHaveLength(0);
+    expect(commentAttribution).not.toHaveLength(0);
+    expect(rsvpAttribution).toEqual([{ imported: true }]);
+    expect(revisionAttribution).not.toHaveLength(0);
+    expect(noteAttribution.every((row) => row.imported)).toBe(true);
+    expect(commentAttribution.every((row) => row.imported)).toBe(true);
+    expect(revisionAttribution.every((row) => row.authorImported && row.replacedByImported)).toBe(true);
 
     // The source campaign is untouched — import never mutates it.
     const sourceLocs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/locations`);
