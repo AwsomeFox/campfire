@@ -850,6 +850,7 @@ describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () =>
     expect(empty.body).toEqual([]);
 
     await request(server).delete(`/api/v1/sessions/${sessionId}`).set(dm).expect(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await request(server).delete(`/api/v1/characters/${characterId}`).set(dm).expect(200);
 
     const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);

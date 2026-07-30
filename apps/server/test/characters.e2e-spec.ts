@@ -1753,6 +1753,8 @@ describe('characters — optimistic concurrency (issue #746, e2e)', () => {
   });
 });
 
+const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'other-player-2' };
+
 describe('POST /characters/:id/rest — individual character rest', () => {
   let ctx: TestAppContext;
   let restCampaignId: number;
@@ -1767,6 +1769,11 @@ describe('POST /characters/:id/rest — individual character rest', () => {
       .set(dm)
       .send({ name: `Rest Test Campaign ${Date.now()}` });
     restCampaignId = campRes.body.id;
+
+    await request(server)
+      .post(`/api/v1/campaigns/${restCampaignId}/members`)
+      .set(dm)
+      .send({ userId: 'dev:other-player-2', role: 'player' });
 
     const charRes = await request(server)
       .post(`/api/v1/campaigns/${restCampaignId}/characters`)
@@ -1790,11 +1797,11 @@ describe('POST /characters/:id/rest — individual character rest', () => {
     await closeTestApp(ctx);
   });
 
-  it('rejects a non-owner non-DM player with 403', async () => {
+  it('rejects a non-owner non-DM campaign player with 403', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .post(`/api/v1/characters/${restCharId}/rest`)
-      .set(nonOwner)
+      .set(otherPlayer)
       .send({ type: 'stamina' });
     expect(res.status).toBe(403);
   });
