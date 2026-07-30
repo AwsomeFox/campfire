@@ -4,7 +4,7 @@
  */
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Character, InventoryItem } from '@campfire/schema';
+import type { Character, InventoryItem, PartyCharacter } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
@@ -50,7 +50,7 @@ export function ItemSection({
   title: string;
   icon: string;
   items: InventoryItem[];
-  characters: Character[];
+  characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
   canEditItem: (item: InventoryItem) => boolean;
   onChanged: () => void;
@@ -98,7 +98,7 @@ export function ItemRow({
 }: {
   item: InventoryItem;
   editable: boolean;
-  characters: Character[];
+  characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
   onChanged: () => void;
 }) {

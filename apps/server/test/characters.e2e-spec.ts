@@ -518,6 +518,14 @@ describe('characters (e2e)', () => {
     expect(ownerList.body.some((character: { id: number }) => character.id === characterId)).toBe(true);
     expect(ownerList.body.some((character: { id: number }) => character.id === otherId)).toBe(false);
 
+    const ownerRoster = await request(server).get(`/api/v1/campaigns/${campaignId}/characters/roster`).set(owner);
+    expect(ownerRoster.status).toBe(200);
+    expect(ownerRoster.body.map((character: { id: number }) => character.id)).toEqual(expect.arrayContaining([characterId, otherId]));
+    const rosterTeammate = ownerRoster.body.find((character: { id: number }) => character.id === otherId);
+    expect(rosterTeammate).toEqual(expect.objectContaining({ id: otherId, name: 'Other Player Sheet' }));
+    expect(rosterTeammate).not.toHaveProperty('spellSlots');
+    expect(rosterTeammate).not.toHaveProperty('actions');
+
     const otherList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(nonOwner);
     expect(otherList.status).toBe(200);
     expect(otherList.body.some((character: { id: number }) => character.id === otherId)).toBe(true);

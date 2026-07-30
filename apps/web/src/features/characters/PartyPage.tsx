@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
-import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/schema';
+import type { Character, CampaignMember, PartyCharacter, RuleSystemAdapter } from '@campfire/schema';
 import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
@@ -42,7 +42,10 @@ export default function PartyPage() {
   const ddbAllowed = ddbImportSupported(campaign?.ruleSystem);
   const adapter = ruleSystemAdapter(campaign?.ruleSystem);
 
-  const [characters, setCharacters] = useState<Character[]>([]);
+  // Full sheets are caller-scoped. The separate roster lets every member see the
+  // party without widening those sheets (and stays light enough for the 5s poll).
+  const [fullCharacters, setFullCharacters] = useState<Character[]>([]);
+  const [party, setParty] = useState<PartyCharacter[]>([]);
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -93,13 +96,15 @@ export default function PartyPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [chars, memberList] = await Promise.all([
+      const [chars, roster, memberList] = await Promise.all([
         api.get<Character[]>(`${API}/campaigns/${id}/characters`),
+        api.get<PartyCharacter[]>(`${API}/campaigns/${id}/characters/roster`),
         // Members list is available to every campaign role (not DM-only) — used
         // only to resolve a character's ownerUserId to a human-readable name below.
         api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`).catch(() => [] as CampaignMember[]),
       ]);
-      setCharacters(chars);
+      setFullCharacters(chars);
+      setParty(roster);
       setMembers(memberList);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load the party.");
@@ -126,7 +131,8 @@ export default function PartyPage() {
   // surface an Undo. The card's own menu runs the DELETE; this handler is the page-level
   // seam that updates the list and owns the snackbar.
   function onCharacterTrashed(character: Character) {
-    setCharacters((prev) => prev.filter((c) => c.id !== character.id));
+    setFullCharacters((prev) => prev.filter((c) => c.id !== character.id));
+    setParty((prev) => prev.filter((c) => c.id !== character.id));
     setPendingUndo(character);
   }
 
@@ -158,7 +164,7 @@ export default function PartyPage() {
   const canCreate = canPlayerWrite;
 
   const secondaryActions: PageHeaderSecondaryAction[] =
-    canDmWrite && !awarding && characters.length > 0
+    canDmWrite && !awarding && party.length > 0
       ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }, { key: 'rest-party', label: 'Rest party', onClick: () => setResting(true) }]
       : [];
 
@@ -169,7 +175,7 @@ export default function PartyPage() {
         title="Party"
         secondaryActions={secondaryActions}
         primaryAction={
-          canCreate && !creating && characters.length > 0 ? (
+          canCreate && !creating && party.length > 0 ? (
             <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
               + New character
             </Btn>
@@ -182,7 +188,7 @@ export default function PartyPage() {
       {canDmWrite && awarding && (
         <AwardXpForm
           campaignId={id}
-          characters={characters}
+          characters={fullCharacters}
           initialAmount={suggestedXpAmount}
           onCancel={() => setAwardingOpen(false)}
           onAwarded={() => {
@@ -191,46 +197,51 @@ export default function PartyPage() {
           }}
         />
       )}
-      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={characters} onClose={() => setResting(false)} onApplied={() => { void load(); }} />}
+      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={fullCharacters} onClose={() => setResting(false)} onApplied={() => { void load(); }} />}
 
       {loading ? (
         <Card>
           <Skeleton lines={4} />
         </Card>
-      ) : characters.length === 0 && !canCreate ? (
+      ) : party.length === 0 && !canCreate ? (
         <EmptyState icon="shield" title="No characters yet" hint="Ask the DM to add the party." />
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
-          {characters.map((c, i) => (
-            <CharacterCard
-              key={c.id}
-              campaignId={id}
-              character={c}
-              adapter={adapter}
-              index={i}
-              ownerLabel={ownerLabel(c.ownerUserId)}
-              // Quick HP is offered on a card the viewer can edit: the DM (any card)
-              // or a player on their own character (issue #68).
-              canEditHp={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
-              // Move-to-Trash (issue #716): owner or DM only — the menu is not rendered
-              // for an unrelated player, matching PATCH /characters/:id role gating.
-              canTrash={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
-              onTrashed={onCharacterTrashed}
-              onError={setError}
-              onChange={load}
-            />
-          ))}
+          {party.map((rosterCharacter, i) => {
+            const fullCharacter = fullCharacters.find((character) => character.id === rosterCharacter.id);
+            return fullCharacter ? (
+              <CharacterCard
+                key={fullCharacter.id}
+                campaignId={id}
+                character={fullCharacter}
+                adapter={adapter}
+                index={i}
+                ownerLabel={ownerLabel(fullCharacter.ownerUserId)}
+                // Quick HP is offered on a card the viewer can edit: the DM (any card)
+                // or a player on their own character (issue #68).
+                canEditHp={canDmWrite || (canPlayerWrite && fullCharacter.ownerUserId != null && myUserId != null && fullCharacter.ownerUserId === String(myUserId))}
+                // Move-to-Trash (issue #716): owner or DM only — the menu is not rendered
+                // for an unrelated player, matching PATCH /characters/:id role gating.
+                canTrash={canDmWrite || (canPlayerWrite && fullCharacter.ownerUserId != null && myUserId != null && fullCharacter.ownerUserId === String(myUserId))}
+                onTrashed={onCharacterTrashed}
+                onError={setError}
+                onChange={load}
+              />
+            ) : (
+              <RosterCharacterCard key={rosterCharacter.id} character={rosterCharacter} index={i} adapter={adapter} />
+            );
+          })}
         </div>
       )}
 
       {/* Wait for the roster load so an empty-state create form (autoFocus) does not
           flash during loading and steal route-change focus from the page h1 (#591). */}
-      {canCreate && !loading && (creating || characters.length === 0) && (
+      {canCreate && !loading && (creating || party.length === 0) && (
         <NewCharacterForm
           campaignId={id}
           adapter={adapter}
           ddbAllowed={ddbAllowed}
-          onCancel={characters.length > 0 ? closeCreating : undefined}
+          onCancel={party.length > 0 ? closeCreating : undefined}
           onCreated={() => {
             closeCreating();
             void load();
@@ -246,6 +257,59 @@ export default function PartyPage() {
         />
       )}
     </div>
+  );
+}
+
+/** A teammate's roster entry is deliberately read-only and not a sheet link. */
+function RosterCharacterCard({
+  character,
+  adapter,
+  index,
+}: {
+  character: PartyCharacter;
+  adapter: RuleSystemAdapter;
+  index: number;
+}) {
+  const tone = avatarTone(index);
+  const isActive = character.status === 'active';
+  const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
+  const classSummary = classField.visible && character.className.trim()
+    ? `${character.className} · `
+    : classField.visible
+      ? `${classField.label} not set · `
+      : '';
+
+  return (
+    <Card density="compact" className={`space-y-2.5 ${isActive ? '' : 'opacity-60'}`} aria-label={`${character.name}, roster entry`}>
+      <div className="flex items-center gap-2.5">
+        {character.portraitUrl ? (
+          <img src={character.portraitUrl} alt="" className={`h-10 w-10 shrink-0 rounded-full object-cover border ${tone.border}`} />
+        ) : (
+          <div className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}>
+            {initials(character.name)}
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
+            {!isActive && <StatusTag status={character.status} className="shrink-0" />}
+          </div>
+          <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={`${classSummary}Lv ${character.level}`}>
+            {classSummary}Lv {character.level}
+          </p>
+        </div>
+      </div>
+      <div className="flex justify-between text-[11.5px] text-secondary">
+        <span>HP</span>
+        <span>{character.hpMax > 0 ? `${character.hpCurrent} / ${character.hpMax}` : 'Not set'}</span>
+      </div>
+      {character.hpMax > 0 ? <HpBar current={character.hpCurrent} max={character.hpMax} /> : <p className="text-[10px] text-secondary">Complete HP on the sheet</p>}
+      {character.conditions.length > 0 && (
+        <div className="flex gap-1.5 flex-wrap">
+          <span className="tag tag-outline" style={{ fontSize: 10 }}>{character.conditions.join(', ')}</span>
+        </div>
+      )}
+    </Card>
   );
 }
 

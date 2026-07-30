@@ -28,6 +28,14 @@ export class CampaignCharactersController {
     return this.characters.listForCampaign(campaignId, user, role);
   }
 
+  @Get('roster')
+  @ApiOperation({ summary: 'List the table-safe party roster', description: 'Every campaign member receives a minimal display roster. Full sheets remain available only through the caller-scoped character list and direct character read endpoints.' })
+  @ApiResponse({ status: 200, description: 'Table-safe party roster for the campaign.' })
+  async roster(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireMember(user, campaignId);
+    return this.characters.partyRosterForCampaign(campaignId);
+  }
+
   @Post()
   @ApiOperation({
     summary: 'Create a character',
