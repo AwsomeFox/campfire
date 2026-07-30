@@ -435,7 +435,7 @@ class ImportJobCancelledError extends Error {}
  * (FTS bm25 rank, or name in the LIKE fallback).
  */
 function foldSqlCol(col: any) {
-  return sql`replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(lower(${col}), 'é', 'e'), 'è', 'e'), 'ê', 'e'), 'ë', 'e'), 'á', 'a'), 'à', 'a'), 'â', 'a'), 'ä', 'a'), 'ó', 'o'), 'ò', 'o'), 'ô', 'o'), 'ö', 'o'), 'ú', 'u'), 'ù', 'u'), 'û', 'u'), 'ü', 'u'), 'ñ', 'n'), 'ç', 'c')`;
+  return sql`lower(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(${col}, 'É', 'e'), 'È', 'e'), 'Ê', 'e'), 'Ë', 'e'), 'é', 'e'), 'è', 'e'), 'ê', 'e'), 'ë', 'e'), 'Á', 'a'), 'À', 'a'), 'Â', 'a'), 'Ä', 'a'), 'á', 'a'), 'à', 'a'), 'â', 'a'), 'ä', 'a'), 'Ó', 'o'), 'Ò', 'o'), 'Ô', 'o'), 'Ö', 'o'), 'ó', 'o'), 'ò', 'o'), 'ô', 'o'), 'ö', 'o'), 'Ú', 'u'), 'Ù', 'u'), 'Û', 'u'), 'Ü', 'u'), 'ú', 'u'), 'ù', 'u'), 'û', 'u'), 'ü', 'u'), 'Ñ', 'n'), 'ñ', 'n'), 'Ç', 'c'), 'ç', 'c'), 'Æ', 'ae'), 'æ', 'ae'), 'Œ', 'oe'), 'œ', 'oe'))`;
 }
 
 /**

@@ -44,6 +44,13 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
       `)
       .run(pack.id, 'resume-entry', 'Résumé', 'rule', 'A character Résumé', '', ts, ts);
 
+    dbCtx.sqlite
+      .prepare(`
+        INSERT INTO rule_entries (pack_id, slug, name, type, summary, body, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(pack.id, 'etoile-entry', 'Étoile', 'rule', 'A star named Étoile', '', ts, ts);
+
     // FTS Path (primary production path backed by unicode61 remove_diacritics FTS table)
     const zoeResultFts = await rulesService.search({ q: 'Zoe' });
     expect(zoeResultFts.items.some((i) => i.name === 'Zoë')).toBe(true);
@@ -56,6 +63,12 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
 
     const resumeAccentResultFts = await rulesService.search({ q: 'Résumé' });
     expect(resumeAccentResultFts.items.some((i) => i.name === 'Résumé')).toBe(true);
+
+    const etoileResultFts = await rulesService.search({ q: 'etoile' });
+    expect(etoileResultFts.items.some((i) => i.name === 'Étoile')).toBe(true);
+
+    const etoileUpperResultFts = await rulesService.search({ q: 'Étoile' });
+    expect(etoileUpperResultFts.items.some((i) => i.name === 'Étoile')).toBe(true);
 
     // Fallback LIKE Path (forces ftsAvailable = false)
     const fallbackRulesService = new RulesService(dbCtx.orm, false, { log: jest.fn() } as any, {} as any);
@@ -71,6 +84,12 @@ describe('Accented content search and compendium cursor pagination (#1493)', () 
 
     const resumeResultLike = await fallbackRulesService.search({ q: 'Resume' });
     expect(resumeResultLike.items.some((i) => i.name === 'Résumé')).toBe(true);
+
+    const etoileResultLike = await fallbackRulesService.search({ q: 'etoile' });
+    expect(etoileResultLike.items.some((i) => i.name === 'Étoile')).toBe(true);
+
+    const etoileUpperResultLike = await fallbackRulesService.search({ q: 'Étoile' });
+    expect(etoileUpperResultLike.items.some((i) => i.name === 'Étoile')).toBe(true);
 
     // Exact-name rank bucket ranking assertion (issue #1493 review feedback)
     expect(zoeResultFts.items[0].name).toBe('Zoë');
