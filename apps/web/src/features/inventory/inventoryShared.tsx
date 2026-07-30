@@ -2,7 +2,7 @@
  * Shared inventory item UI — used by the campaign Inventory page and character
  * sheet inventory section (issue #454).
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Character, InventoryItem, PartyCharacter, RuleEntry } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
@@ -540,29 +540,40 @@ export function CompendiumItemPickerModal({
   const [error, setError] = useState<string | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState(false);
 
+  const fetchGen = useRef(0);
+
   const search = useCallback(
     async (q: string) => {
+      const gen = ++fetchGen.current;
       setLoading(true);
       setError(null);
       try {
         const res = await api.get<{ items: RuleEntry[] }>(
           `${API}/rules/search?campaignId=${campaignId}&type=item&q=${encodeURIComponent(q)}`,
         );
+        if (gen !== fetchGen.current) return;
         setItems(res.items ?? []);
       } catch (err) {
+        if (gen !== fetchGen.current) return;
         setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
       } finally {
-        setLoading(false);
+        if (gen === fetchGen.current) {
+          setLoading(false);
+        }
       }
     },
     [campaignId, t],
   );
 
   useEffect(() => {
+    let cancelled = false;
     const handle = setTimeout(() => {
-      void search(query);
+      if (!cancelled) void search(query);
     }, 250);
-    return () => clearTimeout(handle);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
   }, [query, search]);
 
   async function acquire(duplicateMode: 'confirm' | 'increment' | 'separate' = 'confirm') {

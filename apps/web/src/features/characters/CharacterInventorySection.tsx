@@ -101,7 +101,7 @@ export function CharacterInventorySection({
       ) : (
         <>
           {canManageCharacter && !adding && (
-            <div className="flex items-center gap-2">
+            <div className="cf-print-hide flex items-center gap-2">
               <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
