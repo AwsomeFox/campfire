@@ -65,6 +65,19 @@ describe('character roll catalog (e2e)', () => {
     expect(firstFavIdx).toBeLessThan(firstNonFavIdx);
   });
 
+  it('GET .../checks is limited to the owning player or dm', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'other-player' };
+    const [asViewer, asOtherPlayer, asDm] = await Promise.all([
+      request(server).get(`/api/v1/characters/${characterId}/checks`).set(viewer),
+      request(server).get(`/api/v1/characters/${characterId}/checks`).set(otherPlayer),
+      request(server).get(`/api/v1/characters/${characterId}/checks`).set(dm),
+    ]);
+    expect(asViewer.status).toBe(403);
+    expect(asOtherPlayer.status).toBe(403);
+    expect(asDm.status).toBe(200);
+  });
+
   it('POST .../checks/roll rolls an UNPROFICIENT skill server-side with the correct modifier + breakdown', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)

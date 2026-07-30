@@ -396,10 +396,14 @@ describe('characters (e2e)', () => {
       expect(keys).toEqual(expect.arrayContaining(['hitDice', 'rage', 'actionSurge', 'kiPoints']));
     });
 
-    it('a viewer CAN read the resource vocabulary — non-sensitive campaign metadata, same access as list_checks', async () => {
+    it('a viewer or non-owner player cannot read a character resource vocabulary', async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).get(`/api/v1/characters/${characterId}/resource-vocabulary`).set(viewer);
-      expect(res.status).toBe(200);
+      const [asViewer, asOtherPlayer] = await Promise.all([
+        request(server).get(`/api/v1/characters/${characterId}/resource-vocabulary`).set(viewer),
+        request(server).get(`/api/v1/characters/${characterId}/resource-vocabulary`).set(nonOwner),
+      ]);
+      expect(asViewer.status).toBe(403);
+      expect(asOtherPlayer.status).toBe(403);
     });
 
     it('the owning player spends and restores a resource; an overspend errors rather than clamping', async () => {

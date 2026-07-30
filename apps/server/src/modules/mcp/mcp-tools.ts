@@ -2959,8 +2959,7 @@ export class McpToolsService {
         'this list to create a homebrew resource, so this is for DISCOVERING the adapter-declared ones, not gating them.',
       { characterId: Id.describe('Character id — from list_members, get_party, or list_characters') },
       async ({ characterId }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        await this.access.requireMember(user, character.campaignId);
+        await this.characters.assertCharacterReadable(characterId as number, user);
         return this.characters.listResourceVocabulary(characterId as number);
       },
     );
@@ -3954,8 +3953,7 @@ export class McpToolsService {
         characterId: Id.describe('Character id — from list_members, get_party, or list_characters'),
       },
       async ({ characterId }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        await this.access.requireMember(user, character.campaignId);
+        await this.characters.assertCharacterReadable(characterId as number, user);
         return this.characters.listChecks(characterId as number);
       },
     );

@@ -317,6 +317,23 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Resolve the shared full-sheet read boundary for derived sheet data. Roll catalogs
+   * and resource vocabularies expose private stats/mechanics, so membership alone is
+   * insufficient even when the caller learned an id from the safe party roster.
+   */
+  async assertCharacterReadable(
+    characterId: number,
+    user: RequestUser,
+  ): Promise<{ row: typeof characters.$inferSelect; role: Role }> {
+    const row = await this.getRowOrThrow(characterId);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (role !== 'dm' && row.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only view your own character sheet.');
+    }
+    return { row, role };
+  }
+
   /** dm or owner may write; others 403 */
   assertCanWrite(row: { ownerUserId: string | null }, user: RequestUser, role: Role): void {
     if (role === 'dm') return;
@@ -366,8 +383,8 @@ export class CharactersService {
    * Issue #415: the roll catalog for a character — every rollable check (ability checks,
    * skills incl. unproficient, saves, initiative) with an authoritative modifier and a
    * transparent breakdown, sourced from the campaign's RuleSystemAdapter. Favorites first.
-   * The catalog reads only public sheet numbers (level/stats/saves/skills), so no dmSecret
-   * redaction is needed — it never touches the secret field.
+   * The catalog derives authoritative private sheet mechanics (level/stats/saves/skills),
+   * so callers must pass {@link assertCharacterReadable} before reaching this method.
    */
   async listChecks(id: number): Promise<RollCheckDefinition[]> {
     const row = await this.getRowOrThrow(id);

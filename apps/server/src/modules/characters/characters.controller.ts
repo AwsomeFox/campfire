@@ -312,12 +312,11 @@ export class CharactersController {
   @ApiOperation({
     summary: 'List a character\'s rollable checks (roll catalog)',
     description:
-      'Requires campaign membership. Returns the adapter-owned roll catalog for the character (issue #415): every rollable check — ability checks, skills (proficient AND unproficient), saves/defenses, and initiative — each with an authoritative modifier and a transparent breakdown ("DEX +3, proficient +2 = +5"), favorites (trained/proficient) first. The character sheet and the encounter card render this identical list; the modifier math is computed by the campaign\'s rule system, so no client reinvents proficiency math.',
+      'DM or owning player. Returns the adapter-owned roll catalog for the character (issue #415): every rollable check — ability checks, skills (proficient AND unproficient), saves/defenses, and initiative — each with an authoritative modifier and a transparent breakdown ("DEX +3, proficient +2 = +5"), favorites (trained/proficient) first. The character sheet and the encounter card render this identical list; the modifier math is computed by the campaign\'s rule system, so no client reinvents proficiency math.',
   })
   @ApiResponse({ status: 200, description: 'The character\'s roll catalog, favorites first.' })
   async listChecks(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    const row = await this.characters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
+    await this.characters.assertCharacterReadable(id, user);
     return this.characters.listChecks(id);
   }
 
@@ -364,7 +363,7 @@ export class CharactersController {
   @ApiOperation({
     summary: "List a character's available resource vocabulary",
     description:
-      'Requires campaign membership. Returns the campaign rule system\'s STANDARD resource pools (issue #422) — ' +
+      'DM or owning player. Returns the campaign rule system\'s STANDARD resource pools (issue #422) — ' +
       '5e hitDice/rage/actionSurge/kiPoints/inspiration, PF2e focusPoints/hitDice/heroPoints, and so on — plus any ' +
       'CUSTOM resource already on this character\'s sheet, sourced from the campaign\'s RuleSystemAdapter so no ' +
       'client hardcodes one system\'s resource names. `key` from an entry is what POST :id/resources expects; the ' +
@@ -373,8 +372,7 @@ export class CharactersController {
   })
   @ApiResponse({ status: 200, description: "The character's resource vocabulary." })
   async listResourceVocabulary(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    const row = await this.characters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
+    await this.characters.assertCharacterReadable(id, user);
     return this.characters.listResourceVocabulary(id);
   }
 
