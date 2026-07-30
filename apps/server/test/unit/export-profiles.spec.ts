@@ -205,6 +205,18 @@ describe('allowlist projection (#586)', () => {
     expect(publish[0].status).toBe('preparing');
     expect((publish[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBeUndefined();
 
+    const publishWithPlayedState = projectExport(
+      raw,
+      resolveExportPolicy('publish', { includePlayedState: true }),
+    ).data.encounters as Array<Record<string, unknown>>;
+    expect((publishWithPlayedState[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBeUndefined();
+
+    const publishWithPlayedStateAndDmSecrets = projectExport(
+      raw,
+      resolveExportPolicy('publish', { includePlayedState: true, includeDmSecrets: true }),
+    ).data.encounters as Array<Record<string, unknown>>;
+    expect((publishWithPlayedStateAndDmSecrets[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBe('hostile');
+
     const handoff = projectExport(raw, resolveExportPolicy('handoff')).data.encounters as Array<Record<string, unknown>>;
     expect((handoff[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBe('hostile');
   });

@@ -51,6 +51,11 @@ function fieldsFor(kind: EntityKind, policy: ResolvedExportPolicy): string[] {
   if (policy.playedState && kind in PLAYED_STATE_FIELDS) {
     fields.push(...PLAYED_STATE_FIELDS[kind as keyof typeof PLAYED_STATE_FIELDS]);
   }
+  // This encounter-time value is historical played state, but it is also
+  // DM-only allegiance data. A publish export needs both explicit opt-ins.
+  if (policy.playedState && policy.dmSecrets && kind === 'combatant') {
+    fields.push('npcDispositionSnapshot');
+  }
   if (policy.playerContent && kind in PLAYER_CONTENT_FIELDS) {
     fields.push(...PLAYER_CONTENT_FIELDS[kind as keyof typeof PLAYER_CONTENT_FIELDS]);
   }

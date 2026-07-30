@@ -295,9 +295,7 @@ export const PLAYED_STATE_FIELDS = {
   // public Character schema).
   character: ['status', 'xp', 'hpCurrent', 'hpTemp', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'conditionInstances', 'spellSlots'],
   encounter: ['status', 'round', 'turnIndex', 'currentCombatantId', 'turnPhase', 'escalationDie', 'endedAt'],
-  // Captured while the encounter is played; a pristine publish module must derive
-  // NPC allegiance from its authored NPC record instead.
-  combatant: ['npcDispositionSnapshot', 'initiative', 'hpCurrent', 'hpTemp', 'spCurrent', 'rpCurrent', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'conditionInstances', 'activeEffects'],
+  combatant: ['initiative', 'hpCurrent', 'hpTemp', 'spCurrent', 'rpCurrent', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'conditionInstances', 'activeEffects'],
   storyArc: ['status'],
   storyBeat: ['status'],
   timelineCalendar: ['currentDate'],
