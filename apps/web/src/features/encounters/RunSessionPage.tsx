@@ -94,6 +94,7 @@ import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
   reconcileEncounterPatchResponse,
+  rollbackEncounterPatchError,
   type QueuedEncounterPatch,
 } from './encounterPatchQueue';
 import { pendingFogForEncounter, reconcileFogSyncState, type ScopedPendingFog } from './fogSyncState';
@@ -2186,7 +2187,15 @@ export default function RunSessionPage() {
       );
     },
     onSettled: (_data, error, variables) => {
+      const failedEntry = pendingEncounterPatches.current.get(variables.queueId);
       pendingEncounterPatches.current.delete(variables.queueId);
+      if (error && failedEntry) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), (current) =>
+          current
+            ? rollbackEncounterPatchError(current, failedEntry, pendingEncounterPatches.current.values(), variables.encounterId)
+            : current,
+        );
+      }
       if (!Array.from(pendingEncounterPatches.current.values()).some((entry) => entry.encounterId === variables.encounterId)) {
         lastLocalEncounterRevision.current.delete(variables.encounterId);
       }
@@ -2245,12 +2254,19 @@ export default function RunSessionPage() {
         return false;
       }
       const queueId = `${pendingKey}:${++encounterPatchSequence.current}`;
+      const currentEncounter = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
       const observedUpdatedAt = observedEncounterPatchRevision(
         pendingEncounterPatches.current.values(),
         eid,
-        queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))?.updatedAt,
+        currentEncounter?.updatedAt,
       );
-      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, observedUpdatedAt, patch });
+      const previousValues: Record<string, unknown> = {};
+      if (currentEncounter) {
+        for (const key of Object.keys(patch)) {
+          previousValues[key] = (currentEncounter as Record<string, unknown>)[key];
+        }
+      }
+      pendingEncounterPatches.current.set(queueId, { encounterId: eid, queueId, pendingKey, observedUpdatedAt, patch, previousValues });
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
       // Make every encounter patch optimistic. Fog edits in particular need their cache value
