@@ -51,6 +51,7 @@ describe('account historical attribution privacy (e2e)', () => {
   let campaignId: number;
   let noteId: number;
   let characterId: number;
+  let redactedEvidenceContentHash: string;
 
   function retainedRows(db: DrizzleDb) {
     const stableUserId = String(memberId);
@@ -69,7 +70,18 @@ describe('account historical attribution privacy (e2e)', () => {
         .all(),
       rsvps: db.select().from(sessionRsvps).where(eq(sessionRsvps.userId, stableUserId)).all(),
       acknowledgments: db.select().from(sessionZeroAcknowledgments).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).all(),
-      boundaries: db.select().from(sessionZeroBoundarySubmissions).where(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId)).all(),
+      boundaries: db
+        .select()
+        .from(sessionZeroBoundarySubmissions)
+        .where(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId))
+        .all()
+        .filter((row) => !row.anonymous),
+      anonymousBoundaries: db
+        .select()
+        .from(sessionZeroBoundarySubmissions)
+        .where(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId))
+        .all()
+        .filter((row) => row.anonymous),
       guardianConsents: db.select().from(sessionZeroGuardianConsents).where(eq(sessionZeroGuardianConsents.userId, stableUserId)).all(),
       supportPreferences: db.select().from(participantSupportPreferences).where(eq(participantSupportPreferences.ownerUserId, stableUserId)).all(),
       rolls: db.select().from(diceRolls).where(eq(diceRolls.rollerUserId, stableUserId)).all(),
@@ -89,7 +101,14 @@ describe('account historical attribution privacy (e2e)', () => {
     };
   }
 
-  function expectRetainedAttribution(db: DrizzleDb, label: string, options: { expectSupportPreferences: boolean } = { expectSupportPreferences: true }) {
+  function expectRetainedAttribution(
+    db: DrizzleDb,
+    label: string,
+    options: { expectSupportPreferences: boolean; expectNeutralNotificationCopy: boolean } = {
+      expectSupportPreferences: true,
+      expectNeutralNotificationCopy: false,
+    },
+  ) {
     const rows = retainedRows(db);
     expect(rows.notes).not.toHaveLength(0);
     expect(rows.comments).not.toHaveLength(0);
@@ -98,6 +117,7 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.rsvps).not.toHaveLength(0);
     expect(rows.acknowledgments).not.toHaveLength(0);
     expect(rows.boundaries).not.toHaveLength(0);
+    expect(rows.anonymousBoundaries).not.toHaveLength(0);
     expect(rows.guardianConsents).not.toHaveLength(0);
     if (options.expectSupportPreferences) expect(rows.supportPreferences).not.toHaveLength(0);
     else expect(rows.supportPreferences).toHaveLength(0);
@@ -118,26 +138,58 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.rsvps.every((row) => row.userName === label)).toBe(true);
     expect(rows.acknowledgments.every((row) => row.userName === label)).toBe(true);
     expect(rows.boundaries.every((row) => row.submitterName === label)).toBe(true);
+    expect(rows.anonymousBoundaries.every((row) => row.submitterName === '')).toBe(true);
     expect(rows.guardianConsents.every((row) => row.userName === label)).toBe(true);
     expect(rows.supportPreferences.every((row) => row.ownerName === label)).toBe(true);
     expect(rows.rolls.every((row) => row.rollerName === label)).toBe(true);
     expect(rows.moderationReporter.every((row) => row.reporterName === label)).toBe(true);
     expect(rows.moderationSubject.every((row) => row.subjectName === label)).toBe(true);
     expect(rows.moderationEvidence.every((row) => row.authorName === label)).toBe(true);
+    if (options.expectNeutralNotificationCopy) {
+      expect(
+        rows.moderationEvidence
+          .filter((row) => row.targetType === 'notification')
+          .every((row) => row.content === NEUTRAL_NOTIFICATION_BODY),
+      ).toBe(true);
+    }
     expect(
-      rows.moderationEvidence
-        .filter((row) => row.targetType === 'notification')
-        .every((row) => row.content === NEUTRAL_NOTIFICATION_BODY),
+      rows.moderationEvidence.every((row) =>
+        ['intact', 'redacted'].includes(
+          verifyModerationEvidence(
+            {
+              campaignId: row.campaignId,
+              targetType: row.targetType,
+              targetId: row.targetId,
+              reason: row.reason,
+              source: row.source,
+              authorUserId: row.authorUserId,
+              authorName: row.authorName,
+              recipientUserId: row.recipientUserId,
+              anchorEntityType: row.anchorEntityType,
+              anchorEntityId: row.anchorEntityId,
+              revisionAt: row.revisionAt,
+              capturedAt: row.capturedAt,
+              context: JSON.parse(row.contextJson) as Record<string, unknown>,
+              content: row.content,
+            },
+            row.contentHash,
+            row.redactedAt,
+            row.metadataHash,
+          ),
+        ),
+      ),
     ).toBe(true);
-    expect(rows.moderationEvidence.every((row) => verifyModerationEvidence({ campaignId: row.campaignId, targetType: row.targetType, targetId: row.targetId, reason: row.reason, source: row.source, authorUserId: row.authorUserId, authorName: row.authorName, recipientUserId: row.recipientUserId, anchorEntityType: row.anchorEntityType, anchorEntityId: row.anchorEntityId, revisionAt: row.revisionAt, capturedAt: row.capturedAt, context: JSON.parse(row.contextJson) as Record<string, unknown>, content: row.content }, row.contentHash, row.redactedAt, row.metadataHash) === 'intact')).toBe(true);
+    expect(rows.moderationEvidence.filter((row) => row.redactedAt !== null).every((row) => row.contentHash === redactedEvidenceContentHash)).toBe(true);
     expect(rows.moderationMutes.every((row) => row.userName === label)).toBe(true);
     expect(rows.checkRequests.every((row) => row.requestedByName === label)).toBe(true);
     expect(rows.transcript.every((row) => row.actorName === label)).toBe(true);
     expect(rows.proposals.every((row) => row.proposer === label)).toBe(true);
     for (const row of [...rows.immediate, ...rows.deferred]) {
       expect(row.actorName).toBe(label);
-      expect(row.title).toBe(NEUTRAL_NOTIFICATION_TITLE);
-      expect(row.body).toBe(NEUTRAL_NOTIFICATION_BODY);
+      if (options.expectNeutralNotificationCopy) {
+        expect(row.title).toBe(NEUTRAL_NOTIFICATION_TITLE);
+        expect(row.body).toBe(NEUTRAL_NOTIFICATION_BODY);
+      }
     }
   }
 
@@ -239,10 +291,15 @@ describe('account historical attribution privacy (e2e)', () => {
     const charterVersionId = db.insert(sessionZeroCharterVersions).values({ campaignId, version: 1, lines: '[]', veils: '[]', safetyTools: '[]', houseRules: '', toneAndExpectations: '', material: false, changeSummary: '', publishedBy: String(adminId), publishedAt: ts }).returning().get().id;
     db.insert(sessionZeroAcknowledgments).values({ campaignId, versionId: charterVersionId, userId: String(memberId), userName: OLD_LABEL, state: 'acknowledged', note: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(sessionZeroBoundarySubmissions).values({ campaignId, kind: 'line', text: 'A visible boundary', anonymous: false, submitterUserId: String(memberId), submitterName: OLD_LABEL, createdAt: ts, updatedAt: ts }).run();
+    db.insert(sessionZeroBoundarySubmissions).values({ campaignId, kind: 'line', text: 'An anonymous boundary', anonymous: true, submitterUserId: String(memberId), submitterName: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(sessionZeroGuardianConsents).values({ campaignId, userId: String(memberId), userName: OLD_LABEL, versionId: charterVersionId, guardianName: 'Guardian', guardianEmail: 'guardian@example.test', guardianRelationship: 'parent', minorAttested: true, status: 'pending', decisionNote: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(participantSupportPreferences).values({ campaignId, ownerUserId: String(memberId), ownerName: OLD_LABEL, supportText: 'Need a break', visibility: 'table', aiUseConsent: false, createdAt: ts, updatedAt: ts }).run();
     const evidencePayload = { campaignId, targetType: 'conduct' as const, targetId: null, reason: 'conduct' as const, source: 'server_capture' as const, authorUserId: String(memberId), authorName: OLD_LABEL, recipientUserId: null, anchorEntityType: null, anchorEntityId: null, revisionAt: ts, content: 'Evidence content', context: {}, capturedAt: ts };
     const evidenceId = db.insert(moderationEvidence).values({ ...evidencePayload, contextJson: '{}', contentHash: moderationEvidenceHash(evidencePayload), metadataHash: moderationEvidenceMetadataHash(evidencePayload), redactedAt: null, redactedBy: null, redactionReason: '', expiresAt: null }).returning().get().id;
+    const redactedOriginal = { ...evidencePayload, content: 'Original redacted evidence' };
+    const redactedStored = { ...redactedOriginal, content: '[redacted]' };
+    redactedEvidenceContentHash = moderationEvidenceHash(redactedOriginal);
+    db.insert(moderationEvidence).values({ ...redactedStored, contextJson: '{}', contentHash: redactedEvidenceContentHash, metadataHash: moderationEvidenceMetadataHash(redactedStored), redactedAt: ts, redactedBy: String(adminId), redactionReason: 'test', expiresAt: null }).run();
     db.insert(moderationReports).values({ campaignId, targetType: 'conduct', targetId: null, reporterUserId: String(memberId), reporterName: OLD_LABEL, subjectUserId: String(memberId), subjectName: OLD_LABEL, reason: 'conduct', details: '', status: 'open', resolution: null, resolutionNote: '', evidenceId, quarantined: false, escalationReason: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(moderationMutes).values({ campaignId, userId: String(memberId), userName: OLD_LABEL, reason: 'test', createdBy: String(adminId), createdAt: ts, liftedAt: null, liftedBy: null }).run();
     db.insert(checkRequests).values({ campaignId, characterId, encounterId: null, checkId: 'save:DEX', checkLabel: 'DEX save', mode: 'flat', dc: null, consequence: '', status: 'pending', requestedByUserId: String(memberId), requestedByName: OLD_LABEL, rollId: null, createdAt: ts, resolvedAt: null }).run();
@@ -261,7 +318,16 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(renamed.status).toBe(200);
     expect(renamed.body.displayName).toBe(RENAMED_LABEL);
 
-    expectRetainedAttribution(ctx.app.get<DrizzleDb>(DB), RENAMED_LABEL);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    expectRetainedAttribution(db, RENAMED_LABEL);
+    const safetyNotification = db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.campaignId, campaignId))
+      .all()
+      .find((row) => row.type === 'safety_hold' && row.userId === adminId);
+    expect(safetyNotification?.actorName).toBe(RENAMED_LABEL);
+    expect(safetyNotification?.body).toContain(OLD_LABEL);
   });
 
   it('uses the same transaction policy for a bulk-roster display-name change', async () => {
@@ -288,7 +354,10 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(deleted.status).toBe(204);
 
     const db = ctx.app.get<DrizzleDb>(DB);
-    expectRetainedAttribution(db, DELETED_LABEL, { expectSupportPreferences: false });
+    expectRetainedAttribution(db, DELETED_LABEL, {
+      expectSupportPreferences: false,
+      expectNeutralNotificationCopy: true,
+    });
     const rsvpAudit = db
       .select()
       .from(auditLog)

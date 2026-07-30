@@ -755,7 +755,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       expect(meBody.user.username).not.toMatch(/-2$/);
     });
 
-    it('refreshes an existing account display name from later OIDC claims', async () => {
+    it('preserves an existing account display name when later OIDC claims differ', async () => {
       idp.setNextUser({ sub: 'sub-alice', preferred_username: 'alice', email: 'alice@example.com', name: 'Alice Renamed' });
 
       const agent = new CookieAgent(app.baseUrl);
@@ -765,7 +765,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       const meRes = await agent.get('/api/v1/me');
       const meBody = await meRes.json();
       expect(meRes.status).toBe(200);
-      expect(meBody.user.displayName).toBe('Alice Renamed');
+      expect(meBody.user.displayName).toBe('Alice Example');
     });
 
     it('login with admin-group membership grants serverRole admin', async () => {

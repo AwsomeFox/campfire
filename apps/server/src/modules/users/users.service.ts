@@ -173,8 +173,9 @@ export class UsersService {
    *
    * Historical rows retain those ids for authorization, block-listing, and provenance;
    * their copied public labels must instead follow a rename or become neutral before
-   * deletion. Rendered notification copy is replaced as a whole with neutral text instead
-   * of doing a substring replacement: it may contain quoted player prose or an older label.
+   * deletion. On deletion, rendered notification copy is replaced as a whole with neutral
+   * text instead of doing a substring replacement: it may contain quoted player prose or an
+   * older label. Ordinary renames retain that event copy and change only structured attribution.
    * This is deliberately a synchronous transaction helper: callers get all labels changed
    * or none of them.
    */
@@ -184,6 +185,7 @@ export class UsersService {
     previousLabel: string,
     nextLabel: string,
     force = false,
+    pseudonymizeRenderedCopy = false,
   ): void {
     if (previousLabel === nextLabel && !force) return;
     const stableUserId = String(userId);
@@ -193,7 +195,10 @@ export class UsersService {
     tx.update(entityRevisions).set({ authorName: nextLabel }).where(eq(entityRevisions.authorUserId, stableUserId)).run();
     tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(eq(entityRevisions.replacedByUserId, stableUserId)).run();
     tx.update(sessionZeroAcknowledgments).set({ userName: nextLabel }).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).run();
-    tx.update(sessionZeroBoundarySubmissions).set({ submitterName: nextLabel }).where(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId)).run();
+    tx.update(sessionZeroBoundarySubmissions)
+      .set({ submitterName: nextLabel })
+      .where(and(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId), eq(sessionZeroBoundarySubmissions.anonymous, false)))
+      .run();
     tx.update(sessionZeroGuardianConsents).set({ userName: nextLabel }).where(eq(sessionZeroGuardianConsents.userId, stableUserId)).run();
     tx.update(participantSupportPreferences).set({ ownerName: nextLabel }).where(eq(participantSupportPreferences.ownerUserId, stableUserId)).run();
     tx.update(sessionRsvps).set({ userName: nextLabel }).where(eq(sessionRsvps.userId, stableUserId)).run();
@@ -206,14 +211,17 @@ export class UsersService {
     tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
 
     // Moderation snapshots deliberately hash their copied author label. This is an
-    // authorized privacy rewrite, so re-stamp both digests with the unchanged stable
-    // user id/content/context rather than leaving a privacy update looking tampered.
+    // authorized privacy rewrite, so re-stamp its metadata digest with the unchanged
+    // stable identity/content/context. A redacted row's content hash remains its
+    // pre-redaction anchor and must never be replaced with a placeholder hash.
     const evidenceRows = tx.select().from(moderationEvidence).where(eq(moderationEvidence.authorUserId, stableUserId)).all();
     for (const row of evidenceRows) {
-      // Notification evidence copies bell title/body verbatim. Once the actor is
-      // linked by stable id, remove those public copies rather than attempting an
-      // unsafe substring replacement inside user-authored text.
-      const content = row.targetType === 'notification' ? 'This notification has updated attribution.' : row.content;
+      // On deletion, notification evidence copies bell title/body verbatim. Remove
+      // those rendered copies rather than attempting an unsafe substring replacement.
+      const content =
+        pseudonymizeRenderedCopy && row.targetType === 'notification' && row.redactedAt === null
+          ? 'This notification has updated attribution.'
+          : row.content;
       const payload: ModerationEvidencePayload = {
         campaignId: row.campaignId,
         targetType: row.targetType,
@@ -234,29 +242,29 @@ export class UsersService {
         .set({
           authorName: nextLabel,
           content,
-          contentHash: moderationEvidenceHash(payload),
           metadataHash: moderationEvidenceMetadataHash(payload),
+          ...(row.redactedAt === null ? { contentHash: moderationEvidenceHash(payload) } : {}),
         })
         .where(eq(moderationEvidence.id, row.id))
         .run();
     }
 
-    tx.update(notifications)
-      .set({
-        actorName: nextLabel,
-        title: 'Campaign activity',
-        body: 'This notification has updated attribution.',
-      })
-      .where(eq(notifications.actorUserId, stableUserId))
-      .run();
-    tx.update(notificationDigestQueue)
-      .set({
-        actorName: nextLabel,
-        title: 'Campaign activity',
-        body: 'This notification has updated attribution.',
-      })
-      .where(eq(notificationDigestQueue.actorUserId, stableUserId))
-      .run();
+    if (pseudonymizeRenderedCopy) {
+      tx.update(notifications)
+        .set({ actorName: nextLabel, title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(eq(notifications.actorUserId, stableUserId))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ actorName: nextLabel, title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+        .run();
+    } else {
+      tx.update(notifications).set({ actorName: nextLabel }).where(eq(notifications.actorUserId, stableUserId)).run();
+      tx.update(notificationDigestQueue)
+        .set({ actorName: nextLabel })
+        .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+        .run();
+    }
   }
 
   /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */
@@ -313,39 +321,29 @@ export class UsersService {
   }
 
   /**
-   * Syncs display attribution and serverRole from OIDC claims on every login.
-   * The role demotion guard still lets a successful identity-label refresh proceed:
-   * a last admin must be able to use a newly asserted name without losing access.
+   * Syncs serverRole from the OIDC admin-group claim on every login (up AND
+   * down). Refuses to demote the last enabled admin — logs a warn and
+   * leaves the role untouched rather than throwing, since this runs inline
+   * in the login flow and must not block the user from signing in.
    */
-  async syncOidcIdentity(id: number, desiredRole: 'admin' | 'user', displayName: string): Promise<User> {
-    return this.db.transaction((tx) => {
-      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
-      if (!existing) throw new NotFoundException(`User ${id} not found`);
+  async syncOidcServerRole(id: number, desiredRole: 'admin' | 'user'): Promise<User> {
+    const existing = await this.getRowOrThrow(id);
+    if (existing.serverRole === desiredRole) return toDomain(existing);
 
-      let nextRole = desiredRole;
-      if (desiredRole === 'user' && existing.serverRole === 'admin' && this.enabledAdminCountTx(tx, id) === 0) {
+    if (desiredRole === 'user' && existing.serverRole === 'admin') {
+      const remaining = await this.countEnabledAdmins(id);
+      if (remaining === 0) {
         console.warn(`[oidc] refusing to demote last enabled admin (user ${id}) via group sync`);
-        nextRole = existing.serverRole as 'admin';
+        return toDomain(existing);
       }
+    }
 
-      if (existing.serverRole === nextRole && existing.displayName === displayName) return toDomain(existing);
-      if (existing.displayName !== displayName) {
-        this.synchronizeRetainedAttributionTx(
-          tx,
-          id,
-          this.publicAttribution(existing),
-          displayName || existing.username,
-        );
-      }
-
-      const row = tx
-        .update(users)
-        .set({ serverRole: nextRole, displayName, updatedAt: nowIso() })
-        .where(eq(users.id, id))
-        .returning()
-        .get();
-      return toDomain(row);
-    });
+    const [row] = await this.db
+      .update(users)
+      .set({ serverRole: desiredRole, updatedAt: nowIso() })
+      .where(eq(users.id, id))
+      .returning();
+    return toDomain(row);
   }
 
   async update(id: number, input: UserUpdateInput): Promise<User> {
@@ -434,6 +432,7 @@ export class UsersService {
         id,
         this.publicAttribution(existing),
         DELETED_USER_ATTRIBUTION,
+        true,
         true,
       );
 
