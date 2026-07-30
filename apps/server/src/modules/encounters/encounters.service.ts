@@ -4076,14 +4076,18 @@ export class EncountersService {
     // historical allegiance. Capture the linked NPC's current disposition exactly
     // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
     const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
-    const npcDispositionById = new Map(
-      npcIds.length === 0
-        ? []
-        : (await this.db.select({ id: npcs.id, disposition: npcs.disposition }).from(npcs).where(inArray(npcs.id, npcIds)))
-            .map((npc) => [npc.id, npc.disposition] as const),
-    );
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
+      const npcDispositionById = new Map(
+        npcIds.length === 0
+          ? []
+          : tx
+              .select({ id: npcs.id, disposition: npcs.disposition })
+              .from(npcs)
+              .where(inArray(npcs.id, npcIds))
+              .all()
+              .map((npc) => [npc.id, npc.disposition] as const),
+      );
       for (const [npcId, disposition] of npcDispositionById) {
         tx.update(combatants)
           .set({ npcDispositionSnapshot: disposition })
