@@ -1342,6 +1342,48 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
   });
 
+  it('#1474: replayed apply enforces original applier user identity', () => {
+    const { service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    // Another player attempting to replay Alice's chainId is rejected
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), bob, 'player')).toThrow(
+      /original applier or a DM/i,
+    );
+
+    // The DM is allowed to replay it
+    const resDm = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), dmUser, 'dm');
+    expect(resDm.undoToken.chainId).toBe(preview.chainId);
+  });
+
+  it('#1474: replaying an already-completed chain returns stored undoToken even when safety hold is active', () => {
+    const { service, campaignId, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    // Activate safety hold on the campaign
+    (service as any).safety = {
+      assertNotHeld: (cId: number) => {
+        if (cId === campaignId) throw new Error('Safety hold active');
+      },
+    };
+
+    // Replay of the completed chain should bypass safety hold assertion and return the stored undo token
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
+  });
+
   // ---------------------------------------------------------------------------
   // Issue #1451 review round — Devin/Codex/Kilo findings on the original PR.
   // ---------------------------------------------------------------------------

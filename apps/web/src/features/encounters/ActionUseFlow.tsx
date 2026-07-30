@@ -165,7 +165,14 @@ export function ActionUsePanel({
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontWeight: 700, fontSize: 13 }}>{actorName} · {actionName}</span>
         <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
-        <button type="button" className="btn btn-ghost" onClick={onDismiss} style={{ marginLeft: 'auto', minHeight: 32 }} aria-label="Cancel action use">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          disabled={commit.isPending || commitSubmitted || isUnconfirmed}
+          onClick={onDismiss}
+          style={{ marginLeft: 'auto', minHeight: 32 }}
+          aria-label="Cancel action use"
+        >
           Cancel
         </button>
       </div>

@@ -2158,6 +2158,7 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
   encounterId: integer('encounter_id').notNull(),
   campaignId: integer('campaign_id').notNull(),
   actorCombatantId: integer('actor_combatant_id').notNull(),
+  appliedByUserId: text('applied_by_user_id'),
   actionName: text('action_name').notNull().default(''),
   // The ActionTargetAllow the apply-time spec declared, replayed at undo for defense in depth.
   targetsAllow: text('targets_allow').notNull().default('any'),

@@ -32,5 +32,8 @@ test.describe('ActionUseFlow double-submit guard & error handling (issue #1474)'
     // 7. Unconfirmed state offers Retry button with same chainId and disables Back button
     expect(code).toMatch(/data-testid="action-use-retry"/);
     expect(code).toMatch(/disabled=\{commit\.isPending \|\| isUnconfirmed\}/);
+
+    // 8. Cancel button disabled when commit is pending, submitted, or unconfirmed
+    expect(code).toMatch(/disabled=\{commit\.isPending \|\| commitSubmitted \|\| isUnconfirmed\}/);
   });
 });

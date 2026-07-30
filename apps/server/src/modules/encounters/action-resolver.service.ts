@@ -1304,11 +1304,6 @@ export class ActionResolverService {
    */
   apply(encounterId: number, req: ActionApplyRequest, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
     const encounter = this.encounterRowOrThrow(encounterId);
-    // #599: applying a resolution writes damage, conditions, and death saves to the board. That
-    // is play advancing, and it is precisely what someone raising an X-Card mid-swing is asking
-    // to stop. `resolve` (the preview) stays open — computing a number nobody has committed is
-    // harmless, and blocking it would only hide from the table what was about to happen.
-    this.safety?.assertNotHeld(encounter.campaignId);
 
     const pending = this.db.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, req.chainId)).get();
     if (!pending) {
@@ -1330,9 +1325,17 @@ export class ActionResolverService {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'viewer_cannot_apply');
             throw new ForbiddenException('Viewers may not apply actions.');
           }
+          if (existingChain.appliedByUserId !== null && existingChain.appliedByUserId !== user.id) {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'not_original_applier');
+            throw new ForbiddenException('Only the original applier or a DM may replay an action resolution.');
+          }
           if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
             throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
+          }
+          if (!this.policyFor(encounter.campaignId, actor, user, role).canApply) {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'declaration_only_policy');
+            throw new ForbiddenException('Under this campaign policy, players may only declare actions for DM confirmation.');
           }
         }
         const undoToken = ActionUndoToken.parse({
@@ -1354,6 +1357,12 @@ export class ActionResolverService {
       this.auditRejectedApply(encounter, req.chainId, user, role, 'unknown_or_consumed_chain');
       throw new BadRequestException('This resolution is unknown or has already been applied.');
     }
+
+    // #599: applying a resolution writes damage, conditions, and death saves to the board. That
+    // is play advancing, and it is precisely what someone raising an X-Card mid-swing is asking
+    // to stop. `resolve` (the preview) stays open — computing a number nobody has committed is
+    // harmless, and blocking it would only hide from the table what was about to happen.
+    this.safety?.assertNotHeld(encounter.campaignId);
     if (pending.encounterId !== encounterId) {
       this.auditRejectedApply(encounter, req.chainId, user, role, 'cross_encounter_chain');
       throw new BadRequestException('This chain belongs to a different encounter.');
@@ -1768,6 +1777,7 @@ export class ActionResolverService {
           encounterId: encounter.id,
           campaignId: encounter.campaignId,
           actorCombatantId: actor.id,
+          appliedByUserId: user.id,
           actionName: resolution.actionName,
           targetsAllow,
           costSlot: resolution.costSlot,
