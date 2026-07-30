@@ -40,7 +40,8 @@
       "overrideActive": "Override active — acting on possibly stale data until sync returns.",
       "bannerOverrideOffline": "Offline — showing last-known encounter. Acting on possibly stale data until sync returns.",
       "bannerOverrideReconnecting": "Reconnecting — acting on possibly stale data until live again.",
-      "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced."
+      "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced.",
+      "controlsPaused": "Paused — reconnecting to live updates."
     },
     "errors": {
       "load": "Couldn't load encounters.",

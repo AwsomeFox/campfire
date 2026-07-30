@@ -325,11 +325,17 @@ test('a player never sees or can grant the override, and their owned combatant s
     await expect(page.getByTestId('encounter-sync-override-confirm')).toHaveCount(0);
     await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
 
-    // With no way to grant an override, the player's OWN combatant stays non-editable —
-    // the HP steppers (canEdit-gated) do not appear even though it is their character.
+    // With no way to grant an override, the player's OWN combatant stays non-editable.
+    // Issue #1746: the HP steppers still MOUNT — the player owns this character, so
+    // permission is granted — but render disabled, because the sync gate is blocking
+    // and no override authorizes past it. Absent would be the pre-#1746 defect (the
+    // row unmounting the controls instead of disabling them); permission-denied absence
+    // is covered separately by combatant-row-sync-disable.spec.ts.
     const heroRow = page.getByTestId(`combatant-row-${heroCombatant.id}`);
     await expect(heroRow).toBeVisible();
-    await expect(heroRow.getByTestId('hp-steppers')).toHaveCount(0);
+    const heroStepper = heroRow.getByTestId('hp-steppers').getByRole('button').first();
+    await expect(heroStepper).toBeVisible();
+    await expect(heroStepper).toBeDisabled();
   } finally {
     releaseEvents();
     if (encounterId != null) {
@@ -592,9 +598,12 @@ test('an active override is revoked the instant DM authority is lost', async ({ 
     await page.getByTestId('encounter-sync-override-confirm').click();
     await expect(page.getByTestId('encounter-sync-override-active')).toBeVisible();
 
-    // Confirm the override actually unblocked their own combatant before revoking anything.
+    // Confirm the override actually unblocked their own combatant before revoking anything —
+    // present AND enabled while the override is active.
     const heroRow = page.getByTestId(`combatant-row-${heroCombatant.id}`);
-    await expect(heroRow.getByTestId('hp-steppers')).toBeVisible();
+    const heroStepper = heroRow.getByTestId('hp-steppers').getByRole('button').first();
+    await expect(heroStepper).toBeVisible();
+    await expect(heroStepper).toBeEnabled();
 
     // Demote back to player. The sidecar's healthy stream receives membership.updated and
     // relays it cross-tab; the main (SSE-dead) tab picks it up via BroadcastChannel and
@@ -604,8 +613,10 @@ test('an active override is revoked the instant DM authority is lost', async ({ 
     });
 
     // The override must be REVOKED, not just its confirmation UI hidden: the previously
-    // unblocked owned-combatant controls disappear again.
-    await expect(heroRow.getByTestId('hp-steppers')).toHaveCount(0, { timeout: 10_000 });
+    // unblocked owned-combatant controls are disabled again. Issue #1746: they stay
+    // MOUNTED throughout — the player still owns this character, so permission never
+    // changed — only their disabled state tracks the (now unauthorized) sync gate.
+    await expect(heroStepper).toBeDisabled({ timeout: 10_000 });
     await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
     await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
   } finally {
