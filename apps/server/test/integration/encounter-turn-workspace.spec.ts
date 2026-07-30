@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionSpec } from '@campfire/schema';
+import { ActionSpec, ConditionInstance } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -106,6 +106,11 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     return row.currentCombatantId;
   }
 
+  function currentRound(orm: ReturnType<typeof build>['orm'], encounterId: number): number {
+    const [row] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    return row.round;
+  }
+
   it('the current combatant owner may end their own turn; it advances to the next actor', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();
@@ -195,6 +200,581 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const turnState = JSON.parse(c1row.turnState ?? '{}');
     expect(turnState.used).toEqual({});
     expect(turnState.movementUsedFt).toBe(0);
+  });
+
+  describe('undo restores ticked condition and effect state (issue #1445)', () => {
+    function conditionsFrom(row: { conditionInstances: string | null; conditions: string | null }): string[] {
+      const instances = JSON.parse(row.conditionInstances ?? '[]');
+      const names = new Set<string>();
+      for (const c of instances) {
+        if (typeof c.name === 'string' && c.name.trim().length > 0) names.add(c.name.trim());
+      }
+      return [...names].sort();
+    }
+
+    it('restores an end-of-turn condition that would expire, preserving roundsRemaining and metadata', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      const instance = {
+        id: 'poisoned-1',
+        name: 'Poisoned',
+        source: 'goblin blade',
+        sourceCombatantId: c2,
+        ruleEntryId: null,
+        saveDc: 12,
+        saveAbility: 'CON',
+        isConcentration: false,
+        stacks: 2,
+        notes: 'ends on save',
+        durationRounds: 1,
+        roundsRemaining: 1,
+        timing: 'end-of-turn',
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([instance]),
+          conditions: JSON.stringify(['Poisoned']),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c2);
+
+      const [c1rowAfterAdvance] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(JSON.parse(c1rowAfterAdvance.conditionInstances ?? '[]')).toHaveLength(0);
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c1);
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(c1row.conditionInstances ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0]).toMatchObject(instance);
+      expect(conditionsFrom(c1row)).toEqual(['Poisoned']);
+      expect(JSON.parse(c1row.conditions ?? '[]')).toEqual(['Poisoned']);
+
+      const events = orm
+        .select()
+        .from(encounterEvents)
+        .where(eq(encounterEvents.encounterId, encounterId))
+        .orderBy(encounterEvents.id)
+        .all();
+      const restoredEvent = events.find((e) => e.detail === 'condition restored: Poisoned');
+      expect(restoredEvent).toBeDefined();
+      expect(restoredEvent?.actorId).toBe(c1);
+    });
+
+    it('keeps roundsRemaining unchanged across repeated next/undo cycles', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([
+            { id: 'bless', name: 'Bless', roundsRemaining: 4, timing: 'end-of-turn', isConcentration: false },
+          ]),
+          conditions: JSON.stringify(['Bless']),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      for (let i = 0; i < 3; i++) {
+        await service.nextTurn(encounterId, {}, dmUser, 'dm');
+        expect(currentId(orm, encounterId)).toBe(c2);
+        await service.undoTurn(encounterId, dmUser, 'dm');
+        expect(currentId(orm, encounterId)).toBe(c1);
+      }
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(c1row.conditionInstances ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0].roundsRemaining).toBe(4);
+      expect(conditionsFrom(c1row)).toEqual(['Bless']);
+      expect(JSON.parse(c1row.conditions ?? '[]')).toEqual(['Bless']);
+    });
+
+    it('restores an active effect that would expire, preserving roundsRemaining', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const effect = {
+        id: 'faerie-fire',
+        name: 'Faerie Fire',
+        kind: 'buff',
+        timing: 'none',
+        roundsRemaining: 1,
+        saveAbility: null,
+        saveDc: null,
+        notes: '',
+      };
+      orm
+        .update(combatants)
+        .set({ activeEffects: JSON.stringify([effect]) })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      const [c1rowAfterAdvance] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(JSON.parse(c1rowAfterAdvance.activeEffects ?? '[]')).toHaveLength(0);
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(c1row.activeEffects ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0]).toMatchObject(effect);
+
+      const events = orm
+        .select()
+        .from(encounterEvents)
+        .where(eq(encounterEvents.encounterId, encounterId))
+        .orderBy(encounterEvents.id)
+        .all();
+      expect(events.some((e) => e.detail === 'effect restored: Faerie Fire')).toBe(true);
+    });
+
+    it('keeps active effect roundsRemaining unchanged across repeated next/undo cycles', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      orm
+        .update(combatants)
+        .set({
+          activeEffects: JSON.stringify([
+            { id: 'haste', name: 'Haste', kind: 'buff', timing: 'none', roundsRemaining: 4 },
+          ]),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      for (let i = 0; i < 3; i++) {
+        await service.nextTurn(encounterId, {}, dmUser, 'dm');
+        await service.undoTurn(encounterId, dmUser, 'dm');
+      }
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(c1row.activeEffects ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0].roundsRemaining).toBe(4);
+    });
+
+    it('restores a start-of-turn condition on the incoming combatant, including concentration links', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      orm
+        .update(combatants)
+        .set({ turnState: JSON.stringify({ concentration: 'Hold Person' }) })
+        .where(eq(combatants.id, c1))
+        .run();
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([
+            {
+              id: 'hold-person',
+              name: 'Hold Person',
+              isConcentration: true,
+              sourceCombatantId: c1,
+              roundsRemaining: 1,
+              timing: 'start-of-turn',
+            },
+          ]),
+          conditions: JSON.stringify(['Hold Person']),
+        })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      const [c2rowAfterAdvance] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(JSON.parse(c2rowAfterAdvance.conditionInstances ?? '[]')).toHaveLength(0);
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      const [c2row] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      const restored = JSON.parse(c2row.conditionInstances ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0].roundsRemaining).toBe(1);
+      expect(restored[0].isConcentration).toBe(true);
+      expect(restored[0].sourceCombatantId).toBe(c1);
+      expect(conditionsFrom(c2row)).toEqual(['Hold Person']);
+      expect(JSON.parse(c2row.conditions ?? '[]')).toEqual(['Hold Person']);
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(JSON.parse(c1row.turnState ?? '{}').concentration).toBe('Hold Person');
+    });
+
+    it('skips restoration safely when a snapshot combatant was removed between advance and undo', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([
+            { id: 'slow', name: 'Slow', roundsRemaining: 2, timing: 'end-of-turn' },
+          ]),
+          conditions: JSON.stringify(['Slow']),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+      const undone = await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(undone.currentCombatantId).toBe(c1);
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(c1row.conditionInstances ?? '[]');
+      expect(restored).toHaveLength(1);
+      expect(restored[0].roundsRemaining).toBe(2);
+      expect(JSON.parse(c1row.conditions ?? '[]')).toEqual(['Slow']);
+    });
+
+    it('supports multiple consecutive undos by consuming the snapshot each time (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      function conditionRounds(row: { conditionInstances: string | null }, id: string): number | undefined {
+        return JSON.parse(row.conditionInstances ?? '[]').find((c: any) => c.id === id)?.roundsRemaining;
+      }
+      function effectRounds(row: { activeEffects: string | null }, id: string): number | undefined {
+        return JSON.parse(row.activeEffects ?? '[]').find((e: any) => e.id === id)?.roundsRemaining;
+      }
+
+      const c1Condition = {
+        id: 'c1-cond',
+        name: 'C1 Cond',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+      };
+      const c1Effect = {
+        id: 'c1-eff',
+        name: 'C1 Eff',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      const c2Condition = {
+        id: 'c2-cond',
+        name: 'C2 Cond',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+      };
+      const c2Effect = {
+        id: 'c2-eff',
+        name: 'C2 Eff',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([c1Condition]),
+          conditions: JSON.stringify(['C1 Cond']),
+          activeEffects: JSON.stringify([c1Effect]),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([c2Condition]),
+          conditions: JSON.stringify(['C2 Cond']),
+          activeEffects: JSON.stringify([c2Effect]),
+        })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c2);
+      const [c1rowAfterFirst] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterFirst, 'c1-cond')).toBe(1);
+      expect(effectRounds(c1rowAfterFirst, 'c1-eff')).toBe(1);
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c1);
+      expect(currentRound(orm, encounterId)).toBe(2);
+      const [c2rowAfterSecond] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterSecond, 'c2-cond')).toBe(1);
+      expect(effectRounds(c2rowAfterSecond, 'c2-eff')).toBe(1);
+
+      const first = await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(first.currentCombatantId).toBe(c2);
+      expect(first.round).toBe(1);
+      const [c2rowAfterFirstUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterFirstUndo, 'c2-cond')).toBe(2);
+      expect(effectRounds(c2rowAfterFirstUndo, 'c2-eff')).toBe(2);
+      const [c1rowAfterFirstUndo] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterFirstUndo, 'c1-cond')).toBe(1);
+      expect(effectRounds(c1rowAfterFirstUndo, 'c1-eff')).toBe(1);
+
+      const second = await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(second.currentCombatantId).toBe(c1);
+      expect(second.round).toBe(1);
+      const [c1rowAfterSecondUndo] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterSecondUndo, 'c1-cond')).toBe(2);
+      expect(effectRounds(c1rowAfterSecondUndo, 'c1-eff')).toBe(2);
+      const [c2rowAfterSecondUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterSecondUndo, 'c2-cond')).toBe(2);
+      expect(effectRounds(c2rowAfterSecondUndo, 'c2-eff')).toBe(2);
+    });
+
+    it('preserves conditions and effects added during the turn while restoring ticked state (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      const startCondition = {
+        id: 'c2-start',
+        name: 'C2 Start',
+        roundsRemaining: 1,
+        timing: 'start-of-turn',
+      };
+      const preEffect = {
+        id: 'c2-effect',
+        name: 'C2 Effect',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([startCondition]),
+          conditions: JSON.stringify(['C2 Start']),
+          activeEffects: JSON.stringify([preEffect]),
+        })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c2);
+
+      // Add a condition and effect during c2's turn.
+      await service.updateCombatant(
+        encounterId,
+        c2,
+        {
+          addConditionInstance: ConditionInstance.parse({
+            id: 'added-cond',
+            name: 'Added Cond',
+            roundsRemaining: 3,
+            timing: 'none',
+          }),
+        },
+        dmUser,
+        'dm',
+      );
+      const [c2rowBeforeUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      const beforeEffects = JSON.parse(c2rowBeforeUndo.activeEffects ?? '[]');
+      const addedEffect = {
+        id: 'added-effect',
+        name: 'Added Effect',
+        kind: 'buff',
+        timing: 'none',
+        roundsRemaining: 5,
+      };
+      orm
+        .update(combatants)
+        .set({ activeEffects: JSON.stringify([...beforeEffects, addedEffect]) })
+        .where(eq(combatants.id, c2))
+        .run();
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      expect(currentId(orm, encounterId)).toBe(c1);
+
+      const [c2row] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      const conditionNames = conditionsFrom(c2row);
+      expect(conditionNames).toContain('C2 Start');
+      expect(conditionNames).toContain('Added Cond');
+
+      const effects = JSON.parse(c2row.activeEffects ?? '[]');
+      expect(effects).toHaveLength(2);
+      expect(effects.find((e: any) => e.id === 'added-effect')).toMatchObject(addedEffect);
+      expect(effects.find((e: any) => e.id === 'c2-effect')).toMatchObject(preEffect);
+    });
+
+    it('does not revert post-advance edits or resurrect removed conditions/effects (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const condA = {
+        id: 'cond-a',
+        name: 'Cond A',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: false,
+      };
+      const condB = {
+        id: 'cond-b',
+        name: 'Cond B',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: false,
+      };
+      const effX = {
+        id: 'eff-x',
+        name: 'Eff X',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+        saveAbility: null,
+        saveDc: null,
+        notes: '',
+      };
+      const effY = {
+        id: 'eff-y',
+        name: 'Eff Y',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+        saveAbility: null,
+        saveDc: null,
+        notes: '',
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([condA, condB]),
+          conditions: JSON.stringify(['Cond A', 'Cond B']),
+          activeEffects: JSON.stringify([effX, effY]),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+
+      const [c1rowAfter] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const afterConds = JSON.parse(c1rowAfter.conditionInstances ?? '[]');
+      const afterEffs = JSON.parse(c1rowAfter.activeEffects ?? '[]');
+
+      // Edit cond-a's stacks/notes but leave its post-tick roundsRemaining at 1.
+      const editedCondA = afterConds.find((c: any) => c.id === 'cond-a');
+      editedCondA.stacks = 3;
+      editedCondA.notes = 'kept edit';
+      // Remove cond-b after the tick.
+      const remainingConds = [editedCondA];
+
+      // Edit eff-x's roundsRemaining to a custom value; remove eff-y.
+      const editedEffX = afterEffs.find((e: any) => e.id === 'eff-x');
+      editedEffX.roundsRemaining = 5;
+      const remainingEffs = [editedEffX];
+
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify(remainingConds),
+          conditions: JSON.stringify(['Cond A']),
+          activeEffects: JSON.stringify(remainingEffs),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restoredConds = JSON.parse(c1row.conditionInstances ?? '[]');
+      const restoredEffs = JSON.parse(c1row.activeEffects ?? '[]');
+
+      const a = restoredConds.find((c: any) => c.id === 'cond-a');
+      expect(a).toBeDefined();
+      expect(a.roundsRemaining).toBe(2);
+      expect(a.stacks).toBe(3);
+      expect(a.notes).toBe('kept edit');
+
+      expect(restoredConds.find((c: any) => c.id === 'cond-b')).toBeUndefined();
+
+      const x = restoredEffs.find((e: any) => e.id === 'eff-x');
+      expect(x).toBeDefined();
+      expect(x.roundsRemaining).toBe(5);
+
+      expect(restoredEffs.find((e: any) => e.id === 'eff-y')).toBeUndefined();
+    });
+
+    it('restores both end-of-turn and start-of-turn conditions when the same combatant ends and begins the turn', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+
+      await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+      const endCondition = {
+        id: 'lone-end',
+        name: 'Lone End',
+        source: 'trap',
+        sourceCombatantId: null,
+        ruleEntryId: null,
+        saveDc: null,
+        saveAbility: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        durationRounds: 2,
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+      };
+      const startCondition = {
+        id: 'lone-start',
+        name: 'Lone Start',
+        source: 'trap',
+        sourceCombatantId: null,
+        ruleEntryId: null,
+        saveDc: null,
+        saveAbility: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        durationRounds: 1,
+        roundsRemaining: 1,
+        timing: 'start-of-turn',
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([endCondition, startCondition]),
+          conditions: JSON.stringify(['Lone End', 'Lone Start']),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+      const [rowAfterAdvance] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const afterAdvance = JSON.parse(rowAfterAdvance.conditionInstances ?? '[]');
+      expect(afterAdvance).toHaveLength(1);
+      expect(afterAdvance[0]).toMatchObject({ id: 'lone-end', roundsRemaining: 1 });
+      expect(conditionsFrom(rowAfterAdvance)).toEqual(['Lone End']);
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restored = JSON.parse(row.conditionInstances ?? '[]');
+      expect(restored).toHaveLength(2);
+      expect(restored.find((c: any) => c.id === 'lone-end')).toMatchObject(endCondition);
+      expect(restored.find((c: any) => c.id === 'lone-start')).toMatchObject(startCondition);
+      expect(conditionsFrom(row)).toEqual(['Lone End', 'Lone Start']);
+      expect(JSON.parse(row.conditions ?? '[]')).toEqual(['Lone End', 'Lone Start']);
+      expect(currentId(orm, encounterId)).toBe(c1);
+    });
   });
 
   it('advancing resets the incoming combatant’s per-turn action economy', async () => {

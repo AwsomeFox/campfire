@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, isNull, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
@@ -86,6 +86,34 @@ type CombatantTransactionHook = (
   fresh: typeof combatants.$inferSelect,
   freshEncounter: typeof encounters.$inferSelect,
 ) => void;
+type TurnTickedCondition = {
+  id: string;
+  roundsRemainingBefore: number;
+  roundsRemainingAfter: number;
+};
+type TurnTickedEffect = {
+  id: string;
+  roundsRemainingBefore: number;
+  roundsRemainingAfter: number;
+};
+type TurnTickCombatantDelta = {
+  combatantId: number;
+  conditionTicks: TurnTickedCondition[];
+  conditionExpired: ConditionInstance[];
+  effectTicks: TurnTickedEffect[];
+  effectExpired: ActiveEffect[];
+};
+type TurnTickDelta = {
+  ending?: TurnTickCombatantDelta;
+  starting?: TurnTickCombatantDelta;
+  /** Encounter state *after* the advance this snapshot belongs to. Used by undo to
+   *  verify it is consuming the right snapshot when the turn pointer may have moved
+   *  without an advance (e.g. removing the current combatant). */
+  toRound: number;
+  toCurrentCombatantId: number | null;
+  toPhase: EncounterTurnPhase;
+  toLairResumeCombatantId: number | null;
+};
 type EncounterEventFields = {
   actor?: string | null;
   target?: string | null;
@@ -96,7 +124,7 @@ type EncounterEventFields = {
   parentEventId?: number | null;
   phase?: EncounterEventPhase | null;
   performedBy?: EncounterEventPerformedBy | null;
-  metadata?: EncounterEventMetadata;
+  metadata?: EncounterEventMetadata & { turnTickSnapshot?: TurnTickDelta };
 };
 /** Narrow extension point for an action whose idempotent response is not just a combatant. */
 type CombatantUpdateTransactionOptions = {
@@ -470,6 +498,10 @@ function encounterHasLairSlotFromStatblocks(statblocks: Map<number, ReturnType<R
 }
 
 function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent {
+  // The turn-advance snapshot is server-internal: it is read directly from
+  // metadataJson for undo, but never returned in public combat-log responses.
+  const metadata = row.metadataJson ? (JSON.parse(row.metadataJson) as Record<string, unknown>) : {};
+  delete metadata.turnTickSnapshot;
   return {
     id: row.id,
     encounterId: row.encounterId,
@@ -484,9 +516,116 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
     parentEventId: row.parentEventId ?? null,
     phase: (row.phase as EncounterEventPhase | null) ?? null,
     performedBy: row.performedByJson ? (JSON.parse(row.performedByJson) as EncounterEventPerformedBy) : null,
-    metadata: row.metadataJson ? (JSON.parse(row.metadataJson) as EncounterEventMetadata) : {},
+    metadata: metadata as EncounterEventMetadata,
     createdAt: row.createdAt,
   };
+}
+
+/** Build the condition/effect delta for a combatant whose turn ticked.
+ *  Records only the IDs and roundsRemaining values that changed, plus the full pre-tick
+ *  objects of expired entries so undo can re-add them. */
+function buildConditionTickDelta(
+  pre: ConditionInstance[],
+  post: ConditionInstance[],
+): { ticks: TurnTickedCondition[]; expired: ConditionInstance[] } {
+  const ticks: TurnTickedCondition[] = [];
+  const expired: ConditionInstance[] = [];
+  const postById = new Map(post.map((c) => [c.id, c]));
+  for (const before of pre) {
+    const after = postById.get(before.id);
+    if (!after) {
+      expired.push(before);
+    } else if (
+      before.roundsRemaining !== null &&
+      after.roundsRemaining !== null &&
+      before.roundsRemaining !== after.roundsRemaining
+    ) {
+      ticks.push({
+        id: before.id,
+        roundsRemainingBefore: before.roundsRemaining,
+        roundsRemainingAfter: after.roundsRemaining,
+      });
+    }
+  }
+  return { ticks, expired };
+}
+
+function buildEffectTickDelta(
+  pre: ActiveEffect[],
+  post: ActiveEffect[],
+): { ticks: TurnTickedEffect[]; expired: ActiveEffect[] } {
+  const ticks: TurnTickedEffect[] = [];
+  const expired: ActiveEffect[] = [];
+  const postById = new Map(post.map((e) => [e.id, e]));
+  for (const before of pre) {
+    const after = postById.get(before.id);
+    if (!after) {
+      expired.push(before);
+    } else if (
+      before.roundsRemaining !== null &&
+      after.roundsRemaining !== null &&
+      before.roundsRemaining !== after.roundsRemaining
+    ) {
+      ticks.push({
+        id: before.id,
+        roundsRemainingBefore: before.roundsRemaining,
+        roundsRemainingAfter: after.roundsRemaining,
+      });
+    }
+  }
+  return { ticks, expired };
+}
+
+/** Apply a stored turn-tick delta to current condition/effect state. Only touches the
+ *  roundsRemaining of entries that are still in the post-tick state; re-adds expired
+ *  entries that are not currently present. Returns the merged list and the names that
+ *  were actually restored. */
+function applyConditionTickDelta(
+  delta: TurnTickCombatantDelta,
+  current: ConditionInstance[],
+): { merged: ConditionInstance[]; restoredNames: string[] } {
+  const merged = current.slice();
+  const restoredNames: string[] = [];
+  const byId = new Map(merged.map((c, i) => [c.id, i] as const));
+  for (const tick of delta.conditionTicks) {
+    const idx = byId.get(tick.id);
+    if (idx === undefined) continue; // removed after advance: do not resurrect
+    const currentInst = merged[idx];
+    if (currentInst.roundsRemaining !== tick.roundsRemainingAfter) continue; // user edited the timer
+    merged[idx] = { ...currentInst, roundsRemaining: tick.roundsRemainingBefore };
+    restoredNames.push(currentInst.name);
+  }
+  const currentIds = new Set(current.map((c) => c.id));
+  for (const expired of delta.conditionExpired) {
+    if (currentIds.has(expired.id)) continue; // edited/re-added with the same id: do not overwrite
+    merged.push(expired);
+    restoredNames.push(expired.name);
+  }
+  return { merged, restoredNames };
+}
+
+function applyEffectTickDelta(
+  delta: TurnTickCombatantDelta,
+  current: ActiveEffect[],
+): { merged: ActiveEffect[]; restoredNames: string[] } {
+  const merged = current.slice();
+  const restoredNames: string[] = [];
+  const byId = new Map(merged.map((e, i) => [e.id, i] as const));
+  for (const tick of delta.effectTicks) {
+    const idx = byId.get(tick.id);
+    if (idx === undefined) continue;
+    const currentEff = merged[idx];
+    if (currentEff.roundsRemaining !== tick.roundsRemainingAfter) continue;
+    merged[idx] = { ...currentEff, roundsRemaining: tick.roundsRemainingBefore };
+    restoredNames.push(currentEff.name);
+  }
+  const currentIds = new Set(current.map((e) => e.id));
+  for (const expired of delta.effectExpired) {
+    if (currentIds.has(expired.id)) continue;
+    merged.push(expired);
+    restoredNames.push(expired.name);
+  }
+  return { merged, restoredNames };
 }
 
 function deathSaveRollEventDetail(
@@ -5150,6 +5289,12 @@ export class EncountersService {
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
+    const turnTickSnapshot: TurnTickDelta = {
+      toRound: encounterRow.round,
+      toCurrentCombatantId: encounterRow.currentCombatantId,
+      toPhase: encounterRow.turnPhase as EncounterTurnPhase,
+      toLairResumeCombatantId: encounterRow.lairResumeCombatantId ?? null,
+    };
 
     try {
       this.db.transaction((tx) => {
@@ -5220,6 +5365,13 @@ export class EncountersService {
         const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
         newRound = round;
         newCurrentId = currentCombatantId;
+
+        // Bind the snapshot to the post-advance encounter state so undo can verify it is
+        // consuming the right snapshot when the turn pointer has moved without an advance.
+        turnTickSnapshot.toRound = round;
+        turnTickSnapshot.toCurrentCombatantId = currentCombatantId;
+        turnTickSnapshot.toPhase = phase;
+        turnTickSnapshot.toLairResumeCombatantId = lairResumeCombatantId;
         skippedTurns = skipped;
         const escalation = this.nextEscalationState(adapter, fresh, round, 'round');
         escalationValue = escalation.escalationDie;
@@ -5229,17 +5381,30 @@ export class EncountersService {
         // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
         const ending =
           freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
+        let endingConditionKept: ConditionInstance[] | undefined;
         if (ending) {
           endedName = ending.name;
-          const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
-          if (expired.length > 0) {
-            for (const e of expired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
-            tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
-          } else if (kept.some((e, i) => e.roundsRemaining !== ending.activeEffects[i]?.roundsRemaining)) {
+          const effectPre = ending.activeEffects ?? [];
+          const { kept: effectsKept, expired: effectsExpired } = tickEffectsAtTurnEnd(effectPre);
+          const effectDelta = buildEffectTickDelta(effectPre, effectsKept);
+          const conditionPre = ending.conditionInstances ?? [];
+          const condTick = tickConditionInstancesAtTurnEnd(conditionPre);
+          endingConditionKept = condTick.kept;
+          const conditionDelta = buildConditionTickDelta(conditionPre, condTick.kept);
+          turnTickSnapshot.ending = {
+            combatantId: ending.id,
+            conditionTicks: conditionDelta.ticks,
+            conditionExpired: conditionDelta.expired,
+            effectTicks: effectDelta.ticks,
+            effectExpired: effectDelta.expired,
+          };
+          if (effectsExpired.length > 0) {
+            for (const e of effectsExpired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
+            tx.update(combatants).set({ activeEffects: toJsonText(effectsKept) }).where(eq(combatants.id, ending.id)).run();
+          } else if (effectsKept.some((e, i) => e.roundsRemaining !== ending.activeEffects[i]?.roundsRemaining)) {
             // Durations changed (decremented) even though nothing expired — persist the tick.
-            tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
+            tx.update(combatants).set({ activeEffects: toJsonText(effectsKept) }).where(eq(combatants.id, ending.id)).run();
           }
-          const condTick = tickConditionInstancesAtTurnEnd(ending.conditionInstances ?? []);
           if (
             condTick.expired.length > 0 ||
             condTick.kept.some((c, i) => c.roundsRemaining !== ending.conditionInstances?.[i]?.roundsRemaining)
@@ -5274,12 +5439,25 @@ export class EncountersService {
         const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
         if (starting) {
           newCurrentName = starting.name;
+          // When the same combatant both ends and begins the turn, the start-of-turn tick must
+          // run against the post-end-tick list, not the stale in-memory copy (issue #1445).
+          const startConditionPre =
+            starting.id === ending?.id ? (endingConditionKept ?? starting.conditionInstances ?? []) : (starting.conditionInstances ?? []);
+          const condTick = tickConditionInstancesAtTurnStart(startConditionPre);
+          const conditionDelta = buildConditionTickDelta(startConditionPre, condTick.kept);
+          // Active effects are not ticked at turn start; no effect delta to record.
+          turnTickSnapshot.starting = {
+            combatantId: starting.id,
+            conditionTicks: conditionDelta.ticks,
+            conditionExpired: conditionDelta.expired,
+            effectTicks: [],
+            effectExpired: [],
+          };
           const reset = resetTurnStateForStart(starting.turnState);
-          const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
           if (
             condTick.expired.length > 0 ||
-            condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
+            condTick.kept.some((c, i) => c.roundsRemaining !== startConditionPre[i]?.roundsRemaining)
           ) {
             for (const c of condTick.expired) {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
@@ -5306,6 +5484,41 @@ export class EncountersService {
           .where(eq(encounters.id, encounterId))
           .run();
 
+        // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
+        for (const skipped of skippedTurns) {
+          this.appendEventInTransaction(tx, encounterId, skipped.round, 'turn', {
+            actor: skipped.name,
+            target: skipped.name,
+            actorId: skipped.id,
+            targetId: skipped.id,
+            detail: 'skipped (down)',
+          });
+        }
+        // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
+        // name-free so #869 redaction cannot be bypassed by prose. The operation id (#580)
+        // makes "did the turn advance twice?" answerable from the log alone: two turn markers
+        // carrying the SAME operationId would be a double-advance, two markers with different
+        // ids are two legitimate advances.
+        const turnMeta: EncounterEventMetadata & { turnTickSnapshot?: TurnTickDelta } = opts.idempotencyKey
+          ? { operationId: opts.idempotencyKey }
+          : {};
+        if (turnTickSnapshot.ending || turnTickSnapshot.starting) {
+          turnMeta.turnTickSnapshot = turnTickSnapshot;
+        }
+        this.appendEventInTransaction(tx, encounterId, newRound, 'turn', {
+          actor: newCurrentName,
+          target: newCurrentName,
+          actorId: newCurrentId,
+          targetId: newCurrentId,
+          detail:
+            opts.endedByPlayer && endedName && endedName !== 'Lair'
+              ? 'ended their turn'
+              : newCurrentName === 'Lair'
+                ? 'Lair action (initiative 20)'
+                : '',
+          metadata: turnMeta,
+        });
+
         // Claim written in the SAME transaction as the pointer move. The response body is
         // the whole role-redacted encounter, which is assembled asynchronously below, so it
         // is backfilled immediately after commit instead of stored here. The atomic part is
@@ -5330,34 +5543,6 @@ export class EncountersService {
     if (replayedEncounter) return replayedEncounter;
     if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
 
-    // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
-    for (const skipped of skippedTurns) {
-      await this.appendEvent(encounterId, skipped.round, 'turn', {
-        actor: skipped.name,
-        target: skipped.name,
-        actorId: skipped.id,
-        targetId: skipped.id,
-        detail: 'skipped (down)',
-      });
-    }
-    // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
-    // name-free so #869 redaction cannot be bypassed by prose. The operation id (#580)
-    // makes "did the turn advance twice?" answerable from the log alone: two turn markers
-    // carrying the SAME operationId would be a double-advance, two markers with different
-    // ids are two legitimate advances.
-    await this.appendEvent(encounterId, newRound, 'turn', {
-      actor: newCurrentName,
-      target: newCurrentName,
-      actorId: newCurrentId,
-      targetId: newCurrentId,
-      detail:
-        opts.endedByPlayer && endedName && endedName !== 'Lair'
-          ? 'ended their turn'
-          : newCurrentName === 'Lair'
-            ? 'Lair action (initiative 20)'
-            : '',
-      metadata: opts.idempotencyKey ? { operationId: opts.idempotencyKey } : undefined,
-    });
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
     for (const ex of expiredEffects) {
@@ -5411,10 +5596,9 @@ export class EncountersService {
   /**
    * DM undo of the last turn advance (issue #413). Steps the pointer BACKWARD over the sorted
    * order (see {@link retreatTurn}), decrementing the round when unwrapping past the top.
-   * Serialized like advanceCurrentTurn so it can't race a concurrent advance. Effect ticks
-   * applied on the way forward are NOT reversed — undo restores the turn pointer, and the DM
-   * re-applies any effect corrections manually (surfaced in the log). DM-only (enforced by the
-   * controller's `dm` role gate).
+   * Serialized like advanceCurrentTurn so it can't race a concurrent advance. Timed condition
+   * and effect ticks applied on the way forward are replayed from a snapshot stored in the
+   * advance event's metadata (issue #1445). DM-only (enforced by the controller's `dm` role gate).
    */
   async undoTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -5428,12 +5612,40 @@ export class EncountersService {
     let newCurrentName: string | null = null;
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
+    let restoredLogEntries: Array<{
+      combatantId: number;
+      combatantName: string;
+      conditionNames: string[];
+      effectNames: string[];
+    }> = [];
 
     this.db.transaction((tx) => {
+      // Issue #1445: the turn-advance event carries a snapshot of the ending/starting combatant
+      // conditionInstances and activeEffects from before they were ticked. Read it directly from
+      // metadataJson (not the public event-to-domain mapping) so undo can restore state.
+      const [lastTurnEvent] = tx
+        .select()
+        .from(encounterEvents)
+        .where(
+          and(
+            eq(encounterEvents.encounterId, encounterId),
+            eq(encounterEvents.type, 'turn'),
+            like(encounterEvents.metadataJson, '%"turnTickSnapshot"%'),
+          ),
+        )
+        .orderBy(desc(encounterEvents.id))
+        .limit(1)
+        .all();
+      const turnMeta = lastTurnEvent?.metadataJson
+        ? (JSON.parse(lastTurnEvent.metadataJson) as EncounterEventMetadata & { turnTickSnapshot?: TurnTickDelta })
+        : undefined;
+      let snapshot = turnMeta?.turnTickSnapshot;
+
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
       if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
         throw new BadRequestException('Encounter is not running');
       }
+
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
       const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
@@ -5461,6 +5673,25 @@ export class EncountersService {
       );
       newRound = round;
       newCurrentId = currentCombatantId;
+
+      // Issue #1445: the snapshot belongs to the advance being undone. Because the turn
+      // pointer can move without writing a snapshot (e.g. removing the current combatant),
+      // only apply the newest 'turn' event's snapshot when its post-advance state (round,
+      // current, phase, lair resume) or its ending combatant matches the state the undo
+      // is retreating to. This prevents applying a stale snapshot to an unrelated transition.
+      if (
+        snapshot &&
+        !(
+          (snapshot.toRound === round &&
+            snapshot.toCurrentCombatantId === currentCombatantId &&
+            snapshot.toPhase === phase &&
+            snapshot.toLairResumeCombatantId === (lairResumeCombatantId ?? null)) ||
+          snapshot.ending?.combatantId === currentCombatantId
+        )
+      ) {
+        snapshot = undefined;
+      }
+
       const escalation = this.nextEscalationState(adapter, fresh, round, 'undo');
       escalationValue = escalation.escalationDie;
       escalationLogDetail = escalation.logDetail;
@@ -5477,6 +5708,85 @@ export class EncountersService {
           }
         }
       }
+
+      // Issue #1445: restore the conditionInstances and activeEffects that nextTurn ticked on
+      // the ending and starting combatants. If a combatant was removed between the advance and
+      // the undo, the row will not be found and the snapshot is skipped (safe, not throw).
+      // Apply the stored delta to current state: only adjust roundsRemaining for ticked IDs that
+      // are still in the post-tick state, and re-add only the expired IDs that are not present.
+      // Then consume the snapshot so the next undo selects the previous turn's snapshot.
+      const restoredLog: Array<{
+        combatantId: number;
+        combatantName: string;
+        conditionNames: string[];
+        effectNames: string[];
+      }> = [];
+      if (snapshot) {
+        type Working = {
+          row: typeof combatants.$inferSelect;
+          conditions: ConditionInstance[];
+          effects: ActiveEffect[];
+          conditionRestored: string[];
+          effectRestored: string[];
+        };
+        const workByCombatant = new Map<number, Working>();
+        for (const side of ['ending', 'starting'] as const) {
+          const entry = snapshot[side];
+          if (!entry) continue;
+          let working = workByCombatant.get(entry.combatantId);
+          if (!working) {
+            const row = rows.find((r) => r.id === entry.combatantId);
+            if (!row) continue;
+            working = {
+              row,
+              conditions: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
+              effects: parseActiveEffects(row.activeEffects),
+              conditionRestored: [],
+              effectRestored: [],
+            };
+            workByCombatant.set(entry.combatantId, working);
+          }
+
+          const conditionResult = applyConditionTickDelta(entry, working.conditions);
+          const effectResult = applyEffectTickDelta(entry, working.effects);
+          working.conditions = conditionResult.merged;
+          working.effects = effectResult.merged;
+          working.conditionRestored.push(...conditionResult.restoredNames);
+          working.effectRestored.push(...effectResult.restoredNames);
+        }
+
+        for (const [combatantId, working] of workByCombatant) {
+          const conditionNames = [...new Set(working.conditionRestored)];
+          const effectNames = [...new Set(working.effectRestored)];
+          if (conditionNames.length > 0 || effectNames.length > 0) {
+            restoredLog.push({
+              combatantId,
+              combatantName: working.row.name,
+              conditionNames,
+              effectNames,
+            });
+
+            const writeSet: Partial<typeof combatants.$inferInsert> = {
+              activeEffects: toJsonText(working.effects),
+              ...conditionWriteSetFromInstances(working.conditions),
+            };
+            tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
+          }
+        }
+
+        // Consume the snapshot so a second consecutive undo selects the previous turn.
+        if (lastTurnEvent && turnMeta) {
+          const consumedMeta: Record<string, unknown> = { ...turnMeta };
+          delete consumedMeta.turnTickSnapshot;
+          tx.update(encounterEvents)
+            .set({
+              metadataJson: Object.keys(consumedMeta).length > 0 ? JSON.stringify(consumedMeta) : null,
+            })
+            .where(eq(encounterEvents.id, lastTurnEvent.id))
+            .run();
+        }
+      }
+      restoredLogEntries = restoredLog;
 
       const restored =
         phase === 'combatant' && currentCombatantId !== null
@@ -5516,6 +5826,25 @@ export class EncountersService {
         metadata: { escalationDie: escalationValue },
       });
     }
+
+    // Issue #1445: log what timed state was restored, mirroring how expiry is logged.
+    for (const entry of restoredLogEntries) {
+      for (const name of entry.conditionNames) {
+        await this.appendEvent(encounterId, newRound, 'condition', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: `condition restored: ${name}`,
+        });
+      }
+      for (const name of entry.effectNames) {
+        await this.appendEvent(encounterId, newRound, 'effect', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: `effect restored: ${name}`,
+        });
+      }
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

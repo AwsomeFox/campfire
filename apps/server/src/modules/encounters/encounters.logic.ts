@@ -614,8 +614,8 @@ export function initialEncounterTurnState(
 }
 
 /**
- * Reverse of {@link advanceEncounterTurn} for DM undo (issue #618). Effect ticks are not
- * reversed — only the pointer / lair phase are restored.
+ * Reverse of {@link advanceEncounterTurn} for DM undo (issue #618). The caller restores timed
+ * condition and effect ticks from the advance event's snapshot (issue #1445).
  */
 export function retreatEncounterTurn(
   sorted: Combatant[],

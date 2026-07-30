@@ -679,7 +679,7 @@ export class EncountersController {
     summary: 'Undo the last turn advance (issue #413)',
     description:
       'dm role required. Steps the turn pointer BACKWARD (decrementing the round when unwrapping past the top). ' +
-      'Effect ticks applied while advancing are not reversed — the DM re-applies any effect corrections manually.',
+      'Timed conditions and active effects ticked while advancing are restored automatically from a snapshot.',
   })
   @ApiResponse({ status: 201, description: 'Encounter turn pointer moved back.' })
   @ApiResponse({ status: 400, description: 'Encounter is not running.' })
