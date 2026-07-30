@@ -13,17 +13,20 @@ export function CharacterSheetNav({
   tabRefs,
   onTabKeyDown,
   liveEncounter,
+  levelUpReady,
 }: {
   tab: CharacterSheetTab;
   setTab: (next: CharacterSheetTab) => void;
   tabRefs: TabRefs;
   onTabKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
   liveEncounter: boolean;
+  levelUpReady?: boolean;
 }) {
   return (
     <div
-      className="cf-print-hide sticky top-0 z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
+      className="cf-print-hide sticky z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
       data-testid="character-sheet-tabs"
+      style={{ top: 'var(--app-header-h)' }}
     >
       <div className="seg self-start inline-flex max-w-full" role="tablist" aria-label="Character sheet sections">
         {CHARACTER_SHEET_TAB_ORDER.map((t) => {
@@ -56,6 +59,11 @@ export function CharacterSheetNav({
               {t === 'play' && liveEncounter && (
                 <span className="tag tag-accent text-[9px] !py-0 !px-1.5" aria-label="Live encounter">
                   Live
+                </span>
+              )}
+              {t === 'build' && levelUpReady && (
+                <span className="tag tag-accent text-[9px] !py-0 !px-1.5" aria-label="Ready to level up">
+                  Ready
                 </span>
               )}
             </button>

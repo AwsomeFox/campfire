@@ -1,6 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, request, test } from '@playwright/test';
 import { validateHeadingOutline } from '../../src/lib/headingOutline';
+import { CREDS } from '../global-setup';
 import { seed, stateFor } from './seed';
 
 /**
@@ -88,5 +89,66 @@ test.describe('Page heading hierarchy (#457)', () => {
     expect(results.violations.filter((v) => v.id === 'heading-order' || v.id === 'page-has-heading-one')).toEqual([]);
 
     await context.close();
+  });
+});
+
+test.describe('Character sheet heading hierarchy (#1488)', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('character sheet keeps one h1 and ordered section headings', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const name = `Heading PC ${Date.now()}`;
+
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.player });
+    const me = await (await ctx.get('/api/v1/me')).json();
+    const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: {
+        name,
+        className: 'Rogue',
+        level: 3,
+        ownerUserId: String(me.user.id),
+        ac: 14,
+        hpCurrent: 18,
+        hpMax: 24,
+        xp: 900,
+        stats: { STR: 10, DEX: 16, CON: 12, INT: 12, WIS: 14, CHA: 10 },
+      },
+    });
+    if (!res.ok()) throw new Error(`create character -> ${res.status()}: ${await res.text()}`);
+    const characterId = ((await res.json()) as { id: number }).id;
+
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}`);
+      const main = page.locator('main');
+      await expect(main.getByRole('heading', { level: 1, name })).toHaveCount(1);
+
+      for (const section of [
+        'Ability scores',
+        'Hit points & Defenses',
+        'Conditions',
+        'Actions',
+        'Saving throws',
+        'Skills',
+        'Spell slots',
+      ]) {
+        await expect(main.getByRole('heading', { level: 2, name: section })).toBeVisible();
+      }
+
+      const outline = await main.evaluate((el) => {
+        const nodes = Array.from(el.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+        return nodes.map((node) => ({
+          level: Number(node.tagName.slice(1)),
+          text: (node.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        }));
+      });
+      expect(validateHeadingOutline(outline)).toEqual([]);
+
+      const results = await new AxeBuilder({ page }).include('main').analyze();
+      expect(results.violations.filter((v) => v.id === 'heading-order' || v.id === 'page-has-heading-one')).toEqual([]);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`).catch(() => undefined);
+      await ctx.dispose();
+    }
   });
 });

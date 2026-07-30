@@ -62,8 +62,9 @@ export function CharacterDetailLoadingSkeleton() {
       </div>
 
       <div
-        className="sticky top-0 z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
+        className="sticky z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
         aria-hidden="true"
+        style={{ top: 'var(--app-header-h)' }}
       >
         <div className="inline-flex gap-2">
           <SkeletonBar width="72px" className="h-10 rounded-md" />
