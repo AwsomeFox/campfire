@@ -57,7 +57,7 @@ export class SafetyCharterValidator {
       }
       const parsed = JSON.parse(result.text.slice(start, end + 1));
       return SafetyClassificationSchema.parse(parsed);
-    } catch (err) {
+    } catch (_err) {
       // Fail open on provider errors to not block gameplay during network blips
       return { violates: false };
     }
