@@ -659,13 +659,19 @@ export class NotesService {
       await assertMayInteract(this.db, user, campaignId, role, 'share, whisper, or send notes to other members');
     }
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
-    const noteAuthor = await this.currentAttributionUser(user);
-    const [row] = await this.db
-      .insert(notes)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const current = tx
+        .select({ displayName: users.displayName, username: users.username })
+        .from(users)
+        .where(eq(users.id, Number(user.id)))
+        .limit(1)
+        .get();
+      return tx
+        .insert(notes)
+        .values({
         campaignId,
         authorUserId: user.id,
-        authorName: noteAuthor.name,
+        authorName: current ? (current.displayName || current.username) : 'Deleted user',
         kind: 'note',
         visibility,
         entityType: input.entityType ?? null,
@@ -676,8 +682,10 @@ export class NotesService {
         resolvedNote: '',
         createdAt: ts,
         updatedAt: ts,
-      })
-      .returning();
+        })
+        .returning()
+        .get();
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -915,13 +923,19 @@ export class NotesService {
     // or the DM's own inbox becomes the one channel a silenced member can still use.
     await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
-    const inboxAuthor = await this.currentAttributionUser(user);
-    const [row] = await this.db
-      .insert(notes)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const current = tx
+        .select({ displayName: users.displayName, username: users.username })
+        .from(users)
+        .where(eq(users.id, Number(user.id)))
+        .limit(1)
+        .get();
+      return tx
+        .insert(notes)
+        .values({
         campaignId,
         authorUserId: user.id,
-        authorName: inboxAuthor.name,
+        authorName: current ? (current.displayName || current.username) : 'Deleted user',
         kind: 'inbox',
         visibility: 'dm_shared',
         entityType: null,
@@ -931,8 +945,10 @@ export class NotesService {
         resolvedNote: '',
         createdAt: ts,
         updatedAt: ts,
-      })
-      .returning();
+        })
+        .returning()
+        .get();
+    });
 
     await this.audit.log({
       actor: auditActor(user),

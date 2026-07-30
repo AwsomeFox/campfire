@@ -257,11 +257,31 @@ export class UsersService {
         .run();
       tx.update(notifications)
         .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
-        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'safety_hold')))
+        .where(
+          and(
+            eq(notifications.actorUserId, stableUserId),
+            eq(notifications.type, 'safety_hold'),
+            ne(notifications.title, 'The table safety hold was resolved'),
+          ),
+        )
         .run();
       tx.update(notificationDigestQueue)
         .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
-        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'safety_hold')))
+        .where(
+          and(
+            eq(notificationDigestQueue.actorUserId, stableUserId),
+            eq(notificationDigestQueue.type, 'safety_hold'),
+            ne(notificationDigestQueue.title, 'The table safety hold was resolved'),
+          ),
+        )
+        .run();
+      tx.update(notifications)
+        .set({ title: 'The table safety hold was resolved', body: 'A facilitator resolved the table safety hold. Review the table status before continuing.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'safety_hold'), eq(notifications.title, 'The table safety hold was resolved')))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'The table safety hold was resolved', body: 'A facilitator resolved the table safety hold. Review the table status before continuing.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'safety_hold'), eq(notificationDigestQueue.title, 'The table safety hold was resolved')))
         .run();
       tx.update(notifications)
         .set({ title: 'Charter updated', body: 'Review the campaign charter for the current agreement.' })
