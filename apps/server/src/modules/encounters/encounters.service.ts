@@ -5641,13 +5641,13 @@ export class EncountersService {
               conditionNames,
               effectNames,
             });
-          }
 
-          const writeSet: Partial<typeof combatants.$inferInsert> = {
-            activeEffects: toJsonText(working.effects),
-            ...conditionWriteSetFromInstances(working.conditions),
-          };
-          tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
+            const writeSet: Partial<typeof combatants.$inferInsert> = {
+              activeEffects: toJsonText(working.effects),
+              ...conditionWriteSetFromInstances(working.conditions),
+            };
+            tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
+          }
         }
 
         // Consume the snapshot so a second consecutive undo selects the previous turn.
