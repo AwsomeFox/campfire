@@ -850,11 +850,21 @@ describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () =>
     expect(empty.body).toEqual([]);
 
     await request(server).delete(`/api/v1/sessions/${sessionId}`).set(dm).expect(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await request(server).delete(`/api/v1/characters/${characterId}`).set(dm).expect(200);
 
     const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
     expect(trash.status).toBe(200);
     expect(trash.body).toHaveLength(2);
+
+    // Trashed items are sorted by deletedAt desc (most recently deleted first).
+    const t0 = Date.parse(trash.body[0].deletedAt);
+    const t1 = Date.parse(trash.body[1].deletedAt);
+    expect(t0).toBeGreaterThanOrEqual(t1);
+    if (t0 > t1) {
+      expect(trash.body[0]).toMatchObject({ type: 'character', id: characterId, name: 'Doomed Hero' });
+      expect(trash.body[1]).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });
+    }
 
     const session = trash.body.find((t: { type: string }) => t.type === 'session');
     expect(session).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });

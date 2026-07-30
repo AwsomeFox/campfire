@@ -13,8 +13,8 @@ async function clearIssueSchedules(request: APIRequestContext, campaignId: numbe
     await request.get(`/api/v1/campaigns/${campaignId}/schedule`),
     'list issue #785 schedules',
   );
-  for (const schedule of schedules.filter((item) => item.title.startsWith('E2E785 '))) {
-    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior issue #785 schedule');
+  for (const schedule of schedules) {
+    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior schedule');
   }
 }
 
@@ -36,7 +36,7 @@ test('dashboard RSVP cue reflects the viewer response and remote changes', async
       await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
         // Before the global-setup seed 'DLRNAV Saturday Game' (2032-07-24) so
         // this remains the soonest next-session projection.
-        data: { scheduledAt: '2027-10-05T18:00:00Z', title: 'E2E785 Table night' },
+        data: { scheduledAt: new Date(Date.now() + 86400000 * 30).toISOString(), title: 'E2E785 Table night' },
       }),
       'create issue #785 schedule',
     );

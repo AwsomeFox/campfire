@@ -4,10 +4,16 @@ import { seed, stateFor } from './seed';
 type CreatedArc = { id: number; title: string; sortOrder: number; beats?: CreatedBeat[] };
 type CreatedBeat = { id: number; title: string; sortOrder: number; arcId: number };
 
+const createdArcIds: number[] = [];
+
 async function create<T>(page: Page, path: string, data: unknown): Promise<T> {
   const response = await page.request.post(path, { data });
   expect(response.ok(), `${path} should create its fixture`).toBeTruthy();
-  return response.json() as Promise<T>;
+  const result = (await response.json()) as T;
+  if (path.endsWith('/arcs') && (result as { id?: number }).id) {
+    createdArcIds.push((result as { id: number }).id);
+  }
+  return result;
 }
 
 async function listArcs(page: Page, campaignId: number): Promise<CreatedArc[]> {
@@ -47,6 +53,15 @@ function expectAscending(positions: number[]) {
 
 test.describe('storylines reorder (issue #1312)', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.afterEach(async ({ page }) => {
+    while (createdArcIds.length > 0) {
+      const id = createdArcIds.pop();
+      if (id) {
+        await page.request.delete(`/api/v1/arcs/${id}`).catch(() => undefined);
+      }
+    }
+  });
 
   test('reorder arcs and beats persist after refresh and match API order', async ({ page }) => {
     const { campaignId } = seed();

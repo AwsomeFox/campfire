@@ -32,13 +32,11 @@ async function createCharacter(baseURL: string, who: keyof typeof CREDS, name: s
   return body.id as number;
 }
 
-async function restore(baseURL: string, id: number) {
+async function deleteCharacter(baseURL: string, id: number) {
   const ctx = await request.newContext({ baseURL });
   await login(ctx, baseURL, 'dm');
-  const res = await ctx.post(`/api/v1/characters/${id}/restore`);
+  await ctx.delete(`/api/v1/characters/${id}`).catch(() => undefined);
   await ctx.dispose();
-  // Restore is idempotent — ignore 404 (already purged) gracefully.
-  if (!res.ok() && res.status() !== 404) throw new Error(`restore ${id} -> ${res.status()}: ${await res.text()}`);
 }
 
 /** Link a character as a combatant to an encounter and return the combatant id. */
@@ -66,7 +64,7 @@ test.describe('Character Move to Trash — owner (issue #716)', () => {
     characterId = await createCharacter(baseURL!, 'player', name);
   });
   test.afterAll(async ({ baseURL }) => {
-    if (characterId) await restore(baseURL!, characterId);
+    if (characterId) await deleteCharacter(baseURL!, characterId);
   });
 
   test('owner sees the action, trashes from the roster, and undoes in place', async ({ page }) => {
@@ -122,7 +120,7 @@ test.describe('Character Move to Trash — DM (issue #716)', () => {
     characterId = await createCharacter(baseURL!, 'dm', name);
   });
   test.afterAll(async ({ baseURL }) => {
-    if (characterId) await restore(baseURL!, characterId);
+    if (characterId) await deleteCharacter(baseURL!, characterId);
   });
 
   test('DM trashes from the sheet via keyboard and the open sheet redirects to the roster on undo-expire', async ({ page }) => {
@@ -163,7 +161,7 @@ test.describe('Character Move to Trash — unrelated viewer denied (issue #716)'
     characterId = await createCharacter(baseURL!, 'dm', name);
   });
   test.afterAll(async ({ baseURL }) => {
-    if (characterId) await restore(baseURL!, characterId);
+    if (characterId) await deleteCharacter(baseURL!, characterId);
   });
 
   test('a viewer sees no Move to Trash action on the sheet or roster', async ({ page }) => {
@@ -191,7 +189,14 @@ test.describe('Character Move to Trash — encounter link preserved (issue #716)
     combatantId = await addCharacterCombatant(baseURL!, encounterId, characterId);
   });
   test.afterAll(async ({ baseURL }) => {
-    if (characterId) await restore(baseURL!, characterId);
+    const { encounterId } = seed();
+    if (combatantId) {
+      const ctx = await request.newContext({ baseURL });
+      await login(ctx, baseURL!, 'dm');
+      await ctx.delete(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).catch(() => undefined);
+      await ctx.dispose();
+    }
+    if (characterId) await deleteCharacter(baseURL!, characterId);
   });
 
   test('trashing a character keeps its combatant record on the encounter', async ({ page }) => {

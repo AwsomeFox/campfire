@@ -65,24 +65,31 @@ test.describe('entity discussions (issue #439)', () => {
     await discussion.getByRole('button', { name: 'Post' }).last().click();
     await expect(discussion.getByText(body)).toBeVisible();
 
-    const thread = await page.request.get(
-      `/api/v1/campaigns/${campaignId}/comments?entityType=quest&entityId=${navigation.questId}`,
-    );
-    expect(thread.ok()).toBe(true);
-    const pageJson = (await thread.json()) as {
-      items: Array<{ root: { id: number; body: string }; replies: Array<{ id: number; body: string }> }>;
-    };
-    const posted = pageJson.items
-      .flatMap((item) => [item.root, ...item.replies])
-      .find((comment) => comment.body === body);
-    expect(posted).toBeTruthy();
+    let postedId: number | undefined;
+    try {
+      const thread = await page.request.get(
+        `/api/v1/campaigns/${campaignId}/comments?entityType=quest&entityId=${navigation.questId}`,
+      );
+      expect(thread.ok()).toBe(true);
+      const pageJson = (await thread.json()) as {
+        items: Array<{ root: { id: number; body: string }; replies: Array<{ id: number; body: string }> }>;
+      };
+      const posted = pageJson.items
+        .flatMap((item) => [item.root, ...item.replies])
+        .find((comment) => comment.body === body);
+      expect(posted).toBeTruthy();
+      postedId = posted!.id;
 
-    await page.goto(
-      `/c/${campaignId}/quests/${navigation.questId}?comment=${posted!.id}#entity-comment-${posted!.id}`,
-    );
-    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe(`entity-comment-${posted!.id}`);
-    await expect(page.getByText(body)).toBeVisible();
-    await page.request.delete(`/api/v1/comments/${posted!.id}`);
+      await page.goto(
+        `/c/${campaignId}/quests/${navigation.questId}?comment=${postedId}#entity-comment-${postedId}`,
+      );
+      await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe(`entity-comment-${postedId}`);
+      await expect(page.getByText(body)).toBeVisible();
+    } finally {
+      if (postedId) {
+        await page.request.delete(`/api/v1/comments/${postedId}`).catch(() => undefined);
+      }
+    }
   });
 
   test('discussion is mobile-safe and axe-clean on a quest', async ({ page }) => {

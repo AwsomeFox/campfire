@@ -49,7 +49,7 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       await watchAnnouncements(viewerPage);
 
       const rolled = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/roll`, {
-        data: { expr: '1d20+3', label: 'Stealth check' },
+        data: { expr: '1d4+5', label: 'Stealth check' },
       });
       expect(rolled.ok()).toBe(true);
       const body = (await rolled.json()) as { total: number; expr: string };
@@ -62,7 +62,7 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       expect(afterFirst.filter((message) => message.includes(String(body.total)))).toHaveLength(1);
 
       // Poll refetch must not re-announce the same roll id.
-      await viewerPage.waitForTimeout(5_500);
+      await viewerPage.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
       expect((await announcements(viewerPage)).filter((message) => message.includes(String(body.total)))).toHaveLength(1);
     } finally {
       await dmContext.close();
@@ -89,7 +89,7 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
     const afterRoll = await announcements(page);
     const totalLine = afterRoll.find((message) => /Rolled|rolled/i.test(message)) ?? '';
     expect(totalLine.length).toBeGreaterThan(0);
-    await page.waitForTimeout(5_500);
+    await page.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
     const afterPoll = await announcements(page);
     expect(afterPoll.filter((message) => message === totalLine)).toHaveLength(1);
   });
