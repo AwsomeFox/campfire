@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveUndo, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -3882,6 +3882,15 @@ export class EncountersService {
         }
         const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
         row = updated;
+        // A removal undo may only rewind an untouched turn snapshot. Any live combatant
+        // mutation (including action damage and condition changes) is later state that must
+        // prevent restoring an earlier pointer/round over its committed effects.
+        if (freshEncounter.status === 'running') {
+          tx.update(encounters)
+            .set({ turnVersion: sql`${encounters.turnVersion} + 1`, updatedAt: nowIso() })
+            .where(eq(encounters.id, encounterId))
+            .run();
+        }
         afterHp = updated.hpCurrent;
         afterTemp = updated.hpTemp;
         afterDeath = updated.deathState;
@@ -4156,23 +4165,33 @@ export class EncountersService {
     return combatantToDomain(row);
   }
 
-  async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role): Promise<CombatantRemoveUndo> {
-    const initialEncounter = await this.getRowOrThrow(encounterId);
-    const adapter = await this.adapterForCampaign(initialEncounter.campaignId);
-    const undoToken = randomUUID();
+  async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {
+    // A caller-minted UUID doubles as the opaque undo token. Persisting only this one value
+    // lets a retry recover the exact removal receipt after a response is lost.
+    const undoToken = idempotencyKey ?? randomUUID();
     const now = nowIso();
     // UI offers Undo for seven seconds; retain the opaque server token longer so a
     // click at the end of that window survives ordinary network latency.
     const expiresAt = new Date(Date.now() + 30_000).toISOString();
     let emittedEncounter!: typeof encounters.$inferSelect;
+    let replayed = false;
 
     this.db.transaction((tx) => {
       // Both the transition and its undo snapshots must use one current encounter and
       // roster view; an earlier device must never overwrite a newer turn transition.
       const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      const prior = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
+      if (prior) {
+        if (prior.combatantId !== combatantId) throw new ConflictException('Idempotency key was reused for a different combatant removal');
+        replayed = true;
+        emittedEncounter = freshEncounter;
+        return;
+      }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+      const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, freshEncounter.campaignId)).get();
+      const adapter = ruleSystemAdapter(campaign?.ruleSystem);
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
@@ -4263,8 +4282,8 @@ export class EncountersService {
       emittedEncounter = freshEncounter;
     });
 
-    this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
-    return { undoToken };
+    if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    return { undoToken, encounterId, combatantId };
   }
 
   async undoRemoveCombatant(encounterId: number, undoToken: string, user: RequestUser, role: Role): Promise<Combatant> {
@@ -4272,6 +4291,7 @@ export class EncountersService {
     let restoredCharacterId: number | null = null;
     let restoredNpcId: number | null = null;
     let emittedEncounter!: typeof encounters.$inferSelect;
+    let replayed = false;
     try {
       this.db.transaction((tx) => {
         const current = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
@@ -4281,9 +4301,19 @@ export class EncountersService {
         const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
         const adapter = ruleSystemAdapter(campaign?.ruleSystem);
         const undo = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
-        if (!undo || undo.consumedAt != null || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
+        if (!undo || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
         const snapshot = fromJsonText<typeof combatants.$inferSelect | null>(undo.snapshotJson, null);
         if (!snapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
+        // A committed undo may have lost its response. Replaying the restored row is safe;
+        // never turn the client-visible Retry into a permanent 404 after success.
+        if (undo.consumedAt != null) {
+          const prior = tx.select().from(combatants).where(eq(combatants.id, snapshot.id)).get();
+          if (!prior) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
+          restored = prior;
+          emittedEncounter = current;
+          replayed = true;
+          return;
+        }
         // A rule-pack uninstall nulls live combatants before deleting its entries, but
         // a removed combatant only exists in this snapshot during the undo window.
         // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
@@ -4295,6 +4325,17 @@ export class EncountersService {
         }
         if (snapshot.npcId != null && !tx.select({ id: npcs.id }).from(npcs).where(eq(npcs.id, snapshot.npcId)).get()) {
           snapshot.npcId = null;
+        }
+        if (snapshot.characterId != null) {
+          const sheet = tx.select().from(characters).where(eq(characters.id, snapshot.characterId)).get();
+          if (sheet) Object.assign(snapshot, {
+            hpCurrent: Math.max(0, Math.min(sheet.hpCurrent, sheet.hpMax)), hpMax: sheet.hpMax,
+            hpTemp: sheet.hpTemp, spCurrent: sheet.spCurrent, spMax: sheet.spMax,
+            rpCurrent: sheet.rpCurrent, rpMax: sheet.rpMax, deathState: sheet.deathState,
+            deathSaveSuccesses: sheet.deathSaveSuccesses, deathSaveFailures: sheet.deathSaveFailures,
+            conditions: sheet.conditions, conditionInstances: sheet.conditionInstances,
+            sheetSyncedUpdatedAt: sheet.updatedAt,
+          });
         }
         restoredCharacterId = snapshot.characterId;
         restoredNpcId = snapshot.npcId;
@@ -4343,7 +4384,7 @@ export class EncountersService {
       }
       throw err;
     }
-    this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
     return combatantToDomain(restored);
   }
 

@@ -684,8 +684,13 @@ describe('encounters (e2e)', () => {
 
     it('dm removes a combatant', async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm);
+      const idempotencyKey = '7f5ccac1-fb3d-4ca5-a237-0385d22e0001';
+      const res = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
       expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ undoToken: idempotencyKey, encounterId, combatantId: ruleMonsterId });
+      const replay = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual(res.body);
 
       const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
       expect(getRes.body.combatants.some((c: { id: number }) => c.id === ruleMonsterId)).toBe(false);
@@ -705,12 +710,12 @@ describe('encounters (e2e)', () => {
         request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken }),
         request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken }),
       ]);
-      expect([restored.status, raced.status].filter((status) => status === 201)).toHaveLength(1);
-      expect([restored.status, raced.status].filter((status) => status === 404)).toHaveLength(1);
-      const winner = restored.status === 201 ? restored : raced;
+      expect([restored.status, raced.status].filter((status) => status === 201)).toHaveLength(2);
+      const winner = restored;
       expect(winner.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
       const replay = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
-      expect(replay.status).toBe(404);
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
 
       const expiring = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Expired undo', hpMax: 2 });
       const removedExpired = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm);

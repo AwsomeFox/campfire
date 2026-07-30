@@ -33,7 +33,7 @@ import {
   CharacterCreate,
   CharacterUpdate,
   CombatantCreate,
-  CombatantRemoveUndo,
+  CombatantRemoveRequest, CombatantRemoveUndo,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
@@ -4375,12 +4375,12 @@ export class McpToolsService {
       server,
       user,
       'remove_combatant',
-      'DM only: remove a combatant from an encounter.',
-      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter') },
-      async ({ encounterId, combatantId }) => {
+      'DM only: remove a combatant from an encounter. Returns { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply a UUID idempotencyKey and reuse it after a lost response to replay that receipt.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantRemoveRequest.shape },
+      async ({ encounterId, combatantId, idempotencyKey }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role);
+        return this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role, idempotencyKey as string | undefined);
       },
     );
 
@@ -4388,7 +4388,7 @@ export class McpToolsService {
       server,
       user,
       'undo_remove_combatant',
-      'DM only: restore an exactly-once combatant removal using its short-lived undo token.',
+      'DM only: restore a combatant using its short-lived one-use undoToken. A same-token retry after a lost success response replays the restored combatant.',
       { encounterId: Id.describe('Encounter id'), ...CombatantRemoveUndo.shape },
       async ({ encounterId, undoToken }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
