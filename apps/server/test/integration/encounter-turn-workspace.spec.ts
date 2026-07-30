@@ -712,16 +712,31 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(restoredEffs.find((e: any) => e.id === 'eff-y')).toBeUndefined();
     });
 
-    it('restores an end-of-turn condition when the same combatant both ends and begins the turn', async () => {
+    it('restores both end-of-turn and start-of-turn conditions when the same combatant ends and begins the turn', async () => {
       dataDir = makeTempDataDir();
       const { orm, service } = build();
       const { encounterId, c1, c2 } = seed(orm);
 
       await service.removeCombatant(encounterId, c2, dmUser, 'dm');
 
-      const condition = {
-        id: 'lone-cond',
-        name: 'Lone Cond',
+      const endCondition = {
+        id: 'lone-end',
+        name: 'Lone End',
+        source: 'trap',
+        sourceCombatantId: null,
+        ruleEntryId: null,
+        saveDc: null,
+        saveAbility: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        durationRounds: 2,
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+      };
+      const startCondition = {
+        id: 'lone-start',
+        name: 'Lone Start',
         source: 'trap',
         sourceCombatantId: null,
         ruleEntryId: null,
@@ -732,28 +747,32 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         notes: '',
         durationRounds: 1,
         roundsRemaining: 1,
-        timing: 'end-of-turn',
+        timing: 'start-of-turn',
       };
       orm
         .update(combatants)
         .set({
-          conditionInstances: JSON.stringify([condition]),
-          conditions: JSON.stringify(['Lone Cond']),
+          conditionInstances: JSON.stringify([endCondition, startCondition]),
+          conditions: JSON.stringify(['Lone End', 'Lone Start']),
         })
         .where(eq(combatants.id, c1))
         .run();
 
       await service.nextTurn(encounterId, {}, dmUser, 'dm');
       const [rowAfterAdvance] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
-      expect(JSON.parse(rowAfterAdvance.conditionInstances ?? '[]')).toHaveLength(0);
+      const afterAdvance = JSON.parse(rowAfterAdvance.conditionInstances ?? '[]');
+      expect(afterAdvance).toHaveLength(1);
+      expect(afterAdvance[0]).toMatchObject({ id: 'lone-end', roundsRemaining: 1 });
+      expect(conditionsFrom(rowAfterAdvance)).toEqual(['Lone End']);
 
       await service.undoTurn(encounterId, dmUser, 'dm');
       const [row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
       const restored = JSON.parse(row.conditionInstances ?? '[]');
-      expect(restored).toHaveLength(1);
-      expect(restored[0]).toMatchObject(condition);
-      expect(conditionsFrom(row)).toEqual(['Lone Cond']);
-      expect(JSON.parse(row.conditions ?? '[]')).toEqual(['Lone Cond']);
+      expect(restored).toHaveLength(2);
+      expect(restored.find((c: any) => c.id === 'lone-end')).toMatchObject(endCondition);
+      expect(restored.find((c: any) => c.id === 'lone-start')).toMatchObject(startCondition);
+      expect(conditionsFrom(row)).toEqual(['Lone End', 'Lone Start']);
+      expect(JSON.parse(row.conditions ?? '[]')).toEqual(['Lone End', 'Lone Start']);
       expect(currentId(orm, encounterId)).toBe(c1);
     });
   });

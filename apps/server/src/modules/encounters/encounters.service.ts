@@ -5277,6 +5277,7 @@ export class EncountersService {
         // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
         const ending =
           freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
+        let endingConditionKept: ConditionInstance[] | undefined;
         if (ending) {
           endedName = ending.name;
           const effectPre = ending.activeEffects ?? [];
@@ -5284,6 +5285,7 @@ export class EncountersService {
           const effectDelta = buildEffectTickDelta(effectPre, effectsKept);
           const conditionPre = ending.conditionInstances ?? [];
           const condTick = tickConditionInstancesAtTurnEnd(conditionPre);
+          endingConditionKept = condTick.kept;
           const conditionDelta = buildConditionTickDelta(conditionPre, condTick.kept);
           turnTickSnapshot.ending = {
             combatantId: ending.id,
@@ -5333,7 +5335,10 @@ export class EncountersService {
         const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
         if (starting) {
           newCurrentName = starting.name;
-          const startConditionPre = starting.conditionInstances ?? [];
+          // When the same combatant both ends and begins the turn, the start-of-turn tick must
+          // run against the post-end-tick list, not the stale in-memory copy (issue #1445).
+          const startConditionPre =
+            starting.id === ending?.id ? (endingConditionKept ?? starting.conditionInstances ?? []) : (starting.conditionInstances ?? []);
           const condTick = tickConditionInstancesAtTurnStart(startConditionPre);
           const conditionDelta = buildConditionTickDelta(startConditionPre, condTick.kept);
           // Active effects are not ticked at turn start; no effect delta to record.
@@ -5348,7 +5353,7 @@ export class EncountersService {
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
           if (
             condTick.expired.length > 0 ||
-            condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
+            condTick.kept.some((c, i) => c.roundsRemaining !== startConditionPre[i]?.roundsRemaining)
           ) {
             for (const c of condTick.expired) {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
