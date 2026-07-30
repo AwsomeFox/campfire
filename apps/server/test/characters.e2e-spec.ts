@@ -1819,6 +1819,7 @@ describe('POST /characters/:id/rest — individual character rest', () => {
 
   it('stamina rest with 0 RP returns 400', async () => {
     const server = ctx.app.getHttpServer();
+    await dbUpdate(server, owner, restCharId, { rpCurrent: 0 });
     const res = await request(server)
       .post(`/api/v1/characters/${restCharId}/rest`)
       .set(owner)

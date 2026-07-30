@@ -91,14 +91,6 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
     };
 
     const ambushData = await getAmbush();
-    if (Array.isArray(ambushData.combatants)) {
-      for (const c of ambushData.combatants) {
-        if (c.id !== bossId && c.id !== skirmisherId) {
-          await dm.delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).catch(() => undefined);
-        }
-      }
-    }
-
     let status = ambushData.status;
 
     if (status === 'ended') {
@@ -126,6 +118,15 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
         throw new Error(`reopen seed encounter -> ${reopenRes.status()}: ${await readError(reopenRes)}`);
       }
       status = 'running';
+    }
+
+    const currentAmbush = await getAmbush();
+    if (Array.isArray(currentAmbush.combatants)) {
+      for (const c of currentAmbush.combatants) {
+        if (c.id !== bossId && c.id !== skirmisherId) {
+          await dm.delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).catch(() => undefined);
+        }
+      }
     }
 
     // Reset each seed combatant's HP / initiative. EncounterUpdate does not accept

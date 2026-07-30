@@ -116,6 +116,7 @@ test.describe('storyline authoring (issue #856)', () => {
     );
     await page.getByRole('button', { name: '+ New arc', exact: true }).click();
     const createdArc = await (await createArcResponse).json() as CreatedArc;
+    if (createdArc.id) createdArcIds.push(createdArc.id);
     const arcSection = page.locator(`#entity-arc-${createdArc.id}`);
 
     await arcSection.getByLabel(`New beat in ${arcTitle}`).fill(beatTitle);
