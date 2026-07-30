@@ -1855,7 +1855,7 @@ export function guardDriverLivePlayArgs(
     const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_encounter!;
     // `hidden` and `mapAlignment` are refused rather than dropped. `hidden` controls encounter
     // visibility (#262/#754) and must be a human act. `mapAlignment` is a map-replacement reset
-    // directive (#870) and may not be set by the autonomous seat through update_encounter.
+    // directive (#870) and may not be set by the autonomous seat through update_encounter (#1792).
     if ('hidden' in args) {
       return {
         ok: false,
