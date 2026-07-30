@@ -612,11 +612,16 @@ export class CampaignsService {
     opts?: { revokeInvites?: boolean },
   ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
+    // mapAlignment is a request-time directive (issue #870), not a stored column.
+    const { mapAlignment, ...campaignInput } = input;
+    const mapAttachmentIdChanging =
+      campaignInput.mapAttachmentId !== undefined && campaignInput.mapAttachmentId !== existing.mapAttachmentId;
+    const shouldResetPins = mapAttachmentIdChanging && mapAlignment === 'reset';
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
     if (existing.status !== 'active') {
-      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
+      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && k !== 'mapAlignment' && input[k as keyof CampaignUpdateInput] !== undefined);
       if (extraKeys.length > 0) {
         throw new ForbiddenException(
           `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
@@ -633,26 +638,16 @@ export class CampaignsService {
     // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
     // Fog-protected encounter maps cannot be the region background: players load
     // RegionMap via /attachments/:id/file, which must stay a full-source URL.
-    if (input.mapAttachmentId != null) {
+    if (mapAttachmentIdChanging && campaignInput.mapAttachmentId != null) {
       const fogRows = await this.db
         .select({ fog: encounters.fog })
         .from(encounters)
-        .where(and(eq(encounters.mapAttachmentId, input.mapAttachmentId), eq(encounters.campaignId, id)));
+        .where(and(eq(encounters.mapAttachmentId, campaignInput.mapAttachmentId), eq(encounters.campaignId, id)));
       if (fogRows.some((row) => persistedFogConcealsPixels(row.fog))) {
         throw new ConflictException(
           'This attachment is protecting a fogged encounter map — use a separate image for the campaign region map, or disable fog first',
         );
       }
-      await this.db
-        .update(attachments)
-        .set({ hidden: false, updatedAt: nowIso() })
-        .where(
-          and(
-            eq(attachments.id, input.mapAttachmentId),
-            eq(attachments.campaignId, id),
-            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
-          ),
-        );
     }
 
     const archiving =
@@ -672,7 +667,7 @@ export class CampaignsService {
           .get();
         const row = tx
           .update(campaigns)
-          .set({ ...input, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -718,9 +713,64 @@ export class CampaignsService {
       return toDomain(row);
     }
 
+    const ts = nowIso();
+
+    // Issue #870: replacing/removing the world map can optionally reset every location
+    // pin in the same transaction, so an unrelated image never inherits old coordinates.
+    if (shouldResetPins) {
+      const row = this.db.transaction((tx) => {
+        if (campaignInput.mapAttachmentId != null) {
+          tx.update(attachments)
+            .set({ hidden: false, updatedAt: ts })
+            .where(
+              and(
+                eq(attachments.id, campaignInput.mapAttachmentId),
+                eq(attachments.campaignId, id),
+                eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+              ),
+            )
+            .run();
+        }
+        const row = tx
+          .update(campaigns)
+          .set({ ...campaignInput, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        if (!row) throw new NotFoundException(`Campaign ${id} not found`);
+        tx.update(locations)
+          .set({ mapX: null, mapY: null, updatedAt: ts })
+          .where(eq(locations.campaignId, id))
+          .run();
+        return row;
+      });
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.update',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+      });
+      return toDomain(row);
+    }
+
+    if (mapAttachmentIdChanging && campaignInput.mapAttachmentId != null) {
+      await this.db
+        .update(attachments)
+        .set({ hidden: false, updatedAt: ts })
+        .where(
+          and(
+            eq(attachments.id, campaignInput.mapAttachmentId),
+            eq(attachments.campaignId, id),
+            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+          ),
+        );
+    }
+
     const [row] = await this.db
       .update(campaigns)
-      .set({ ...input, updatedAt: nowIso() })
+      .set({ ...campaignInput, updatedAt: ts })
       .where(eq(campaigns.id, id))
       .returning();
     await this.audit.log({

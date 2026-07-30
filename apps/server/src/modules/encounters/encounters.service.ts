@@ -1631,6 +1631,24 @@ export class EncountersService {
       if (input.mapAttachmentId !== encounterRow.mapAttachmentId) {
         set.mapAttachmentId = input.mapAttachmentId;
         changedPredicates.push(sql`${encounters.mapAttachmentId} IS NOT ${input.mapAttachmentId}`);
+
+        // Issue #870: when the image changes, optionally clear every piece of dependent
+        // spatial state in the same transaction so old tokens/grid/fog/AoE don't reappear.
+        if (input.mapAlignment === 'reset') {
+          set.gridSize = null;
+          set.gridScale = null;
+          set.gridUnit = null;
+          set.gridSnap = false;
+          set.gridType = 'square';
+          set.hexOrientation = 'pointy';
+          set.gridOffsetX = 0;
+          set.gridOffsetY = 0;
+          set.gridCellHeight = null;
+          set.gridRotation = 0;
+          set.gridOpacity = 0.35;
+          set.fog = null;
+          set.aoe = toJsonText([]);
+        }
       }
     }
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
@@ -1709,10 +1727,28 @@ export class EncountersService {
     // The null-safe predicates make the semantic no-op check atomic. Two clients may both
     // observe missing defaults, but after the first write the second UPDATE changes zero rows
     // and therefore produces no duplicate audit entry or SSE invalidation (#865).
-    const result = await this.db
-      .update(encounters)
-      .set(set)
-      .where(and(eq(encounters.id, encounterId), or(...changedPredicates)));
+    const shouldResetTokens =
+      input.mapAttachmentId !== undefined &&
+      input.mapAttachmentId !== encounterRow.mapAttachmentId &&
+      input.mapAlignment === 'reset';
+
+    // Issue #870: run the encounter update and (when resetting) token clearing inside
+    // one SQLite transaction so a map swap cannot commit without its dependent state.
+    const result = this.db.transaction((tx) => {
+      const result = tx
+        .update(encounters)
+        .set(set)
+        .where(and(eq(encounters.id, encounterId), or(...changedPredicates)))
+        .run();
+      const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
+      if (rowsChanged > 0 && shouldResetTokens) {
+        tx.update(combatants)
+          .set({ tokenX: null, tokenY: null })
+          .where(eq(combatants.encounterId, encounterId))
+          .run();
+      }
+      return result;
+    });
     const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
     if (rowsChanged === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -1722,8 +1758,13 @@ export class EncountersService {
     // a handout, restage the raw attachment immediately. The raw-file route also
     // checks fog dynamically (defense in depth), so even a failure here cannot leak
     // source pixels; this keeps the attachment metadata/UI consistent as well.
-    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
-    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    let effectiveMapId = set.mapAttachmentId !== undefined ? set.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog =
+      set.fog !== undefined
+        ? parseFog(set.fog)
+        : input.fog !== undefined
+          ? input.fog
+          : parseFog(encounterRow.fog);
     if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
       // Reusing the campaign region-map attachment as a fogged battle map would
       // block players from GET /attachments/:id/file (RegionMap has no fog-safe

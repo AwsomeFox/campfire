@@ -13,6 +13,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, attachmentSrcSet, uploadAttachment } from '../../components/ImageUpload';
+import { MapReplaceDialog, type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { useAttachmentDerivatives } from '../../components/useAttachmentDerivatives';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { CampaignCover } from '../../components/CampaignCover';
@@ -301,6 +302,15 @@ export function RegionMap({
 
   const mapImageUrl = campaign.mapAttachmentId ? attachmentFileUrl(campaign.mapAttachmentId) : null;
 
+  // Map replacement lifecycle (issue #870): stage the file/reason, show a preview, and
+  // ask whether to preserve or reset dependent pins before committing.
+  const [mapDialog, setMapDialog] = useState<{
+    mode: 'replace' | 'remove';
+    previewUrl: string | null;
+    pendingFile?: File;
+    defaultAlignment: MapReplaceAlignment;
+  } | null>(null);
+
   /**
    * Responsive world map (issue #604). This card renders at ~360–640 CSS px, but it
    * used to load the FULL original — a multi-MB campaign map — on every dashboard
@@ -317,22 +327,25 @@ export function RegionMap({
   // the viewport once the dashboard goes two-up.
   const mapSizes = '(max-width: 768px) 100vw, 50vw';
 
-  async function handleMapUpload(attachment: Attachment, options?: { manageBusy?: boolean }) {
-    // uploadMapFile owns busy for the full upload+patch path; skip nested toggles.
-    const manageBusy = options?.manageBusy ?? true;
-    if (manageBusy) setBusy(true);
+  async function commitMapAttachment(mapAttachmentId: number | null, alignment: MapReplaceAlignment) {
+    setBusy(true);
     try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: attachment.id });
+      await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId, mapAlignment: alignment });
       clearMapError();
       onChange();
     } catch (err) {
       setMapError(
         err instanceof ApiError ? err.message : "Couldn't save the map.",
-        () => handleMapUpload(attachment),
+        () => commitMapAttachment(mapAttachmentId, alignment),
       );
     } finally {
-      if (manageBusy) setBusy(false);
+      setBusy(false);
     }
+  }
+
+  // Initial attach / generated map / imported map: no existing map, so no lifecycle dialog.
+  async function handleMapUpload(attachment: Attachment) {
+    await commitMapAttachment(attachment.id, 'preserve');
   }
 
   // First-party generator "Use this map" (issue #409): the wizard previews without saving;
@@ -355,32 +368,40 @@ export function RegionMap({
     }
   }
 
-  async function handleMapRemove() {
-    setBusy(true);
-    try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: null });
-      clearMapError();
-      onChange();
-    } catch (err) {
-      setMapError(
-        err instanceof ApiError ? err.message : "Couldn't remove the map.",
-        () => handleMapRemove(),
-      );
-    } finally {
-      setBusy(false);
-    }
+  function openMapRemoveDialog() {
+    setMapDialog({
+      mode: 'remove',
+      previewUrl: mapImageUrl,
+      defaultAlignment: 'preserve',
+    });
   }
 
-  /** "Replace map" button path — bare upload (no dropzone UI), then wire the new attachment id. */
-  async function uploadMapFile(file: File) {
+  async function handleMapRemove(alignment: MapReplaceAlignment) {
+    await commitMapAttachment(null, alignment);
+  }
+
+  /** "Replace map" button path — stage a local preview, ask preserve/reset, then upload + commit. */
+  function uploadMapFile(file: File) {
+    const previewUrl = URL.createObjectURL(file);
+    setMapDialog({
+      mode: 'replace',
+      previewUrl,
+      pendingFile: file,
+      defaultAlignment: 'reset',
+    });
+  }
+
+  async function commitMapReplace(alignment: MapReplaceAlignment) {
+    const file = mapDialog?.pendingFile;
+    if (!file) return;
     setBusy(true);
     try {
       const attachment = await uploadAttachment(campaignId, 'map', file);
-      await handleMapUpload(attachment, { manageBusy: false });
+      await commitMapAttachment(attachment.id, alignment);
     } catch (err) {
       setMapError(
         err instanceof ApiError ? err.message : "Couldn't upload the map.",
-        () => uploadMapFile(file),
+        () => commitMapReplace(alignment),
       );
     } finally {
       setBusy(false);
@@ -530,7 +551,7 @@ export function RegionMap({
             hasMap
             uploading={busy}
             onPick={(file) => void uploadMapFile(file)}
-            onRemove={() => void handleMapRemove()}
+            onRemove={() => void openMapRemoveDialog()}
           />
         )}
         {/* Explicit "download original" (issue #604). Now that the card renders a
@@ -561,6 +582,34 @@ export function RegionMap({
             onRetry={canRetry ? handleRetry : undefined}
           />
         </div>
+      )}
+
+      {mapDialog && (
+        <MapReplaceDialog
+          mode={mapDialog.mode}
+          previewUrl={mapDialog.previewUrl}
+          counts={{ points: pinned.length }}
+          defaultAlignment={mapDialog.defaultAlignment}
+          busy={busy}
+          onChoice={async (alignment) => {
+            const mode = mapDialog.mode;
+            if (mapDialog.previewUrl?.startsWith('blob:')) {
+              URL.revokeObjectURL(mapDialog.previewUrl);
+            }
+            setMapDialog(null);
+            if (mode === 'remove') {
+              await handleMapRemove(alignment);
+            } else {
+              await commitMapReplace(alignment);
+            }
+          }}
+          onCancel={() => {
+            if (mapDialog.previewUrl?.startsWith('blob:')) {
+              URL.revokeObjectURL(mapDialog.previewUrl);
+            }
+            setMapDialog(null);
+          }}
+        />
       )}
 
       {/* Derivative lifecycle for the world map (issue #604). The map itself always

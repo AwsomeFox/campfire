@@ -114,6 +114,7 @@ import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
+import { MapReplaceDialog, type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { useDerivativeManifest } from '../../components/useAttachmentDerivatives';
 import { planEncounterMapResponsive } from '../../components/attachmentSrcSet';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
@@ -2315,7 +2316,8 @@ export default function RunSessionPage() {
   attemptGridDefaultsRef.current = attemptGridDefaults;
 
   const setEncounterMap = useCallback(
-    (attachmentId: number | null) => queueEncounterPatch({ mapAttachmentId: attachmentId }),
+    (attachmentId: number | null, alignment: MapReplaceAlignment = 'preserve') =>
+      queueEncounterPatch({ mapAttachmentId: attachmentId, mapAlignment: alignment }),
     [queueEncounterPatch],
   );
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
@@ -3711,7 +3713,7 @@ export function BattleMap({
   canDmWrite: boolean;
   busy: boolean;
   canMoveToken: (c: Combatant) => boolean;
-  onSetMap: (attachmentId: number | null) => void;
+  onSetMap: (attachmentId: number | null, alignment?: MapReplaceAlignment) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
   onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
   onUndoTokenBatch?: (undoToken: string) => Promise<void>;
@@ -3766,6 +3768,12 @@ export function BattleMap({
     | { kind: 'viewport-pan'; pointerId: number; captureTarget: Element; lastX: number; lastY: number };
 
   const [uploading, setUploading] = useState(false);
+  const [mapDialog, setMapDialog] = useState<{
+    mode: 'replace' | 'remove';
+    previewUrl: string | null;
+    pendingFile?: File;
+    defaultAlignment: MapReplaceAlignment;
+  } | null>(null);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [tool, setTool] = useState<MapTool>('move');
@@ -4104,16 +4112,35 @@ export function BattleMap({
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
   // Those combatants land in `hiddenByFog` via tokenHiddenByFog (issue #418), not Unplaced.
 
-  async function uploadMapFile(file: File) {
+  function uploadMapFile(file: File) {
+    setMapDialog({
+      mode: 'replace',
+      previewUrl: URL.createObjectURL(file),
+      pendingFile: file,
+      defaultAlignment: 'reset',
+    });
+  }
+
+  async function commitMapReplace(alignment: MapReplaceAlignment) {
+    const file = mapDialog?.pendingFile;
+    if (!file) return;
     setUploading(true);
     try {
       const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
-      onSetMap(attachment.id);
+      onSetMap(attachment.id, alignment);
     } catch (err) {
       onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.uploadMap' }));
     } finally {
       setUploading(false);
     }
+  }
+
+  function openMapRemoveDialog() {
+    setMapDialog({
+      mode: 'remove',
+      previewUrl: mapImageUrl,
+      defaultAlignment: 'preserve',
+    });
   }
 
   /**
@@ -4902,10 +4929,43 @@ export function BattleMap({
             hasMap
             uploading={uploading || busy}
             onPick={(file) => void uploadMapFile(file)}
-            onRemove={() => onSetMap(null)}
+            onRemove={() => void openMapRemoveDialog()}
           />
         )}
       </div>
+      )}
+
+      {mapDialog && (
+        <MapReplaceDialog
+          mode={mapDialog.mode}
+          previewUrl={mapDialog.previewUrl}
+          counts={{
+            points: placed.length + hiddenByFog.length,
+            grid: encounter.gridSize != null && encounter.gridSize > 0,
+            fog: encounter.fog?.enabled === true,
+            aoe: encounter.aoe?.length ?? 0,
+          }}
+          defaultAlignment={mapDialog.defaultAlignment}
+          busy={uploading || busy}
+          onChoice={async (alignment) => {
+            const mode = mapDialog.mode;
+            if (mapDialog.previewUrl?.startsWith('blob:')) {
+              URL.revokeObjectURL(mapDialog.previewUrl);
+            }
+            setMapDialog(null);
+            if (mode === 'remove') {
+              onSetMap(null, alignment);
+            } else {
+              await commitMapReplace(alignment);
+            }
+          }}
+          onCancel={() => {
+            if (mapDialog.previewUrl?.startsWith('blob:')) {
+              URL.revokeObjectURL(mapDialog.previewUrl);
+            }
+            setMapDialog(null);
+          }}
+        />
       )}
 
       {!isCast && effectiveCanDmWrite && !mapImageUrl && (
