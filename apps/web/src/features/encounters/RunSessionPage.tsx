@@ -881,6 +881,13 @@ function hpPatchWithActor(
 
 const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp', 'deathSaveRoll']);
 
+type OptimisticHpQueue = {
+  encounterId: number;
+  base: EncounterWithCombatants | undefined;
+  nextSequence: number;
+  operations: Map<string, OptimisticHpDelta & { sequence: number }>;
+};
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -1755,7 +1762,7 @@ export default function RunSessionPage() {
 
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
   // straight into the query cache so the click lands instantly (no round-trip wait, no
-  // disabled control); onError rebuilds from committed state plus the remaining clicks;
+  // disabled control); onError rebuilds from committed state plus the recorded clicks;
   // onSettled reconciles
   // against server truth, but only once the *last* of a rapid burst settles so spamming
   // ±1 doesn't trigger a refetch storm.
@@ -1765,17 +1772,30 @@ export default function RunSessionPage() {
   // committed-but-lost response is replayed by the server rather than re-applied. Retry
   // is enabled only because the key is present — the two arrive together by construction.
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
-  const optimisticHpBaseRef = useRef<EncounterWithCombatants | undefined>(undefined);
-  const nextOptimisticHpSequenceRef = useRef(0);
-  const pendingOptimisticHpDeltasRef = useRef(new Map<string, OptimisticHpDelta & { sequence: number }>());
+  const optimisticHpQueueRef = useRef<OptimisticHpQueue>({
+    encounterId: eid,
+    base: undefined,
+    nextSequence: 0,
+    operations: new Map(),
+  });
+  if (optimisticHpQueueRef.current.encounterId !== eid) {
+    optimisticHpQueueRef.current = {
+      encounterId: eid,
+      base: undefined,
+      nextSequence: 0,
+      operations: new Map(),
+    };
+  }
   const replayPendingOptimisticHpDeltas = useCallback(() => {
-    const base = optimisticHpBaseRef.current;
+    const queue = optimisticHpQueueRef.current;
+    if (queue.encounterId !== eid) return;
+    const { base } = queue;
     if (!base) return;
     queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
       ...base,
       combatants: replayOptimisticHpDeltas(
         base.combatants,
-        [...pendingOptimisticHpDeltasRef.current.values()]
+        [...queue.operations.values()]
           .sort((a, b) => a.sequence - b.sequence)
           .map(({ combatantId, delta }) => ({ combatantId, delta })),
         ruleSystem,
@@ -1809,12 +1829,13 @@ export default function RunSessionPage() {
       ),
     onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }) => {
       setActionError(null);
+      const queue = optimisticHpQueueRef.current;
       const optimisticOperation =
         damageType === undefined &&
         saveOutcome === undefined &&
         isCrit === undefined &&
         damageDice === undefined
-          ? { combatantId, delta, sequence: nextOptimisticHpSequenceRef.current++ }
+          ? { combatantId, delta, sequence: queue.nextSequence++ }
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
@@ -1824,17 +1845,23 @@ export default function RunSessionPage() {
         previous &&
         optimisticOperation
       ) {
-        if (!optimisticHpBaseRef.current) optimisticHpBaseRef.current = previous;
-        pendingOptimisticHpDeltasRef.current.set(idempotencyKey, optimisticOperation);
+        if (queue.encounterId !== eid) return {};
+        if (!queue.base) queue.base = previous;
+        queue.operations.set(idempotencyKey, optimisticOperation);
         replayPendingOptimisticHpDeltas();
-        return { optimisticOperationId: idempotencyKey };
+        return { encounterId: eid, optimisticOperationId: idempotencyKey };
       }
       return {};
     },
     onError: (err, _vars, ctx) => {
-      if (ctx?.optimisticOperationId && pendingOptimisticHpDeltasRef.current.delete(ctx.optimisticOperationId)) {
+      const queue = optimisticHpQueueRef.current;
+      if (
+        ctx?.encounterId === eid &&
+        queue.encounterId === eid &&
+        ctx.optimisticOperationId &&
+        queue.operations.delete(ctx.optimisticOperationId)
+      ) {
         replayPendingOptimisticHpDeltas();
-        if (pendingOptimisticHpDeltasRef.current.size === 0) optimisticHpBaseRef.current = undefined;
       }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
       // just rolled back, but the server may in fact have applied it. Telling the DM "that
@@ -1843,21 +1870,17 @@ export default function RunSessionPage() {
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
     },
-    onSuccess: (combatant, _vars, ctx) => {
-      if (!ctx?.optimisticOperationId || !pendingOptimisticHpDeltasRef.current.delete(ctx.optimisticOperationId)) return;
-      const base = optimisticHpBaseRef.current;
-      if (base) {
-        optimisticHpBaseRef.current = {
-          ...base,
-          combatants: base.combatants.map((candidate) => candidate.id === combatant.id ? combatant : candidate),
-        };
-        replayPendingOptimisticHpDeltas();
-      }
-      if (pendingOptimisticHpDeltasRef.current.size === 0) optimisticHpBaseRef.current = undefined;
-    },
     onSettled: () => {
+      // A response can already include a later write, so successful operations stay in
+      // the replay ledger until the whole burst settles instead of promoting response data.
       // Only reconcile after the last in-flight HP write of a burst settles.
       if (queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) === 1) {
+        const queue = optimisticHpQueueRef.current;
+        if (queue.encounterId === eid) {
+          queue.base = undefined;
+          queue.nextSequence = 0;
+          queue.operations.clear();
+        }
         invalidateEncounter(queryClient, eid);
       }
     },

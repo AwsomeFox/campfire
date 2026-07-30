@@ -37,7 +37,9 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
 
     expect(source).toContain('replayPendingOptimisticHpDeltas');
-    expect(source).toContain('pendingOptimisticHpDeltasRef.current.delete');
+    expect(source).toContain('optimisticHpQueueRef');
+    expect(source).toContain('ctx?.encounterId === eid');
+    expect(source).toContain('successful operations stay in');
     expect(source).not.toContain('rollbackOptimisticHpDelta');
   });
 });
