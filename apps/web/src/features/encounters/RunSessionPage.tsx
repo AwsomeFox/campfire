@@ -1973,17 +1973,7 @@ export default function RunSessionPage() {
   );
 
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
-  const startEncounter = () =>
-    runControl.mutate(
-      { action: 'start' },
-      {
-        onSuccess: (data) => {
-          if (data && typeof data === 'object' && 'warning' in data && typeof data.warning === 'string' && data.warning) {
-            surfaceActionError(data.warning);
-          }
-        },
-      },
-    );
+  const startEncounter = () => runControl.mutate({ action: 'start' });
   // Issue #580: next-turn no longer rides the generic (unkeyed) runControl mutation. It
   // carries an operation id AND the combatant the DM believes holds the turn, so a lost
   // response replays and a co-DM's simultaneous advance conflicts instead of skipping.
