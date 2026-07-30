@@ -8,7 +8,7 @@ test.describe('accessibility harness and incomplete policy (#1778)', () => {
   test('createAxeBuilder configures target-size rule as enabled by default', () => {
     const dummyPage = {} as any;
     const builder = createAxeBuilder(dummyPage);
-    const rules = (builder as any).options?.rules ?? (builder as any).ruleParams;
+    const rules = (builder as any).option?.rules;
     expect(rules?.['target-size']?.enabled).toBe(true);
   });
 
