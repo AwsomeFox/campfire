@@ -5343,7 +5343,6 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(startRes.status).toBe(201);
       expect(startRes.body.status).toBe('running');
       expect(startRes.body.hidden).toBe(true);
-      expect(startRes.body.warning).toBe("This encounter is hidden; players won't see it.");
 
       // Player GET should be 404 secrecy check
       const playerReadBefore = await request(server)

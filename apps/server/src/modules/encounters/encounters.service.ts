@@ -4092,14 +4092,6 @@ export class EncountersService {
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     this.emitEncounterEvent('encounter.updated', campaignId, encounterId, snapshot.hidden);
 
-    if (snapshot.hidden) {
-      const res: EncounterWithCombatants = {
-        ...snapshot,
-        warning: "This encounter is hidden; players won't see it.",
-      };
-      return res;
-    }
-
     return snapshot;
   }
 

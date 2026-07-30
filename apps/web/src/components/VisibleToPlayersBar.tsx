@@ -26,13 +26,13 @@ export function VisibleToPlayersBar({
   /** Reveal when currently hidden (issue #1475). */
   onReveal?: () => Promise<void>;
 }) {
-  const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'hide' | 'reveal' | null>(null);
   const [pendingUndo, setPendingUndo] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function hide() {
-    if (busy) return;
-    setBusy(true);
+    if (pendingAction) return;
+    setPendingAction('hide');
     setError(null);
     try {
       await onHide();
@@ -40,20 +40,20 @@ export function VisibleToPlayersBar({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't hide from players.");
     } finally {
-      setBusy(false);
+      setPendingAction(null);
     }
   }
 
   async function reveal() {
-    if (busy || !onReveal) return;
-    setBusy(true);
+    if (pendingAction || !onReveal) return;
+    setPendingAction('reveal');
     setError(null);
     try {
       await onReveal();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't reveal to players.");
     } finally {
-      setBusy(false);
+      setPendingAction(null);
     }
   }
 
@@ -84,8 +84,8 @@ export function VisibleToPlayersBar({
           This encounter is hidden; players won't see it. Reveal when you are ready.
         </span>
         {error && <span className="text-xs text-rose-300">{error}</span>}
-        <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => void reveal()}>
-          {busy ? 'Revealing…' : 'Reveal now'}
+        <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void reveal()}>
+          {pendingAction === 'reveal' ? 'Revealing…' : 'Reveal now'}
         </Btn>
       </div>
     );
@@ -102,8 +102,8 @@ export function VisibleToPlayersBar({
         They can see this in lists, search, and links. Hide to make it DM-only again.
       </span>
       {error && <span className="text-xs text-rose-300">{error}</span>}
-      <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => void hide()}>
-        {busy ? 'Hiding…' : 'Hide'}
+      <Btn density="xs" ghost className="text-xs" disabled={pendingAction !== null} onClick={() => void hide()}>
+        {pendingAction === 'hide' ? 'Hiding…' : 'Hide'}
       </Btn>
     </div>
   );

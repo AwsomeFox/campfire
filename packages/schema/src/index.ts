@@ -10067,8 +10067,6 @@ export const EncounterWithCombatants = Encounter.extend({
   combatants: z.array(Combatant),
   /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
   hpSyncConflicts: z.array(HpSyncConflict).optional(),
-  /** Warning surfaced to DM (e.g. when starting a hidden encounter — issue #1475). */
-  warning: z.string().optional(),
 });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
