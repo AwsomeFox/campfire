@@ -75,6 +75,8 @@ import {
   DRIVER_INVENTORY_GRANT_MAX_QTY,
   DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
   DRIVER_UNDOABLE_TOOLS,
   isDriverForbiddenToolName,
   isWithinAftermathWindow,
@@ -579,6 +581,11 @@ export interface AiDmSessionState {
    */
   pendingToolConfirmations?: Record<string, AiDmPendingToolConfirmation>;
   /**
+   * Active aftermath economy-grant budget window state (#1781 / #1495). Null when no aftermath
+   * window is active or no grants have been made yet in the current window.
+   */
+  aftermathGrantWindow?: AftermathGrantWindow | null;
+  /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
    * must not write ladder/status updates that would race a replacement session.
@@ -595,7 +602,8 @@ type AiDmSessionPrivateGuardFields =
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
   | 'pendingToolConfirmations'
-  | 'detached';
+  | 'detached'
+  | 'aftermathGrantWindow';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
@@ -619,6 +627,7 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     policyViolationsThisTurn: _violations,
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
+    aftermathGrantWindow: _aftermathGrantWindow,
     ...rest
   } = session;
   return rest;
@@ -859,6 +868,7 @@ function isStoredSecretApproval(value: unknown): value is AiDmSecretReadApproval
 function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolConfirmation {
   const rec = recordOf(value);
   const retainedActionChain = rec?.retainedActionChain === undefined ? undefined : recordOf(rec.retainedActionChain);
+  const aftermathGrantWindow = rec?.aftermathGrantWindow === undefined ? undefined : recordOf(rec.aftermathGrantWindow);
   return !!rec
     && typeof rec.id === 'string'
     && typeof rec.tool === 'string'
@@ -877,7 +887,109 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.triggeredBy === 'string'
     && Number.isInteger(rec.turnNumber)
     && (retainedActionChain === undefined
-      || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'));
+      || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'))
+    && (aftermathGrantWindow === undefined
+      || (Number.isInteger(aftermathGrantWindow?.encounterId) && typeof aftermathGrantWindow?.endedAt === 'string'));
+}
+
+export interface AftermathGrantWindow {
+  encounterId: number;
+  endedAt: string;
+  treasuryGranted: number;
+  inventoryQtyGranted: number;
+}
+
+export function isStoredAftermathGrantWindow(val: unknown): val is AftermathGrantWindow {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return false;
+  const rec = val as Record<string, unknown>;
+  return (
+    typeof rec.encounterId === 'number' &&
+    Number.isFinite(rec.encounterId) &&
+    typeof rec.endedAt === 'string' &&
+    typeof rec.treasuryGranted === 'number' &&
+    Number.isFinite(rec.treasuryGranted) &&
+    typeof rec.inventoryQtyGranted === 'number' &&
+    Number.isFinite(rec.inventoryQtyGranted)
+  );
+}
+
+export function syncAftermathGrantWindow(
+  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
+  latestEndedEncounter: { encounterId: number; endedAt: string } | null,
+  now: number = Date.now(),
+): void {
+  if (!latestEndedEncounter || !isWithinAftermathWindow(latestEndedEncounter.endedAt, now)) {
+    session.aftermathGrantWindow = undefined;
+    return;
+  }
+  const current = session.aftermathGrantWindow;
+  if (
+    !current ||
+    current.encounterId !== latestEndedEncounter.encounterId ||
+    current.endedAt !== latestEndedEncounter.endedAt
+  ) {
+    session.aftermathGrantWindow = {
+      encounterId: latestEndedEncounter.encounterId,
+      endedAt: latestEndedEncounter.endedAt,
+      treasuryGranted: 0,
+      inventoryQtyGranted: 0,
+    };
+  }
+}
+
+export function noteDriverEconomyGrant(
+  session: Partial<Pick<AiDmSessionState, 'aftermathGrantWindow'>>,
+  toolName: string,
+  args: Record<string, unknown>,
+): void {
+  if (!session.aftermathGrantWindow) return;
+  if (toolName === 'adjust_treasury') {
+    const delta = (args.delta ?? {}) as Record<string, number | undefined>;
+    const callTotal = (delta.cp ?? 0) + (delta.sp ?? 0) + (delta.ep ?? 0) + (delta.gp ?? 0) + (delta.pp ?? 0);
+    session.aftermathGrantWindow.treasuryGranted += callTotal;
+  } else if (toolName === 'add_inventory_item') {
+    const qty = typeof args.qty === 'number' ? args.qty : 1;
+    session.aftermathGrantWindow.inventoryQtyGranted += qty;
+  } else if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
+    if (qtyDelta > 0) {
+      session.aftermathGrantWindow.inventoryQtyGranted += qtyDelta;
+    }
+  }
+}
+
+export function pendingEconomyGrantsForWindow(
+  session: Pick<AiDmSessionState, 'pendingToolConfirmations'>,
+  window: { encounterId: number; endedAt: string },
+): { treasuryReserved: number; inventoryQtyReserved: number } {
+  let treasuryReserved = 0;
+  let inventoryQtyReserved = 0;
+
+  for (const pending of Object.values(session.pendingToolConfirmations ?? {})) {
+    if (
+      !pending.aftermathGrantWindow ||
+      pending.aftermathGrantWindow.encounterId !== window.encounterId ||
+      pending.aftermathGrantWindow.endedAt !== window.endedAt
+    ) {
+      continue;
+    }
+
+    if (pending.tool === 'adjust_treasury') {
+      const delta = (pending.args.delta ?? {}) as Record<string, number | undefined>;
+      const callTotal = (delta.cp ?? 0) + (delta.sp ?? 0) + (delta.ep ?? 0) + (delta.gp ?? 0) + (delta.pp ?? 0);
+      treasuryReserved += callTotal;
+    } else if (pending.tool === 'add_inventory_item') {
+      const qty = typeof pending.args.qty === 'number' ? pending.args.qty : 1;
+      inventoryQtyReserved += qty;
+    } else if (pending.tool === 'update_inventory_item') {
+      const qtyDelta = typeof pending.args.qtyDelta === 'number' ? pending.args.qtyDelta : 0;
+      if (qtyDelta > 0) {
+        inventoryQtyReserved += qtyDelta;
+      }
+    }
+  }
+
+  return { treasuryReserved, inventoryQtyReserved };
 }
 
 /** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
@@ -1481,6 +1593,8 @@ export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
 } from './driver-tool-policy';
 
 /** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
@@ -1613,7 +1727,7 @@ export function guardDriverLivePlayArgs(
   args: Record<string, unknown>,
   session: Pick<
     AiDmSessionState,
-    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds'
+    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds' | 'aftermathGrantWindow' | 'pendingToolConfirmations'
   >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
@@ -1758,6 +1872,18 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
+    if (session.aftermathGrantWindow) {
+      const window = session.aftermathGrantWindow;
+      const { treasuryReserved } = pendingEconomyGrantsForWindow(session, window);
+      const callTotal = entries.reduce((acc, [, val]) => acc + (val as number), 0);
+      if (window.treasuryGranted + treasuryReserved + callTotal > DRIVER_TREASURY_SESSION_GRANT_CAP) {
+        return {
+          ok: false,
+          code: 'treasury_grant_cap_exceeded',
+          message: `Cumulative treasury grants for this aftermath window cannot exceed ${DRIVER_TREASURY_SESSION_GRANT_CAP}.`,
+        };
+      }
+    }
     return { ok: true, args: { ...args } };
   }
 
@@ -1795,6 +1921,17 @@ export function guardDriverLivePlayArgs(
         message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
       };
     }
+    if (session.aftermathGrantWindow) {
+      const window = session.aftermathGrantWindow;
+      const { inventoryQtyReserved } = pendingEconomyGrantsForWindow(session, window);
+      if (window.inventoryQtyGranted + inventoryQtyReserved + qty > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
+        return {
+          ok: false,
+          code: 'inventory_grant_cap_exceeded',
+          message: `Cumulative inventory grants for this aftermath window cannot exceed ${DRIVER_INVENTORY_SESSION_GRANT_CAP}.`,
+        };
+      }
+    }
     return { ok: true, args: { ...args } };
   }
 
@@ -1829,6 +1966,18 @@ export function guardDriverLivePlayArgs(
         code: 'forbidden_inventory_field',
         message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug) to update_inventory_item.',
       };
+    }
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
+    if (qtyDelta > 0 && session.aftermathGrantWindow) {
+      const window = session.aftermathGrantWindow;
+      const { inventoryQtyReserved } = pendingEconomyGrantsForWindow(session, window);
+      if (window.inventoryQtyGranted + inventoryQtyReserved + qtyDelta > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
+        return {
+          ok: false,
+          code: 'inventory_grant_cap_exceeded',
+          message: `Cumulative inventory grants for this aftermath window cannot exceed ${DRIVER_INVENTORY_SESSION_GRANT_CAP}.`,
+        };
+      }
     }
     if (hasDelta) {
       const delta = args.qtyDelta;
@@ -2430,6 +2579,8 @@ export class AiDriverService {
       }
     }
     fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
+    const aftermathGrantWindow = fromJsonText<unknown>(row.aftermathGrantWindow, null);
+    fresh.aftermathGrantWindow = isStoredAftermathGrantWindow(aftermathGrantWindow) ? aftermathGrantWindow : null;
 
     // #1042: the two GRANT maps are read back to be REVOKED, not restored. `fresh` keeps the
     // empty maps `freshSession` gave it, so the seat comes back with no outstanding authority —
@@ -2795,6 +2946,7 @@ export class AiDriverService {
       pendingToolConfirmations: nonEmptyJson(session.pendingToolConfirmations),
       phase: session.phase, // #1043
       collaborative: session.collaborative, // #1051
+      aftermathGrantWindow: session.aftermathGrantWindow ? toJsonText(session.aftermathGrantWindow) : null,
       updatedAt: ts,
     };
 
@@ -2825,6 +2977,7 @@ export class AiDriverService {
             pendingToolConfirmations: values.pendingToolConfirmations,
             phase: values.phase,
             collaborative: values.collaborative,
+            aftermathGrantWindow: values.aftermathGrantWindow,
             updatedAt: values.updatedAt,
           },
         })
@@ -3447,7 +3600,7 @@ export class AiDriverService {
    */
   private async resolveSessionProfile(
     campaignId: number,
-  ): Promise<{ profile: DriverSessionProfile }> {
+  ): Promise<{ profile: DriverSessionProfile; latestEndedEncounter: { encounterId: number; endedAt: string } | null }> {
     const [running, preparing, ended] = await Promise.all([
       this.encounters.listForCampaign(campaignId, 'running', 'dm'),
       this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
@@ -3459,7 +3612,14 @@ export class AiDriverService {
       hasPreparingEncounter: preparing.length > 0,
       hasRecentlyEndedEncounter: ended.some((encounter) => isWithinAftermathWindow(encounter.endedAt, now)),
     });
-    return { profile };
+    let latestEndedEncounter: { encounterId: number; endedAt: string } | null = null;
+    for (const encounter of ended) {
+      if (!encounter.endedAt) continue;
+      if (!latestEndedEncounter || Date.parse(encounter.endedAt) > Date.parse(latestEndedEncounter.endedAt)) {
+        latestEndedEncounter = { encounterId: encounter.id, endedAt: encounter.endedAt };
+      }
+    }
+    return { profile, latestEndedEncounter };
   }
 
   private policyForTool(
@@ -3822,7 +3982,8 @@ export class AiDriverService {
     // registry per call from classifyDriverRead + the on-file approvals.
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
-    const { profile: sessionProfile } = await this.resolveSessionProfile(campaignId);
+    const { profile: sessionProfile, latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+    syncAftermathGrantWindow(session, latestEndedEncounter);
     // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
     // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
     // denied live-play tools are withheld from the schema. Execution still enforces the same
@@ -5751,9 +5912,8 @@ export class AiDriverService {
       // combat log so awards survive reload (toast alone is not enough). Best-effort:
       // a log failure must not fail the grant that already committed.
       if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
-        // #1495 — the economy-cap accounting already happened BEFORE dispatch (see the
-        // reservation just before `toolset.call` earlier in this loop iteration); nothing to
-        // note here. This block now only owns the combat-log note.
+        noteDriverEconomyGrant(session, call.name, args);
+        this.persistControlState(session);
         const detail = formatDriverLootCombatLogDetail(call.name, args);
         if (detail) {
           try {
@@ -5893,6 +6053,14 @@ export class AiDriverService {
       triggeredBy,
       turnNumber: session.turnCount,
       ...(retainedActionChain ? { retainedActionChain } : {}),
+      ...(session.aftermathGrantWindow
+        ? {
+            aftermathGrantWindow: {
+              encounterId: session.aftermathGrantWindow.encounterId,
+              endedAt: session.aftermathGrantWindow.endedAt,
+            },
+          }
+        : {}),
     };
     session.pendingToolConfirmations[key] = pending;
     // Insert the incoming owner BEFORE cap eviction. If it continues a chain owned by the
@@ -6293,17 +6461,84 @@ export class AiDriverService {
     // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
     // labels are not part of the executable MCP schema. Keep this boundary explicit instead
     // of relying on the action resolver to ignore surplus caller-facing fields.
-    const executionArgs =
+    const baseArgs =
       pending.tool === 'apply_action'
         ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
         : pending.args;
+
+    // #1781 / #1495 — re-run execution guard and aftermath window check immediately before dispatch
+    const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+    syncAftermathGrantWindow(session, latestEndedEncounter);
+
+    if (pending.aftermathGrantWindow) {
+      if (
+        !latestEndedEncounter ||
+        latestEndedEncounter.encounterId !== pending.aftermathGrantWindow.encounterId ||
+        latestEndedEncounter.endedAt !== pending.aftermathGrantWindow.endedAt
+      ) {
+        this.releaseRetainedActionChain(session, pending);
+        await this.audit.log({
+          actor: pending.actor,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.blocked',
+          entityType: 'ai-dm',
+          campaignId,
+          detail:
+            `blocked confirmed ${pending.tool} at approval-time recheck: stale_aftermath_window ` +
+            `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
+        });
+        this.stream.emit({
+          type: 'tool-confirmation',
+          campaignId,
+          action: 'rejected',
+          confirmationId,
+          tool: pending.tool,
+        });
+        this.persistControlState(session);
+        return {
+          confirmation: null,
+          result: {
+            isError: true,
+            text: 'This economy grant was queued for an aftermath window that is no longer active.',
+          },
+        };
+      }
+    }
+
+    const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
+    if (!recheck.ok) {
+      this.releaseRetainedActionChain(session, pending);
+      await this.audit.log({
+        actor: pending.actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.blocked',
+        entityType: 'ai-dm',
+        campaignId,
+        detail:
+          `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
+          `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
+      });
+      this.stream.emit({
+        type: 'tool-confirmation',
+        campaignId,
+        action: 'rejected',
+        confirmationId,
+        tool: pending.tool,
+      });
+      this.persistControlState(session);
+      return { confirmation: null, result: { isError: true, text: recheck.message } };
+    }
+
+    const executionArgs = recheck.args;
     const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
     if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
-      const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
+      noteDriverEconomyGrant(session, pending.tool, executionArgs);
+      this.persistControlState(session);
+      const detail = formatDriverLootCombatLogDetail(pending.tool, executionArgs);
       if (detail) {
         try {
           await this.encounters.appendActiveEncounterNote(campaignId, detail);

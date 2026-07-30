@@ -3,9 +3,14 @@ import {
   isDriverToolAllowed,
   guardDriverLivePlayArgs,
   formatDriverLootCombatLogDetail,
+  syncAftermathGrantWindow,
+  noteDriverEconomyGrant,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
 } from '../../src/modules/ai-driver/ai-driver.service';
+import { DRIVER_AFTERMATH_WINDOW_MS } from '../../src/modules/ai-driver/driver-tool-policy';
 
 /**
  * #1021: Verify that the AI Driver can award loot, treasury, and items during live play.
@@ -261,5 +266,112 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       'Increased party item quantity by +2',
     );
     expect(formatDriverLootCombatLogDetail('roll_dice', { expr: '1d20' })).toBeNull();
+  });
+
+  const grantWindow = (overrides: Partial<{ encounterId: number; endedAt: string; treasuryGranted: number; inventoryQtyGranted: number }> = {}) => ({
+    encounterId: 1,
+    endedAt: '2026-01-01T00:00:00.000Z',
+    treasuryGranted: 0,
+    inventoryQtyGranted: 0,
+    ...overrides,
+  });
+
+  it('#1781 / #1495: add_inventory_item and update_inventory_item share a cumulative grant cap keyed to the aftermath window', () => {
+    const session = {
+      driverGeneratedMapIds: [] as number[],
+      generateMapCallsThisTurn: 0,
+      aftermathGrantWindow: grantWindow({ inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP - 5 }),
+    };
+
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 5 }, session)).toEqual({
+      ok: true,
+      args: { name: 'Torch', qty: 5 },
+    });
+
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 6 }, session)).toEqual({
+      ok: false,
+      code: 'inventory_grant_cap_exceeded',
+      message: `Cumulative inventory grants for this aftermath window cannot exceed ${DRIVER_INVENTORY_SESSION_GRANT_CAP}.`,
+    });
+
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 6 }, session)).toEqual({
+      ok: false,
+      code: 'inventory_grant_cap_exceeded',
+      message: `Cumulative inventory grants for this aftermath window cannot exceed ${DRIVER_INVENTORY_SESSION_GRANT_CAP}.`,
+    });
+  });
+
+  it('#1781 / #1495: syncAftermathGrantWindow opens a fresh budget for a DIFFERENT encounter identity even with no observed profile edge', () => {
+    const t1 = '2026-01-01T00:00:00.000Z';
+    const now1 = Date.parse(t1) + 1000;
+    const t2 = '2026-01-02T00:00:00.000Z';
+    const now2 = Date.parse(t2) + 1000;
+
+    const session = {
+      aftermathGrantWindow: grantWindow({
+        encounterId: 10,
+        endedAt: t1,
+        treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
+        inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
+      }),
+    };
+
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: t1 }, now1);
+    expect(session.aftermathGrantWindow).toEqual(
+      grantWindow({
+        encounterId: 10,
+        endedAt: t1,
+        treasuryGranted: DRIVER_TREASURY_SESSION_GRANT_CAP,
+        inventoryQtyGranted: DRIVER_INVENTORY_SESSION_GRANT_CAP,
+      }),
+    );
+
+    syncAftermathGrantWindow(session, { encounterId: 11, endedAt: t2 }, now2);
+    expect(session.aftermathGrantWindow).toEqual(grantWindow({ encounterId: 11, endedAt: t2 }));
+  });
+
+  it('#1781 / #1495: syncAftermathGrantWindow clears aftermath grant window when encounter endedAt is outside DRIVER_AFTERMATH_WINDOW_MS', () => {
+    const now = Date.parse('2026-01-01T12:00:00.000Z');
+    const freshEndedAt = new Date(now - 1000).toISOString();
+    const expiredEndedAt = new Date(now - (DRIVER_AFTERMATH_WINDOW_MS + 1000)).toISOString();
+
+    const session: { aftermathGrantWindow?: any } = {
+      aftermathGrantWindow: grantWindow({
+        encounterId: 10,
+        endedAt: freshEndedAt,
+        treasuryGranted: 500,
+        inventoryQtyGranted: 10,
+      }),
+    };
+
+    // While still in window, sync retains/updates window
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: freshEndedAt }, now);
+    expect(session.aftermathGrantWindow).toBeDefined();
+
+    // When endedAt is beyond DRIVER_AFTERMATH_WINDOW_MS, sync clears aftermathGrantWindow
+    syncAftermathGrantWindow(session, { encounterId: 10, endedAt: expiredEndedAt }, now);
+    expect(session.aftermathGrantWindow).toBeUndefined();
+  });
+
+  it('#1781 / #1495: adjust_treasury enforces a cumulative grant cap regardless of call count', () => {
+    const session = {
+      driverGeneratedMapIds: [] as number[],
+      generateMapCallsThisTurn: 0,
+      aftermathGrantWindow: grantWindow(),
+    };
+
+    const perCallGrant = 1_000;
+    const callsToFillCap = Math.floor(DRIVER_TREASURY_SESSION_GRANT_CAP / perCallGrant);
+    for (let i = 0; i < callsToFillCap; i++) {
+      const result = guardDriverLivePlayArgs('adjust_treasury', { delta: { gp: perCallGrant } }, session);
+      expect(result.ok).toBe(true);
+      noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: perCallGrant } });
+    }
+    expect(session.aftermathGrantWindow.treasuryGranted).toBe(callsToFillCap * perCallGrant);
+
+    expect(guardDriverLivePlayArgs('adjust_treasury', { delta: { gp: 1 } }, session)).toMatchObject({
+      ok: false,
+      code: 'treasury_grant_cap_exceeded',
+    });
   });
 });

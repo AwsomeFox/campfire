@@ -8,6 +8,7 @@ import {
   GREETING_PROMPT,
   WRAP_UP_PROMPT,
   lifecyclePhaseForInput,
+  toPublicAiDmSessionState,
 } from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
@@ -908,5 +909,39 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     // Durability is best-effort: losing the write must not fail the pause the DM just asked for.
     expect(() => first.service.setPaused(campaignId, true)).not.toThrow();
     expect(first.service.getSession(campaignId).state).toBe('paused');
+  });
+
+  it('#1781 / #1495: aftermathGrantWindow survives a restart and is redacted from public session state', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.aftermathGrantWindow = {
+      encounterId: 42,
+      endedAt: '2026-07-30T12:00:00.000Z',
+      treasuryGranted: 1500,
+      inventoryQtyGranted: 3,
+    };
+    first.service.setPaused(campaignId, true);
+
+    const raw = rawRow();
+    expect(raw?.aftermath_grant_window).toBeDefined();
+    expect(JSON.parse(String(raw?.aftermath_grant_window))).toEqual({
+      encounterId: 42,
+      endedAt: '2026-07-30T12:00:00.000Z',
+      treasuryGranted: 1500,
+      inventoryQtyGranted: 3,
+    });
+
+    const restarted = boot();
+    const restoredSession = restarted.service.getSession(campaignId);
+    expect(restoredSession.aftermathGrantWindow).toEqual({
+      encounterId: 42,
+      endedAt: '2026-07-30T12:00:00.000Z',
+      treasuryGranted: 1500,
+      inventoryQtyGranted: 3,
+    });
+
+    const publicShape = toPublicAiDmSessionState(restoredSession);
+    expect(publicShape).not.toHaveProperty('aftermathGrantWindow');
+    expect('aftermathGrantWindow' in (publicShape as Record<string, unknown>)).toBe(false);
   });
 });

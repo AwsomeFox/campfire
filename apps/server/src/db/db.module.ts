@@ -1885,6 +1885,20 @@ function migrateAiDriverCollaborative1051(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #1781 — cumulative AI Driver economy grant cap per aftermath window.
+ */
+function migrateAiDriverAftermathGrantWindow1781(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'aftermath_grant_window')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN aftermath_grant_window TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -4900,6 +4914,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // Originally 0150, which #1469 claimed first on main; renumbered to the next free
   // ordinal after merging main (never shipped on any real database as 0150).
   { name: '0152_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
+  { name: '0153_ai_driver_aftermath_grant_window_1781', run: migrateAiDriverAftermathGrantWindow1781 },
 ];
 
 /**
