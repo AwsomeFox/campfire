@@ -1830,15 +1830,6 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   phase: text('phase').notNull().default('active'),
   /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
   collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
-  /**
-   * #1495 — the autonomous seat's cumulative `aftermath` economy-grant budget, keyed to the
-   * SPECIFIC ended encounter (id + endedAt) whose post-combat window it belongs to, not to an
-   * observed profile transition. Unlike `secret_read_approvals`/`pending_tool_confirmations`
-   * above, this is RESTORED on hydration rather than revoked: it is a spend counter, not a grant
-   * of authority, so restoring it can only make the seat MORE restrictive after a restart, never
-   * less. Losing it (the pre-#1495 bug) let a restart mid-window silently refill the budget.
-   */
-  aftermathGrantWindow: text('aftermath_grant_window'),
   updatedAt: text('updated_at').notNull(),
 });
 

@@ -73,26 +73,6 @@ export interface AiDmPendingToolConfirmation {
    * owner even when an earlier confirmation performed the false-to-true transition.
    */
   retainedActionChain?: { encounterId: number; chainId: string };
-  /**
-   * The economy-grant budget window this confirmation RESERVED its amount against at queue time
-   * (#1495) — only set (as a KEY, present-or-absent) for
-   * `adjust_treasury`/`add_inventory_item`/`update_inventory_item`. The reservation (not just a
-   * check) happens synchronously at queue time specifically so two concurrently-approved
-   * confirmations have nothing left to race over: the accounting decision was already made when
-   * this was queued, one call at a time, inside the single-flight turn loop — never at approval,
-   * where two HTTP requests can run genuinely concurrently. Approval verifies the CURRENT window
-   * still matches this one and rejects the confirmation as stale rather than silently re-keying
-   * it to a later fight's budget if it does not.
-   *
-   * `null` is a DISTINCT, meaningful value from the key being absent: `null` means "this IS an
-   * economy tool, and no window was tracked yet when it was queued" (the campaign had never had
-   * an encounter end). That must still be checked at approval — if a window has opened SINCE
-   * (the campaign's first-ever encounter ended while this sat pending), the confirmation is
-   * equally stale and must not be quietly matched against a window that did not exist when it
-   * was reserved. The key being absent entirely means "not an economy tool" — no window concept
-   * applies at all, and approval falls back to a plain guard re-check instead.
-   */
-  aftermathGrantWindow?: { encounterId: number; endedAt: string } | null;
 }
 
 /** Tool-name prefixes the driver seat may never call — every hard delete, even proposed. */
@@ -110,21 +90,6 @@ export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
  * DM's own writes).
  */
 export const DRIVER_INVENTORY_GRANT_MAX_QTY = 100;
-/**
- * Cumulative cap on treasury granted (summed across every denomination and every
- * `adjust_treasury` call) during one `aftermath` window (#1495). Bounding a single call is not
- * enough: nothing stopped a runaway sequence of individually-small grants from repeating
- * indefinitely while the profile stayed `aftermath`. See
- * `AiDmSessionState.treasuryGrantTotalThisSession` for where the running total is kept and
- * when it resets.
- */
-export const DRIVER_TREASURY_SESSION_GRANT_CAP = 50_000;
-/**
- * Cumulative cap on inventory `qty` granted (summed across every `add_inventory_item` and
- * `update_inventory_item` call) during one `aftermath` window (#1495). Same rationale as
- * {@link DRIVER_TREASURY_SESSION_GRANT_CAP}.
- */
-export const DRIVER_INVENTORY_SESSION_GRANT_CAP = 1_000;
 /**
  * Recency window for the post-combat `aftermath` profile (#1495). An encounter's `endedAt`
  * must fall within this many milliseconds of "now" for the driver to still treat play as the

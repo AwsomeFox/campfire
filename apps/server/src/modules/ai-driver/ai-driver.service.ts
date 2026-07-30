@@ -71,10 +71,8 @@ import {
   checkDriverPolicyRateLimits,
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
-  DRIVER_INVENTORY_SESSION_GRANT_CAP,
   DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
-  DRIVER_TREASURY_SESSION_GRANT_CAP,
   DRIVER_UNDOABLE_TOOLS,
   isDriverForbiddenToolName,
   isWithinAftermathWindow,
@@ -500,21 +498,6 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
-/**
- * Identity + running totals for the CURRENT `aftermath` economy-grant budget (#1495). Keyed to
- * the SPECIFIC ended encounter (its id and `endedAt`) whose post-combat window the totals
- * belong to — see {@link AiDmSessionState.aftermathGrantWindow} for the full rationale and
- * {@link syncAftermathGrantWindow} for how the identity comparison opens a fresh window.
- */
-export interface AiDmAftermathGrantWindow {
-  encounterId: number;
-  endedAt: string;
-  /** Cumulative treasury granted (summed across every denomination and every adjust_treasury call) this window. */
-  treasuryGranted: number;
-  /** Cumulative inventory qty granted (add_inventory_item + update_inventory_item) this window. */
-  inventoryQtyGranted: number;
-}
-
 export interface AiDmSessionState {
   campaignId: number;
   status: AiDmSessionStatus;
@@ -591,33 +574,6 @@ export interface AiDmSessionState {
   /** Policy violations (deny / guard / rate-limit) this turn (#474). */
   policyViolationsThisTurn?: number;
   /**
-   * The autonomous seat's cumulative economy-grant budget (#1495), keyed to the SPECIFIC ended
-   * encounter (id + `endedAt`) whose loot/treasury it belongs to — the campaign's most recently
-   * ended encounter, WHATEVER IT IS, not to an observed `aftermath` profile transition and not
-   * gated by the profile's own time-boxed recency window (see
-   * `AiDriverService.resolveSessionProfile`'s `latestEndedEncounter` for why those are kept
-   * separate). Two failure modes that keying to a transient "was the last profile aftermath" bit
-   * had, both closed by keying to durable window identity instead:
-   *  - EDGE LOSS ACROSS A RESTART: an in-memory "last profile" bit resets to unknown on every
-   *    restart, so a restart mid-window silently reopened a fresh budget. This field is
-   *    PERSISTED (`persistControlState`/`loadPersistedControlState`) and RESTORED, not revoked
-   *    like `secretReadApprovals`/`pendingToolConfirmations` — it is a spend counter, not a
-   *    grant of authority, so restoring it can only make the seat MORE restrictive, never less.
-   *  - EDGE LOSS ACROSS AN UNOBSERVED TRANSITION: an edge is only visible if a turn runs while
-   *    the profile flips. If a fight's aftermath spends its allowance and no AI turn runs before
-   *    a LATER fight ends, no edge is ever observed and the new fight would inherit the old
-   *    one's exhausted totals. Comparing the tracked `encounterId`/`endedAt` against the CURRENT
-   *    most-recently-ended encounter (see {@link syncAftermathGrantWindow}) detects this even
-   *    with no edge at all: a different encounter identity is always a fresh window.
-   *  - STALE TOTAL ACROSS CONCURRENT APPROVALS: `resolveToolConfirmation` re-syncs this field and
-   *    RE-RUNS the guard immediately before dispatching an approved confirmation, not only when
-   *    the call was first queued, so several queued grants cannot each pass against the same
-   *    stale total.
-   *
-   * `null` only when the campaign has never had an encounter end.
-   */
-  aftermathGrantWindow?: AiDmAftermathGrantWindow | null;
-  /**
    * Pending DM confirmations for irreversible live-play tools (#474). Keyed
    * `${tool}:${toolCallId}`; each entry executes once when a DM approves it.
    */
@@ -638,7 +594,6 @@ type AiDmSessionPrivateGuardFields =
   | 'generateMapCallsThisTurn'
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
-  | 'aftermathGrantWindow'
   | 'pendingToolConfirmations'
   | 'detached';
 
@@ -652,8 +607,7 @@ export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGu
  * the STATIC type — it does not remove a runtime object key. The actual redaction is this
  * destructuring, and every name in {@link AiDmSessionPrivateGuardFields} MUST be destructured
  * out here too, or the field is silently serialized to member-facing session endpoints despite
- * being typed as absent. `aftermathGrantWindow` was added to the type list without a matching
- * entry here — this is that fix.
+ * being typed as absent.
  */
 export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
   const {
@@ -663,7 +617,6 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     generateMapCallsThisTurn: _mapCalls,
     confirmToolAttemptsThisTurn: _confirmAttempts,
     policyViolationsThisTurn: _violations,
-    aftermathGrantWindow: _aftermathGrantWindow,
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
     ...rest
@@ -672,19 +625,18 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
 }
 
 /**
- * Project a pending confirmation to its public REST shape (#1495, review findings :6197/:6632
- * class). `AiDmPendingToolConfirmation` carries internal-only bookkeeping —
- * `aftermathGrantWindow` (the reservation's window identity) and `retainedActionChain` (#1451's
- * action-chain retention marker) — that `listPendingToolConfirmations`/`resolveToolConfirmation`
- * used to return VERBATIM to `GET /tool-confirmations` and the approval response, even though the
- * shared `@campfire/schema` `AiDmToolConfirmation` contract deliberately excludes both.
+ * Project a pending confirmation to its public REST shape (#1495, review finding :6197 class).
+ * `AiDmPendingToolConfirmation` carries internal-only bookkeeping — `retainedActionChain`
+ * (#1451's action-chain retention marker) — that `listPendingToolConfirmations`/
+ * `resolveToolConfirmation` used to return VERBATIM to `GET /tool-confirmations` and the approval
+ * response, even though the shared `@campfire/schema` `AiDmToolConfirmation` contract
+ * deliberately excludes it.
  *
  * Deliberately schema-enforced (`AiDmToolConfirmation.parse`, which strips unrecognized keys by
  * zod's default behaviour) rather than hand-maintained destructuring like
- * {@link toPublicAiDmSessionState} above: a hand-maintained field list is exactly what let this
- * recur as a SECOND instance of the same leak class in this one PR — a schema-driven projection
- * cannot silently start passing a newly added internal field through, because the schema itself
- * has to be updated (and reviewed) for the field to appear in the public shape at all.
+ * {@link toPublicAiDmSessionState} above: a schema-driven projection cannot silently start
+ * passing a newly added internal field through, because the schema itself has to be updated
+ * (and reviewed) for the field to appear in the public shape at all.
  */
 export function toPublicAiDmToolConfirmation(pending: AiDmPendingToolConfirmation): AiDmToolConfirmation {
   return AiDmToolConfirmation.parse(pending);
@@ -920,26 +872,6 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && Number.isInteger(rec.turnNumber)
     && (retainedActionChain === undefined
       || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'));
-}
-
-/**
- * Validate a persisted `aftermath_grant_window` blob (#1495) before restoring it. Unlike
- * {@link isStoredPendingConfirmation}/`isStoredSecretApproval`, a validation failure here still
- * fails CLOSED in the safe direction: `loadPersistedControlState` treats an invalid/missing blob
- * as `null` (no tracked window), which only means the NEXT economy grant opens a fresh budget —
- * never a restored one that is silently wrong in a way that grants more than it should.
- */
-function isStoredAftermathGrantWindow(value: unknown): value is AiDmAftermathGrantWindow {
-  const rec = recordOf(value);
-  return !!rec
-    && Number.isInteger(rec.encounterId)
-    && typeof rec.endedAt === 'string'
-    && typeof rec.treasuryGranted === 'number'
-    && Number.isFinite(rec.treasuryGranted)
-    && rec.treasuryGranted >= 0
-    && typeof rec.inventoryQtyGranted === 'number'
-    && Number.isFinite(rec.inventoryQtyGranted)
-    && rec.inventoryQtyGranted >= 0;
 }
 
 /** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
@@ -1539,9 +1471,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
 export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
-  DRIVER_INVENTORY_SESSION_GRANT_CAP,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
-  DRIVER_TREASURY_SESSION_GRANT_CAP,
 } from './driver-tool-policy';
 
 /** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
@@ -1571,146 +1501,6 @@ export function formatDriverLootCombatLogDetail(toolName: string, args: Record<s
     return 'Updated party inventory';
   }
   return null;
-}
-
-/**
- * Keep the economy-grant budget keyed to the ACTUAL most-recently-ended encounter (#1495), not
- * to an observed `aftermath` profile edge. See {@link AiDmSessionState.aftermathGrantWindow} for
- * the failure modes this closes. `current` is `resolveSessionProfile`'s `latestEndedEncounter` —
- * deliberately NOT gated by the profile's own time-boxed recency window or by whether the
- * profile is `aftermath` right now, because a `confirm`-queued economy grant (queued during
- * `prep`/`live`/`downtime`, since these tools are never queued in `aftermath` — there they are
- * `auto`) can be approved arbitrarily later and must still draw against and be bounded by the
- * fight it actually belongs to.
- *
- * A no-op when `current` is null: the campaign has never had an encounter end, so there is
- * nothing yet to key a budget to.
- */
-export function syncAftermathGrantWindow(
-  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
-  current: { encounterId: number; endedAt: string } | null,
-): void {
-  if (!current) return;
-  const existing = session.aftermathGrantWindow;
-  if (!existing || existing.encounterId !== current.encounterId || existing.endedAt !== current.endedAt) {
-    session.aftermathGrantWindow = {
-      encounterId: current.encounterId,
-      endedAt: current.endedAt,
-      treasuryGranted: 0,
-      inventoryQtyGranted: 0,
-    };
-  }
-}
-
-/**
- * THE ECONOMY-GRANT RESERVATION INVARIANT (#1495).
- *
- * A reservation ({@link noteDriverEconomyGrant}) is created EXACTLY ONCE, BEFORE the write it
- * authorises — on both the `auto` and `confirm` paths — is PERSISTED at creation, and is
- * released EXACTLY ONCE ({@link releaseDriverEconomyGrant}) on every terminal outcome that is
- * not a completed grant. The set of terminal outcomes is CLOSED — every one of them is handled
- * at exactly one site, listed here so the next reader can see nothing is missing:
- *
- *   1. Executed successfully           -> no release. The reservation IS the permanent charge.
- *      (auto: `executeToolCalls`, right after `toolset.call` returns `!isError`; confirm:
- *      `resolveToolConfirmation`, same shape after `seatToolset.call` returns `!isError`.)
- *   2. DM explicitly rejects it        -> release. `resolveToolConfirmation`, `action === 'reject'`.
- *   3. Approved, but execution fails   -> release. `resolveToolConfirmation`, `res.isError`.
- *   4. Approved, but the window is stale (a different/newer encounter has since ended, or one
- *      has opened for the first time) -> release. `resolveToolConfirmation`'s window-identity
- *      check, before dispatch.
- *   5. Auto-executed, but the tool call itself fails -> release. `executeToolCalls`, right after
- *      `toolset.call` returns `res.isError`, BEFORE the reservation ever reaches disk unreleased.
- *   6. Evicted from the pending queue (the {@link MAX_PENDING_TOOL_CONFIRMATIONS}-entry cap)
- *      -> release. `queueToolConfirmation`'s eviction loop.
- *   7. Discarded wholesale on restart (`loadPersistedControlState` never restores
- *      `pendingToolConfirmations` — #1042 — but the window it reserved against WAS persisted
- *      and IS restored) -> release. `loadPersistedControlState`, immediately after restoring
- *      `fresh.aftermathGrantWindow`, once per entry in `confirmationsDiscarded`.
- *
- * Persisting at creation (not just at release) matters just as much as releasing: the auto path
- * used to account for a grant only AFTER the write, past awaited identity-resolution and audit
- * work, with no immediate persist — a crash or restart in that gap left the grant applied while
- * the durable counter still read its old value, letting the same allowance be spent again
- * (under-charging). Reserving before dispatch and persisting immediately closes that regardless
- * of what happens afterward, symmetrically with releasing closing the opposite (over-charging)
- * direction above.
- */
-
-/**
- * The economy amount a tool call would grant, as {treasury, inventoryQty} deltas — the same
- * computation `noteDriverEconomyGrant` (reserve) and `releaseDriverEconomyGrant` (release) both
- * need, kept in ONE place so a reservation and its release can never silently disagree about how
- * much was actually reserved (#1495).
- */
-function driverEconomyGrantAmount(toolName: string, args: Record<string, unknown>): { treasury: number; inventoryQty: number } {
-  if (toolName === 'adjust_treasury') {
-    const delta = args.delta;
-    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return { treasury: 0, inventoryQty: 0 };
-    const rec = delta as Record<string, unknown>;
-    const total = TREASURY_DENOMS.reduce((sum, d) => {
-      const v = rec[d];
-      return typeof v === 'number' && v > 0 ? sum + v : sum;
-    }, 0);
-    return { treasury: Math.max(0, total), inventoryQty: 0 };
-  }
-  if (toolName === 'add_inventory_item') {
-    const qty = typeof args.qty === 'number' && args.qty > 0 ? args.qty : 1;
-    return { treasury: 0, inventoryQty: qty };
-  }
-  if (toolName === 'update_inventory_item') {
-    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
-    return { treasury: 0, inventoryQty: Math.max(0, qtyDelta) };
-  }
-  return { treasury: 0, inventoryQty: 0 };
-}
-
-/**
- * RESERVE a tool call's economy amount against the CURRENT window's cumulative caps (#1495):
- * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}. Part
- * of the reservation invariant documented above — called synchronously, BEFORE the tool
- * actually dispatches, on both paths: right before `toolset.call` on the `auto` path
- * (`executeToolCalls`), and right before `queueToolConfirmation` on the `confirm` path (which
- * also snapshots the window identity onto the pending record — see
- * {@link AiDmPendingToolConfirmation.aftermathGrantWindow}). Never called again later for the
- * SAME call/confirmation: a completed grant's reservation simply stands as the permanent charge.
- * A no-op with no tracked window: the grant/reservation still "happened", but with nothing to
- * attribute it to.
- */
-export function noteDriverEconomyGrant(
-  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
-  toolName: string,
-  args: Record<string, unknown>,
-): void {
-  const window = session.aftermathGrantWindow;
-  if (!window) return;
-  const { treasury, inventoryQty } = driverEconomyGrantAmount(toolName, args);
-  window.treasuryGranted += treasury;
-  window.inventoryQtyGranted += inventoryQty;
-}
-
-/**
- * RELEASE a previously-reserved economy amount (#1495) — one of the reservation invariant's
- * non-success terminal outcomes (see the enumeration above) happened, so the grant never
- * actually happened (or, for an eviction/hydration-discard, never will) and must not keep
- * consuming budget. `reservedWindow` is the identity the amount was reserved against (captured
- * at reservation time); the release is applied only if `session.aftermathGrantWindow` STILL
- * matches it. If a later fight's window has since replaced it, there is nothing live left to
- * credit back into — the old window's counters no longer exist in session state, which is
- * harmless: nothing will ever check that superseded window's budget again either.
- */
-export function releaseDriverEconomyGrant(
-  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
-  toolName: string,
-  args: Record<string, unknown>,
-  reservedWindow: { encounterId: number; endedAt: string } | null | undefined,
-): void {
-  if (!reservedWindow) return;
-  const window = session.aftermathGrantWindow;
-  if (!window || window.encounterId !== reservedWindow.encounterId || window.endedAt !== reservedWindow.endedAt) return;
-  const { treasury, inventoryQty } = driverEconomyGrantAmount(toolName, args);
-  window.treasuryGranted = Math.max(0, window.treasuryGranted - treasury);
-  window.inventoryQtyGranted = Math.max(0, window.inventoryQtyGranted - inventoryQty);
 }
 
 /**
@@ -1800,21 +1590,18 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
  *    `hidden` is refused outright; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
  *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination
- *    ({@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}) AND per session
- *    ({@link DRIVER_TREASURY_SESSION_GRANT_CAP}).
+ *    ({@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}).
  *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
- *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}) and per
- *    session ({@link DRIVER_INVENTORY_SESSION_GRANT_CAP}).
+ *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}).
  *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
- *    qtyDelta, and owner-move fields (ownerType/characterId) are refused; qtyDelta shares
- *    add_inventory_item's per-session cap.
+ *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
   args: Record<string, unknown>,
   session: Pick<
     AiDmSessionState,
-    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds' | 'aftermathGrantWindow'
+    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds'
   >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
@@ -1959,25 +1746,14 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    // #1495 — the per-call bound above stops one big grant; it does nothing to stop a long run
-    // of small ones. Bound the WINDOW total too (see AiDmSessionState.aftermathGrantWindow).
-    const callTotal = entries.reduce((sum, [, value]) => sum + (value as number), 0);
-    const sessionTotal = session.aftermathGrantWindow?.treasuryGranted ?? 0;
-    if (sessionTotal + callTotal > DRIVER_TREASURY_SESSION_GRANT_CAP) {
-      return {
-        ok: false,
-        code: 'forbidden_treasury_session_cap',
-        message: `The driver may grant at most ${DRIVER_TREASURY_SESSION_GRANT_CAP} treasury total per aftermath window (already granted ${sessionTotal}).`,
-      };
-    }
     return { ok: true, args: { ...args } };
   }
 
   if (toolName === 'add_inventory_item') {
     // Grant-only guard mirroring update_inventory_item's shape (#1495): the party/treasury
-    // pool only, never a specific character, and a bounded qty both per call and per session —
-    // the exact guard this tool was missing entirely before #1495 (it fell through to blanket
-    // allow with an unbounded qty).
+    // pool only, never a specific character, and a bounded qty per call — the exact guard
+    // this tool was missing entirely before #1495 (it fell through to blanket allow with an
+    // unbounded qty).
     if ('ownerType' in args && args.ownerType !== undefined && args.ownerType !== 'party') {
       return {
         ok: false,
@@ -2005,14 +1781,6 @@ export function guardDriverLivePlayArgs(
         ok: false,
         code: 'forbidden_inventory_grant_limit',
         message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
-      };
-    }
-    const sessionQty = session.aftermathGrantWindow?.inventoryQtyGranted ?? 0;
-    if (sessionQty + qty > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
-      return {
-        ok: false,
-        code: 'forbidden_inventory_session_cap',
-        message: `The driver may grant at most ${DRIVER_INVENTORY_SESSION_GRANT_CAP} item quantity total per aftermath window (already granted ${sessionQty}).`,
       };
     }
     return { ok: true, args: { ...args } };
@@ -2044,16 +1812,6 @@ export function guardDriverLivePlayArgs(
           ok: false,
           code: 'forbidden_inventory_reduction',
           message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
-        };
-      }
-      // #1495 — shares add_inventory_item's per-window grant cap: both tools mint party
-      // inventory, so a budget that only watched one of them would not bound anything.
-      const sessionQty = session.aftermathGrantWindow?.inventoryQtyGranted ?? 0;
-      if (sessionQty + delta > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
-        return {
-          ok: false,
-          code: 'forbidden_inventory_session_cap',
-          message: `The driver may grant at most ${DRIVER_INVENTORY_SESSION_GRANT_CAP} item quantity total per aftermath window (already granted ${sessionQty}).`,
         };
       }
     }
@@ -2682,23 +2440,6 @@ export class AiDriverService {
     // #1051: the MODE is restored before the ladder value is reconciled, because the
     // reconciliation below needs to know whether `running` should read as `collaborative`.
     fresh.collaborative = row.collaborative === true;
-    // #1495 — RESTORED, not revoked (contrast the two grant maps above at #1042): this is a
-    // spend counter, not a grant of authority, so restoring it can only make the seat MORE
-    // restrictive after a restart, never less. A restart mid-window silently refilling the
-    // budget was the exact bug this closes.
-    const aftermathGrantWindow = fromJsonText<unknown>(row.aftermathGrantWindow, null);
-    fresh.aftermathGrantWindow = isStoredAftermathGrantWindow(aftermathGrantWindow) ? aftermathGrantWindow : null;
-    // #1495 — every discarded confirmation above (`confirmationsDiscarded`) that reserved an
-    // economy-grant amount at queue time must release it now, against the window just restored.
-    // `pendingToolConfirmations` is discarded wholesale on restart (never restored — see the
-    // comment above `confirmationsDiscarded`), but its RESERVATIONS already landed in the
-    // persisted window before this restart, so leaving them in place would let discarded loot
-    // that never executed keep consuming the campaign's allowance until another encounter ends
-    // (over-charging). Each release is a no-op if the window has since moved on, exactly like
-    // every other release call.
-    for (const discarded of confirmationsDiscarded) {
-      releaseDriverEconomyGrant(fresh, discarded.tool, discarded.args, discarded.aftermathGrantWindow);
-    }
     // These two drop an impossible ladder value back to the baseline; `deriveLadderState` at the
     // end of this block is what turns that baseline back into `collaborative` when the mode is on.
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
@@ -3029,10 +2770,6 @@ export class AiDriverService {
       pendingToolConfirmations: nonEmptyJson(session.pendingToolConfirmations),
       phase: session.phase, // #1043
       collaborative: session.collaborative, // #1051
-      // #1495 — persisted and RESTORED (not revoked) on hydration; see the column comment on
-      // the schema and the field comment on AiDmSessionState.aftermathGrantWindow for why this
-      // one is different from the two grant maps above.
-      aftermathGrantWindow: session.aftermathGrantWindow ? toJsonText(session.aftermathGrantWindow) : null,
       updatedAt: ts,
     };
 
@@ -3063,7 +2800,6 @@ export class AiDriverService {
             pendingToolConfirmations: values.pendingToolConfirmations,
             phase: values.phase,
             collaborative: values.collaborative,
-            aftermathGrantWindow: values.aftermathGrantWindow,
             updatedAt: values.updatedAt,
           },
         })
@@ -3676,27 +3412,17 @@ export class AiDriverService {
   }
 
   /**
-   * Resolve the driver session profile from encounter state (#474 / #1495), AND separately
-   * identify the economy-grant budget's window identity.
+   * Resolve the driver session profile from encounter state (#474 / #1495).
    *
    * `ended` still lists the campaign's full ended-encounter history (no cheap DB-level date
    * filter exists for it), but `profile` no longer follows from that history being non-empty:
    * only an encounter whose `endedAt` falls within {@link isWithinAftermathWindow}'s recency
    * window makes the profile `aftermath`. Once every ended encounter has aged out of that
    * window, this resolves `downtime` instead of clinging to `aftermath`.
-   *
-   * `latestEndedEncounter` is DELIBERATELY a separate, un-windowed concept from the profile: it
-   * is simply the most recently ended encounter in the campaign, however long ago, and it is
-   * what {@link syncAftermathGrantWindow} keys the economy-grant budget to (#1495). Decoupling it
-   * from the profile's time-boxed window matters for `resolveToolConfirmation`: a `confirm`
-   * queued during `prep`/`live`/`downtime` play (which is when economy tools are ever queued —
-   * they are `auto` and never queued in `aftermath`) can be approved arbitrarily later, and it
-   * must still draw against and be bounded by the same fight's budget, not by nothing just
-   * because the recency window has since elapsed or the profile has moved on.
    */
   private async resolveSessionProfile(
     campaignId: number,
-  ): Promise<{ profile: DriverSessionProfile; latestEndedEncounter: { encounterId: number; endedAt: string } | null }> {
+  ): Promise<{ profile: DriverSessionProfile }> {
     const [running, preparing, ended] = await Promise.all([
       this.encounters.listForCampaign(campaignId, 'running', 'dm'),
       this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
@@ -3708,14 +3434,7 @@ export class AiDriverService {
       hasPreparingEncounter: preparing.length > 0,
       hasRecentlyEndedEncounter: ended.some((encounter) => isWithinAftermathWindow(encounter.endedAt, now)),
     });
-    let latestEndedEncounter: { encounterId: number; endedAt: string } | null = null;
-    for (const encounter of ended) {
-      if (!encounter.endedAt) continue;
-      if (!latestEndedEncounter || Date.parse(encounter.endedAt) > Date.parse(latestEndedEncounter.endedAt)) {
-        latestEndedEncounter = { encounterId: encounter.id, endedAt: encounter.endedAt };
-      }
-    }
-    return { profile, latestEndedEncounter };
+    return { profile };
   }
 
   private policyForTool(
@@ -4078,12 +3797,7 @@ export class AiDriverService {
     // registry per call from classifyDriverRead + the on-file approvals.
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
-    const { profile: sessionProfile, latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
-    // #1495 — key the economy-grant budget to the most recently ended encounter's actual
-    // identity (id + endedAt), not to an observed profile edge: a DIFFERENT encounter is always
-    // a fresh budget, whether or not a turn ran to "see" the transition. See
-    // syncAftermathGrantWindow / AiDmSessionState.aftermathGrantWindow for the full rationale.
-    syncAftermathGrantWindow(session, latestEndedEncounter);
+    const { profile: sessionProfile } = await this.resolveSessionProfile(campaignId);
     // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
     // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
     // denied live-play tools are withheld from the schema. Execution still enforces the same
@@ -5793,29 +5507,6 @@ export class AiDriverService {
             retainedActionChain = { encounterId: argEncounterId, chainId: argChainId };
           }
         }
-        // #1495 — RESERVE an economy tool's amount against the CURRENT window right now,
-        // synchronously, and snapshot which window it was reserved against (`null` if no window
-        // is tracked yet — a DISTINCT, meaningful value from "not an economy tool", see
-        // AiDmPendingToolConfirmation.aftermathGrantWindow). This (not a check at approval time)
-        // is what makes concurrently-approved confirmations race-free: queuing happens ONE CALL
-        // AT A TIME inside this turn's synchronous loop, so there is nothing to race here,
-        // whereas `resolveToolConfirmation` is reached from separate HTTP requests that
-        // genuinely can run concurrently. `resolveToolConfirmation` verifies the window it was
-        // reserved against still matches the CURRENT one before executing — including the case
-        // where NO window existed at queue time but one has opened since — and releases the
-        // reservation if the DM rejects it or execution fails.
-        //
-        // Skipped for a call that was ALREADY queued (`confirmationAlreadyQueued`,
-        // e.g. a provider resending an identical call id): `queueToolConfirmation` returns the
-        // existing record unchanged in that case, so reserving again here would double-count an
-        // amount that was already reserved the first time this exact call was seen.
-        let reservedAftermathGrantWindow: { encounterId: number; endedAt: string } | null | undefined;
-        if (DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name) && !confirmationAlreadyQueued) {
-          reservedAftermathGrantWindow = session.aftermathGrantWindow
-            ? { encounterId: session.aftermathGrantWindow.encounterId, endedAt: session.aftermathGrantWindow.endedAt }
-            : null;
-          noteDriverEconomyGrant(session, call.name, args);
-        }
         const pending = this.queueToolConfirmation(
           session,
           call,
@@ -5825,7 +5516,6 @@ export class AiDriverService {
           actor,
           triggeredBy.id,
           retainedActionChain,
-          reservedAftermathGrantWindow,
         );
         const pendingText = JSON.stringify({
           status: 'pending_dm_confirmation',
@@ -5930,37 +5620,8 @@ export class AiDriverService {
       if (canPropose) args.propose = true;
       const proposed = canPropose;
 
-      // #1495 — RESERVE an auto-executed economy grant's amount BEFORE dispatch, synchronously,
-      // and PERSIST immediately — mirroring the confirm-path reservation (see the queueing
-      // branch above) and for the identical reason. The domain write below (`toolset.call`) is
-      // the actual grant; accounting for it only AFTER that call — and after the identity
-      // resolution and audit-log work that used to sit between the write and the counter update
-      // — left a gap where a throw in that later work, or a restart before this turn's next
-      // unrelated `persistControlState`, would leave the grant applied while the durable counter
-      // still read its OLD value: the same allowance could then be spent again (under-charging).
-      // Reserving here and persisting immediately closes that gap the same way the confirm path
-      // closes its own. Safe against the turn-serialization lock (#381) exactly like the confirm
-      // path's reservation is: only one runTurn can be in flight per campaign, so this call's
-      // reserve-then-dispatch never races another auto-execute for the same window.
-      let autoEconomyGrantWindow: { encounterId: number; endedAt: string } | null | undefined;
-      if (tool?.mutating && policyDecision?.policy === 'auto' && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
-        autoEconomyGrantWindow = session.aftermathGrantWindow
-          ? { encounterId: session.aftermathGrantWindow.encounterId, endedAt: session.aftermathGrantWindow.endedAt }
-          : null;
-        noteDriverEconomyGrant(session, call.name, args);
-        this.persistControlState(session);
-      }
-
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
-      if (autoEconomyGrantWindow !== undefined && res.isError) {
-        // The reserved grant never actually happened — release it immediately (rather than
-        // leaving it to the existing "(7)" block below, which only runs `!res.isError`) so a
-        // legitimate later grant this turn is not short-changed by a reservation for a call that
-        // failed.
-        releaseDriverEconomyGrant(session, call.name, args, autoEconomyGrantWindow);
-        this.persistControlState(session);
-      }
 
       if (call.name === 'generate_map' && !res.isError) {
         try {
@@ -6189,11 +5850,6 @@ export class AiDriverService {
     actor: string,
     triggeredBy: string,
     retainedActionChain?: { encounterId: number; chainId: string },
-    // #1495 — `undefined` (the default) means "not an economy tool, no window concept applies".
-    // An explicit `null` means "this IS an economy tool, reserved when no window was tracked
-    // yet" — a real, checkable value, not the same as the argument being omitted. Checked via
-    // `!== undefined` below rather than truthiness so `null` is still written onto `pending`.
-    aftermathGrantWindow?: { encounterId: number; endedAt: string } | null,
   ): AiDmPendingToolConfirmation {
     session.pendingToolConfirmations = session.pendingToolConfirmations ?? {};
     const key = pendingConfirmationKey(call.name, call.id);
@@ -6212,9 +5868,6 @@ export class AiDriverService {
       triggeredBy,
       turnNumber: session.turnCount,
       ...(retainedActionChain ? { retainedActionChain } : {}),
-      // #1495 — the window identity this confirmation's amount was RESERVED against at queue
-      // time (see the call site in executeToolCalls). Verified, not re-derived, at approval.
-      ...(aftermathGrantWindow !== undefined ? { aftermathGrantWindow } : {}),
     };
     session.pendingToolConfirmations[key] = pending;
     // Insert the incoming owner BEFORE cap eviction. If it continues a chain owned by the
@@ -6233,15 +5886,7 @@ export class AiDriverService {
       // queues roughly four per combat turn, so five turns of an inattentive DM now silently
       // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
       // row naming the call, and a signal that reconciles the DM's queue.
-      if (evicted) {
-        // #1495 — an evicted confirmation never executes, so any economy-grant amount it
-        // reserved at queue time must be released now — otherwise discarded loot keeps
-        // consuming the campaign's allowance until another encounter opens a fresh window
-        // (over-charging). A no-op for a non-economy tool (no reserved key at all) or one
-        // reserved against a window that has since moved on.
-        releaseDriverEconomyGrant(session, evicted.tool, evicted.args, evicted.aftermathGrantWindow);
-        this.announceEvictedConfirmation(session, evicted);
-      }
+      if (evicted) this.announceEvictedConfirmation(session, evicted);
     }
     // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
     // dies before the DM answers, the next boot has to be able to tell them it was discarded —
@@ -6587,18 +6232,17 @@ export class AiDriverService {
     if (!pending) {
       throw new BadRequestException(`No pending tool confirmation ${confirmationId}.`);
     }
+    const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
+    delete pendingMap[key];
+    session.pendingToolConfirmations = pendingMap;
+    // #1042: written before the approve path runs the tool, not after. If the tool call crashes
+    // the process mid-execution, the confirmation must NOT come back pending — a DM answering
+    // it a second time would run an irreversible write twice, which is a worse failure than the
+    // one this issue is about.
+    this.persistControlState(session);
 
     if (action === 'reject') {
-      // No `await` precedes this — safe to remove + persist immediately, as #1042 always did.
-      const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
-      delete pendingMap[key];
-      session.pendingToolConfirmations = pendingMap;
-      this.persistControlState(session);
       this.releaseRetainedActionChain(session, pending);
-      // #1495 — the DM rejected it: the grant never happens, so release whatever this
-      // confirmation reserved at queue time (a no-op if the window has since moved on).
-      releaseDriverEconomyGrant(session, pending.tool, pending.args, pending.aftermathGrantWindow);
-      this.persistControlState(session);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -6619,131 +6263,22 @@ export class AiDriverService {
       return { confirmation: null };
     }
 
+    const seatPrincipal = this.seatPrincipal(campaignId);
+    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
     // labels are not part of the executable MCP schema. Keep this boundary explicit instead
     // of relying on the action resolver to ignore surplus caller-facing fields.
-    const baseArgs =
+    const executionArgs =
       pending.tool === 'apply_action'
         ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
         : pending.args;
-
-    let executionArgs = baseArgs;
-    // #1495 (:6632) — this whole check runs BEFORE the confirmation is removed from the map or
-    // persisted. `resolveSessionProfile` reads the encounters table and CAN throw (a transient
-    // DB failure is enough); if it does, `pending` is still sitting exactly where it was —
-    // recoverable, retryable — rather than gone from disk with its reservation stuck charged
-    // and no pending confirmation left for hydration to ever release it against. The ONLY
-    // reason #1042 originally deleted-then-persisted before running the tool was to stop the
-    // TOOL CALL itself from executing twice; nothing here has that shape yet, so it is safe to
-    // do all of it first and only commit to "this confirmation is resolved" once it succeeds.
-    let blockedOutcome: { auditDetail: string; resultText: string } | null = null;
-    if ('aftermathGrantWindow' in pending) {
-      // An economy tool that was reserved at queue time — `pending.aftermathGrantWindow` is
-      // either the window identity it was reserved against, or `null` if no window was tracked
-      // yet at that moment. Both are checkable, comparable values (see the field comment on
-      // AiDmPendingToolConfirmation): a `null` reservation is stale too if a window has since
-      // opened — the campaign's first-ever encounter ending while this sat pending is exactly as
-      // much "a different window now" as a second fight replacing the first.
-      const reserved = pending.aftermathGrantWindow ?? null;
-      const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
-      const stillCurrentWindow = reserved === null
-        ? latestEndedEncounter === null
-        : !!latestEndedEncounter
-          && latestEndedEncounter.encounterId === reserved.encounterId
-          && latestEndedEncounter.endedAt === reserved.endedAt;
-      if (!stillCurrentWindow) {
-        // A LATER fight ended while this sat pending (or one ended for the first time). Reject
-        // it rather than silently letting it execute against that fresh budget — a grant
-        // requested against one window's remaining allowance must not spend another's instead.
-        blockedOutcome = {
-          auditDetail:
-            `blocked confirmed ${pending.tool}: stale aftermath window (reserved against ` +
-            `${reserved ? `encounter=${reserved.encounterId} endedAt=${reserved.endedAt}` : 'no window'}) ` +
-            `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
-          resultText: `${pending.tool} was requested against a fight whose aftermath window has since closed. Ask the AI to make the grant again.`,
-        };
-      }
-      // Reservation still valid for the current window: no guard re-check needed (and running
-      // the cumulative-cap check again here would double-count an amount already reserved).
-    } else {
-      // No reservation concept applies at all — this is not an economy tool (every confirm-
-      // policy tool is mutating by construction, see resolveDriverToolPolicy). Fall back to a
-      // plain guard re-check against current session state (harmless: it has no cumulative cap
-      // to double-count).
-      const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
-      syncAftermathGrantWindow(session, latestEndedEncounter);
-      const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
-      if (!recheck.ok) {
-        blockedOutcome = {
-          auditDetail:
-            `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
-            `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
-          resultText: recheck.message,
-        };
-      } else {
-        executionArgs = recheck.args;
-      }
-    }
-
-    // Only now — after the one thing above that could throw has already succeeded — is it safe
-    // to remove the confirmation from the map and persist that removal (#1042's original
-    // reasoning: a DM must never be able to answer the same confirmation twice).
-    const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
-    delete pendingMap[key];
-    session.pendingToolConfirmations = pendingMap;
-    this.persistControlState(session);
-
-    if (blockedOutcome) {
-      if ('aftermathGrantWindow' in pending) {
-        releaseDriverEconomyGrant(session, pending.tool, baseArgs, pending.aftermathGrantWindow);
-      }
-      this.releaseRetainedActionChain(session, pending);
-      this.persistControlState(session);
-      await this.audit.log({
-        actor: pending.actor,
-        actorRole: 'dm',
-        action: 'ai-dm.driver.blocked',
-        entityType: 'ai-dm',
-        campaignId,
-        detail: blockedOutcome.auditDetail,
-      });
-      this.stream.emit({
-        type: 'tool-confirmation',
-        campaignId,
-        action: 'rejected',
-        confirmationId,
-        tool: pending.tool,
-      });
-      return { confirmation: null, result: { isError: true, text: blockedOutcome.resultText } };
-    }
-
-    const seatPrincipal = this.seatPrincipal(campaignId);
-    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
-    if (res.isError) {
-      this.releaseRetainedActionChain(session, pending);
-      // #1495 — execution failed after all: the grant never happened, so release whatever was
-      // reserved for it at queue time (a no-op if nothing was reserved, or if the window has
-      // since moved on and there is nothing live left to credit back into).
-      releaseDriverEconomyGrant(session, pending.tool, executionArgs, pending.aftermathGrantWindow);
-      this.persistControlState(session);
-    }
+    if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
-      // #1495 — only NOTE (add to) the running total here when this confirmation was never
-      // reserved at queue time at all (`'aftermathGrantWindow' in pending` is false — a
-      // non-economy tool has no such key; contrast an economy tool reserved against `null`,
-      // which already went through the reservation/verification path above and must not be
-      // counted a second time here).
-      if (!('aftermathGrantWindow' in pending)) {
-        noteDriverEconomyGrant(session, pending.tool, executionArgs);
-      }
-      // Persist the updated running total immediately — a restart before the next unrelated
-      // persistControlState call must not silently forget a grant that already committed.
-      this.persistControlState(session);
-      const detail = formatDriverLootCombatLogDetail(pending.tool, executionArgs);
+      const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
       if (detail) {
         try {
           await this.encounters.appendActiveEncounterNote(campaignId, detail);

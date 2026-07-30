@@ -214,8 +214,6 @@ describe('driver-tool-policy (#474)', () => {
         driverGeneratedMapIds: [] as number[],
         generateMapCallsThisTurn: DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
         driverAuthoredEncounterIds: [] as number[],
-        treasuryGrantTotalThisSession: 0,
-        inventoryGrantQtyTotalThisSession: 0,
       };
       const hostileCases: Array<{ tool: string; args: Record<string, unknown>; assert: (r: ReturnType<typeof guardDriverLivePlayArgs>) => void }> = [
         { tool: 'generate_map', args: {}, assert: (r) => expect(r.ok).toBe(false) },

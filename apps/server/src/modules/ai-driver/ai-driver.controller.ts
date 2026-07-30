@@ -567,7 +567,7 @@ export class AiDriverController {
   async listToolConfirmations(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     // #1495 — project through the shared public schema; the internal record carries bookkeeping
-    // (aftermathGrantWindow, retainedActionChain) that must never reach an HTTP client.
+    // (retainedActionChain) that must never reach an HTTP client.
     return this.driver.listPendingToolConfirmations(id).map(toPublicAiDmToolConfirmation);
   }
 
