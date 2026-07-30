@@ -3698,14 +3698,6 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       ).status,
     ).toBe(200);
 
-    let releaseOriginal!: () => void;
-    const originalGate = new Promise<void>((resolve) => {
-      releaseOriginal = resolve;
-    });
-    let originalAtBarrier!: () => void;
-    const originalBarrier = new Promise<void>((resolve) => {
-      originalAtBarrier = resolve;
-    });
     let releaseRetry!: () => void;
     const retryGate = new Promise<void>((resolve) => {
       releaseRetry = resolve;
@@ -3714,16 +3706,25 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     const retryBarrier = new Promise<void>((resolve) => {
       retryAtBarrier = resolve;
     });
+    const waitForRetryBarrier = async () => {
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          retryBarrier,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('retry did not reach the death-save preflight barrier')), 5_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    };
     const service = ctx.app.get(EncountersService);
     const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
     let adapterLookups = 0;
     const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
       adapterLookups += 1;
-      if (adapterLookups === 2) {
-        originalAtBarrier();
-        await originalGate;
-      }
-      if (adapterLookups === 3) {
+      if (adapterLookups === 1) {
         retryAtBarrier();
         await retryGate;
       }
@@ -3731,23 +3732,22 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     });
     const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
     const body = { idempotencyKey: 'death-save-late-replay' };
+    let retryRequest: Promise<request.Response> | undefined;
     try {
-      const originalRequest = request(server)
+      // Park the retry after its initial replay lookup but before the mutable-row
+      // preflight. The original request can then commit the same key without two
+      // mutually blocked HTTP requests, making the late-replay window deterministic.
+      retryRequest = request(server)
         .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
         .set(player)
         .send(body)
         .then((response) => response);
-      await originalBarrier;
+      await waitForRetryBarrier();
 
-      const retryRequest = request(server)
+      const original = await request(server)
         .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
         .set(player)
         .send(body)
-        .then((response) => response);
-      await retryBarrier;
-
-      releaseOriginal();
-      const original = await originalRequest;
       expect(original.status).toBe(201);
       expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`).set(dm)).status).toBe(200);
 
@@ -3758,6 +3758,10 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       expect(adapterLookups).toBeGreaterThanOrEqual(3);
       expect(rollSpy).toHaveBeenCalledTimes(1);
     } finally {
+      // If an assertion fails while the retry is parked, let its request finish so
+      // the shared Nest test app can shut down cleanly instead of timing out in afterAll.
+      releaseRetry();
+      await retryRequest?.catch(() => undefined);
       adapterSpy.mockRestore();
       rollSpy.mockRestore();
     }
