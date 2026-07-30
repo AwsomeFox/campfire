@@ -4345,7 +4345,9 @@ export class McpToolsService {
         idempotencyKey: IdempotencyKey.unwrap().describe('Client-minted action intent key; reuse for retries of this roll'),
       },
       async ({ encounterId, combatantId, idempotencyKey }) => {
-        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
         const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
         return this.encounters.rollDeathSave(encounterId as number, combatantId as number, idempotencyKey as string, user, role);
       },

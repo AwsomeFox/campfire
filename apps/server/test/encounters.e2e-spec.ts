@@ -3539,6 +3539,135 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     }
   });
 
+  it('rejects a fresh death save when the encounter is trashed after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash race' });
+    expect(trashCampaign.status).toBe(201);
+    const trashCampaignId = trashCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Trash Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const trashEncounter = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Trash race', hidden: false });
+    expect(trashEncounter.status).toBe(201);
+    const trashEncounterId = trashEncounter.body.id as number;
+    const trashCombatantId = trashEncounter.body.combatants[0].id as number;
+    const trashCharacterId = trashEncounter.body.combatants[0].characterId as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeRolls = (await request(server).get(`/api/v1/campaigns/${trashCampaignId}/rolls`).set(player)).body.length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === trashCampaignId).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, trashEncounterId))
+    ).filter((event) => event.targetId === trashCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect((await request(server).delete(`/api/v1/encounters/${trashEncounterId}`).set(dm)).status).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-trash-race' });
+
+      expect(rejected.status).toBe(404);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await request(server).get(`/api/v1/campaigns/${trashCampaignId}/rolls`).set(player)).body).toHaveLength(beforeRolls);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === trashCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, trashEncounterId))
+      ).filter((event) => event.targetId === trashCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+      expect(afterEvents).toBe(beforeEvents);
+      expect((await request(server).get(`/api/v1/characters/${trashCharacterId}`).set(dm)).body).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('replays a committed REST death save after encounter trashing without allowing a fresh key', async () => {
+    const server = ctx.app.getHttpServer();
+    const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash replay' });
+    expect(replayCampaign.status).toBe(201);
+    const replayCampaignId = replayCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${replayCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Replay Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${replayCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Trash replay', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-trashed-replay' };
+    try {
+      const first = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(first.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      const fresh = await request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-trashed-fresh' });
+
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(fresh.status).toBe(404);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      rollSpy.mockRestore();
+    }
+  });
+
   it('replays a committed death save after the encounter and campaign end without creating new evidence', async () => {
     const server = ctx.app.getHttpServer();
     // This lifecycle transition must be self-contained: other death-save regressions

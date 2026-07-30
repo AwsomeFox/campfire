@@ -1121,6 +1121,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       idempotencyKey: 'mcp-death-save-lost-response',
     };
     const first = parseResult(await client.callTool({ name: 'roll_death_save', arguments: arguments_ }));
+    expect((await dmAgent.delete(`/api/v1/encounters/${encounter.body.id}`)).status).toBe(200);
     const replay = parseResult(await client.callTool({ name: 'roll_death_save', arguments: arguments_ }));
 
     expect(replay).toEqual(first);

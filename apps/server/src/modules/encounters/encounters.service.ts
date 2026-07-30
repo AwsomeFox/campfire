@@ -607,7 +607,7 @@ export class EncountersService {
   }
 
   /**
-   * Reject a write against an 'ended' encounter (issues #163, #470). Combatant mutations
+   * Reject a write against a trashed or 'ended' encounter (issues #163, #470). Combatant mutations
    * were the first gap: per-combatant writes never checked status, so after a fight any
    * owning player or DM could keep editing the historical record and every combatant HP
    * patch rewrote the linked character's live sheet HP through write-through in
@@ -618,6 +618,9 @@ export class EncountersService {
    * the supported path back to a mutable 'running' encounter.
    */
   private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
+    if (encounterRow.deletedAt !== null) {
+      throw new NotFoundException(`Encounter ${encounterRow.id} not found`);
+    }
     if (encounterRow.status === 'ended') {
       throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
     }
@@ -3170,10 +3173,9 @@ export class EncountersService {
   }
 
   /**
-   * dm may change anything (including initiative, and the combatant identity fields
-   * name/hpMax/initMod — issue #114). A player may only touch HP-ish fields
-   * (hpDelta, hpSet, hpTemp, deathSave counters, add/removeConditions), and only on a
-   * combatant whose characterId links to a character THEY own — everything else 403s.
+   * Roll one server-authoritative d20 for a dying 5e character, atomically applying
+   * its outcome and matching dice/audit/combat-log evidence. A same-key retry replays
+   * its committed response without rolling again, including after lifecycle changes.
    */
   async rollDeathSave(
     encounterId: number,
@@ -3182,7 +3184,9 @@ export class EncountersService {
     user: RequestUser,
     role: Role,
   ): Promise<{ combatant: Combatant; roll: DiceRoll }> {
-    const encounter = await this.getRowOrThrow(encounterId);
+    // A retained trashed row is sufficient to authorize an existing keyed replay;
+    // fresh writes still fail in updateCombatant's transaction-local mutable check.
+    const encounter = await this.getRowOrThrow(encounterId, true);
     const operationFingerprint = { combatantId };
     const deathSaveClaim: EncounterOpClaim = {
       actorId: user.id,
@@ -3361,6 +3365,12 @@ export class EncountersService {
     }
   }
 
+  /**
+   * dm may change anything (including initiative, and the combatant identity fields
+   * name/hpMax/initMod — issue #114). A player may only touch HP-ish fields
+   * (hpDelta, hpSet, hpTemp, deathSave counters, add/removeConditions), and only on a
+   * combatant whose characterId links to a character THEY own — everything else 403s.
+   */
   async updateCombatant(
     encounterId: number,
     combatantId: number,

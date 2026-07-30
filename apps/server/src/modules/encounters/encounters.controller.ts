@@ -519,13 +519,17 @@ export class EncountersController {
   @ApiResponse({ status: 201, description: 'The updated combatant and the single authoritative dice-log roll.' })
   @ApiResponse({ status: 400, description: 'Combatant is not a dying character.' })
   @ApiResponse({ status: 403, description: 'Not the DM or owning player, or campaign is archived.' })
+  @ApiResponse({ status: 404, description: 'Encounter was deleted or does not exist.' })
   async rollDeathSave(
     @Param('id', ParseIntPipe) id: number,
     @Param('cid', ParseIntPipe) cid: number,
     @Body() body: DeathSaveRollDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const row = await this.encounters.getRowOrThrow(id);
+    // A same-key retry is a read of the stored response, so retain the soft-deleted
+    // encounter long enough to establish current membership. Fresh writes are rejected
+    // by the transaction-local mutable check in the service.
+    const row = await this.encounters.getRowOrThrow(id, true);
     // A same-key retry only replays an already-committed response. Let the service
     // distinguish that safe read from a fresh write after membership is established.
     const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
