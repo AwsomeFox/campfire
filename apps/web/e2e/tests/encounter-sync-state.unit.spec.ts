@@ -277,6 +277,17 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     expect(
       encounterOverrideAuthorized(granted, { canDmWrite: false, staleIdentity: true, campaignId: 2, userId: 43 }),
     ).toBe(false);
+
+    // Degenerate case: an override granted with a null userId must NOT authorize against
+    // an authority whose userId is also null — `null === null` is true, but an
+    // authorization predicate must never default to "match" on two ABSENT identities.
+    // canDmWrite would have to also be true for a signed-out/unresolved viewer for this to
+    // matter in practice (nothing in this codebase does that today), but the predicate
+    // itself must refuse this on its own, not rely on canDmWrite to save it.
+    const grantedNullIdentity = confirmEncounterOverride(1, null);
+    expect(
+      encounterOverrideAuthorized(grantedNullIdentity, { canDmWrite: true, staleIdentity: false, campaignId: 1, userId: null }),
+    ).toBe(false);
   });
 
   test('a stale identity blocks the override offer and any already-active override, at every level (issue #1446, final review round)', () => {

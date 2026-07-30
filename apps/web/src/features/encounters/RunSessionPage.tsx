@@ -1633,12 +1633,16 @@ export default function RunSessionPage() {
     setActionError(message ? makeActionError(message) : null);
   }, []);
   const reportTurnAdvanceError = useCallback((err: unknown) => {
+    // Issue #1446 review fix: this used to hardcode its own English string here, so the
+    // errors.json TURN_ALREADY_ADVANCED catalog entry — including the "someone else
+    // already advanced the turn" wording this issue asked for — was dead code; nothing
+    // ever rendered it. Route through the same i18n seam every other server error uses.
     if (err instanceof ApiError && err.code === 'TURN_ALREADY_ADVANCED') {
-      surfaceActionError('Another device already advanced the turn. The tracker has refreshed.');
+      surfaceActionError(t('errors.TURN_ALREADY_ADVANCED'));
       return;
     }
     reportError(err);
-  }, [reportError, surfaceActionError]);
+  }, [reportError, surfaceActionError, t]);
 
   // Issue #580 — the ambiguous-outcome gate. When a combat write times out or its socket
   // drops, the outcome is genuinely unknown: the server may have committed. Showing a

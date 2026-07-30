@@ -193,6 +193,14 @@ export function encounterOverrideAuthorized(
     && authority.canDmWrite
     && !authority.staleIdentity
     && override.campaignId === authority.campaignId
+    // Issue #1446 review fix: `override.userId === authority.userId` alone would
+    // authorize when BOTH are `null` (two absent identities "matching") — reachable
+    // only if canDmWrite were also somehow true for a signed-out viewer, which nothing
+    // in this codebase does today, but an authorization predicate should never default
+    // to true on an absent identity regardless of current reachability. Require a real,
+    // non-null match on both sides explicitly.
+    && override.userId != null
+    && authority.userId != null
     && override.userId === authority.userId
   );
 }
