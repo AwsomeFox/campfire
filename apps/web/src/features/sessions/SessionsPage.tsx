@@ -404,7 +404,7 @@ export default function SessionsPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <PageHeader
-        title="Sessions"
+        title={t('sessions.title')}
         secondaryActions={secondaryActions}
         primaryAction={
           canDmWrite && tab === 'log' ? (

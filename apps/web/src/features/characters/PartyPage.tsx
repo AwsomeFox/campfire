@@ -6,6 +6,7 @@
  * silently caps a player at a single owned character (issue #129).
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
@@ -28,6 +29,7 @@ import { STATUS_LABEL, StatusTag } from './status';
 import { PartyRestPanel } from './PartyRestPanel';
 
 export default function PartyPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -172,7 +174,7 @@ export default function PartyPage() {
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       <CampaignCover campaignId={id} name={campaign?.name ?? 'Campaign'} variant="strip" showMonogram={false} />
       <PageHeader
-        title="Party"
+        title={t('nav.party')}
         secondaryActions={secondaryActions}
         primaryAction={
           canCreate && !creating && party.length > 0 ? (

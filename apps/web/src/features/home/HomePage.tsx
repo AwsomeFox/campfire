@@ -6,6 +6,7 @@
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
@@ -391,6 +392,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
 }
 
 export function HomePage() {
+  const { t } = useTranslation();
   const { me, roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
   const navigate = useNavigate();
@@ -498,7 +500,7 @@ export function HomePage() {
   return (
     <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5 cf-authed-shell">
       <div>
-        <PageTitle style={{ margin: 0 }}>Your campaigns</PageTitle>
+        <PageTitle style={{ margin: 0 }}>{t('home.title')}</PageTitle>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
           Everything on this server, one sign-in. Roles are per campaign. Opening a
           campaign resumes the matching module or your last place there.

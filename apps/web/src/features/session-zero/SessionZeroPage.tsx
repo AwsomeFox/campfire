@@ -307,7 +307,7 @@ export default function SessionZeroPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <PageTitle>Session Zero</PageTitle>
+        <PageTitle>{t('sessionZero.title')}</PageTitle>
         <TermHelp termId="sessionZero" />
         <div style={{ flex: 1 }} />
         {canDmWrite && !editing && !loading && (

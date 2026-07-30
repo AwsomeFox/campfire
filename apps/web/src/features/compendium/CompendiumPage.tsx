@@ -382,7 +382,7 @@ export default function CompendiumPage() {
       <div className="flex items-start gap-2.5 flex-wrap">
         <div style={{ flex: 1, minWidth: 200 }}>
           <div className="flex items-center gap-2 flex-wrap">
-            <PageTitle>Compendium</PageTitle>
+            <PageTitle>{t('compendium.title')}</PageTitle>
             <TermHelp termId="compendium" />
           </div>
           <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>

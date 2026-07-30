@@ -155,9 +155,9 @@ export default function ReaderPage() {
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 900 }}>
       <div className="flex items-center gap-2.5 flex-wrap">
         <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => navigate(`/c/${id}/compendium`)}>
-          ← Compendium
+          ← {t('nav.compendium')}
         </button>
-        {!entry && <PageTitle style={{ margin: 0, fontSize: 17 }}>Reader</PageTitle>}
+        {!entry && <PageTitle style={{ margin: 0, fontSize: 17 }}>{t('compendium.readerTitle')}</PageTitle>}
         {pack && (
           <span className="tag tag-accent-2" style={{ fontSize: 9.5 }}>
             {pack.name}{pack.license ? ` · ${pack.license}` : ''}
