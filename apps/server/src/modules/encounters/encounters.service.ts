@@ -4125,6 +4125,9 @@ export class EncountersService {
             deathSaveFailures: patch.deathSaveFailures,
             deathSaveRoll: patch.deathSaveRoll,
           });
+          if (patch.deathState !== undefined) {
+            result.deathState = patch.deathState as any;
+          }
           if (shouldCheckConcentration && result.concentrationCheck) {
             const queued = enqueueConcentrationCheck(turnState, {
               id: `damage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,

@@ -7178,7 +7178,54 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
 
   describe('encounters — issue #1459: turn-lifecycle correctness (e2e)', () => {
     it('first combatant executes turn-start triggers; removing lair pointer does not wrap round; deathState is not clobbered', async () => {
-      expect(1).toBe(1);
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '1459 Test Campaign' });
+      const campId = campaign.body.id;
+      
+      const encounter = await request(server).post(`/api/v1/campaigns/${campId}/encounters`).set(dm).send({ name: '1459 Test' });
+      const encounterId = encounter.body.id;
+      
+      const target = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', name: 'Target', hpCurrent: 20, hpMax: 20 });
+      const other = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', name: 'Other', hpCurrent: 20, hpMax: 20 });
+      const targetId = target.body.id;
+      const otherId = other.body.id;
+      
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm).send({ initiative: 20 });
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${otherId}`).set(dm).send({ initiative: 10 });
+      
+      // 1. Setup turn-start condition on target (who will go first)
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants/${targetId}/condition-instances`).set(dm).send({
+        name: 'Poison',
+        type: 'standard',
+        turnStartEffects: [{ type: 'damage', roll: '2' }],
+      });
+      
+      // START the encounter
+      await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+      
+      // Verify turn-start triggered
+      let state = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      let targetState = state.body.combatants.find((c: any) => c.id === targetId);
+      expect(targetState.hpCurrent).toBe(18); // 20 - 2
+      
+      // 2. Verify removing lair pointer does not wrap round
+      await db.update(encountersTable).set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: targetId }).where(eq(encountersTable.id, encounterId));
+      await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm);
+      
+      state = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(state.body.round).toBe(1);
+      
+      // 3. Verify deathState is not clobbered
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${otherId}`).set(dm).send({
+        hpDelta: -20,
+        deathState: 'stable',
+      });
+      state = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const otherState = state.body.combatants.find((c: any) => c.id === otherId);
+      expect(otherState.hpCurrent).toBe(0);
+      expect(otherState.deathState).toBe('stable');
     });
   });
 });
