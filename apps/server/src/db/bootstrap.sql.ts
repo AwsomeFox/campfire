@@ -1781,6 +1781,7 @@ CREATE TABLE IF NOT EXISTS combatant_removal_undos (
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   combatant_id INTEGER NOT NULL,
   request_key TEXT,
+  actor_id TEXT NOT NULL DEFAULT '',
   snapshot_json TEXT NOT NULL,
   before_encounter_json TEXT NOT NULL,
   after_encounter_json TEXT NOT NULL,
@@ -1789,7 +1790,7 @@ CREATE TABLE IF NOT EXISTS combatant_removal_undos (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, request_key) WHERE request_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, actor_id, request_key) WHERE request_key IS NOT NULL;
 
 -- Campaign-scoped homebrew monster library (issue #425).
 CREATE TABLE IF NOT EXISTS campaign_library_monsters (

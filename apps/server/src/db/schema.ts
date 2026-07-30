@@ -2063,6 +2063,10 @@ export const combatants = sqliteTable('combatants', {
 export const combatantRemovalUndos = sqliteTable('combatant_removal_undos', {
   token: text('token').primaryKey(),
   requestKey: text('request_key'),
+  // Retry keys belong to the authenticated principal, matching the other
+  // encounter idempotency surfaces. A second DM must not receive the first
+  // DM's capability merely because their clients generated the same key.
+  actorId: text('actor_id').notNull().default(''),
   encounterId: integer('encounter_id').notNull(),
   combatantId: integer('combatant_id').notNull(),
   snapshotJson: text('snapshot_json').notNull(),

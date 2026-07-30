@@ -2348,10 +2348,14 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(restoredByMcp.isError).toBeFalsy();
     expect(parseResult(restoredByMcp)).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });
 
-    const removeResult = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id } });
+    const idempotencyKey = '3fd4d041-a13d-4dbd-a105-2b1abf15791b';
+    const removeResult = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id, idempotencyKey } });
     expect(removeResult.isError).toBeFalsy();
     const removedByMcp = parseResult(removeResult) as { undoToken: string };
     expect(typeof removedByMcp.undoToken).toBe('string');
+    const replayedRemove = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id, idempotencyKey } });
+    expect(replayedRemove.isError).toBeFalsy();
+    expect(parseResult(replayedRemove)).toEqual(removedByMcp);
     const restoredViaRest = await dmAgent.post(`/api/v1/encounters/${encounter.id}/combatants/undo-remove`).send({ undoToken: removedByMcp.undoToken });
     expect(restoredViaRest.status).toBe(201);
     expect(restoredViaRest.body).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });

@@ -21,6 +21,7 @@ import { EncountersService } from '../src/modules/encounters/encounters.service'
 import { RollsService } from '../src/modules/rolls/rolls.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
+const otherDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-2' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
 const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'p-2' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
@@ -704,6 +705,25 @@ describe('encounters (e2e)', () => {
       expect(getRes.body.combatants.some((c: { id: number }) => c.id === ruleMonsterId)).toBe(false);
     });
 
+    it('scopes removal idempotency receipts to the requesting DM', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Scoped removal receipt campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Scoped removal receipt' });
+      const dmTarget = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'DM scoped receipt', hpMax: 2 });
+      const otherDmTarget = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Other DM scoped receipt', hpMax: 2 });
+      const sharedKey = 'ba7a1d0f-8f86-45d7-8a86-c0e159c05d31';
+
+      // Two DMs can independently choose the same key without exposing each
+      // other's undo capability or suppressing the second removal.
+      const dmRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${dmTarget.body.id}`).set(dm).send({ idempotencyKey: sharedKey });
+      const otherDmRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${otherDmTarget.body.id}`).set(otherDm).send({ idempotencyKey: sharedKey });
+      expect(dmRemoval.status).toBe(200);
+      expect(otherDmRemoval.status).toBe(200);
+      expect(otherDmRemoval.body.undoToken).not.toBe(dmRemoval.body.undoToken);
+      const otherDmReplay = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${otherDmTarget.body.id}`).set(otherDm).send({ idempotencyKey: sharedKey });
+      expect(otherDmReplay.body).toEqual(otherDmRemoval.body);
+    });
+
     it('removal undo is DM-gated, exact, and one-shot', async () => {
       const server = ctx.app.getHttpServer();
       const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Undo target', hpMax: 9 });
@@ -950,8 +970,15 @@ describe('encounters (e2e)', () => {
     it('undo restores the lair resume pointer without relying on a database foreign key', async () => {
       const server = ctx.app.getHttpServer();
       const db = ctx.app.get<DrizzleDb>(DB);
-      const encounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Undo lair resume' });
+      // This needs its own campaign so it can start a running encounter without
+      // contending with the shared full-flow fixture's authoritative live fight.
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo lair resume campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Undo lair resume' });
       const target = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Lair resume target', hpMax: 2 });
+      const other = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Lair resume other', hpMax: 2 });
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm).send({ initiative: 20 })).status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${other.body.id}`).set(dm).send({ initiative: 10 })).status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
       await db.update(encountersTable).set({ lairResumeCombatantId: target.body.id }).where(eq(encountersTable.id, encounter.body.id));
 
       // Older additive schemas have no ON DELETE SET NULL constraint on this column.
@@ -962,6 +989,10 @@ describe('encounters (e2e)', () => {
         expect(removed.status).toBe(200);
         const afterRemoval = await db.select().from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get();
         expect(afterRemoval?.lairResumeCombatantId).toBeNull();
+        // A later combatant write forces Undo down its reconcile path rather than
+        // the exact rewind path. It must still restore the pointer cleared solely
+        // because the removed combatant was the pending lair target.
+        expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${other.body.id}`).set(dm).send({ hpDelta: -1 })).status).toBe(200);
         const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
         expect(restored.status).toBe(201);
         const afterUndo = await db.select().from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get();
@@ -1031,6 +1062,13 @@ describe('encounters (e2e)', () => {
       const preexistingMismatchRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
       const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
       expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
+      // A name-only sheet edit changes updatedAt, but is not sheet-owned combat
+      // state. Preserve the encounter-local HP (and, by the same merge rule,
+      // local timed condition metadata) captured in the removal snapshot.
+      const nameOnlyRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed during removal' })).status).toBe(200);
+      const nameOnlyRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: nameOnlyRemoval.body.undoToken });
+      expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
       // Keep the shared full-flow encounter eligible for its later HP write-back test.
       expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)).status).toBe(200);
     });

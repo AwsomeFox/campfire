@@ -2217,8 +2217,9 @@ export default function RunSessionPage() {
       })
       .catch((error) => {
         // A response from the application conclusively rejected the intent. Keep
-        // the key for network/proxy failures so Retry remains a safe replay.
-        if (error instanceof ApiError && error.status < 500) combatantRemovalKeys.current.delete(removalKey);
+        // the key for transient failures (including retryable HTTP 408/425/429)
+        // so Retry remains a safe replay even when the server committed first.
+        if (!isTransientError(error)) combatantRemovalKeys.current.delete(removalKey);
         if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) reportError(error);
       })
       .finally(() => {

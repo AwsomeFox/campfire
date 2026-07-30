@@ -4491,7 +4491,7 @@ function migrateCombatantRemoveUndo1469(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS combatant_removal_undos (
       token TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE, combatant_id INTEGER NOT NULL,
-      request_key TEXT,
+      request_key TEXT, actor_id TEXT NOT NULL DEFAULT '',
       snapshot_json TEXT NOT NULL, before_encounter_json TEXT NOT NULL, after_encounter_json TEXT NOT NULL,
       expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
     );
@@ -4509,7 +4509,14 @@ function migrateCombatantRemovalRevision1469(sqlite: Database.Database): void {
   if (undoColumns.length > 0 && !undoColumns.some((column) => column.name === 'request_key')) {
     sqlite.exec('ALTER TABLE combatant_removal_undos ADD COLUMN request_key TEXT');
   }
-  sqlite.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, request_key) WHERE request_key IS NOT NULL');
+  if (undoColumns.length > 0 && !undoColumns.some((column) => column.name === 'actor_id')) {
+    sqlite.exec("ALTER TABLE combatant_removal_undos ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''");
+  }
+  sqlite.exec(`
+    DROP INDEX IF EXISTS idx_combatant_removal_undos_request;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request
+      ON combatant_removal_undos(encounter_id, actor_id, request_key) WHERE request_key IS NOT NULL;
+  `);
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [

@@ -142,7 +142,7 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     expect(source).toContain('const idempotencyKey = combatantRemovalKeys.current.get(removalKey) ?? newOperationId();');
     expect(source).toContain('.delete<CombatantRemoveResult>');
     expect(source).toContain('{ json: { idempotencyKey } }');
-    expect(source).toContain('error instanceof ApiError && error.status < 500');
+    expect(source).toContain('if (!isTransientError(error)) combatantRemovalKeys.current.delete(removalKey);');
     expect(source).toContain('mutationFn: ({ encounterId }: { encounterId: number; updatedAt?: string })');
     expect(source).toContain('if (encounterId === activeEncounterIdRef.current)');
     expect(source).toContain('const sourceEncounterId = pendingTrashUndo?.encounterId;');

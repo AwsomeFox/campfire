@@ -4170,6 +4170,7 @@ export class EncountersService {
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {
     // Retry keys identify a request; the server still mints the separate, opaque
     // capability used to undo it.
+    const actorId = user.id;
     const undoToken = randomUUID();
     let receiptUndoToken = undoToken;
     const now = nowIso();
@@ -4188,7 +4189,11 @@ export class EncountersService {
       // retry cannot receive a token that undoRemoveCombatant must reject.
       tx.delete(combatantRemovalUndos).where(lte(combatantRemovalUndos.expiresAt, now)).run();
       const prior = idempotencyKey
-        ? tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.requestKey, idempotencyKey), eq(combatantRemovalUndos.encounterId, encounterId))).get()
+        ? tx.select().from(combatantRemovalUndos).where(and(
+          eq(combatantRemovalUndos.requestKey, idempotencyKey),
+          eq(combatantRemovalUndos.actorId, actorId),
+          eq(combatantRemovalUndos.encounterId, encounterId),
+        )).get()
         : undefined;
       if (prior) {
         if (prior.combatantId !== combatantId) throw new ConflictException('Idempotency key was reused for a different combatant removal');
@@ -4206,9 +4211,26 @@ export class EncountersService {
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-      const sheetUpdatedAtAtRemoval = snapshot.characterId == null
+      const sheetAtRemoval = snapshot.characterId == null
         ? null
-        : tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, snapshot.characterId)).get()?.updatedAt ?? null;
+        : tx.select().from(characters).where(eq(characters.id, snapshot.characterId)).get() ?? null;
+      const sheetUpdatedAtAtRemoval = sheetAtRemoval?.updatedAt ?? null;
+      // A sheet's revision includes unrelated fields (such as its name or notes).
+      // Keep the sheet-owned values at removal time so undo can merge only values
+      // that actually changed during its short recovery window.
+      const sheetStateAtRemoval = sheetAtRemoval == null ? null : {
+        hpCurrent: sheetAtRemoval.hpCurrent,
+        hpTemp: sheetAtRemoval.hpTemp,
+        spCurrent: sheetAtRemoval.spCurrent,
+        spMax: sheetAtRemoval.spMax,
+        rpCurrent: sheetAtRemoval.rpCurrent,
+        rpMax: sheetAtRemoval.rpMax,
+        deathState: sheetAtRemoval.deathState,
+        deathSaveSuccesses: sheetAtRemoval.deathSaveSuccesses,
+        deathSaveFailures: sheetAtRemoval.deathSaveFailures,
+        conditions: sheetAtRemoval.conditions,
+        conditionInstances: sheetAtRemoval.conditionInstances,
+      };
 
       const runningAdapter = freshEncounter.status === 'running' ? adapter : null;
       let newCurrentId = freshEncounter.currentCombatantId;
@@ -4282,9 +4304,10 @@ export class EncountersService {
       tx.insert(combatantRemovalUndos).values({
         token: undoToken,
         requestKey: idempotencyKey ?? null,
+        actorId,
         encounterId,
         combatantId,
-        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval }),
+        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval }),
         beforeEncounterJson: toJsonText({
           currentCombatantId: freshEncounter.currentCombatantId,
           turnIndex: freshEncounter.turnIndex,
@@ -4317,9 +4340,17 @@ export class EncountersService {
         if (!current) throw new NotFoundException(`Encounter ${encounterId} not found`);
         const undo = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
         if (!undo || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
-        const storedSnapshot = fromJsonText<(typeof combatants.$inferSelect & { sheetUpdatedAtAtRemoval?: string | null }) | null>(undo.snapshotJson, null);
+        const storedSnapshot = fromJsonText<(typeof combatants.$inferSelect & {
+          sheetUpdatedAtAtRemoval?: string | null;
+          sheetStateAtRemoval?: {
+            hpCurrent: number; hpTemp: number; spCurrent: number; spMax: number;
+            rpCurrent: number; rpMax: number; deathState: string;
+            deathSaveSuccesses: number; deathSaveFailures: number;
+            conditions: string; conditionInstances: string | null;
+          } | null;
+        }) | null>(undo.snapshotJson, null);
         if (!storedSnapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
-        const { sheetUpdatedAtAtRemoval, ...snapshot } = storedSnapshot;
+        const { sheetUpdatedAtAtRemoval, sheetStateAtRemoval, ...snapshot } = storedSnapshot;
         // A committed undo may have lost its response. Replaying the restored row is safe;
         // never turn the client-visible Retry into a permanent 404 after success.
         if (undo.consumedAt != null) {
@@ -4349,16 +4380,27 @@ export class EncountersService {
         if (snapshot.characterId != null) {
           const sheet = tx.select().from(characters).where(eq(characters.id, snapshot.characterId)).get();
           // Combatants intentionally permit encounter-local overrides (notably hpMax
-          // and timed condition metadata). Pull sheet state only when the sheet was
-          // edited during the removal window; otherwise restore the exact snapshot.
-          if (sheet && sheet.updatedAt !== sheetUpdatedAtAtRemoval) Object.assign(snapshot, {
-            hpCurrent: Math.max(0, Math.min(sheet.hpCurrent, snapshot.hpMax)),
-            hpTemp: sheet.hpTemp, spCurrent: sheet.spCurrent, spMax: sheet.spMax,
-            rpCurrent: sheet.rpCurrent, rpMax: sheet.rpMax, deathState: sheet.deathState,
-            deathSaveSuccesses: sheet.deathSaveSuccesses, deathSaveFailures: sheet.deathSaveFailures,
-            conditions: sheet.conditions, conditionInstances: sheet.conditionInstances,
-            sheetSyncedUpdatedAt: sheet.updatedAt,
-          });
+          // and timed condition metadata). A sheet revision can also change for an
+          // unrelated field, so merge each sheet-owned slice only when it differs
+          // from the value captured at removal; otherwise restore the exact snapshot.
+          if (sheet && sheetStateAtRemoval && sheet.updatedAt !== sheetUpdatedAtAtRemoval) {
+            let pulledSheetState = false;
+            if (sheet.hpCurrent !== sheetStateAtRemoval.hpCurrent) {
+              snapshot.hpCurrent = Math.max(0, Math.min(sheet.hpCurrent, snapshot.hpMax));
+              pulledSheetState = true;
+            }
+            if (sheet.hpTemp !== sheetStateAtRemoval.hpTemp) { snapshot.hpTemp = sheet.hpTemp; pulledSheetState = true; }
+            if (sheet.spCurrent !== sheetStateAtRemoval.spCurrent) { snapshot.spCurrent = sheet.spCurrent; pulledSheetState = true; }
+            if (sheet.spMax !== sheetStateAtRemoval.spMax) { snapshot.spMax = sheet.spMax; pulledSheetState = true; }
+            if (sheet.rpCurrent !== sheetStateAtRemoval.rpCurrent) { snapshot.rpCurrent = sheet.rpCurrent; pulledSheetState = true; }
+            if (sheet.rpMax !== sheetStateAtRemoval.rpMax) { snapshot.rpMax = sheet.rpMax; pulledSheetState = true; }
+            if (sheet.deathState !== sheetStateAtRemoval.deathState) { snapshot.deathState = sheet.deathState; pulledSheetState = true; }
+            if (sheet.deathSaveSuccesses !== sheetStateAtRemoval.deathSaveSuccesses) { snapshot.deathSaveSuccesses = sheet.deathSaveSuccesses; pulledSheetState = true; }
+            if (sheet.deathSaveFailures !== sheetStateAtRemoval.deathSaveFailures) { snapshot.deathSaveFailures = sheet.deathSaveFailures; pulledSheetState = true; }
+            if (sheet.conditions !== sheetStateAtRemoval.conditions) { snapshot.conditions = sheet.conditions; pulledSheetState = true; }
+            if (sheet.conditionInstances !== sheetStateAtRemoval.conditionInstances) { snapshot.conditionInstances = sheet.conditionInstances; pulledSheetState = true; }
+            if (pulledSheetState) snapshot.sheetSyncedUpdatedAt = sheet.updatedAt;
+          }
         }
         restoredCharacterId = snapshot.characterId;
         restoredNpcId = snapshot.npcId;
@@ -4388,7 +4430,17 @@ export class EncountersService {
         } else if (runningAdapter) {
           const restoredRoster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain);
           const turnIndex = turnIndexFor(this.sortCombatantsWithAdapter(restoredRoster, 'running', runningAdapter), current.currentCombatantId);
-          tx.update(encounters).set({ turnIndex, combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
+          // Removal clears this pointer only when the removed combatant owned it.
+          // In a reconcile, restore it only if no later write has chosen a different
+          // lair resume target; an unrelated combatant mutation must not lose it.
+          const restoreLairResume = before.lairResumeCombatantId === snapshot.id
+            && current.lairResumeCombatantId === after.lairResumeCombatantId;
+          tx.update(encounters).set({
+            turnIndex,
+            ...(restoreLairResume ? { lairResumeCombatantId: before.lairResumeCombatantId } : {}),
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nowIso(),
+          }).where(eq(encounters.id, encounterId)).run();
         }
         tx.update(combatantRemovalUndos).set({ consumedAt: nowIso() }).where(eq(combatantRemovalUndos.token, undoToken)).run();
         this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.restore', entityType: 'combatant', entityId: snapshot.id, campaignId: current.campaignId, detail: snapshot.name });
