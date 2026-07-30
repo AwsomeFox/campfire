@@ -26,7 +26,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
-import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { foldForSearch, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -532,12 +532,16 @@ export class SchedulingService {
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
-    const matches = rows.filter(
-      (r) =>
-        foldedIncludes(r.title, folded)
-        || foldedIncludes(r.scheduledAt, folded)
-        || foldedIncludes(r.notes, folded),
-    );
+    const matches = rows.filter((r) => {
+      // Mirror the FTS5 aux column for scheduled_session, which stores the ISO
+      // date alongside a space-separated copy (T/:/- → space) so date/time tokens
+      // like "19:30" or "2031-09-20" prefix-match. Matching only the raw ISO would
+      // leave "19" buried inside "20T19" and diverge from the index; prefix-token
+      // matching (matchesSearchQuery) keeps this bounded read on the same
+      // semantics as FTS5 (issue #1481).
+      const composite = `${r.title} ${scheduledAtSearchText(r.scheduledAt)} ${r.notes}`;
+      return matchesSearchQuery(composite, folded);
+    });
     // Same read-time link reconciliation as every other projection: search must not
     // hand back a sessionId pointing at a trashed recap either.
     const liveLinks = await this.liveLinkedSessionIds(matches);

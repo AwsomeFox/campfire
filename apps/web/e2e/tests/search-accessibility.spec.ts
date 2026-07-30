@@ -59,4 +59,28 @@ test.describe('campaign search results', () => {
     await expect(page.getByText(/Try an encounter name, scheduled-session date or time/)).toBeVisible();
     await context.close();
   });
+
+  test('is reachable from the mobile top bar by touch, with no keyboard (issue #1481)', async ({ browser }) => {
+    const { campaignId } = seed();
+    const context = await browser.newContext({
+      storageState: stateFor('dm'),
+      viewport: { width: 375, height: 812 },
+      // `.tap()` needs a touch-capable context: a 375px viewport alone emulates
+      // the width but not pointer input, so Playwright rejects `tap()` unless the
+      // context is explicitly touch-enabled.
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    // Land on the campaign dashboard — the mobile chrome is visible and there is
+    // no keyboard. The desktop sidebar search box is `hidden md:flex`, and the
+    // command palette needs a keyboard chord, so a touch user's only entry used to
+    // be typing the URL. The magnifier in the mobile top bar is the fix.
+    await page.goto(`/c/${campaignId}`);
+    const searchButton = page.getByRole('button', { name: 'Search this campaign' });
+    await expect(searchButton).toBeVisible();
+    await searchButton.tap();
+    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/search$`));
+    await expect(page.getByRole('textbox', { name: 'Search this campaign' })).toBeVisible();
+    await context.close();
+  });
 });

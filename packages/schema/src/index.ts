@@ -6845,6 +6845,16 @@ export const ServerInstance = z.object({
   instanceId: z.string().min(1),
   /** Monotonic integer bumped on every whole-server restore. */
   dataGeneration: z.number().int().nonnegative(),
+  /**
+   * Which full-text search backend this install booted with (issue #1481):
+   * `'fts5'` when SQLite's FTS5 extension is available (the fast, prefix-token
+   * index), `'fallback'` when it is not (a JS full-scan with the same matching
+   * semantics). Surfaced on `/me` so a deployment whose search silently degraded
+   * to the fallback is diagnosable without shell access. Optional only so older
+   * clients / fixtures that pre-date the field keep parsing; the server always
+   * sets it.
+   */
+  searchMode: z.enum(['fts5', 'fallback']).optional(),
 });
 export type ServerInstance = z.infer<typeof ServerInstance>;
 
@@ -11695,9 +11705,19 @@ export const SearchResult = z.object({
 });
 export type SearchResult = z.infer<typeof SearchResult>;
 
+// The total/truncated fields (issue #1481) surface silent truncation: `results`
+// is already sliced to the request limit, so a campaign with 200 matches is
+// indistinguishable from one with exactly `limit` without them. `total` is the
+// number of matches the server actually found (before slicing); `truncated` is
+// true when `total > results.length` (more matches exist than are returned).
+// `total` may itself undercount on the degraded fallback path when a per-
+// collection scan cap is hit — `truncated` is also raised then, so the flag is
+// the honest "this list is not complete" signal regardless of mode.
 export const SearchResponse = z.object({
   query: z.string(),
   results: z.array(SearchResult),
+  total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
 });
 export type SearchResponse = z.infer<typeof SearchResponse>;
 

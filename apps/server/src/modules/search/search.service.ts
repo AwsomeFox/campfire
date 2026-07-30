@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
-import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
+import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { notDeleted } from '../../common/soft-delete';
 import { anchorVisibilitySql } from '../../common/anchor-visibility';
 import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
@@ -40,6 +40,16 @@ import { SchedulingService } from '../sessions/scheduling.service';
 
 /** Max results returned from one search (keeps a broad query bounded). */
 const DEFAULT_LIMIT = 50;
+/**
+ * Hard cap on how many rows of EACH collection the LIKE/full-scan fallback
+ * scans (issue #1481). The fallback loads whole collections and matches in JS,
+ * so without a cap a campaign with tens of thousands of one entity type would
+ * do an unbounded scan on every keystroke — the exact O(n) walk #533 removed for
+ * the FTS path. Generous enough that a normal campaign never hits it (so the
+ * fallback still returns the same set as FTS); when it IS hit the response is
+ * marked `truncated` so the user knows the list may be incomplete.
+ */
+const FALLBACK_COLLECTION_SCAN_CAP = 1000;
 /** Characters of context to show on each side of a body/recap match in the snippet. */
 const SNIPPET_PAD = 60;
 
@@ -143,13 +153,13 @@ export class SearchService {
 
   async search(campaignId: number, user: RequestUser, role: Role, q: string, limit = DEFAULT_LIMIT): Promise<SearchResponse> {
     const needle = foldForSearch(q.trim());
-    if (!needle) return { query: q, results: [] };
+    if (!needle) return this.toResponse(q, [], limit);
     if (!this.campaignSearchFtsAvailable) {
       return this.searchFallback(campaignId, user, role, q, limit);
     }
 
     const ftsQuery = toFtsQuery(needle);
-    if (!ftsQuery) return { query: q, results: [] };
+    if (!ftsQuery) return this.toResponse(q, [], limit);
 
     const candidateLimit = Math.max(limit * 8, 100);
     const titleCandidates = this.searchFtsCandidates(campaignId, role, user, `${FTS_TITLE_COLUMNS}: ${ftsQuery}`, candidateLimit);
@@ -164,12 +174,30 @@ export class SearchService {
       seen.add(key);
       candidates.push(candidate);
     }
+    // If either candidate query hit its LIMIT, the index may hold more matches we
+    // never retrieved — surface that as truncation rather than silently returning
+    // a partial list (issue #1481).
+    const candidateCapHit = candidates.length >= candidateLimit;
 
     const results = await this.hydrateFtsCandidates(campaignId, user, role, needle, candidates);
     results.sort(
       (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
     );
-    return { query: q, results: results.slice(0, limit) };
+    return this.toResponse(q, results, limit, candidateCapHit);
+  }
+
+  /**
+   * Build a {@link SearchResponse} with honest truncation accounting (issue #1481).
+   * `allResults` is the FULL ordered match list BEFORE slicing; `total` reports
+   * that count and `truncated` is true when even one more match exists than is
+   * returned, OR when `forceTruncated` says the scan/index was itself bounded
+   * (fallback per-collection cap hit, or FTS candidate LIMIT hit) and more
+   * matches may exist that were never examined.
+   */
+  private toResponse(q: string, allResults: SearchResult[], limit: number, forceTruncated = false): SearchResponse {
+    const total = allResults.length;
+    const results = allResults.slice(0, Math.max(0, limit));
+    return { query: q, results, total, truncated: forceTruncated || total > results.length };
   }
 
   private async searchFallback(
@@ -181,9 +209,23 @@ export class SearchService {
   ): Promise<SearchResponse> {
     // Fold once; encounter/schedule helpers receive this same folded needle (#624).
     const needle = foldForSearch(q.trim());
-    if (!needle) return { query: q, results: [] };
+    if (!needle) return this.toResponse(q, [], limit);
 
     const isDm = role === 'dm';
+    // Bound the per-collection full scan (issue #1481): each generic collection
+    // is loaded whole and matched in JS, so cap how many rows of each we actually
+    // scan. Generous (normal campaigns never hit it); when any collection exceeds
+    // it, `scanCapped` flags the response truncated because matches beyond the cap
+    // were never examined.
+    let scanCapped = false;
+    const capScan = <T>(p: Promise<T[]>): Promise<T[]> =>
+      p.then((rows) => {
+        if (rows.length > FALLBACK_COLLECTION_SCAN_CAP) {
+          scanCapped = true;
+          return rows.slice(0, FALLBACK_COLLECTION_SCAN_CAP);
+        }
+        return rows;
+      });
     const [
       quests,
       npcs,
@@ -199,18 +241,20 @@ export class SearchService {
       scheduledSessionHits,
       sessionHits,
     ] = await Promise.all([
-      this.quests.listForCampaign(campaignId, role),
-      this.npcs.listForCampaign(campaignId, role),
-      this.factions.listForCampaign(campaignId, role),
-      this.locations.listForCampaign(campaignId, role),
-      this.characters.listForCampaign(campaignId, user, role),
-      this.notes.listAllForCampaign(campaignId, user, role, {}),
-      this.timeline.listEvents(campaignId, role),
-      this.inventory.listForCampaign(campaignId),
-      this.comments.listForCampaign(campaignId, role),
+      capScan(this.quests.listForCampaign(campaignId, role)),
+      capScan(this.npcs.listForCampaign(campaignId, role)),
+      capScan(this.factions.listForCampaign(campaignId, role)),
+      capScan(this.locations.listForCampaign(campaignId, role)),
+      capScan(this.characters.listForCampaign(campaignId, user, role)),
+      capScan(this.notes.listAllForCampaign(campaignId, user, role, {})),
+      capScan(this.timeline.listEvents(campaignId, role)),
+      capScan(this.inventory.listForCampaign(campaignId)),
+      capScan(this.comments.listForCampaign(campaignId, role)),
       // Story arcs/beats are DM-only prep content (issue #27) — never fetch them
       // for a non-DM, so a player's search can't surface a planned twist.
-      isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([]),
+      capScan(isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([])),
+      // The bounded search projections self-cap (min(limit, 50)), so they need no
+      // further cap here; their own ordering/visibility is authoritative.
       this.encounters.searchForCampaign(campaignId, role, needle, limit),
       this.scheduling.searchForCampaign(campaignId, needle, limit),
       this.sessions.searchForCampaign(campaignId, role, needle, limit),
@@ -218,7 +262,11 @@ export class SearchService {
 
     const results: SearchResult[] = [];
     const push = (type: SearchResultType, id: number, title: string, fields: Field[], extra?: Partial<SearchResult>) => {
-      const hit = fields.find((f) => f.text && foldedIncludes(f.text, needle));
+      // Prefix-token match (matchesSearchQuery) keeps the fallback on the SAME
+      // semantics as the FTS5 index, so a query returns the same set on either
+      // backend (issue #1481) — plain substring (foldedIncludes) used to make
+      // "ex" match "Vexley" only here, never on FTS.
+      const hit = fields.find((f) => f.text && matchesSearchQuery(f.text, needle));
       if (!hit) return;
       results.push({
         type,
@@ -296,9 +344,13 @@ export class SearchService {
     for (const scheduled of scheduledSessionHits) {
       const title = scheduled.title.trim()
         || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
+      // The re-check matches the SAME date form scheduling.searchForCampaign (and
+      // the FTS5 aux column) use, else a date/time query that the bounded read
+      // matched would be dropped here because "19" is buried in the raw "20T19"
+      // token (issue #1481).
       push('scheduled_session', scheduled.id, title, [
         { field: 'title', text: scheduled.title },
-        { field: 'scheduledAt', text: scheduled.scheduledAt },
+        { field: 'scheduledAt', text: scheduledAtSearchText(scheduled.scheduledAt) },
         { field: 'notes', text: scheduled.notes },
       ]);
     }
@@ -350,7 +402,7 @@ export class SearchService {
     results.sort(
       (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
     );
-    return { query: q, results: results.slice(0, limit) };
+    return this.toResponse(q, results, limit, scanCapped);
   }
 
   private campaignSearchVisibilitySql(role: Role, user: RequestUser) {

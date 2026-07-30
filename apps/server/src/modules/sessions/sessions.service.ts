@@ -10,7 +10,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
 import { clampSessionsListLimit, sessionsListOffset } from './sessions-pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
-import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { foldForSearch, matchesSearchQuery } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -323,10 +323,13 @@ export class SessionsService {
     return redacted
       .filter((s) => {
         const title = s.title.trim() || `Session ${s.number}`;
+        // Prefix-token match keeps this bounded read on the same semantics as the
+        // FTS5 index (issue #1481) — plain substring used to return a different
+        // set than the index for the same query.
         return (
-          foldedIncludes(title, folded)
-          || foldedIncludes(s.recap, folded)
-          || foldedIncludes(s.dmSecret, folded)
+          matchesSearchQuery(title, folded)
+          || matchesSearchQuery(s.recap, folded)
+          || matchesSearchQuery(s.dmSecret, folded)
         );
       })
       .slice(0, boundedLimit);

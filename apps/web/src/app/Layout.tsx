@@ -208,6 +208,36 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
   );
 }
 
+/**
+ * Touch-reachable search entry for the mobile top bar (issue #1481). The sidebar
+ * search box is `hidden md:flex` and the command palette opens only via a
+ * keyboard chord, so on a phone search was reachable only by typing the URL.
+ * This magnifier lands on the full search page (which auto-focuses its input),
+ * giving a touch user the same kind of entry every other destination has.
+ */
+function MobileSearchButton({ campaignId }: { campaignId: number }) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  return (
+    <button
+      type="button"
+      onClick={() => navigate(`/c/${campaignId}/search`)}
+      aria-label={t('nav.searchAria')}
+      title={t('nav.searchAria')}
+      className="inline-flex items-center justify-center rounded-md shrink-0"
+      style={{
+        minHeight: 34,
+        minWidth: 34,
+        color: 'var(--color-text)',
+        background: 'transparent',
+        border: '1px solid var(--color-divider)',
+      }}
+    >
+      <GameIcon slug="magnifying-glass" size={UI_ICON_SIZE.sm} title={t('nav.searchAria')} />
+    </button>
+  );
+}
+
 function SidebarKeyboardShortcutsButton() {
   const { t } = useTranslation();
   const commands = useKeyboardCommands();
@@ -955,6 +985,7 @@ function LayoutContent() {
             </div>
           </div>
           <div className="flex-1" />
+          {campaignId !== undefined && <MobileSearchButton campaignId={campaignId} />}
           {!desktopLayout && <NotificationsBell />}
           {campaignId !== undefined && roleLabel && (
             <button

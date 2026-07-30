@@ -15,7 +15,7 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
-import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { foldForSearch, foldedIncludes, matchesSearchQuery } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -1298,10 +1298,12 @@ export class EncountersService {
     return rows
       .filter(
         (r) =>
-          foldedIncludes(r.name, folded)
-          || foldedIncludes(r.locationLabel ?? '', folded)
-          || foldedIncludes(r.questLabel ?? '', folded)
-          || foldedIncludes(r.sessionLabel ?? '', folded),
+          // Prefix-token match keeps this bounded read on the same semantics as the
+          // FTS5 index (issue #1481), so the encounter set agrees across modes.
+          matchesSearchQuery(r.name, folded)
+          || matchesSearchQuery(r.locationLabel ?? '', folded)
+          || matchesSearchQuery(r.questLabel ?? '', folded)
+          || matchesSearchQuery(r.sessionLabel ?? '', folded),
       )
       .slice(0, boundedLimit);
   }
