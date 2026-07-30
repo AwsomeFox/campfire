@@ -1,4 +1,4 @@
-import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../src/common/text-search';
+import { compareSearchText, firstTokenMatchIndex, foldForSearch, foldedIncludes, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../src/common/text-search';
 
 describe('foldForSearch (issue #624)', () => {
   it('NFKC-normalizes ligatures and compatibility forms', () => {
@@ -108,5 +108,35 @@ describe('matchesSearchQuery (issue #1481 — FTS5-aligned prefix-token match)',
     expect(matchesSearchQuery(composite, foldForSearch('19'))).toBe(true);
     expect(matchesSearchQuery(composite, foldForSearch('19:30'))).toBe(true);
     expect(matchesSearchQuery(composite, foldForSearch('2031-09-20'))).toBe(true);
+  });
+});
+
+describe('firstTokenMatchIndex (issue #1481 — snippet centering for non-contiguous matches)', () => {
+  it('returns -1 when no query token prefix-matches any token', () => {
+    expect(firstTokenMatchIndex('Vexley the Innkeeper', foldForSearch('dragon'))).toBe(-1);
+    expect(firstTokenMatchIndex('a b c', foldForSearch(''))).toBe(-1);
+  });
+
+  it('locates the first matched token for a non-contiguous multi-token query', () => {
+    // 'red dragon' is not contiguous in 'red ancient dragon', but 'red' and
+    // 'dragon' are both token-prefix matches; the snippet must center on one of
+    // them rather than the field opening. Folded, the matched token 'dragon'
+    // starts after 'red ancient '.
+    const text = 'The party faced a red ancient dragon at the gate.';
+    const idx = firstTokenMatchIndex(text, foldForSearch('red dragon'));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    // The window should land on 'red' (the earliest matched token) or 'dragon'.
+    const window = text.slice(idx, idx + 40);
+    expect(window).toMatch(/red|dragon/);
+  });
+
+  it('skips earlier non-matching prose to center on the matched term', () => {
+    // >SNIPPET_PAD chars of padding before the matched term, so a naive opening
+    // window would show none of it.
+    const padding = 'Lorem ipsum dolor sit amet consectetur adipiscing elit. '.repeat(4);
+    const text = `${padding}Behold the crimson wyrm dragon awaits.`;
+    const idx = firstTokenMatchIndex(text, foldForSearch('red dragon'));
+    expect(idx).toBeGreaterThan(padding.length - 10);
+    expect(text.slice(idx, idx + 40)).toMatch(/dragon|wyrm/);
   });
 });

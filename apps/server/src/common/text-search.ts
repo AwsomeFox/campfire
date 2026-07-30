@@ -81,6 +81,31 @@ export function matchesSearchQuery(haystack: string, foldedNeedle: string): bool
 }
 
 /**
+ * Folded index of the first haystack token that STARTS WITH any query token
+ * (issue #1481). {@link matchesSearchQuery} accepts non-contiguous multi-token
+ * matches (e.g. "red dragon" inside "red ancient dragon"), but a snippet built
+ * from a contiguous-substring index (`foldedIndexOf`) returns -1 for such a match
+ * and would fall back to the field's opening, showing none of the matched terms.
+ * This locates the first matched token so the snippet can be centered on it.
+ * `haystack` is unfolded display text; `foldedNeedle` must already be folded.
+ * Returns -1 when no query token prefix-matches any haystack token.
+ */
+export function firstTokenMatchIndex(haystack: string, foldedNeedle: string): number {
+  if (!foldedNeedle) return -1;
+  const need = searchTokens(foldedNeedle);
+  if (need.length === 0) return -1;
+  const folded = foldForSearch(haystack);
+  let best = -1;
+  for (const token of searchTokens(folded)) {
+    if (need.some((nt) => token.startsWith(nt))) {
+      const at = folded.indexOf(token);
+      if (at >= 0 && (best < 0 || at < best)) best = at;
+    }
+  }
+  return best;
+}
+
+/**
  * The searchable form of a scheduled-session ISO timestamp (issue #1481). The
  * FTS5 index stores the date alongside a space-separated copy (T/:/- → space) so
  * date/time fragments like "19:30" or "2031-09-20" prefix-match as their own

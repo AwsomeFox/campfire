@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
-import { compareSearchText, foldForSearch, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
+import { compareSearchText, firstTokenMatchIndex, foldForSearch, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { notDeleted } from '../../common/soft-delete';
 import { anchorVisibilitySql } from '../../common/anchor-visibility';
 import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
@@ -84,7 +84,13 @@ const FTS_DM_COLUMNS = '{title name body aux dm_secret title_fold name_fold body
  * The returned snippet always slices the original `text` so spelling is preserved.
  */
 function makeSnippet(text: string, foldedNeedle: string): string {
-  const idx = foldedIndexOf(text, foldedNeedle);
+  let idx = foldedIndexOf(text, foldedNeedle);
+  if (idx < 0) {
+    // Non-contiguous multi-token match (matchesSearchQuery): foldedIndexOf returns
+    // -1 for "red dragon" inside "red ancient dragon", so center the window on the
+    // first token-prefix match instead of the field's opening (issue #1481).
+    idx = firstTokenMatchIndex(text, foldedNeedle);
+  }
   if (idx < 0) return text.slice(0, SNIPPET_PAD * 2).trim();
   // Folded index is exact when NFKC is length-stable; clamp for compatibility forms.
   const approx = Math.min(Math.max(0, idx), text.length);
@@ -170,22 +176,28 @@ export class SearchService {
     if (!ftsQuery) return this.toResponse(q, [], limit);
 
     const candidateLimit = Math.max(limit * 8, 100);
+    // Each candidate query fetches one extra row as a cap sentinel (issue #1481):
+    // treating "we retrieved exactly candidateLimit" as proof of a cap produced
+    // false truncation reports when the index held exactly that many matches and
+    // hydration rejected them all. The flag is raised only when a query actually
+    // returned more than its cap, and the sentinel is trimmed before hydration.
     const titleCandidates = this.searchFtsCandidates(campaignId, role, user, `${FTS_TITLE_COLUMNS}: ${ftsQuery}`, candidateLimit);
     const fullColumns = role === 'dm' ? FTS_DM_COLUMNS : FTS_PUBLIC_COLUMNS;
     const fullCandidates = this.searchFtsCandidates(campaignId, role, user, `${fullColumns}: ${ftsQuery}`, candidateLimit);
+    const titleCapHit = titleCandidates.length > candidateLimit;
+    const fullCapHit = fullCandidates.length > candidateLimit;
+    const candidateCapHit = titleCapHit || fullCapHit;
+    const titleBase = titleCapHit ? titleCandidates.slice(0, candidateLimit) : titleCandidates;
+    const fullBase = fullCapHit ? fullCandidates.slice(0, candidateLimit) : fullCandidates;
 
     const seen = new Set<string>();
     const candidates: Candidate[] = [];
-    for (const candidate of [...titleCandidates, ...fullCandidates]) {
+    for (const candidate of [...titleBase, ...fullBase]) {
       const key = candidateKey(candidate.type, candidate.id);
       if (seen.has(key)) continue;
       seen.add(key);
       candidates.push(candidate);
     }
-    // If either candidate query hit its LIMIT, the index may hold more matches we
-    // never retrieved — surface that as truncation rather than silently returning
-    // a partial list (issue #1481).
-    const candidateCapHit = candidates.length >= candidateLimit;
 
     const results = await this.hydrateFtsCandidates(campaignId, user, role, needle, candidates);
     results.sort(
@@ -539,7 +551,9 @@ export class SearchService {
         AND campaign_search_fts MATCH ${matchQuery}
         AND ${this.campaignSearchVisibilitySql(role, user)}
       ORDER BY campaign_search_fts.rank, campaign_search_fts.rowid
-      LIMIT ${limit}
+      -- +1 sentinel row so the caller proves the cap was hit rather than guessing
+      -- from an exact-length result (issue #1481).
+      LIMIT ${limit + 1}
     `);
     return rows.map((r) => ({ type: r.type as SearchResultType, id: Number(r.id), rank: Number(r.rank) }));
   }

@@ -251,4 +251,47 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
       expect(hit!.snippet).toContain('2031-09-20T19:30:00.000Z');
     });
   });
+
+  // A non-contiguous multi-token match (matchesSearchQuery) in long prose must
+  // still center its snippet on a matched term. The contiguous indexOf used to
+  // build the window returns -1 for "red dragon" inside "red ancient dragon", so
+  // before the fix the snippet fell back to the field opening and showed none of
+  // the matched words (issue #1481).
+  describe('snippets center on a matched token for non-contiguous matches (issue #1481)', () => {
+    let ctx: TestAppContext;
+    let campaignId: number;
+    let questId: number;
+
+    beforeAll(async () => {
+      ctx = await createTestApp();
+      const server = ctx.app.getHttpServer();
+      campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Snippet Center Camp' })).body.id;
+      // >2*SNIPPET_PAD chars of prose before the matched term, so an opening-only
+      // window would show none of it.
+      const padding = 'The party travelled through many quiet provinces without incident. '.repeat(4);
+      questId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/quests`)
+          .set(dm)
+          .send({ title: 'Wyrmhunt', body: `${padding}At last they found the red ancient dragon hoarding the stolen ledger.` })
+      ).body.id;
+    });
+
+    afterAll(() => closeTestApp(ctx));
+
+    it('centers the snippet on the matched term, not the body opening', async () => {
+      const res = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('red dragon')}`)
+        .set(dm);
+      expect(res.status).toBe(200);
+      const hit = (res.body.results as Array<{ type: string; id: number; snippet: string; matchedField: string }>).find(
+        (r) => r.type === 'quest' && r.id === questId,
+      );
+      expect(hit).toBeTruthy();
+      expect(hit!.matchedField).toBe('body');
+      // The snippet must reach the matched term, not just the opening prose.
+      expect(hit!.snippet.toLowerCase()).toContain('dragon');
+      expect(hit!.snippet).not.toContain('without incident');
+    });
+  });
 });
