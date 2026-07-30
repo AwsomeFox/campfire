@@ -60,10 +60,10 @@ export function QuickCaptureDialog({
       data-keyboard-command-overlay
       afterBody={
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-muted mb-4">{t('keyboard.quickCaptureHint')}</p>
+          <p className="text-sm text-muted mb-3.5">{t('keyboard.quickCaptureHint')}</p>
           {error && <ErrorNote message={error} />}
           {!isDm && (
-            <div className="flex gap-2 mb-3 text-xs">
+            <div className="flex gap-2 mb-2.5 text-xs">
               <button
                 type="button"
                 className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
