@@ -223,8 +223,9 @@ export class NotificationsService implements OnApplicationBootstrap {
    * the #597 "a block stops a notification" rule exists to stop a sender's own content from
    * reaching someone who blocked them, not to hide the fact that access itself changed. The
    * actor is still excluded from the RECIPIENT list as normal (they already know synchronously
-   * from their own request). The durable actor id is still written for later privacy rewrites;
-   * only the separate block-filter input to `dispatch` is null.
+   * from their own request). A bypassed lifecycle signal deliberately remains actor-free both
+   * in rendered and durable fields: retaining an id would let a later rename attach actor text
+   * to this unblockable access-control channel. Other bypass callers retain their actor id.
    */
   async notifyCampaign(
     campaignId: number,
@@ -239,11 +240,12 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((m) => m.userId).filter((id) => actorId === null || id !== actorId);
+      const actorFreeLifecycle = opts?.bypassBlockFilter === true && event.type === 'campaign_trashed';
       await this.dispatch(
         recipients,
         campaignId,
         event,
-        actor?.id ?? null,
+        actorFreeLifecycle ? null : (actor?.id ?? null),
         opts?.bypassBlockFilter ? null : (actor?.id ?? null),
       );
     } catch (err) {

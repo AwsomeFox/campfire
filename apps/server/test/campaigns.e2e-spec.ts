@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { rulePacks } from '../src/db/schema';
+import { notifications, rulePacks } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 
@@ -719,6 +720,19 @@ describe('campaign trash notifies account-wide (e2e, real cookie sessions, issue
       (n: { type: string; campaignId: number }) => n.type === 'campaign_trashed' && n.campaignId === campaignId,
     );
     expect(trashed).toBeDefined();
+    expect(trashed.actorName).toBe('');
+    // This bypassed access-control signal must stay actor-free even after the
+    // deleting DM changes their display name, otherwise a blocked member gets an
+    // unblockable actor-controlled label.
+    expect((await dmAgent.patch('/api/v1/me/preferences').send({ displayName: 'Unblockable actor text' })).status).toBe(200);
+    const refreshed = await playerAgent.get('/api/v1/notifications');
+    const refreshedItems = Array.isArray(refreshed.body) ? refreshed.body : refreshed.body.items;
+    expect(refreshedItems.find((n: { id: number }) => n.id === trashed.id)?.actorName).toBe('');
+    const stored = ctx.app.get<DrizzleDb>(DB).select().from(notifications).where(eq(notifications.id, trashed.id)).get();
+    expect(stored).toMatchObject({ actorName: '', actorUserId: null });
+    // Keep the shared test principal in its original profile state for subsequent
+    // account-wide lifecycle cases in this describe block.
+    expect((await dmAgent.patch('/api/v1/me/preferences').send({ displayName: '' })).status).toBe(200);
   });
 
   it('trashing with revokeInvites=true ALSO notifies (the sibling gap found while fixing #1707: this branch used to return before the shared tail)', async () => {
