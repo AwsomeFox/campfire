@@ -995,11 +995,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0151 adds #842 safety attribution identically on a fresh DB and an upgraded one', () => {
+  it('0152 adds #842 safety attribution identically on a fresh DB and an upgraded one', () => {
     // Same drift guard as 0121: bootstrap.sql and the migration must produce the SAME table, or
     // an upgraded install ends up with a subtly different safety-hold row than a fresh one.
     expect(MIGRATION_NAMES).toContain('0130_table_safety_holds_599');
-    expect(MIGRATION_NAMES).toContain('0151_table_safety_attribution_842');
+    expect(MIGRATION_NAMES).toContain('0152_table_safety_attribution_842');
 
     const expected = [
       'campaign_id',
@@ -1037,7 +1037,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const missingTable = new Database(dbFilePath(dataDir));
       try {
         missingTable.exec('DROP TABLE table_safety_holds');
-        missingTable.prepare('DELETE FROM __migrations WHERE name = ?').run('0151_table_safety_attribution_842');
+        missingTable.prepare('DELETE FROM __migrations WHERE name = ?').run('0152_table_safety_attribution_842');
       } finally {
         missingTable.close();
       }
@@ -1045,8 +1045,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       try {
         expect([...columnNames(recreated.sqlite, 'table_safety_holds')].sort()).toEqual(expected);
         expect(
-          recreated.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0151_table_safety_attribution_842'),
-        ).toEqual({ name: '0151_table_safety_attribution_842' });
+          recreated.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0152_table_safety_attribution_842'),
+        ).toEqual({ name: '0152_table_safety_attribution_842' });
       } finally {
         recreated.sqlite.close();
       }
@@ -1091,8 +1091,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0152 adds explicit imported-attribution markers with privacy-safe legacy defaults (#842)', () => {
-    expect(MIGRATION_NAMES).toContain('0152_imported_attribution_842');
+  it('0153 adds explicit imported-attribution markers with privacy-safe legacy defaults (#842)', () => {
+    expect(MIGRATION_NAMES).toContain('0153_imported_attribution_842');
     dataDir = makeTempDataDir();
     const fresh = openDatabase(dataDir);
     fresh.sqlite.close();
@@ -1106,7 +1106,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         ALTER TABLE entity_revisions DROP COLUMN author_imported;
         ALTER TABLE entity_revisions DROP COLUMN replaced_by_imported;
       `);
-      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0152_imported_attribution_842');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0153_imported_attribution_842');
     } finally {
       legacy.close();
     }

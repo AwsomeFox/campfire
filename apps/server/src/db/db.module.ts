@@ -4776,10 +4776,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // why this is never renumbered: renaming a migration a database has already recorded is the
   // one edit that silently breaks run-once.
   { name: '0130_table_safety_holds_599', run: migrateTableSafetyHolds599 },
-  // 0151/0152 are centrally allocated to #842. They stay after #599 because
+  // 0152/0153 are centrally allocated to #842. They stay after #599 because
   // both alter tables that #599/bootstrap owns; the full names preserve run-once.
-  { name: '0151_table_safety_attribution_842', run: migrateTableSafetyAttribution842 },
-  { name: '0152_imported_attribution_842', run: migrateImportedAttribution842 },
+  { name: '0152_table_safety_attribution_842', run: migrateTableSafetyAttribution842 },
+  { name: '0153_imported_attribution_842', run: migrateImportedAttribution842 },
   // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 were held by
   // other in-flight branches when this entry was written. Several have since landed and are
   // registered in this same array (0130 → #599, 0131 → #1042, 0132 → #1047), which changes
