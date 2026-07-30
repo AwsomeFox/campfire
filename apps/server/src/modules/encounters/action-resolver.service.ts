@@ -601,7 +601,7 @@ export class ActionResolverService {
     // initially automatic preview into that same kind of pending human decision; the driver marks
     // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply, encounter.round);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply, encounter.round, encounter.turnVersion);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -611,7 +611,7 @@ export class ActionResolverService {
       // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
       // silently commit a number the spec itself could never have rolled.
       this.assertResolutionWithinSpecBounds(spec, resolution);
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round, encounter.turnVersion);
       applied = true;
     }
     return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
@@ -1099,6 +1099,7 @@ export class ActionResolverService {
     actionFingerprint: string | null,
     awaitingConfirmation: boolean,
     turnRound: number,
+    turnVersion: number,
   ): void {
     this.db
       .insert(actionPendingResolutions)
@@ -1112,6 +1113,7 @@ export class ActionResolverService {
         actionFingerprint,
         awaitingConfirmation,
         turnRound,
+        turnVersion,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
       })
@@ -1375,7 +1377,7 @@ export class ActionResolverService {
       throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
     }
 
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id, pending.turnRound);
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id, pending.turnRound, pending.turnVersion);
     return { undoToken };
   }
 
@@ -1401,6 +1403,8 @@ export class ActionResolverService {
     chainId: string,
     /** The resolve-time round stored with the opaque pending chain, never client input. */
     turnRound: number,
+    /** Monotonic server-owned turn version, invalidated by advance and undo. */
+    turnVersion: number,
   ): ActionUndoToken {
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
@@ -1433,11 +1437,11 @@ export class ActionResolverService {
       // resource mutation so a stale player action is atomically rejected.
       const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
       if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
-      if (role !== 'dm' && turnRound !== liveEncounter.round) {
+      if (role !== 'dm' && (turnRound !== liveEncounter.round || turnVersion !== liveEncounter.turnVersion)) {
         // Defer this durable, best-effort write until after the transaction rolls back.
         // Writing it on the same handle while the transaction is open would make the
         // audit row part of the rollback instead of recording the rejected attempt.
-        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, 'stale_preview_round'));
+        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, turnRound !== liveEncounter.round ? 'stale_preview_round' : 'stale_preview_turn_version'));
         throw new ForbiddenException('Action preview is from a previous turn.');
       }
       if (!this.isPlayerActiveTurn(liveEncounter, actor, role)) {

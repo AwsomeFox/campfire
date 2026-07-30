@@ -1,7 +1,8 @@
 import request from 'supertest';
+import { and, eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { rulePacks, ruleEntries } from '../src/db/schema';
+import { auditLog, rulePacks, ruleEntries } from '../src/db/schema';
 
 /**
  * Issue #414 — structured action resolver at the HTTP API layer (real Nest app + SQLite).
@@ -424,5 +425,40 @@ describe('action resolver (e2e HTTP)', () => {
     expect(dmApply.status).toBe(200);
     const undo = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(dm).send(dmApply.body.undoToken);
     expect(undo.status).toBe(200);
+
+    // Restore the shared fixture's opening turn for the same-round undo regression below.
+    const undoTurn = await request(server).post(`/api/v1/encounters/${encounterId}/undo-turn`).set(dm).send({});
+    expect(undoTurn.status).toBe(201);
+    expect(undoTurn.body.currentCombatantId).toBe(actorId);
+  });
+
+  it('issue #1316: advance then undo to the same actor still invalidates a player preview', async () => {
+    const server = ctx.app.getHttpServer();
+    const preview = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(player)
+      .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+    expect(preview.status).toBe(200);
+
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const hpBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm).send({})).status).toBe(201);
+    const restored = await request(server).post(`/api/v1/encounters/${encounterId}/undo-turn`).set(dm).send({});
+    expect(restored.status).toBe(201);
+    expect(restored.body.currentCombatantId).toBe(actorId);
+    expect(restored.body.round).toBe(before.body.round);
+
+    const apply = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(player).send({ chainId: preview.body.chainId });
+    expect(apply.status).toBe(403);
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent).toBe(hpBefore);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rejected = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')));
+    expect(rejected.some((row) => JSON.parse(row.detail).reason === 'stale_preview_turn_version' && JSON.parse(row.detail).chainId === preview.body.chainId)).toBe(true);
   });
 });

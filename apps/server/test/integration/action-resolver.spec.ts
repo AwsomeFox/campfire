@@ -730,11 +730,11 @@ describe('action resolver (real SQLite, service layer)', () => {
     );
     expect(
       orm
-        .select({ turnRound: actionPendingResolutions.turnRound })
+        .select({ turnRound: actionPendingResolutions.turnRound, turnVersion: actionPendingResolutions.turnVersion })
         .from(actionPendingResolutions)
         .where(eq(actionPendingResolutions.id, preview.chainId))
         .get(),
-    ).toEqual({ turnRound: 1 });
+    ).toEqual({ turnRound: 1, turnVersion: 0 });
     const internals = service as unknown as { applyInternal: (...args: unknown[]) => unknown };
     const originalApplyInternal = internals.applyInternal;
     internals.applyInternal = (...args) => {
