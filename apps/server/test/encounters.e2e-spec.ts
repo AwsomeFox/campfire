@@ -717,6 +717,14 @@ describe('encounters (e2e)', () => {
       expect(replay.status).toBe(201);
       expect(replay.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
 
+      // A later removal runs token cleanup. It must not erase this consumed
+      // receipt while the 30-second lost-response replay window is still open.
+      const cleanupTrigger = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Cleanup trigger', hpMax: 2 });
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${cleanupTrigger.body.id}`).set(dm)).status).toBe(200);
+      const replayAfterCleanup = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(replayAfterCleanup.status).toBe(201);
+      expect(replayAfterCleanup.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
+
       const expiring = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Expired undo', hpMax: 2 });
       const removedExpired = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm);
       const db = ctx.app.get<DrizzleDb>(DB);

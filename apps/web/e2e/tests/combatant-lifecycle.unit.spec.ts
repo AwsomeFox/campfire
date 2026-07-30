@@ -130,9 +130,13 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     expect(source).toContain('trashedEncounterIdsRef.current.has(requestEncounterId)');
     expect(source).toContain('overflow > 0');
     expect(source).toContain('dismissCompetingRecoveryUndos();');
-    expect(source).toContain('trashedEncounterIdsRef.current.add(eid);\n      dismissCompetingRecoveryUndos();');
-    expect(source).toContain('if (trashedEncounterIdsRef.current.has(eid)) return;');
+    expect(source).toContain('trashedEncounterIdsRef.current.add(eid);');
     expect(source).toContain("snapshot?.name ?? 'Combatant'");
+    expect(source).toContain('const combatantRemovalKeys = useRef(new Map<string, string>());');
+    expect(source).toContain('const idempotencyKey = combatantRemovalKeys.current.get(removalKey) ?? newOperationId();');
+    expect(source).toContain('.delete<CombatantRemoveResult>');
+    expect(source).toContain('{ json: { idempotencyKey } }');
+    expect(source).toContain('error instanceof ApiError && error.status < 500');
     expect(source).toContain('!isCurrentCombatantUndoEncounter(eid, activeEncounterIdRef.current) || trashedEncounterIdsRef.current.has(eid)');
     expect(source).toContain('if (onBeginTokenBatchUndo?.() === false) return;');
     expect(source).toContain('dismissTokenUndoNonce={dismissTokenUndoNonce}');

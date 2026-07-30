@@ -29,7 +29,7 @@ import type {
   CastSessionCreated,
   Character,
   Combatant,
-  CombatantRemoveUndo,
+  CombatantRemoveResult,
   CombatantKind,
   ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
@@ -1082,6 +1082,10 @@ export default function RunSessionPage() {
   const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const trashedEncounterIdsRef = useRef(new Set<number>());
   const trashedEncounterRevisionsRef = useRef(new Map<number, string>());
+  // Keep one key for a remove intent until a definite response. If its success
+  // response is lost, pressing Remove again must replay the same receipt rather
+  // than turn the retry into a 404 after the original delete committed.
+  const combatantRemovalKeys = useRef(new Map<string, string>());
   const [pendingCombatantUndo, setPendingCombatantUndo] = useState<{ name: string; undoToken: string; encounterId: number } | null>(null);
   const [dismissTokenUndoNonce, setDismissTokenUndoNonce] = useState(0);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
@@ -2174,11 +2178,15 @@ export default function RunSessionPage() {
   const removeCombatant = (combatantId: number) => {
     const snapshot = encounter?.combatants.find((combatant) => combatant.id === combatantId);
     const requestEncounterId = eid;
+    const removalKey = `${requestEncounterId}:${combatantId}`;
+    const idempotencyKey = combatantRemovalKeys.current.get(removalKey) ?? newOperationId();
+    combatantRemovalKeys.current.set(removalKey, idempotencyKey);
     setActionError(null);
     markCombatantPending(combatantId, true);
     api
-      .delete<CombatantRemoveUndo>(`${API}/encounters/${requestEncounterId}/combatants/${combatantId}`)
+      .delete<CombatantRemoveResult>(`${API}/encounters/${requestEncounterId}/combatants/${combatantId}`, { json: { idempotencyKey } })
       .then(({ undoToken }) => {
+        combatantRemovalKeys.current.delete(removalKey);
         if (
           !isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current) ||
           trashedEncounterIdsRef.current.has(requestEncounterId)
@@ -2189,6 +2197,9 @@ export default function RunSessionPage() {
         invalidateEncounter(queryClient, requestEncounterId);
       })
       .catch((error) => {
+        // A response from the application conclusively rejected the intent. Keep
+        // the key for network/proxy failures so Retry remains a safe replay.
+        if (error instanceof ApiError && error.status < 500) combatantRemovalKeys.current.delete(removalKey);
         if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) reportError(error);
       })
       .finally(() => {

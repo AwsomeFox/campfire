@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
@@ -4251,7 +4251,9 @@ export class EncountersService {
         }
       }
 
-      tx.delete(combatantRemovalUndos).where(or(lt(combatantRemovalUndos.expiresAt, now), isNotNull(combatantRemovalUndos.consumedAt))).run();
+      // Consumed tokens still provide the lost-response replay guarantee until
+      // their short expiry window closes. Only discard records that have expired.
+      tx.delete(combatantRemovalUndos).where(lt(combatantRemovalUndos.expiresAt, now)).run();
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
       tx.update(encounters).set({
         ...afterEncounter,
