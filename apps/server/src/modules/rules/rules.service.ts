@@ -31,7 +31,6 @@ import {
   clampRuleSearchLimit,
   decodeRuleSearchCursor,
   encodeRuleSearchCursor,
-  nameMatchBucket,
   type BrowseCursor,
   type FtsCursor,
   type LikeCursor,
@@ -445,28 +444,70 @@ class ImportJobCancelledError extends Error {}
  * Ties within a bucket are broken by the caller's secondary ORDER BY
  * (FTS bm25 rank, or name in the LIKE fallback).
  */
+const DIACRITIC_REPLACEMENT_PAIRS: Array<[string, string]> = [
+  ['É', 'e'], ['È', 'e'], ['Ê', 'e'], ['Ë', 'e'], ['é', 'e'], ['è', 'e'], ['ê', 'e'], ['ë', 'e'],
+  ['Á', 'a'], ['À', 'a'], ['Â', 'a'], ['Ä', 'a'], ['Ã', 'a'], ['Å', 'a'], ['á', 'a'], ['à', 'a'], ['â', 'a'], ['ä', 'a'], ['ã', 'a'], ['å', 'a'],
+  ['Í', 'i'], ['Ì', 'i'], ['Î', 'i'], ['Ï', 'i'], ['í', 'i'], ['ì', 'i'], ['î', 'i'], ['ï', 'i'],
+  ['Ó', 'o'], ['Ò', 'o'], ['Ô', 'o'], ['Ö', 'o'], ['Õ', 'o'], ['Ø', 'o'], ['ó', 'o'], ['ò', 'o'], ['ô', 'o'], ['ö', 'o'], ['õ', 'o'], ['ø', 'o'],
+  ['Ú', 'u'], ['Ù', 'u'], ['Û', 'u'], ['Ü', 'u'], ['ú', 'u'], ['ù', 'u'], ['û', 'u'], ['ü', 'u'],
+  ['Ý', 'y'], ['Ÿ', 'y'], ['ý', 'y'], ['ÿ', 'y'],
+  ['Ñ', 'n'], ['ñ', 'n'],
+  ['Ç', 'c'], ['ç', 'c'], ['Ć', 'c'], ['ć', 'c'], ['Č', 'c'], ['č', 'c'],
+  ['Š', 's'], ['š', 's'], ['Ś', 's'], ['ś', 's'],
+  ['Ž', 'z'], ['ž', 'z'], ['Ź', 'z'], ['ź', 'z'], ['Ż', 'z'], ['ż', 'z'],
+  ['Ł', 'l'], ['ł', 'l'],
+  ['Æ', 'ae'], ['æ', 'ae'], ['Œ', 'oe'], ['œ', 'oe'],
+];
+
+function foldSqlCol(col: any) {
+  let expr = sql`lower(${col})`;
+  for (const [from, to] of DIACRITIC_REPLACEMENT_PAIRS) {
+    expr = sql`replace(${expr}, ${from}, ${to})`;
+  }
+  return expr;
+}
+
+/**
+ * Name-match ranking expression used to compute candidate relevance bucket
+ * (FTS bm25 rank, or name in the LIKE fallback).
+ */
 function nameMatchRank(q: string) {
-  // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
-  // sanitisation in the LIKE fallback below). Fold the needle with the shared
-  // helper (#624); SQL lower() on the column remains ASCII-limited on SQLite —
-  // FTS path is preferred when available; LIKE fallback is best-effort for ASCII.
+  const rawNeedle = q.trim().replace(/[%_]/g, '').toLowerCase();
   const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
+  const foldedName = foldSqlCol(ruleEntries.name);
   return sql`CASE
-    WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
-    WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
-    WHEN lower(${ruleEntries.name}) LIKE ${`%${needle}%`} THEN 2
+    WHEN lower(${ruleEntries.name}) = ${rawNeedle} OR ${foldedName} = ${needle} THEN 0
+    WHEN lower(${ruleEntries.name}) LIKE ${`${rawNeedle}%`} OR ${foldedName} LIKE ${`${needle}%`} THEN 1
+    WHEN lower(${ruleEntries.name}) LIKE ${`%${rawNeedle}%`} OR ${foldedName} LIKE ${`%${needle}%`} THEN 2
     ELSE 3
   END`;
 }
 
 /** Escapes an FTS5 MATCH query string by quoting it as a single phrase, then appending a prefix wildcard per token. */
 function toFtsQuery(q: string): string {
-  const tokens = q
+  const rawTokens = q
     .split(/\s+/)
     .map((t) => t.replace(/["]/g, ''))
     .filter(Boolean);
-  if (tokens.length === 0) return '';
-  return tokens.map((t) => `"${t}"*`).join(' ');
+  if (rawTokens.length === 0) return '';
+
+  return rawTokens
+    .map((rawToken) => {
+      const unicode61Token = rawToken
+        .normalize('NFD')
+        // eslint-disable-next-line no-misleading-character-class
+        .replace(/[\u{0300}-\u{036f}\u{1ab0}-\u{1aff}\u{1dc0}-\u{1dff}\u{20d0}-\u{20ff}\u{fe20}-\u{fe2f}]/gu, '')
+        .normalize('NFKC')
+        .toLowerCase();
+      const expandedToken = foldForSearch(rawToken);
+
+      if (unicode61Token && expandedToken && unicode61Token !== expandedToken) {
+        return `("${unicode61Token}"* OR "${expandedToken}"*)`;
+      }
+      const tokenToUse = expandedToken || unicode61Token || rawToken;
+      return `"${tokenToUse}"*`;
+    })
+    .join(' ');
 }
 
 const RULE_FACET_ORDER: RuleEntryType[] = [
@@ -2557,7 +2598,10 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, packTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select()
+      .select({
+        entry: ruleEntries,
+        sortKey: sql<string>`lower(${ruleEntries.name})`,
+      })
       .from(ruleEntries)
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(sql`lower(${ruleEntries.name})`, asc(ruleEntries.id))
@@ -2565,16 +2609,15 @@ export class RulesService implements OnModuleInit {
 
     const hasMore = rows.length > opts.limit;
     const page = hasMore ? rows.slice(0, opts.limit) : rows;
-    const items = page.map(entryToDomain);
+    const items = page.map((r) => entryToDomain(r.entry));
     const last = page[page.length - 1];
-    // Cursor `n` must match SQL lower(name) used in ORDER BY / keyset (ASCII-oriented).
     const nextCursor =
       hasMore && last
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'browse',
-            n: last.name.toLowerCase(),
-            i: last.id,
+            n: last.sortKey,
+            i: last.entry.id,
           })
         : undefined;
     return { items, total, hasMore, nextCursor, limit: opts.limit, facets };
@@ -2619,7 +2662,11 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select({ entry: ruleEntries, ftsRank: sql<number>`rule_entries_fts.rank` })
+      .select({
+        entry: ruleEntries,
+        ftsRank: sql<number>`rule_entries_fts.rank`,
+        bucket: rankExpr,
+      })
       .from(ruleEntries)
       .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
       .where(and(...conditions))
@@ -2635,7 +2682,7 @@ export class RulesService implements OnModuleInit {
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'fts',
-            b: nameMatchBucket(opts.q, last.entry.name),
+            b: Number(last.bucket),
             r: Number(last.ftsRank),
             i: last.entry.id,
           })
@@ -2653,10 +2700,18 @@ export class RulesService implements OnModuleInit {
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'like') as LikeCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
-    const like = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const needle = foldForSearch(opts.q.trim().replace(/[%_]/g, ''));
+    const rawLike = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const foldedLike = needle ? `%${needle}%` : undefined;
+    const foldedName = foldSqlCol(ruleEntries.name);
+    const foldedSummary = foldSqlCol(ruleEntries.summary);
+    const foldedBody = foldSqlCol(ruleEntries.body);
+    const likeClause = foldedLike
+      ? sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`
+      : sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${rawLike})`;
     const baseConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      likeClause,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2672,7 +2727,7 @@ export class RulesService implements OnModuleInit {
 
     const matchConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      likeClause,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
@@ -2682,7 +2737,10 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select()
+      .select({
+        entry: ruleEntries,
+        bucket: rankExpr,
+      })
       .from(ruleEntries)
       .where(and(...conditions))
       .orderBy(rankExpr, asc(ruleEntries.name), asc(ruleEntries.id))
@@ -2690,16 +2748,16 @@ export class RulesService implements OnModuleInit {
 
     const hasMore = rows.length > opts.limit;
     const page = hasMore ? rows.slice(0, opts.limit) : rows;
-    const items = page.map(entryToDomain);
+    const items = page.map((r) => entryToDomain(r.entry));
     const last = page[page.length - 1];
     const nextCursor =
       hasMore && last
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'like',
-            b: nameMatchBucket(opts.q, last.name),
-            n: last.name,
-            i: last.id,
+            b: Number(last.bucket),
+            n: last.entry.name,
+            i: last.entry.id,
           })
         : undefined;
     return { items, total, hasMore, nextCursor, limit: opts.limit, facets };

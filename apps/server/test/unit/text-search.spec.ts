@@ -35,13 +35,44 @@ describe('foldForSearch (issue #624)', () => {
     expect(foldForSearch('İ')).toBe('i');
   });
 
+  it('strips diacritics so accented and unaccented terms match symmetrically (issue #1493)', () => {
+    expect(foldForSearch('Zoë')).toBe('zoe');
+    expect(foldForSearch('Zoe')).toBe('zoe');
+    expect(foldedIncludes('Zoë', foldForSearch('Zoe'))).toBe(true);
+    expect(foldedIncludes('Zoe', foldForSearch('Zoë'))).toBe(true);
+
+    expect(foldForSearch('Résumé')).toBe('resume');
+    expect(foldForSearch('Resume')).toBe('resume');
+    expect(foldedIncludes('Résumé', foldForSearch('Resume'))).toBe(true);
+    expect(foldedIncludes('Resume', foldForSearch('Résumé'))).toBe(true);
+  });
+
   it('keeps emoji stable under fold', () => {
     const withEmoji = 'Party at 🐉 Café 🎉';
     const folded = foldForSearch(withEmoji);
     expect(folded).toContain('🐉');
     expect(folded).toContain('🎉');
-    expect(folded).toBe('party at 🐉 café 🎉');
+    expect(folded).toBe('party at 🐉 cafe 🎉');
     expect(foldedIncludes(withEmoji, foldForSearch('🐉'))).toBe(true);
+  });
+
+  it('preserves standalone ASCII punctuation diacritic characters like caret or backtick (issue #1493)', () => {
+    expect(foldForSearch('^')).toBe('^');
+    expect(foldForSearch('`')).toBe('`');
+    expect(foldedIncludes('note with ^ caret', foldForSearch('^'))).toBe(true);
+    expect(foldedIncludes('note with ` backtick', foldForSearch('`'))).toBe(true);
+  });
+
+  it('preserves Japanese voiced and semi-voiced kana distinctions (issue #1493)', () => {
+    expect(foldForSearch('ガード')).toBe('ガード');
+    expect(foldForSearch('カード')).toBe('カード');
+    expect(foldForSearch('ガード')).not.toBe(foldForSearch('カード'));
+  });
+
+  it('folds ligatures æ -> ae and œ -> oe (issue #1493)', () => {
+    expect(foldForSearch('Æther')).toBe('aether');
+    expect(foldForSearch('Cœur')).toBe('coeur');
+    expect(foldedIncludes('Æther Elemental', foldForSearch('aether'))).toBe(true);
   });
 
   it('does not mutate identity of already-folded ASCII', () => {

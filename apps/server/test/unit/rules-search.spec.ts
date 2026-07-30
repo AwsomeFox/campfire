@@ -2,7 +2,6 @@ import {
   clampRuleSearchLimit,
   decodeRuleSearchCursor,
   encodeRuleSearchCursor,
-  nameMatchBucket,
 } from '../../src/modules/rules/rules-search';
 
 describe('rules-search helpers (issue #613)', () => {
@@ -13,13 +12,6 @@ describe('rules-search helpers (issue #613)', () => {
     expect(clampRuleSearchLimit(500)).toBe(100);
     expect(clampRuleSearchLimit(0)).toBe(50);
     expect(clampRuleSearchLimit(-3)).toBe(50);
-  });
-
-  it('ranks name matches into stable buckets (exact/prefix/contains/other)', () => {
-    expect(nameMatchBucket('poisoned', 'Poisoned')).toBe(0);
-    expect(nameMatchBucket('poison', 'Poisoned')).toBe(1);
-    expect(nameMatchBucket('ison', 'Poisoned')).toBe(2);
-    expect(nameMatchBucket('petrified', 'Poisoned')).toBe(3);
   });
 
   it('round-trips browse/fts/like cursors and rejects mismatched modes', () => {
@@ -40,5 +32,12 @@ describe('rules-search helpers (issue #613)', () => {
 
     expect(decodeRuleSearchCursor(undefined, 'browse')).toBeUndefined();
     expect(() => decodeRuleSearchCursor('%%%not-base64%%%', 'browse')).toThrow(/cursor/i);
+  });
+
+  it('round-trips non-ASCII names through cursor encode/decode unchanged (issue #1493)', () => {
+    const nonAsciiName = 'Æther Elemental';
+    const cursor = encodeRuleSearchCursor({ v: 1, m: 'browse', n: nonAsciiName, i: 101 });
+    const decoded = decodeRuleSearchCursor(cursor, 'browse');
+    expect(decoded).toEqual({ v: 1, m: 'browse', n: 'Æther Elemental', i: 101 });
   });
 });
