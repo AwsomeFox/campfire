@@ -5593,34 +5593,56 @@ export class EncountersService {
         effectNames: string[];
       }> = [];
       if (snapshot) {
+        type Working = {
+          row: typeof combatants.$inferSelect;
+          conditions: ConditionInstance[];
+          effects: ActiveEffect[];
+          conditionRestored: string[];
+          effectRestored: string[];
+        };
+        const workByCombatant = new Map<number, Working>();
         for (const side of ['ending', 'starting'] as const) {
           const entry = snapshot[side];
           if (!entry) continue;
-          const row = rows.find((r) => r.id === entry.combatantId);
-          if (!row) continue;
+          let working = workByCombatant.get(entry.combatantId);
+          if (!working) {
+            const row = rows.find((r) => r.id === entry.combatantId);
+            if (!row) continue;
+            working = {
+              row,
+              conditions: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
+              effects: parseActiveEffects(row.activeEffects),
+              conditionRestored: [],
+              effectRestored: [],
+            };
+            workByCombatant.set(entry.combatantId, working);
+          }
 
-          const currentConditions = parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, []));
-          const currentEffects = parseActiveEffects(row.activeEffects);
+          const conditionResult = applyConditionTickDelta(entry, working.conditions);
+          const effectResult = applyEffectTickDelta(entry, working.effects);
+          working.conditions = conditionResult.merged;
+          working.effects = effectResult.merged;
+          working.conditionRestored.push(...conditionResult.restoredNames);
+          working.effectRestored.push(...effectResult.restoredNames);
+        }
 
-          const conditionResult = applyConditionTickDelta(entry, currentConditions);
-          const effectResult = applyEffectTickDelta(entry, currentEffects);
-
-          const restoredConditionNames = conditionResult.restoredNames;
-          const restoredEffectNames = effectResult.restoredNames;
-          if (restoredConditionNames.length > 0 || restoredEffectNames.length > 0) {
+        for (const [combatantId, working] of workByCombatant) {
+          const conditionNames = [...new Set(working.conditionRestored)];
+          const effectNames = [...new Set(working.effectRestored)];
+          if (conditionNames.length > 0 || effectNames.length > 0) {
             restoredLog.push({
-              combatantId: entry.combatantId,
-              combatantName: row.name,
-              conditionNames: restoredConditionNames,
-              effectNames: restoredEffectNames,
+              combatantId,
+              combatantName: working.row.name,
+              conditionNames,
+              effectNames,
             });
           }
 
           const writeSet: Partial<typeof combatants.$inferInsert> = {
-            activeEffects: toJsonText(effectResult.merged),
-            ...conditionWriteSetFromInstances(conditionResult.merged),
+            activeEffects: toJsonText(working.effects),
+            ...conditionWriteSetFromInstances(working.conditions),
           };
-          tx.update(combatants).set(writeSet).where(eq(combatants.id, entry.combatantId)).run();
+          tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
         }
 
         // Consume the snapshot so a second consecutive undo selects the previous turn.
