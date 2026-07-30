@@ -4310,10 +4310,6 @@ export class EncountersService {
       this.db.transaction((tx) => {
         const current = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
         if (!current) throw new NotFoundException(`Encounter ${encounterId} not found`);
-        this.assertMutable(current);
-        this.assertCampaignWritableInTx(tx, current.campaignId);
-        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
-        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
         const undo = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
         if (!undo || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
         const storedSnapshot = fromJsonText<(typeof combatants.$inferSelect & { sheetUpdatedAtAtRemoval?: string | null }) | null>(undo.snapshotJson, null);
@@ -4329,6 +4325,10 @@ export class EncountersService {
           replayed = true;
           return;
         }
+        this.assertMutable(current);
+        this.assertCampaignWritableInTx(tx, current.campaignId);
+        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
+        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
         // A rule-pack uninstall nulls live combatants before deleting its entries, but
         // a removed combatant only exists in this snapshot during the undo window.
         // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
@@ -4488,9 +4488,11 @@ export class EncountersService {
           adapter,
         );
         const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
-        if (turnIndex !== fresh.turnIndex) {
-          tx.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
-        }
+        tx.update(encounters).set({
+          turnIndex,
+          combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+          ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+        }).where(eq(encounters.id, encounterId)).run();
       }
 
       for (const r of rolled) {

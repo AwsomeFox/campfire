@@ -768,6 +768,29 @@ describe('encounters (e2e)', () => {
       expect(restored.status).toBe(404);
     });
 
+    it('replays a consumed removal undo after the encounter ends', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Ended undo replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Ended undo replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Replay target', hpMax: 2 });
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/roll-initiative`).set(dm)).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken })).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/end`).set(dm)).status).toBe(201);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id: added.body.id, name: 'Replay target' });
+    });
+
     it('rolls back a removal when its audit write fails', async () => {
       const server = ctx.app.getHttpServer();
       const db = ctx.app.get<DrizzleDb>(DB);
@@ -2511,6 +2534,12 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
 
   it('roll-initiative works while running and fills the late joiner (only null values)', async () => {
     const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const before = await db
+      .select({ combatantStateVersion: encountersTable.combatantStateVersion })
+      .from(encountersTable)
+      .where(eq(encountersTable.id, encounterId))
+      .get();
     const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
     expect(res.status).toBe(201);
     for (const c of res.body.combatants as CombatantShape[]) {
@@ -2519,6 +2548,12 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
     // Aria's manually-set initiative is left untouched.
     const aria = (res.body.combatants as CombatantShape[]).find((c) => c.id === ariaCombatantId);
     expect(aria?.initiative).toBe(12);
+    const after = await db
+      .select({ combatantStateVersion: encountersTable.combatantStateVersion })
+      .from(encountersTable)
+      .where(eq(encountersTable.id, encounterId))
+      .get();
+    expect(after?.combatantStateVersion).toBe((before?.combatantStateVersion ?? 0) + 1);
   });
 
   it('dm can set a specific initiative on any combatant while running', async () => {

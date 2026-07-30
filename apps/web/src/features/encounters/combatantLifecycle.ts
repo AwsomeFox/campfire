@@ -40,5 +40,14 @@ export function isCurrentCombatantUndoEncounter(requestEncounterId: number, acti
   return requestEncounterId === activeEncounterId;
 }
 
+/** A post-trash read must first observe the deletion before a changed row can prove restoration. */
+export function hasRestoredTrashedEncounter(
+  trashedRevision: string | undefined,
+  deletionObserved: boolean,
+  encounterRevision: string,
+): boolean {
+  return trashedRevision !== undefined && deletionObserved && trashedRevision !== encounterRevision;
+}
+
 export const REMOVE_COMBATANT_CONFIRM_BODY =
   'This removes their HP, conditions, initiative, and turn state. You can undo it immediately to restore the combatant.';

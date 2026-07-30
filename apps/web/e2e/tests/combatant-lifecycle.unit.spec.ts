@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   canStabilizeCombatant,
+  hasRestoredTrashedEncounter,
   isCurrentCombatantUndoEncounter,
   REMOVE_COMBATANT_CONFIRM_BODY,
   withOptimisticHpLifecycle,
@@ -112,6 +113,11 @@ test.describe('combatant lifecycle (issue #1469)', () => {
   test('remove copy names the lost state and immediate undo recovery', () => {
     expect(REMOVE_COMBATANT_CONFIRM_BODY).toContain('HP, conditions, initiative, and turn state');
     expect(REMOVE_COMBATANT_CONFIRM_BODY).toContain('undo it immediately');
+  });
+
+  test('a changed encounter revision proves restoration only after a post-trash 404', () => {
+    expect(hasRestoredTrashedEncounter('before-trash', false, 'late-pre-trash-read')).toBe(false);
+    expect(hasRestoredTrashedEncounter('before-trash', true, 'after-restore')).toBe(true);
   });
 
   test('replacement undo tokens remount, survive older undo completions, and cannot cross encounter routes', () => {
