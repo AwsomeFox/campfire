@@ -1938,7 +1938,11 @@ export class EncountersService {
     const enemyCombatants = combatantRows.filter((c) => {
       if (c.kind === 'monster') return true;
       if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
-      const disposition = c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+      // Preparation is still authored world state: show the NPC's live
+      // disposition until start() captures historical allegiance for play.
+      const disposition = encounterRow.status === 'preparing'
+        ? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '')
+        : c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
       return disposition.trim().toLowerCase() === 'hostile';
     });
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR

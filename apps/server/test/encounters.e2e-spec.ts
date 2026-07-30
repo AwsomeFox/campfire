@@ -4415,6 +4415,11 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
     const npcDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(npcDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    // Before play begins, a preparation estimate follows the NPC's current
+    // disposition rather than the snapshot captured when it was added.
+    expect((await request(server).patch(`/api/v1/npcs/${hostileNpcId}`).set(dm).send({ disposition: 'friendly' })).status).toBe(200);
+    const prepDifficultyAfterDispositionChange = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(prepDifficultyAfterDispositionChange.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
 
     const friendlyAndNeutral = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
@@ -4460,7 +4465,6 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
     const db = ctx.app.get<DrizzleDb>(DB);
     await db.update(encountersTable).set({ status: 'ended' }).where(eq(encountersTable.id, npcOnly.body.id));
-    await db.update(npcs).set({ disposition: 'friendly' }).where(eq(npcs.id, hostileNpcId));
     const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
     await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
