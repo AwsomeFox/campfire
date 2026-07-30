@@ -10890,7 +10890,7 @@ export type CampaignEvent = z.infer<typeof CampaignEvent>;
  * This is the input shape for CampaignEventsService.emit(): callers pass one
  * variant minus its server-assigned `at` timestamp.
  */
-export type DistributiveOmit<T, K extends keyof any> = [T] extends [never] ? never : T extends unknown ? Omit<T, K> : never;
+export type DistributiveOmit<T, K extends PropertyKey> = [T] extends [never] ? never : T extends unknown ? Omit<T, K> : never;
 export type CampaignEventInput = DistributiveOmit<CampaignEvent, 'at'>;
 
 // A persisted, campaign-shared dice roll (issue #35): RollResult plus authorship +

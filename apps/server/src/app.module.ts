@@ -68,6 +68,7 @@ import { InboxSweepModule } from './modules/inbox-sweep/inbox-sweep.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { CatchUpModule } from './modules/catch-up/catch-up.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
+import { SafetyCharterGuard } from './modules/session-zero/safety-charter.guard';
 import { RevisionsModule } from './modules/revisions/revisions.module';
 import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
 import { CastModule } from './modules/cast/cast.module';
@@ -216,6 +217,7 @@ function serveStaticImports(): DynamicModule[] {
     { provide: APP_GUARD, useClass: SessionAuthGuard },
     // After SessionAuthGuard — stamp audit actor into ALS (#684).
     { provide: APP_GUARD, useClass: RequestContextActorGuard },
+    { provide: APP_GUARD, useClass: SafetyCharterGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
     // Runs after SessionAuthGuard has populated req.tokenContext: enforces the
     // token's server-side writeScope (issue #158) — a 'none' token can't write,
