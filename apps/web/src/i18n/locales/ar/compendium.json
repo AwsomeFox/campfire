@@ -1,6 +1,7 @@
 {
   "compendium": {
     "title": "الموسوعة",
+    "readerTitle": "Reader",
     "searchPlaceholder": "Search creatures, spells, items…",
     "errors": {
       "search": "تعذّر البحث the compendium.",

@@ -11,6 +11,7 @@
  * Data: GET/POST /api/v1/campaigns/:campaignId/arcs, plus /arcs/:id and /beats/:id routes.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type {
   StoryArc,
@@ -168,6 +169,7 @@ function ReorderButtons({
 type PendingTrashUndo = { type: 'story_arc' | 'story_beat'; id: number; label: string };
 
 export default function StorylinesPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -366,7 +368,7 @@ export default function StorylinesPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
-        <PageTitle>Storylines</PageTitle>
+        <PageTitle>{t('nav.storylines')}</PageTitle>
         <TermHelp termId="storylines" />
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
           DM only

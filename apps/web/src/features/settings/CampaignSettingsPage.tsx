@@ -224,7 +224,7 @@ export default function CampaignSettingsPage() {
   if (!isDm) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-3">
-        <PageTitle>Campaign settings</PageTitle>
+        <PageTitle>{t('settings.title')}</PageTitle>
         <Card className="text-center space-y-1">
           <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p style={{ fontSize: 13, color: 'var(--color-neutral-300)', fontWeight: 600 }}>DM only</p>

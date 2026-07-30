@@ -4,6 +4,7 @@
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
@@ -54,6 +55,7 @@ function toTree(locations: Location[]): Array<{ loc: Location; depth: number }> 
 }
 
 export default function LocationListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
@@ -114,13 +116,13 @@ export default function LocationListPage() {
 
   const secondaryActions: PageHeaderSecondaryAction[] = useMemo(() => {
     const actions: PageHeaderSecondaryAction[] = [
-      { key: 'npcs', label: 'NPCs →', href: `/c/${id}/npcs` },
+      { key: 'npcs', label: t('locations.npcsLink'), href: `/c/${id}/npcs` },
     ];
     if (draftAction) {
       actions.push(draftAction);
     }
     return actions;
-  }, [draftAction, id]);
+  }, [draftAction, id, t]);
 
   async function createLocation() {
     if (!newName.trim()) return;
@@ -177,8 +179,8 @@ export default function LocationListPage() {
         <PageHeader
           variant="card"
           icon={<GameIcon slug="world" size={UI_ICON_SIZE.md} />}
-          title="World"
-          subtitle="· Locations"
+          title={t('nav.world')}
+          subtitle={t('locations.locationsSub')}
           secondaryActions={secondaryActions}
           primaryAction={
             canDmWrite && !creating ? (

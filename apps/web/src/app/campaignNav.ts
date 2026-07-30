@@ -64,7 +64,7 @@ export function buildCampaignNavGroups(
         { key: 'session-zero', label: t('nav.sessionZero'), to: `${base}/session-zero`, termId: 'sessionZero' },
         ...(isDm ? [{ key: 'storylines', label: t('nav.storylines'), to: `${base}/storylines`, termId: 'storylines' as const }] : []),
         { key: 'compendium', label: t('nav.compendium'), to: `${base}/compendium`, termId: 'compendium' },
-        { key: 'library', label: 'Library', to: `${base}/library` },
+        { key: 'library', label: t('nav.library'), to: `${base}/library` },
       ],
     },
     {
@@ -96,7 +96,7 @@ export function buildCampaignNavGroups(
         // Issue #601 — the DM's abuse-report queue. Sits in Manage next to Members
         // and Audit because it is campaign governance, not campaign content.
         { key: 'moderation', label: t('nav.moderation'), to: `${base}/moderation` },
-        { key: 'audit', label: 'Audit log', to: `${base}/audit` },
+        { key: 'audit', label: t('nav.auditLog'), to: `${base}/audit` },
       ]
     : [
         { key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals`, termId: 'proposals' },

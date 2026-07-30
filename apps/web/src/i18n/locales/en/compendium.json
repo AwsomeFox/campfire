@@ -1,6 +1,7 @@
 {
   "compendium": {
     "title": "Compendium",
+    "readerTitle": "Reader",
     "searchPlaceholder": "Search creatures, spells, items…",
     "errors": {
       "search": "Couldn't search the compendium.",

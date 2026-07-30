@@ -4,6 +4,7 @@
  * DM can inline-create (name + role); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
@@ -20,6 +21,7 @@ import { initials } from '../../lib/avatarText';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function NpcListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
@@ -148,7 +150,7 @@ export default function NpcListPage() {
         <PageHeader
           variant="card"
           icon={<GameIcon slug="hooded-figure" size={UI_ICON_SIZE.md} />}
-          title="NPCs"
+          title={t('nav.npcs')}
           secondaryActions={secondaryActions}
           primaryAction={
             canDmWrite && !creating ? (

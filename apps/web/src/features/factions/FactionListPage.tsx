@@ -113,7 +113,7 @@ export default function FactionListPage() {
         <PageHeader
           variant="card"
           icon={<GameIcon slug="black-flag" size={UI_ICON_SIZE.md} />}
-          title="Factions"
+          title={t('nav.factions')}
           primaryAction={
             canDmWrite && !creating ? (
               <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>

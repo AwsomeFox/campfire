@@ -19,6 +19,7 @@
  * errors with logical focus, and keyboard-complete controls.
  */
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import type { TimelineEvent, TimelineCalendar, TimelineListPage } from '@campfire/schema';
 import { TIMELINE_LIST_DEFAULT_LIMIT } from '@campfire/schema';
@@ -117,6 +118,7 @@ function focusField(id: string) {
 }
 
 export default function TimelinePage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -425,7 +427,7 @@ export default function TimelinePage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <PageTitle>Timeline</PageTitle>
+        <PageTitle>{t('nav.timeline')}</PageTitle>
         <div style={{ flex: 1 }} />
         {canDmWrite && !creating && (
           <Btn
