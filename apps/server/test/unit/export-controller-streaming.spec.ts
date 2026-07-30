@@ -24,48 +24,64 @@ function response(overrides: Partial<Response> = {}): Response {
   return res as unknown as Response;
 }
 
-// Issue #1527: hand-rolled doubles are typed against `Pick<RealService, ...>` — the
-// exact methods this file exercises — instead of a blind `{...} as unknown as X` with
-// no shape check at all. A double missing (or misspelling) a method the real service
-// requires is then a compile error here, not a runtime `TypeError` discovered only when
-// the double is actually invoked (see #1426's SchedulingService.listForExport case).
-// `ExportController`'s constructor still takes the concrete classes, so the final
-// `as unknown as X` is unavoidable — these classes carry private constructor-injected
-// fields, which no plain object literal can structurally satisfy — but everything up to
-// that single, narrow cast is now checked.
-type ExportServiceDouble = Pick<ExportService, 'exportFilename' | 'streamMarkdownZip'>;
-type CampaignAccessServiceDouble = Pick<CampaignAccessService, 'requireRole'>;
+// Issue #1527: `ExportController`'s constructor is typed against
+// `Pick<RealService, ...methods it actually calls>` rather than the concrete class (see
+// export.controller.ts). Because a `Pick<...>` is a plain structural type — not a class
+// with a private-field brand — a double satisfying it can be passed here with NO unsafe
+// cast at all, and the assignment is fully checked both ways:
+//
+//   - a double missing (or misspelling) a picked method fails to compile where it's
+//     declared, not at runtime when the controller calls it (#1426's failure mode);
+//   - if the controller starts calling a method outside this Pick list, that call fails
+//     to compile IN export.controller.ts, forcing the Pick list to widen — and once
+//     widened, every double here fails to compile until it supplies the new method too.
+// This is the "no third method can sneak in silently" property a bare
+// `Pick<Service, 'onlyWhatThisTestUses'>` on the double alone does not give you: that
+// narrower form only catches renames/typos on the methods already listed, not a new
+// method the production code starts requiring.
+type ExportServiceDouble = Pick<
+  ExportService,
+  'exportFilename' | 'streamMarkdownZip' | 'buildExportInventory' | 'buildProfileExport' | 'buildMemberExport' | 'memberExportFilename'
+>;
+type CampaignAccessServiceDouble = Pick<CampaignAccessService, 'requireRole' | 'requireMember'>;
 type CampaignsServiceDouble = Pick<CampaignsService, 'getOrThrow'>;
 
-function controller(streamMarkdownZip: jest.Mock): ExportController {
-  const exportService: ExportServiceDouble = {
+/** Full-shape export service double. Methods this file's tests don't exercise are
+ * present (required by the type) but never expected to be called. */
+function exportServiceDouble(overrides: Partial<ExportServiceDouble> = {}): ExportServiceDouble {
+  return {
     exportFilename: jest.fn().mockReturnValue('campaign-backup.zip'),
-    streamMarkdownZip,
+    streamMarkdownZip: jest.fn(),
+    buildExportInventory: jest.fn(),
+    buildProfileExport: jest.fn(),
+    buildMemberExport: jest.fn(),
+    memberExportFilename: jest.fn(),
+    ...overrides,
   };
-  const access: CampaignAccessServiceDouble = {
+}
+
+function accessDouble(overrides: Partial<CampaignAccessServiceDouble> = {}): CampaignAccessServiceDouble {
+  return {
     requireRole: jest.fn().mockResolvedValue(undefined),
+    requireMember: jest.fn(),
+    ...overrides,
   };
-  const campaigns: CampaignsServiceDouble = {
-    getOrThrow: jest.fn().mockResolvedValue({ name: 'Campaign' }),
-  };
-  return new ExportController(
-    exportService as unknown as ExportService,
-    access as unknown as CampaignAccessService,
-    campaigns as unknown as CampaignsService,
-  );
+}
+
+function controller(streamMarkdownZip: jest.Mock): ExportController {
+  const exportService = exportServiceDouble({ streamMarkdownZip });
+  const access = accessDouble();
+  const campaigns: CampaignsServiceDouble = { getOrThrow: jest.fn().mockResolvedValue({ name: 'Campaign' }) };
+  return new ExportController(exportService, access, campaigns);
 }
 
 describe('ExportController markdown ZIP streaming', () => {
   it('does not begin preliminary lookups for an already-ended response', async () => {
     const streamMarkdownZip = jest.fn();
-    const access: CampaignAccessServiceDouble = { requireRole: jest.fn() };
+    const access = accessDouble();
     const campaigns: CampaignsServiceDouble = { getOrThrow: jest.fn() };
-    const exportService: ExportServiceDouble = { exportFilename: jest.fn(), streamMarkdownZip };
-    const subject = new ExportController(
-      exportService as unknown as ExportService,
-      access as unknown as CampaignAccessService,
-      campaigns as unknown as CampaignsService,
-    );
+    const exportService = exportServiceDouble({ streamMarkdownZip });
+    const subject = new ExportController(exportService, access, campaigns);
     const res = response({ destroyed: true, writableEnded: true });
 
     await expect(subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res)).resolves.toBeUndefined();
@@ -79,7 +95,7 @@ describe('ExportController markdown ZIP streaming', () => {
     const requireRole = jest.fn(() => new Promise<Role>((resolve) => { releaseRole = () => resolve('dm'); }));
     const getOrThrow = jest.fn().mockResolvedValue({ name: 'Campaign' });
     const streamMarkdownZip = jest.fn();
-    const exportService: ExportServiceDouble = { exportFilename: jest.fn(), streamMarkdownZip };
+    const exportService = exportServiceDouble({ streamMarkdownZip });
     const res = response();
     let onClose!: () => void;
     (res.once as unknown as jest.Mock).mockImplementation((event: string, listener: () => void) => {
@@ -87,9 +103,9 @@ describe('ExportController markdown ZIP streaming', () => {
       return res;
     });
     const subject = new ExportController(
-      exportService as unknown as ExportService,
-      { requireRole } as CampaignAccessServiceDouble as unknown as CampaignAccessService,
-      { getOrThrow } as CampaignsServiceDouble as unknown as CampaignsService,
+      exportService,
+      accessDouble({ requireRole }),
+      { getOrThrow },
     );
 
     const pending = subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res);

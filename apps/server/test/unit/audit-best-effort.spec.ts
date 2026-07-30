@@ -9,17 +9,21 @@ import type { AuditService } from '../../src/modules/audit/audit.service';
  * must not be relabelled a failure), always log loudly at error level with the stack,
  * and hand back a short note the caller MAY attach to an operator-facing result.
  */
-// Issue #1527: the double is typed against `Pick<AuditService, 'log'>` rather than
-// cast blind with `as unknown as AuditService` — a missing or renamed `log` method is
-// then a compile error at the object literal, not a runtime `TypeError` discovered only
-// when `auditBestEffort` actually calls it. The final `as unknown as AuditService` is
-// still needed to satisfy `AuditService`'s private constructor-injected fields, which no
-// plain object literal can structurally provide.
+// Issue #1527: `auditBestEffort` itself takes `Pick<AuditService, 'log'>`, not the
+// concrete class (see audit-best-effort.ts) — a plain structural type, not a class with
+// a private-field brand, so no unsafe cast is needed here at all. This is stronger than
+// typing only the double: if `auditBestEffort` starts calling a second `AuditService`
+// method, that call fails to compile in audit-best-effort.ts itself, forcing the Pick
+// list to widen — and once widened, this double (and every other caller) fails to
+// compile until it supplies the new method too. A double typed against a `Pick` on the
+// double's OWN declaration, with the concrete class cast still applied at the call
+// site, only catches renames/typos on the methods already listed — not a new method the
+// consumer starts requiring (see export-controller-streaming.spec.ts for that case,
+// where the consumer's constructor parameter type is narrowed instead).
 type AuditServiceDouble = Pick<AuditService, 'log'>;
 
-function fakeAudit(log: AuditServiceDouble['log']): AuditService {
-  const double: AuditServiceDouble = { log };
-  return double as unknown as AuditService;
+function fakeAudit(log: AuditServiceDouble['log']): AuditServiceDouble {
+  return { log };
 }
 
 describe('auditBestEffort (#1581)', () => {

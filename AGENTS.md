@@ -77,16 +77,45 @@ first.
 
 When hand-rolling a test double for a service dependency, type it against
 `Pick<RealService, 'methodsActuallyUsed'>` instead of a blind
-`{...} as unknown as RealService` with no shape check at all — see
-`apps/server/test/unit/audit-best-effort.spec.ts` and
-`export-controller-streaming.spec.ts` for the pattern. A double missing (or
-misspelling) a method the real service now requires is then a compile error
-where the double is declared, not a runtime `TypeError` the first time
-production code actually calls it (issue #1527, originally hit in #1426). The
-final cast to the concrete class is usually still required — most services
-carry private constructor-injected fields no plain object literal can
-structurally satisfy — but everything up to that single, narrow cast is
-checked. This is a per-double convention, not a lint rule: most existing
+`{...} as unknown as RealService`, which performs no shape-checking at all.
+Two strengths of this, in increasing order of guarantee — pick based on how
+the dependency is consumed:
+
+- **Double-side only** (the consumer still declares the dependency as the
+  concrete class, so a cast to it is unavoidable): the double is checked
+  against the `Pick` type, then cast — e.g.
+  `const x: Pick<AuditService, 'log'> = {...}; return x as unknown as
+  AuditService;`. This catches a double that is missing or misspells one of
+  the *listed* methods. It does **not** catch production code starting to
+  call an *additional* method the double never had — the `Pick` list itself
+  isn't forced to grow, and the final cast lets an incomplete double through
+  regardless (this is the #1426 case in its full generality: the review
+  discussion on issue #1527 traced through why the double-side pattern alone
+  doesn't close it).
+- **Consumer-side narrowing** (stronger, when the consumer's own declared
+  dependency type can be narrowed): change the *constructor parameter* (or
+  plain function parameter) from the concrete class to
+  `Pick<RealService, 'methodsActuallyUsed'>` directly. Because a `Pick` is a
+  plain structural type, not a class with a private-field brand, a double
+  satisfying it can be assigned with **no cast at all**, checked both ways —
+  a double missing a listed method fails where it's declared, AND a new
+  method call inside the consumer that falls outside the `Pick` list fails to
+  compile in the consumer's own source, forcing the list to widen (which then
+  breaks every double until it supplies the new method too). For a NestJS
+  constructor parameter this needs an explicit `@Inject(RealService)` beside
+  the narrowed type, since the erased `Pick<...>` carries no
+  `design:paramtypes` metadata for Nest to resolve the token from — see
+  `export.controller.ts`'s constructor and its double in
+  `export-controller-streaming.spec.ts`. For a plain (non-DI) function, no
+  `@Inject` is needed — see `audit-best-effort.ts` and
+  `audit-best-effort.spec.ts`.
+
+Prefer consumer-side narrowing when the cost is small (one constructor, or a
+plain function like `auditBestEffort`); fall back to double-side-only typing
+when narrowing the consumer isn't practical. Either way, type the double with
+an annotation (`const x: Pick<...> = {...}`) — a type *assertion*
+(`{...} as Pick<...>`) skips the excess/missing-property check the pattern
+exists for. This is a per-double convention, not a lint rule: most existing
 doubles in `apps/server/test/**` have not been converted.
 
 ## Change and review discipline
