@@ -19,9 +19,9 @@ test.describe('hidden encounter start and persistent indicator (issue #1475)', (
     expect(source).toMatch(/Reveal now/);
   });
 
-  test('RunSessionPage mounts VisibleToPlayersBar with onReveal and surfaces start warnings', () => {
+  test('RunSessionPage mounts VisibleToPlayersBar with onReveal when running and surfaces start warnings', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/onReveal=\{async \(\) => \{/);
+    expect(source).toMatch(/encounter\.status === 'running'/);
     expect(source).toMatch(/queueEncounterPatch\(\{ hidden: false \}\)/);
     expect(source).toMatch(/data\.warning/);
   });

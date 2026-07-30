@@ -2599,9 +2599,13 @@ export default function RunSessionPage() {
           onUndoHide={async () => {
             await queueEncounterPatch({ hidden: false });
           }}
-          onReveal={async () => {
-            await queueEncounterPatch({ hidden: false });
-          }}
+          onReveal={
+            encounter.status === 'running'
+              ? async () => {
+                  await queueEncounterPatch({ hidden: false });
+                }
+              : undefined
+          }
         />
       )}
 
