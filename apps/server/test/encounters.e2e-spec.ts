@@ -1069,6 +1069,25 @@ describe('encounters (e2e)', () => {
       expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed during removal' })).status).toBe(200);
       const nameOnlyRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: nameOnlyRemoval.body.undoToken });
       expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
+
+      // A combat-only timed condition is absent from the sheet at removal. Adding a
+      // different sheet condition during the recovery window must not replace that
+      // timed instance with the sheet's metadata-free copy (or drop it entirely).
+      const timedPoison = {
+        id: 'undo_timed_poison', name: 'poisoned', ruleEntryId: null, source: 'Giant spider',
+        sourceCombatantId: 777, durationRounds: 3, roundsRemaining: 2, timing: 'end-of-turn',
+        saveTiming: 'end-of-turn', saveDc: 13, saveAbility: 'con', isConcentration: false,
+        stacks: 1, notes: 'local timer', custom: false,
+      };
+      await db.update(combatantsTable)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([timedPoison]) })
+        .where(eq(combatantsTable.id, added.body.id));
+      const conditionRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).post(`/api/v1/characters/${character.body.id}/conditions`).set(dm).send({ add: ['blessed'] })).status).toBe(201);
+      const conditionRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: conditionRemoval.body.undoToken });
+      const restoredPoison = conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'poisoned');
+      expect(restoredPoison).toMatchObject({ sourceCombatantId: 777, roundsRemaining: 2, saveTiming: 'end-of-turn', notes: 'local timer' });
+      expect(conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'blessed')).toBeDefined();
       // Keep the shared full-flow encounter eligible for its later HP write-back test.
       expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)).status).toBe(200);
     });

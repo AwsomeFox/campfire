@@ -216,6 +216,58 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     expect(hpAudits).toEqual([expect.objectContaining({ actor: dmUser.id, campaignId: ctx.campaignId })]);
   });
 
+  it('does not expose a live combatant addition without its undo revision', async () => {
+    const ctx = seedRunningFight();
+    const [removedTurn] = ctx.orm.insert(combatants).values({
+      encounterId: ctx.encounterId,
+      kind: 'monster',
+      name: 'Removed turn',
+      initiative: 20,
+      initMod: 0,
+      hpCurrent: 10,
+      hpMax: 10,
+      conditions: '[]',
+      sortOrder: 1,
+    }).returning().all();
+    ctx.orm.update(encounters)
+      .set({ currentCombatantId: removedTurn.id, turnIndex: 0, combatantStateVersion: 0 })
+      .where(eq(encounters.id, ctx.encounterId))
+      .run();
+    const removal = await ctx.encountersService.removeCombatant(ctx.encounterId, removedTurn.id, dmUser, 'dm');
+
+    // Before the fix the INSERT committed, then addCombatant yielded to re-read the roster
+    // before bumping combatantStateVersion. Let Undo run at that same interleaving point.
+    let addSettled = false;
+    let undo: Promise<unknown> | undefined;
+    const interleaveUndo = () => {
+      const hasAddition = ctx.orm.select({ id: combatants.id })
+        .from(combatants)
+        .where(eq(combatants.encounterId, ctx.encounterId))
+        .all()
+        .some((combatant) => combatant.id !== ctx.combatantId);
+      if (!undo && hasAddition) {
+        undo = ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+      } else if (!addSettled) {
+        queueMicrotask(interleaveUndo);
+      }
+    };
+    const addition = ctx.encountersService.addCombatant(
+      ctx.encounterId,
+      { kind: 'monster', name: 'Later arrival', hpMax: 6 },
+      dmUser,
+      'dm',
+    ).finally(() => { addSettled = true; });
+    queueMicrotask(interleaveUndo);
+    const added = await addition;
+    undo ??= ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+    await undo;
+
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.currentCombatantId).toBe(ctx.combatantId);
+    expect(ctx.orm.select().from(auditLog).where(eq(auditLog.entityId, added.id)).all())
+      .toEqual([expect.objectContaining({ action: 'encounter.combatant.add', actor: dmUser.id })]);
+  });
+
   it('tracker addConditions survives /end onto the sheet', async () => {
     const ctx = seedRunningFight();
     await ctx.encountersService.updateCombatant(

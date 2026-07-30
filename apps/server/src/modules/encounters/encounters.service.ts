@@ -134,6 +134,48 @@ function isUniqueConstraintError(err: unknown): boolean {
   return /UNIQUE constraint failed/i.test(message);
 }
 
+/**
+ * Apply only the sheet-condition delta made during a combatant-removal window.
+ * Conditions already present only on the combatant are encounter-local, so a sheet
+ * addition/removal elsewhere must not erase their timer/save/source metadata on undo.
+ */
+function mergeRemovalUndoSheetConditionDelta(
+  snapshotConditions: string,
+  snapshotInstancesText: string | null,
+  sheetConditionsAtRemoval: string,
+  sheetInstancesAtRemoval: string | null,
+  currentSheetConditions: string,
+  currentSheetInstances: string | null,
+): { conditions: string; conditionInstances: string } {
+  const keyFor = (instance: ConditionInstance) => instance.name.trim().toLowerCase();
+  const capturedSheet = readConditionInstances(sheetInstancesAtRemoval, sheetConditionsAtRemoval);
+  const currentSheet = readConditionInstances(currentSheetInstances, currentSheetConditions);
+  const capturedByKey = new Map(capturedSheet.map((instance) => [keyFor(instance), instance] as const));
+  const currentByKey = new Map(currentSheet.map((instance) => [keyFor(instance), instance] as const));
+  const snapshot = readConditionInstances(snapshotInstancesText, snapshotConditions);
+  const merged = new Map(snapshot.map((instance) => [keyFor(instance), instance] as const));
+
+  for (const [key, priorSheetInstance] of capturedByKey) {
+    const currentSheetInstance = currentByKey.get(key);
+    if (!currentSheetInstance) {
+      merged.delete(key);
+    } else if (currentSheetInstance.stacks !== priorSheetInstance.stacks) {
+      const priorCombatantInstance = merged.get(key);
+      merged.set(key, priorCombatantInstance
+        ? { ...priorCombatantInstance, stacks: currentSheetInstance.stacks }
+        : currentSheetInstance);
+    }
+  }
+  for (const [key, currentSheetInstance] of currentByKey) {
+    if (capturedByKey.has(key)) continue;
+    const priorCombatantInstance = merged.get(key);
+    merged.set(key, priorCombatantInstance
+      ? { ...priorCombatantInstance, stacks: currentSheetInstance.stacks }
+      : currentSheetInstance);
+  }
+  return conditionWriteSetFromInstances([...merged.values()]);
+}
+
 /** Clamp a 0–100 percent overlay coordinate, mirroring the campaign map's location-pin drag. */
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
@@ -3100,11 +3142,15 @@ export class EncountersService {
     // npc) — a `count>1` monster batch never touches the partial indexes, so the
     // loop never throws there. Throwing here (before audit/event) keeps everything
     // consistent: the WINNING caller owns the single audit entry + SSE signal.
-    const insertedRows: (typeof combatants.$inferSelect)[] = [];
+    let insertedRows: (typeof combatants.$inferSelect)[] = [];
+    let emittedEncounter = encounterRow;
     try {
-      for (const n of names) {
-        const [inserted] = await this.db
-          .insert(combatants)
+      this.db.transaction((tx) => {
+        const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+        if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        this.assertMutable(freshEncounter);
+        this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+        insertedRows = names.map((n) => tx.insert(combatants)
           .values({
             encounterId,
             kind: input.kind,
@@ -3144,9 +3190,24 @@ export class EncountersService {
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
-          .returning();
-        insertedRows.push(inserted);
-      }
+          .returning()
+          .all()[0]);
+
+        // Keep a running encounter's roster mutation and its exact-undo guard atomic.
+        // Otherwise Undo can observe the inserted row before the revision bump and rewind
+        // a pointer across that newer roster state.
+        if (freshEncounter.status === 'running') {
+          const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+          const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
+          const turnIndex = turnIndexFor(sorted, freshEncounter.currentCombatantId);
+          tx.update(encounters).set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            ...(turnIndex !== freshEncounter.turnIndex ? { updatedAt: nowIso() } : {}),
+          }).where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running'))).run();
+        }
+        emittedEncounter = freshEncounter;
+      });
     } catch (err) {
       if (isUniqueConstraintError(err) && (characterId !== null || npcId !== null)) {
         // The race loser: another caller inserted this same identity between our
@@ -3169,32 +3230,17 @@ export class EncountersService {
     }
     const row = insertedRows[0];
 
-    // Keep the positional turnIndex aligned with the identity pointer after the row
-    // count changes (issue #49). A freshly-added combatant has null initiative and so
-    // sorts last, so the current actor's index is normally unchanged — but re-deriving
-    // it keeps turnIndex correct regardless.
-    if (encounterRow.status === 'running') {
-      const rows = await this.listCombatantRows(encounterId);
-      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
-      const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
-      await this.db.update(encounters).set({
-        turnIndex,
-        combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-        ...(turnIndex !== encounterRow.turnIndex ? { updatedAt: nowIso() } : {}),
-      }).where(eq(encounters.id, encounterId));
-    }
-
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
       action: 'encounter.combatant.add',
       entityType: 'combatant',
       entityId: row.id,
-      campaignId: encounterRow.campaignId,
+      campaignId: emittedEncounter.campaignId,
       detail: insertedRows.length > 1 ? `${name} ×${insertedRows.length}` : name,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
 
     return combatantToDomain(row);
   }
@@ -4397,8 +4443,19 @@ export class EncountersService {
             if (sheet.deathState !== sheetStateAtRemoval.deathState) { snapshot.deathState = sheet.deathState; pulledSheetState = true; }
             if (sheet.deathSaveSuccesses !== sheetStateAtRemoval.deathSaveSuccesses) { snapshot.deathSaveSuccesses = sheet.deathSaveSuccesses; pulledSheetState = true; }
             if (sheet.deathSaveFailures !== sheetStateAtRemoval.deathSaveFailures) { snapshot.deathSaveFailures = sheet.deathSaveFailures; pulledSheetState = true; }
-            if (sheet.conditions !== sheetStateAtRemoval.conditions) { snapshot.conditions = sheet.conditions; pulledSheetState = true; }
-            if (sheet.conditionInstances !== sheetStateAtRemoval.conditionInstances) { snapshot.conditionInstances = sheet.conditionInstances; pulledSheetState = true; }
+            if (sheet.conditions !== sheetStateAtRemoval.conditions || sheet.conditionInstances !== sheetStateAtRemoval.conditionInstances) {
+              const mergedConditions = mergeRemovalUndoSheetConditionDelta(
+                snapshot.conditions,
+                snapshot.conditionInstances,
+                sheetStateAtRemoval.conditions,
+                sheetStateAtRemoval.conditionInstances,
+                sheet.conditions,
+                sheet.conditionInstances,
+              );
+              snapshot.conditions = mergedConditions.conditions;
+              snapshot.conditionInstances = mergedConditions.conditionInstances;
+              pulledSheetState = true;
+            }
             if (pulledSheetState) snapshot.sheetSyncedUpdatedAt = sheet.updatedAt;
           }
         }
