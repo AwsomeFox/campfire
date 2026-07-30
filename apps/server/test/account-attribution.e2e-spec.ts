@@ -211,6 +211,9 @@ describe('account historical attribution privacy (e2e)', () => {
         if (row.type === 'campaign_trashed') {
           expect(row.title).toBe(LIFECYCLE_NOTIFICATION_TITLE);
           expect(row.body).toBe(LIFECYCLE_NOTIFICATION_BODY);
+        } else if (row.type === 'safety_hold') {
+          expect(row.title).toBe('The table is paused');
+          expect(row.body).toBe('A participant used the safety hold. Play is paused until a facilitator resolves it.');
         } else {
           expect(row.title).toBe(NEUTRAL_NOTIFICATION_TITLE);
           expect(row.body).toBe(NEUTRAL_NOTIFICATION_BODY);

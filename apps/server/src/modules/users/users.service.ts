@@ -234,15 +234,42 @@ export class UsersService {
         .set({ actorName: nextLabel })
         .where(eq(notificationDigestQueue.actorUserId, stableUserId))
         .run();
-      // Lifecycle rows deliberately carry actor-free access information. Keep their
-      // rendered explanation while pseudonymizing structured attribution everywhere.
+      // Lifecycle rows are already actor-free. Critical notices need equally
+      // actor-free, type-specific copy: a generic privacy message must not turn a
+      // live safety stop or charter acknowledgement into an opaque bell item.
       tx.update(notifications)
         .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
-        .where(and(eq(notifications.actorUserId, stableUserId), notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES])))
+        .where(
+          and(
+            eq(notifications.actorUserId, stableUserId),
+            notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published']),
+          ),
+        )
         .run();
       tx.update(notificationDigestQueue)
         .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
-        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES])))
+        .where(
+          and(
+            eq(notificationDigestQueue.actorUserId, stableUserId),
+            notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published']),
+          ),
+        )
+        .run();
+      tx.update(notifications)
+        .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'safety_hold')))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'safety_hold')))
+        .run();
+      tx.update(notifications)
+        .set({ title: 'Charter updated', body: 'Review the campaign charter for the current agreement.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'charter_published')))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'Charter updated', body: 'Review the campaign charter for the current agreement.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'charter_published')))
         .run();
     } else {
       tx.update(notifications).set({ actorName: nextLabel }).where(eq(notifications.actorUserId, stableUserId)).run();
