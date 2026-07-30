@@ -1001,8 +1001,8 @@ function ensureSoftDeleteColumns(sqlite: Database.Database): void {
     if (!exists) continue;
     const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === 'deleted_at')) {
-      console.warn(`[Database] Backfilled missing deleted_at column on table '${table}'`);
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+      dbLog.warn(`backfilled missing deleted_at column on table '${table}'`);
     }
   }
 }
@@ -4975,9 +4975,12 @@ export function openDatabase(dataDir: string): {
   // recorded version, and the guard stays meaningful for a subsequent older binary.
   recordAppVersion(sqlite);
 
-  sqlite.exec(BOOTSTRAP_SQL);
-  // Ensure soft-delete deleted_at columns exist on all entity tables even if migrations were already recorded
+  // Ensure soft-delete deleted_at columns exist on all entity tables even if migrations were already recorded.
+  // Runs BEFORE BOOTSTRAP_SQL because BOOTSTRAP_SQL itself creates idx_campaigns_deleted_at, which fails
+  // when campaigns is missing the column.
   ensureSoftDeleteColumns(sqlite);
+
+  sqlite.exec(BOOTSTRAP_SQL);
   const ftsAvailable = setupRuleEntriesFts(sqlite);
   const campaignSearchFtsSetup = setupCampaignSearchFts(sqlite);
   const campaignSearchFtsAvailable = campaignSearchFtsSetup.available;
