@@ -455,14 +455,19 @@
        dialogs / sheets (ConfirmDialog, …):   --cf-layer-dialog (50)
        notification panel:                    --cf-layer-notification (50)
        undo / recovery snackbar:              --cf-layer-snackbar (60)
+       dice roll overlay (decorative, issue #1352): --cf-layer-modal (70)
      Nested overlays share a tier; later DOM order wins. ConfirmDialog portals
      to <body> so a page stacking context cannot trap it under chrome.
      Keyboard clearance is not a z-index — it feeds --cf-keyboard-inset
-     for the undo snackbar bottom offset (issue #794). */
+     for the undo snackbar bottom offset (issue #794). The dice roll overlay
+     sits above every other tier: it is pointer-events:none and must stay
+     visible even while a dialog, notification, or the undo snackbar is on
+     screen (issue #1532). */
   --cf-layer-tabbar: 40;
   --cf-layer-dialog: 50;
   --cf-layer-notification: 50;
   --cf-layer-snackbar: 60;
+  --cf-layer-modal: 70;
   /* Measured by useUndoSnackbarChrome while the bar is mounted; defaults keep
      desktop (no tab bar) clear of the home-indicator safe-area alone. */
   --cf-tabbar-content-height: 0px;
@@ -2056,7 +2061,7 @@ a:hover .cf-name-reveal {
 .cf-dice-roll-overlay {
   position: fixed;
   inset: 0;
-  z-index: var(--cf-layer-modal, 1200);
+  z-index: var(--cf-layer-modal);
   display: flex;
   align-items: center;
   justify-content: center;

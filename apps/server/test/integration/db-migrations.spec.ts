@@ -431,6 +431,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0086_encounters_boss_turn_phase');
       expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(MIGRATION_NAMES).toContain('0090_trash_soft_delete_701');
+      expect(MIGRATION_NAMES).toContain('0149_ensure_soft_delete_columns_701');
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
@@ -2273,6 +2274,29 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(row.manifest_hash).toBe('');
     } finally {
       upgraded.sqlite.close();
+    }
+  });
+
+  it('ensureSoftDeleteColumns backfills missing deleted_at columns on boot even if __migrations recorded all migrations', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    sqlite.close();
+
+    // Simulate an existing database where all migrations are recorded, but a table is missing deleted_at
+    const manual = new Database(dbFilePath(dataDir));
+    try {
+      manual.exec('ALTER TABLE encounters DROP COLUMN deleted_at');
+      expect(columnNames(manual, 'encounters')).not.toContain('deleted_at');
+    } finally {
+      manual.close();
+    }
+
+    // openDatabase must run ensureSoftDeleteColumns and add back deleted_at
+    const booted = openDatabase(dataDir);
+    try {
+      expect(columnNames(booted.sqlite, 'encounters')).toContain('deleted_at');
+    } finally {
+      booted.sqlite.close();
     }
   });
 });

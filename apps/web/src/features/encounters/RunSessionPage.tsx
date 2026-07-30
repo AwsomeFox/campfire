@@ -67,7 +67,7 @@ import {
   hitTestFogRegion,
   moveFogRegion,
 } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
+import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
@@ -90,6 +90,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
+import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
@@ -890,53 +891,6 @@ function DeathSaveTracker({
   );
 }
 
-/**
- * Optimistic HP application (issue #73) — the local guess we write into the query cache
- * the instant an HP stepper is clicked, so a DM spamming ±1 sees each hit land without
- * waiting a round-trip. Mirrors the server's 5e math closely enough for the interim
- * render; `onSettled` invalidates and reconciles against server truth. A redacted monster
- * (exact HP hidden — issue #43) has null HP and gets no optimistic guess.
- */
-function applyHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): Combatant {
-  if (c.hpCurrent == null || c.hpMax == null) return c;
-  const isStarfinder =
-    ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID ||
-    ruleSystem?.startsWith('starfinder') ||
-    (c.spMax != null && c.spMax > 0);
-  if (isStarfinder && delta < 0) {
-    const sfResult = applyStarfinderDamage(
-      {
-        hpCurrent: c.hpCurrent,
-        hpMax: c.hpMax,
-        spCurrent: c.spCurrent ?? 0,
-        spMax: c.spMax ?? 0,
-        rpCurrent: c.rpCurrent ?? 0,
-        rpMax: c.rpMax ?? 0,
-        hpTemp: c.hpTemp ?? 0,
-        deathState: c.deathState ?? 'none',
-      },
-      -delta,
-    );
-    return {
-      ...c,
-      hpCurrent: sfResult.hpCurrent,
-      spCurrent: sfResult.spCurrent,
-      rpCurrent: sfResult.rpCurrent,
-      hpTemp: sfResult.hpTemp,
-      deathState: sfResult.deathState,
-    };
-  }
-  if (delta >= 0) {
-    return { ...c, hpCurrent: Math.min(c.hpMax, c.hpCurrent + delta) };
-  }
-  // Damage: temporary HP absorbs first, then real HP, floored at 0.
-  const dmg = -delta;
-  const temp = c.hpTemp ?? 0;
-  const fromTemp = Math.min(temp, dmg);
-  const overflow = dmg - fromTemp;
-  return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
-}
-
 /** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
 function hpLogActorId(actorCombatantId: number | undefined | null, targetCombatantId: number): number | undefined {
   if (actorCombatantId == null || actorCombatantId === targetCombatantId) return undefined;
@@ -975,6 +929,13 @@ function hpPatchWithActor(
 }
 
 const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp']);
+
+type OptimisticHpQueue = {
+  encounterId: number;
+  base: EncounterWithCombatants | undefined;
+  nextSequence: number;
+  operations: Map<string, OptimisticHpDelta & { sequence: number }>;
+};
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -1850,7 +1811,8 @@ export default function RunSessionPage() {
 
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
   // straight into the query cache so the click lands instantly (no round-trip wait, no
-  // disabled control); onError rolls back to the pre-click snapshot; onSettled reconciles
+  // disabled control); onError rebuilds from committed state plus the recorded clicks;
+  // onSettled reconciles
   // against server truth, but only once the *last* of a rapid burst settles so spamming
   // ±1 doesn't trigger a refetch storm.
   //
@@ -1859,6 +1821,36 @@ export default function RunSessionPage() {
   // committed-but-lost response is replayed by the server rather than re-applied. Retry
   // is enabled only because the key is present — the two arrive together by construction.
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
+  const optimisticHpQueueRef = useRef<OptimisticHpQueue>({
+    encounterId: eid,
+    base: undefined,
+    nextSequence: 0,
+    operations: new Map(),
+  });
+  if (optimisticHpQueueRef.current.encounterId !== eid) {
+    optimisticHpQueueRef.current = {
+      encounterId: eid,
+      base: undefined,
+      nextSequence: 0,
+      operations: new Map(),
+    };
+  }
+  const replayPendingOptimisticHpDeltas = useCallback(() => {
+    const queue = optimisticHpQueueRef.current;
+    if (queue.encounterId !== eid) return;
+    const { base } = queue;
+    if (!base) return;
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
+      ...base,
+      combatants: replayOptimisticHpDeltas(
+        base.combatants,
+        [...queue.operations.values()]
+          .sort((a, b) => a.sequence - b.sequence)
+          .map(({ combatantId, delta }) => ({ combatantId, delta })),
+        ruleSystem,
+      ),
+    });
+  }, [eid, queryClient, ruleSystem]);
   const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
     mutationFn: ({
@@ -1884,28 +1876,42 @@ export default function RunSessionPage() {
         `${API}/encounters/${eid}/combatants/${combatantId}`,
         hpPatchWithActor({ hpDelta: delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }, actorId, combatantId, isDm),
       ),
-    onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit, damageDice }) => {
+    onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }) => {
       setActionError(null);
+      const queue = optimisticHpQueueRef.current;
+      const optimisticOperation =
+        damageType === undefined &&
+        saveOutcome === undefined &&
+        isCrit === undefined &&
+        damageDice === undefined
+          ? { combatantId, delta, sequence: queue.nextSequence++ }
+          : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
       // Defence data lives in the server's authoritative statblock.  Do not briefly
       // show an incorrect local HP total when damage rules are active; refetch settles it.
       if (
         previous &&
-        damageType === undefined &&
-        saveOutcome === undefined &&
-        isCrit === undefined &&
-        damageDice === undefined
+        optimisticOperation
       ) {
-        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-          ...previous,
-          combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta, ruleSystem) : c)),
-        });
+        if (queue.encounterId !== eid) return {};
+        if (!queue.base) queue.base = previous;
+        queue.operations.set(idempotencyKey, optimisticOperation);
+        replayPendingOptimisticHpDeltas();
+        return { encounterId: eid, optimisticOperationId: idempotencyKey };
       }
-      return { previous };
+      return {};
     },
     onError: (err, _vars, ctx) => {
-      if (ctx?.previous) queryClient.setQueryData(queryKeys.encounter(eid), ctx.previous);
+      const queue = optimisticHpQueueRef.current;
+      if (
+        ctx?.encounterId === eid &&
+        queue.encounterId === eid &&
+        ctx.optimisticOperationId &&
+        queue.operations.delete(ctx.optimisticOperationId)
+      ) {
+        replayPendingOptimisticHpDeltas();
+      }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
       // just rolled back, but the server may in fact have applied it. Telling the DM "that
       // failed" invites a re-click that is a fresh intent and really would double the
@@ -1914,8 +1920,16 @@ export default function RunSessionPage() {
       else reportError(err);
     },
     onSettled: () => {
+      // A response can already include a later write, so successful operations stay in
+      // the replay ledger until the whole burst settles instead of promoting response data.
       // Only reconcile after the last in-flight HP write of a burst settles.
       if (queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) === 1) {
+        const queue = optimisticHpQueueRef.current;
+        if (queue.encounterId === eid) {
+          queue.base = undefined;
+          queue.nextSequence = 0;
+          queue.operations.clear();
+        }
         invalidateEncounter(queryClient, eid);
       }
     },
@@ -1945,7 +1959,7 @@ export default function RunSessionPage() {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
           combatants: previous.combatants.map((c) =>
-            targets.has(c.id) ? applyHpDelta(c, delta, ruleSystem) : c,
+            targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem) : c,
           ),
         });
       }

@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import type { Response } from 'express';
+import type { Role } from '@campfire/schema';
 import type { RequestUser } from '../../src/common/user.types';
 import { ExportController } from '../../src/modules/export/export.controller';
 import type { ExportService } from '../../src/modules/export/export.service';
@@ -23,30 +24,64 @@ function response(overrides: Partial<Response> = {}): Response {
   return res as unknown as Response;
 }
 
-function controller(streamMarkdownZip: jest.Mock): ExportController {
-  const exportService = {
+// Issue #1527: `ExportController`'s constructor is typed against
+// `Pick<RealService, ...methods it actually calls>` rather than the concrete class (see
+// export.controller.ts). Because a `Pick<...>` is a plain structural type — not a class
+// with a private-field brand — a double satisfying it can be passed here with NO unsafe
+// cast at all, and the assignment is fully checked both ways:
+//
+//   - a double missing (or misspelling) a picked method fails to compile where it's
+//     declared, not at runtime when the controller calls it (#1426's failure mode);
+//   - if the controller starts calling a method outside this Pick list, that call fails
+//     to compile IN export.controller.ts, forcing the Pick list to widen — and once
+//     widened, every double here fails to compile until it supplies the new method too.
+// This is the "no third method can sneak in silently" property a bare
+// `Pick<Service, 'onlyWhatThisTestUses'>` on the double alone does not give you: that
+// narrower form only catches renames/typos on the methods already listed, not a new
+// method the production code starts requiring.
+type ExportServiceDouble = Pick<
+  ExportService,
+  'exportFilename' | 'streamMarkdownZip' | 'buildExportInventory' | 'buildProfileExport' | 'buildMemberExport' | 'memberExportFilename'
+>;
+type CampaignAccessServiceDouble = Pick<CampaignAccessService, 'requireRole' | 'requireMember'>;
+type CampaignsServiceDouble = Pick<CampaignsService, 'getOrThrow'>;
+
+/** Full-shape export service double. Methods this file's tests don't exercise are
+ * present (required by the type) but never expected to be called. */
+function exportServiceDouble(overrides: Partial<ExportServiceDouble> = {}): ExportServiceDouble {
+  return {
     exportFilename: jest.fn().mockReturnValue('campaign-backup.zip'),
-    streamMarkdownZip,
-  } as unknown as ExportService;
-  const access = {
+    streamMarkdownZip: jest.fn(),
+    buildExportInventory: jest.fn(),
+    buildProfileExport: jest.fn(),
+    buildMemberExport: jest.fn(),
+    memberExportFilename: jest.fn(),
+    ...overrides,
+  };
+}
+
+function accessDouble(overrides: Partial<CampaignAccessServiceDouble> = {}): CampaignAccessServiceDouble {
+  return {
     requireRole: jest.fn().mockResolvedValue(undefined),
-  } as unknown as CampaignAccessService;
-  const campaigns = {
-    getOrThrow: jest.fn().mockResolvedValue({ name: 'Campaign' }),
-  } as unknown as CampaignsService;
+    requireMember: jest.fn(),
+    ...overrides,
+  };
+}
+
+function controller(streamMarkdownZip: jest.Mock): ExportController {
+  const exportService = exportServiceDouble({ streamMarkdownZip });
+  const access = accessDouble();
+  const campaigns: CampaignsServiceDouble = { getOrThrow: jest.fn().mockResolvedValue({ name: 'Campaign' }) };
   return new ExportController(exportService, access, campaigns);
 }
 
 describe('ExportController markdown ZIP streaming', () => {
   it('does not begin preliminary lookups for an already-ended response', async () => {
     const streamMarkdownZip = jest.fn();
-    const access = { requireRole: jest.fn() } as unknown as CampaignAccessService;
-    const campaigns = { getOrThrow: jest.fn() } as unknown as CampaignsService;
-    const subject = new ExportController(
-      { exportFilename: jest.fn(), streamMarkdownZip } as unknown as ExportService,
-      access,
-      campaigns,
-    );
+    const access = accessDouble();
+    const campaigns: CampaignsServiceDouble = { getOrThrow: jest.fn() };
+    const exportService = exportServiceDouble({ streamMarkdownZip });
+    const subject = new ExportController(exportService, access, campaigns);
     const res = response({ destroyed: true, writableEnded: true });
 
     await expect(subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res)).resolves.toBeUndefined();
@@ -57,10 +92,10 @@ describe('ExportController markdown ZIP streaming', () => {
 
   it('cancels before campaign lookup when the client closes during authorization', async () => {
     let releaseRole!: () => void;
-    const requireRole = jest.fn(() => new Promise<void>((resolve) => { releaseRole = resolve; }));
+    const requireRole = jest.fn(() => new Promise<Role>((resolve) => { releaseRole = () => resolve('dm'); }));
     const getOrThrow = jest.fn().mockResolvedValue({ name: 'Campaign' });
     const streamMarkdownZip = jest.fn();
-    const exportService = { exportFilename: jest.fn(), streamMarkdownZip } as unknown as ExportService;
+    const exportService = exportServiceDouble({ streamMarkdownZip });
     const res = response();
     let onClose!: () => void;
     (res.once as unknown as jest.Mock).mockImplementation((event: string, listener: () => void) => {
@@ -69,8 +104,8 @@ describe('ExportController markdown ZIP streaming', () => {
     });
     const subject = new ExportController(
       exportService,
-      { requireRole } as unknown as CampaignAccessService,
-      { getOrThrow } as unknown as CampaignsService,
+      accessDouble({ requireRole }),
+      { getOrThrow },
     );
 
     const pending = subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res);

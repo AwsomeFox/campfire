@@ -19,12 +19,20 @@
  * Deliberately takes an already-built `AuditService` + `Logger` rather than being a
  * method on `AuditService` itself: the log MESSAGE is caller-context (which operation,
  * which id, which outcome), and `AuditService` has no business knowing any of that.
+ *
+ * `audit` is typed as `Pick<AuditService, 'log'>` rather than the full class (issue
+ * #1527): this function is a plain function, not NestJS-DI-constructed, so narrowing
+ * costs nothing here and buys a real, two-way guarantee a bare `Pick`-typed *double*
+ * cannot on its own — if this function starts calling a second `AuditService` method,
+ * that call fails to compile HERE, forcing the Pick list to widen; once widened, every
+ * caller (real `AuditService` instances still satisfy it structurally) and every test
+ * double must supply the new method too.
  */
 import type { Logger } from '@nestjs/common';
 import type { AuditLogParams, AuditService } from './audit.service';
 
 export async function auditBestEffort(
-  audit: AuditService,
+  audit: Pick<AuditService, 'log'>,
   logger: Logger,
   entry: AuditLogParams,
   describe: (err: unknown) => string,

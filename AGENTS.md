@@ -65,6 +65,59 @@ Run the smallest relevant checks while iterating. Run all checks affected by the
 final diff before handoff. GitHub's aggregate required check is named `ci`.
 Non-required browser jobs still matter when the branch caused their failure.
 
+`npm run typecheck` covers `apps/server/test/**` and the `apps/web` Playwright
+tree, and the `lint` job runs it — a broken service constructor/method
+signature fails there in under two minutes, not ~20 minutes later in
+`coverage` (issue #1527/#1535). Before that landed, `apps/server`'s typecheck
+covered `src/**` only, so a test-only compile error surfaced solely in
+`coverage`, reported as `N suites failed, 0 tests failed` — easy to misread as
+a flaky or threshold-miss failure rather than a compile error. If you ever see
+that shape locally with an out-of-date checkout, rerun `npm run typecheck`
+first.
+
+When hand-rolling a test double for a service dependency, type it against
+`Pick<RealService, 'methodsActuallyUsed'>` instead of a blind
+`{...} as unknown as RealService`, which performs no shape-checking at all.
+Two strengths of this, in increasing order of guarantee — pick based on how
+the dependency is consumed:
+
+- **Double-side only** (the consumer still declares the dependency as the
+  concrete class, so a cast to it is unavoidable): the double is checked
+  against the `Pick` type, then cast — e.g.
+  `const x: Pick<AuditService, 'log'> = {...}; return x as unknown as
+  AuditService;`. This catches a double that is missing or misspells one of
+  the *listed* methods. It does **not** catch production code starting to
+  call an *additional* method the double never had — the `Pick` list itself
+  isn't forced to grow, and the final cast lets an incomplete double through
+  regardless (this is the #1426 case in its full generality: the review
+  discussion on issue #1527 traced through why the double-side pattern alone
+  doesn't close it).
+- **Consumer-side narrowing** (stronger, when the consumer's own declared
+  dependency type can be narrowed): change the *constructor parameter* (or
+  plain function parameter) from the concrete class to
+  `Pick<RealService, 'methodsActuallyUsed'>` directly. Because a `Pick` is a
+  plain structural type, not a class with a private-field brand, a double
+  satisfying it can be assigned with **no cast at all**, checked both ways —
+  a double missing a listed method fails where it's declared, AND a new
+  method call inside the consumer that falls outside the `Pick` list fails to
+  compile in the consumer's own source, forcing the list to widen (which then
+  breaks every double until it supplies the new method too). For a NestJS
+  constructor parameter this needs an explicit `@Inject(RealService)` beside
+  the narrowed type, since the erased `Pick<...>` carries no
+  `design:paramtypes` metadata for Nest to resolve the token from — see
+  `export.controller.ts`'s constructor and its double in
+  `export-controller-streaming.spec.ts`. For a plain (non-DI) function, no
+  `@Inject` is needed — see `audit-best-effort.ts` and
+  `audit-best-effort.spec.ts`.
+
+Prefer consumer-side narrowing when the cost is small (one constructor, or a
+plain function like `auditBestEffort`); fall back to double-side-only typing
+when narrowing the consumer isn't practical. Either way, type the double with
+an annotation (`const x: Pick<...> = {...}`) — a type *assertion*
+(`{...} as Pick<...>`) skips the excess/missing-property check the pattern
+exists for. This is a per-double convention, not a lint rule: most existing
+doubles in `apps/server/test/**` have not been converted.
+
 ## Change and review discipline
 
 - Keep one coherent issue per PR and use `Fixes #<issue>` when the merge should
