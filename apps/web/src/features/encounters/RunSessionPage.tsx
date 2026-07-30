@@ -2189,7 +2189,7 @@ export default function RunSessionPage() {
     onSettled: (_data, error, variables) => {
       const failedEntry = pendingEncounterPatches.current.get(variables.queueId);
       pendingEncounterPatches.current.delete(variables.queueId);
-      if (error && failedEntry) {
+      if (error && failedEntry && !variables.defaultAttemptKey) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), (current) =>
           current
             ? rollbackEncounterPatchError(current, failedEntry, pendingEncounterPatches.current.values(), variables.encounterId)
