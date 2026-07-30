@@ -160,10 +160,13 @@ function mergeRemovalUndoSheetConditionDelta(
   for (const [key, priorSheetInstance] of capturedByKey) {
     const currentSheetInstance = currentByKey.get(key);
     if (!currentSheetInstance) {
-      merged = merged.filter((instance) => keyFor(instance) !== key);
+      // A sheet condition and an encounter-local condition may intentionally share a
+      // display name. The sheet's stable instance id identifies the one that its
+      // removal owns; filtering by name would erase unrelated timers/sources.
+      merged = merged.filter((instance) => instance.id !== priorSheetInstance.id);
     } else if (currentSheetInstance.stacks !== priorSheetInstance.stacks) {
-      const hadCombatantInstance = merged.some((instance) => keyFor(instance) === key);
-      merged = merged.map((instance) => keyFor(instance) === key
+      const hadCombatantInstance = merged.some((instance) => instance.id === priorSheetInstance.id);
+      merged = merged.map((instance) => instance.id === priorSheetInstance.id
         ? { ...instance, stacks: currentSheetInstance.stacks }
         : instance);
       if (!hadCombatantInstance) merged.push(currentSheetInstance);
@@ -171,10 +174,7 @@ function mergeRemovalUndoSheetConditionDelta(
   }
   for (const [key, currentSheetInstance] of currentByKey) {
     if (capturedByKey.has(key)) continue;
-    const hadCombatantInstance = merged.some((instance) => keyFor(instance) === key);
-    merged = merged.map((instance) => keyFor(instance) === key
-      ? { ...instance, stacks: currentSheetInstance.stacks }
-      : instance);
+    const hadCombatantInstance = merged.some((instance) => instance.id === currentSheetInstance.id);
     if (!hadCombatantInstance) merged.push(currentSheetInstance);
   }
   return conditionWriteSetFromInstances(merged);
@@ -4290,6 +4290,7 @@ export class EncountersService {
       let lairResumeCombatantId = freshEncounter.lairResumeCombatantId === combatantId
         ? null
         : freshEncounter.lairResumeCombatantId;
+      let startingAfterRemoval: Combatant | null = null;
       if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
         const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
@@ -4310,6 +4311,9 @@ export class EncountersService {
         wrappedToNextRound = advanced.roundWrapped;
         turnPhase = advanced.phase;
         lairResumeCombatantId = advanced.lairResumeCombatantId;
+        startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
+          ? advanceRoster.find((combatant) => combatant.id === advanced.currentCombatantId) ?? null
+          : null;
       }
       let afterEncounter = {
         currentCombatantId: newCurrentId,
@@ -4352,6 +4356,22 @@ export class EncountersService {
       }
 
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
+      // Removing the active actor can immediately start a later eligible actor's
+      // turn. Apply the same per-turn reset and start-of-turn condition tick as a
+      // regular advance, without manufacturing a second turn/audit event.
+      if (startingAfterRemoval) {
+        const starting = startingAfterRemoval;
+        const reset = resetTurnStateForStart(starting.turnState);
+        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+        const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
+        if (
+          condTick.expired.length > 0 ||
+          condTick.kept.some((condition, index) => condition.roundsRemaining !== starting.conditionInstances?.[index]?.roundsRemaining)
+        ) {
+          Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+        }
+        tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
+      }
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
@@ -4376,6 +4396,7 @@ export class EncountersService {
           escalationDie: freshEncounter.escalationDie,
           escalationDieHistory: freshEncounter.escalationDieHistory,
           lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
+          turnPhase: (freshEncounter.turnPhase as EncounterTurnPhase) ?? 'combatant',
         }),
         afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, combatantStateVersion: afterCombatantStateVersion, escalationEventId }),
         expiresAt,
@@ -4477,10 +4498,10 @@ export class EncountersService {
         restoredCharacterId = snapshot.characterId;
         restoredNpcId = snapshot.npcId;
         tx.insert(combatants).values(snapshot).run();
-        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
-        const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
+        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
+        const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const runningAdapter = current.status === 'running' ? adapter : null;
-        if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
+        if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && current.turnPhase === after.turnPhase && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
           const restoredRoster = runningAdapter
             ? tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain)
             : null;
@@ -4494,6 +4515,7 @@ export class EncountersService {
             escalationDie: before.escalationDie,
             escalationDieHistory: before.escalationDieHistory,
             lairResumeCombatantId: before.lairResumeCombatantId,
+            turnPhase: before.turnPhase,
             ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nowIso(),

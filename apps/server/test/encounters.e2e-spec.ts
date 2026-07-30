@@ -1061,7 +1061,9 @@ describe('encounters (e2e)', () => {
       expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed' })).status).toBe(200);
       await db.update(combatantsTable).set({ hpCurrent: 7 }).where(eq(combatantsTable.id, added.body.id));
       const preexistingMismatchRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect(preexistingMismatchRemoval.status).toBe(200);
       const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
+      expect(preexistingMismatchRestore.status).toBe(201);
       expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
       // A name-only sheet edit changes updatedAt, but is not sheet-owned combat
       // state. Preserve the encounter-local HP (and, by the same merge rule,
@@ -1089,6 +1091,31 @@ describe('encounters (e2e)', () => {
       const restoredPoison = conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'poisoned');
       expect(restoredPoison).toMatchObject({ sourceCombatantId: 777, roundsRemaining: 2, saveTiming: 'end-of-turn', notes: 'local timer' });
       expect(conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'blessed')).toBeDefined();
+      // The sheet and encounter can both have a same-named condition. Removing the
+      // sheet-owned instance during the undo window must retain the distinct local
+      // timer/source instance rather than filtering every matching display name.
+      const sheetPoison = {
+        id: 'undo_sheet_poison', name: 'poisoned', ruleEntryId: null, source: null,
+        sourceCombatantId: null, durationRounds: null, roundsRemaining: null, timing: 'none',
+        saveTiming: 'none', saveDc: null, saveAbility: null, isConcentration: false,
+        stacks: 1, notes: '', custom: false,
+      };
+      const localPoison = { ...timedPoison, id: 'undo_distinct_local_poison', sourceCombatantId: 888 };
+      const removalWindowSheetUpdate = new Date(Date.now() + 1_000).toISOString();
+      await db.update(characters)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([sheetPoison]), updatedAt: removalWindowSheetUpdate })
+        .where(eq(characters.id, character.body.id));
+      await db.update(combatantsTable)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([sheetPoison, localPoison]) })
+        .where(eq(combatantsTable.id, added.body.id));
+      const sameNameRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      const sheetRemovalUpdatedAt = new Date(Date.now() + 2_000).toISOString();
+      await db.update(characters)
+        .set({ conditions: JSON.stringify([]), conditionInstances: JSON.stringify([]), updatedAt: sheetRemovalUpdatedAt })
+        .where(eq(characters.id, character.body.id));
+      const sameNameRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: sameNameRemoval.body.undoToken });
+      expect(sameNameRestore.status).toBe(201);
+      expect(sameNameRestore.body.conditionInstances).toEqual([expect.objectContaining({ id: 'undo_distinct_local_poison', sourceCombatantId: 888, roundsRemaining: 2 })]);
       // Keep the shared full-flow encounter eligible for its later HP write-back test.
       expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)).status).toBe(200);
     });
