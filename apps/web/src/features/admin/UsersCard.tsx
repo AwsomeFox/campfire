@@ -198,12 +198,22 @@ function NewUserForm({
       backdropStyle={{ zIndex: 50 }}
       onBackdropClick={() => !saving && onCancel()}
       ariaBusy={saving}
+      actions={
+        <>
+          <Btn ghost type="button" aria-label="Cancel creating user" onClick={onCancel} disabled={saving}>
+            Cancel
+          </Btn>
+          <Btn type="submit" form="new-user-form" disabled={saving}>
+            {saving ? 'Creating…' : 'Create user'}
+          </Btn>
+        </>
+      }
     >
       <p className="text-sm text-slate-400 mb-3" id={descriptionId}>
         Create a Campfire account. You can add the user to campaigns after creation.
       </p>
 
-      <form className="space-y-3" onSubmit={create} noValidate>
+      <form id="new-user-form" className="space-y-3" onSubmit={create} noValidate>
         <div className="field">
           <label htmlFor={usernameId}>Username</label>
           <TextInput
@@ -301,14 +311,6 @@ function NewUserForm({
           </p>
         )}
 
-        <div className="dialog-actions">
-          <Btn ghost type="button" aria-label="Cancel creating user" onClick={onCancel} disabled={saving}>
-            Cancel
-          </Btn>
-          <Btn type="submit" disabled={saving}>
-            {saving ? 'Creating…' : 'Create user'}
-          </Btn>
-        </div>
       </form>
     </Dialog>
   );
