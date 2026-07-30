@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Inject, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -30,10 +30,25 @@ function parseProfile(value: string | undefined): ExportProfile {
 @ApiTags('export')
 @Controller('campaigns/:campaignId/export')
 export class ExportController {
+  // Issue #1527: narrowed to exactly the methods this controller calls (verified by
+  // deliberately narrowing further and letting `tsc` name every call site that broke —
+  // see the PR discussion) rather than the full concrete classes. A hand-rolled test
+  // double can then be assigned here WITHOUT any unsafe cast, which is what makes this
+  // different from `Pick`-typing only the double: if this controller starts calling a
+  // method outside this list, compilation fails HERE, forcing the list to widen; once
+  // widened, every double assigned without a cast fails until it supplies the new
+  // method too. `@Inject(...)` supplies the runtime DI token explicitly because the
+  // erased `Pick<...>` type carries no `design:paramtypes` metadata for Nest to resolve.
   constructor(
-    private readonly exportService: ExportService,
-    private readonly access: CampaignAccessService,
-    private readonly campaigns: CampaignsService,
+    @Inject(ExportService)
+    private readonly exportService: Pick<
+      ExportService,
+      'exportFilename' | 'streamMarkdownZip' | 'buildExportInventory' | 'buildProfileExport' | 'buildMemberExport' | 'memberExportFilename'
+    >,
+    @Inject(CampaignAccessService)
+    private readonly access: Pick<CampaignAccessService, 'requireRole' | 'requireMember'>,
+    @Inject(CampaignsService)
+    private readonly campaigns: Pick<CampaignsService, 'getOrThrow'>,
   ) {}
 
   /**
