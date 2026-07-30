@@ -106,6 +106,13 @@ type TurnTickCombatantDelta = {
 type TurnTickDelta = {
   ending?: TurnTickCombatantDelta;
   starting?: TurnTickCombatantDelta;
+  /** Encounter state *after* the advance this snapshot belongs to. Used by undo to
+   *  verify it is consuming the right snapshot when the turn pointer may have moved
+   *  without an advance (e.g. removing the current combatant). */
+  toRound: number;
+  toCurrentCombatantId: number | null;
+  toPhase: EncounterTurnPhase;
+  toLairResumeCombatantId: number | null;
 };
 type EncounterEventFields = {
   actor?: string | null;
@@ -5197,7 +5204,12 @@ export class EncountersService {
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
-    const turnTickSnapshot: TurnTickDelta = {};
+    const turnTickSnapshot: TurnTickDelta = {
+      toRound: encounterRow.round,
+      toCurrentCombatantId: encounterRow.currentCombatantId,
+      toPhase: encounterRow.turnPhase as EncounterTurnPhase,
+      toLairResumeCombatantId: encounterRow.lairResumeCombatantId ?? null,
+    };
 
     try {
       this.db.transaction((tx) => {
@@ -5268,6 +5280,13 @@ export class EncountersService {
         const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
         newRound = round;
         newCurrentId = currentCombatantId;
+
+        // Bind the snapshot to the post-advance encounter state so undo can verify it is
+        // consuming the right snapshot when the turn pointer has moved without an advance.
+        turnTickSnapshot.toRound = round;
+        turnTickSnapshot.toCurrentCombatantId = currentCombatantId;
+        turnTickSnapshot.toPhase = phase;
+        turnTickSnapshot.toLairResumeCombatantId = lairResumeCombatantId;
         skippedTurns = skipped;
         const escalation = this.nextEscalationState(adapter, fresh, round, 'round');
         escalationValue = escalation.escalationDie;
@@ -5535,11 +5554,27 @@ export class EncountersService {
       const turnMeta = lastTurnEvent?.metadataJson
         ? (JSON.parse(lastTurnEvent.metadataJson) as EncounterEventMetadata & { turnTickSnapshot?: TurnTickDelta })
         : undefined;
-      const snapshot = turnMeta?.turnTickSnapshot;
+      let snapshot = turnMeta?.turnTickSnapshot;
 
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
       if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
         throw new BadRequestException('Encounter is not running');
+      }
+
+      // Issue #1445: the snapshot belongs to the advance that produced the current encounter
+      // state. If the turn pointer moved without an advance (e.g. removing the current
+      // combatant) the newest 'turn' event's snapshot describes a different transition and
+      // must not be applied or consumed.
+      if (
+        snapshot &&
+        (
+          snapshot.toRound !== fresh.round ||
+          snapshot.toCurrentCombatantId !== fresh.currentCombatantId ||
+          snapshot.toPhase !== (fresh.turnPhase as EncounterTurnPhase) ||
+          snapshot.toLairResumeCombatantId !== (fresh.lairResumeCombatantId ?? null)
+        )
+      ) {
+        snapshot = undefined;
       }
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
