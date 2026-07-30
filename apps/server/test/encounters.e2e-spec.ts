@@ -3132,6 +3132,27 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(res.status).toBe(400);
   });
 
+  it('keeps hidden death saves out of the shared feed and hides their existence from non-DMs', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const beforeRolls = await deathSaveRolls();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const playerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(player)
+      .send({ idempotencyKey: 'hidden-death-save-player' });
+    const dmAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(dm)
+      .send({ idempotencyKey: 'hidden-death-save-dm' });
+    expect(playerAttempt.status).toBe(404);
+    expect(dmAttempt.status).toBe(403);
+    expect(
+      (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
+    ).toHaveLength(beforeRolls.length);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+  });
+
   it('rolls back the death-save outcome when the matching dice entry cannot persist', async () => {
     const server = ctx.app.getHttpServer();
     await setDying();
