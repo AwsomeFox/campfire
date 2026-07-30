@@ -26,7 +26,7 @@ export function gridCellUnitPlural(gridType: GridType): string {
 
 /** Real-world distance from fractional cell count and per-cell scale. */
 export function rulerDistanceFeet(cells: number, scale: number): number {
-  return Math.round(cells) * scale;
+  return Math.round(cells * scale);
 }
 
 /**
