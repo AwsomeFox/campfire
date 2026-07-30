@@ -558,19 +558,23 @@ export class EncountersController {
   }
 
   @Delete(':id/combatants/:cid')
-  @ApiOperation({ summary: 'Remove a combatant', description: 'dm role required. Returns a server-issued, one-use undoToken valid for 30 seconds; reuse an optional UUID idempotencyKey after a lost response.' })
+  @ApiOperation({ summary: 'Remove a combatant', description: 'dm role required. Returns a server-issued, one-use undoToken valid for 30 seconds; reuse an optional idempotencyKey after a lost response.' })
   @ApiResponse({ status: 200, description: 'Removal receipt: undoToken, encounterId, and combatantId.' })
   async removeCombatant(@Param('id', ParseIntPipe) id: number, @Param('cid', ParseIntPipe) cid: number, @Body() body: CombatantRemoveRequestDto, @CurrentUser() user: RequestUser) {
-    const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    // A same-key retry only reads its committed receipt; keep a trashed row long
+    // enough to authenticate the DM, while the service rejects fresh writes.
+    const row = await this.encounters.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
     return this.encounters.removeCombatant(id, cid, user, role, body.idempotencyKey);
   }
 
   @Post(':id/combatants/undo-remove')
   @ApiOperation({ summary: 'Undo combatant removal', description: 'dm role required. Restores the exact combatant snapshot once while its undo token is valid.' })
   async undoRemoveCombatant(@Param('id', ParseIntPipe) id: number, @Body() body: CombatantRemoveUndoDto, @CurrentUser() user: RequestUser) {
-    const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    // A consumed-token retry is likewise a safe read; the service applies the
+    // mutable lifecycle gate only to the first restoration.
+    const row = await this.encounters.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
     return this.encounters.undoRemoveCombatant(id, body.undoToken, user, role);
   }
 

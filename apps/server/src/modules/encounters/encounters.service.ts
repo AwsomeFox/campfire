@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
@@ -642,7 +642,7 @@ export class EncountersService {
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .get();
-    if (!campaign) return;
+    if (!campaign) throw new NotFoundException('Campaign not found');
     if (campaign.deletedAt != null) throw new NotFoundException('Campaign not found');
     if (campaign.status !== 'active') {
       throw new ForbiddenException(
@@ -4184,15 +4184,20 @@ export class EncountersService {
       // roster view; an earlier device must never overwrite a newer turn transition.
       const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      // An expired undo cannot provide a usable replay receipt. Sweep first so a
+      // retry cannot receive a token that undoRemoveCombatant must reject.
+      tx.delete(combatantRemovalUndos).where(lte(combatantRemovalUndos.expiresAt, now)).run();
       const prior = idempotencyKey
         ? tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.requestKey, idempotencyKey), eq(combatantRemovalUndos.encounterId, encounterId))).get()
         : undefined;
       if (prior) {
         if (prior.combatantId !== combatantId) throw new ConflictException('Idempotency key was reused for a different combatant removal');
-        receiptUndoToken = prior.token as typeof undoToken;
-        replayed = true;
-        emittedEncounter = freshEncounter;
-        return;
+        if (prior.consumedAt == null) {
+          receiptUndoToken = prior.token as typeof undoToken;
+          replayed = true;
+          emittedEncounter = freshEncounter;
+          return;
+        }
       }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
@@ -4261,9 +4266,9 @@ export class EncountersService {
         }
       }
 
-      // Consumed tokens still provide the lost-response replay guarantee until
-      // their short expiry window closes. Only discard records that have expired.
-      tx.delete(combatantRemovalUndos).where(lt(combatantRemovalUndos.expiresAt, now)).run();
+      // A consumed receipt represents an undo that already restored this combatant.
+      // Reusing its key is a new removal, so replace the consumed receipt atomically.
+      if (prior) tx.delete(combatantRemovalUndos).where(eq(combatantRemovalUndos.token, prior.token)).run();
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
       tx.update(encounters).set({
         ...afterEncounter,

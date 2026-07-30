@@ -4375,11 +4375,11 @@ export class McpToolsService {
       server,
       user,
       'remove_combatant',
-      'DM only: remove a combatant from an encounter. Returns a server-issued { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply a UUID idempotencyKey and reuse it after a lost response to replay that receipt.',
+      'DM only: remove a combatant from an encounter. Returns a server-issued { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply an idempotencyKey and reuse it after a lost response to replay that receipt.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantRemoveRequest.shape },
       async ({ encounterId, combatantId, idempotencyKey }) => {
-        const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
         return this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role, idempotencyKey as string | undefined);
       },
     );
@@ -4391,8 +4391,8 @@ export class McpToolsService {
       'DM only: restore a combatant using its short-lived one-use undoToken. A same-token retry after a lost success response replays the restored combatant.',
       { encounterId: Id.describe('Encounter id'), ...CombatantRemoveUndo.shape },
       async ({ encounterId, undoToken }) => {
-        const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
         return this.encounters.undoRemoveCombatant(encounterId as number, undoToken as string, user, role);
       },
     );

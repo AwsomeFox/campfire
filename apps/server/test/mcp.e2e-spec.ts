@@ -2361,6 +2361,31 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(true);
   });
 
+  it('replays committed removal and undo receipts through MCP after an encounter is trashed', async () => {
+    const client = await mcpClient(dmToken);
+    const encounter = parseResult(await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP trashed removal retry' } })) as { id: number };
+    const combatant = parseResult(await client.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'MCP retry target', hpMax: 2 } })) as { id: number };
+    const idempotencyKey = 'd3b9256b-5b63-4c65-9b05-22582b7cdb17';
+    const removed = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: combatant.id, idempotencyKey } });
+    expect(removed.isError).toBeFalsy();
+    expect((await dmAgent.delete(`/api/v1/encounters/${encounter.id}`)).status).toBe(200);
+
+    const replay = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: combatant.id, idempotencyKey } });
+    expect(replay.isError).toBeFalsy();
+    expect(parseResult(replay)).toEqual(parseResult(removed));
+
+    const undoEncounter = parseResult(await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP trashed undo retry' } })) as { id: number };
+    const undoCombatant = parseResult(await client.callTool({ name: 'add_combatant', arguments: { encounterId: undoEncounter.id, kind: 'monster', name: 'MCP undo target', hpMax: 2 } })) as { id: number };
+    const undoRemoval = parseResult(await client.callTool({ name: 'remove_combatant', arguments: { encounterId: undoEncounter.id, combatantId: undoCombatant.id } })) as { undoToken: string };
+    const restored = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: undoEncounter.id, undoToken: undoRemoval.undoToken } });
+    expect(restored.isError).toBeFalsy();
+    expect((await dmAgent.delete(`/api/v1/encounters/${undoEncounter.id}`)).status).toBe(200);
+
+    const undoReplay = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: undoEncounter.id, undoToken: undoRemoval.undoToken } });
+    expect(undoReplay.isError).toBeFalsy();
+    expect(parseResult(undoReplay)).toEqual(parseResult(restored));
+  });
+
   // Issue #495: update_combatant addConditions is vocabulary-gated for non-DMs (same
   // EncountersService path as REST). Players cannot inject arbitrary free-text labels.
   it('update_combatant rejects unknown conditions from a player; DM may mint custom (issue #495)', async () => {

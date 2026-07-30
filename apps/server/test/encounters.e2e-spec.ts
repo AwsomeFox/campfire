@@ -734,11 +734,14 @@ describe('encounters (e2e)', () => {
       expect(replayAfterCleanup.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
 
       const expiring = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Expired undo', hpMax: 2 });
-      const removedExpired = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm);
+      const expiredIdempotencyKey = 'e479599d-c776-4459-a3c6-b04483044d98';
+      const removedExpired = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm).send({ idempotencyKey: expiredIdempotencyKey });
       const db = ctx.app.get<DrizzleDb>(DB);
       await db.update(combatantRemovalUndos).set({ expiresAt: '2000-01-01T00:00:00.000Z' }).where(eq(combatantRemovalUndos.token, removedExpired.body.undoToken));
       const expired = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedExpired.body.undoToken });
       expect(expired.status).toBe(404);
+      const expiredRetry = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm).send({ idempotencyKey: expiredIdempotencyKey });
+      expect(expiredRetry.status).toBe(404);
     });
 
     it('undo nulls a rule entry reference removed during its recovery window', async () => {
@@ -760,12 +763,32 @@ describe('encounters (e2e)', () => {
       const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed undo encounter' });
       const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Recovery target' });
       const added = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Removed before trash', hpMax: 2 });
-      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const idempotencyKey = 'b28cf782-39e7-4428-993a-2cf819d74f21';
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
       expect(removed.status).toBe(200);
       expect((await request(server).delete(`/api/v1/encounters/${encounter.body.id}`).set(dm)).status).toBe(200);
 
+      const replay = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual(removed.body);
+
       const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
       expect(restored.status).toBe(404);
+    });
+
+    it('treats a removal retry after undo as a fresh removal', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Fresh removal retry campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Fresh removal retry' });
+      const added = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Fresh retry target', hpMax: 2 });
+      const idempotencyKey = 'd2c59f5c-0e24-4dca-8ebb-a6f82e1a6959';
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken })).status).toBe(201);
+
+      const repeatedRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect(repeatedRemoval.status).toBe(200);
+      expect(repeatedRemoval.body.undoToken).not.toBe(removed.body.undoToken);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: repeatedRemoval.body.undoToken })).status).toBe(201);
     });
 
     it('replays a consumed removal undo after the encounter ends', async () => {
@@ -789,6 +812,30 @@ describe('encounters (e2e)', () => {
         .send({ undoToken: removed.body.undoToken });
       expect(replay.status).toBe(201);
       expect(replay.body).toMatchObject({ id: added.body.id, name: 'Replay target' });
+    });
+
+    it('replays a consumed removal undo after the encounter is trashed', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed undo replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Trashed undo replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Trashed replay target', hpMax: 2 });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${encounter.body.id}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id: added.body.id, name: 'Trashed replay target' });
     });
 
     it('rolls back a removal when its audit write fails', async () => {
