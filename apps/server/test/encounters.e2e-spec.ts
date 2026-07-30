@@ -1076,6 +1076,14 @@ describe('encounters (e2e)', () => {
       const changedRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: changedRemoval.body.undoToken });
       expect(changedRestore.body).toMatchObject({ hpCurrent: 4, hpMax: 14 });
 
+      // A mid-window level-up mirrors both the sheet's raised maximum and its
+      // increased current HP into a live combatant. Undo must preserve that
+      // newer sheet slice rather than clamping it to the old local maximum.
+      const raisedMaxRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).post(`/api/v1/characters/${character.body.id}/level-up`).set(dm).send({ hpMax: 20 })).status).toBe(201);
+      const raisedMaxRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: raisedMaxRemoval.body.undoToken });
+      expect(raisedMaxRestore.body).toMatchObject({ hpCurrent: 16, hpMax: 20 });
+
       // A sheet edit before removal is not an edit during the recovery window.
       // Preserve the snapshot rather than comparing against its older sync stamp.
       expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed' })).status).toBe(200);
@@ -1084,14 +1092,14 @@ describe('encounters (e2e)', () => {
       expect(preexistingMismatchRemoval.status).toBe(200);
       const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
       expect(preexistingMismatchRestore.status).toBe(201);
-      expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
+      expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 20 });
       // A name-only sheet edit changes updatedAt, but is not sheet-owned combat
       // state. Preserve the encounter-local HP (and, by the same merge rule,
       // local timed condition metadata) captured in the removal snapshot.
       const nameOnlyRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
       expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed during removal' })).status).toBe(200);
       const nameOnlyRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: nameOnlyRemoval.body.undoToken });
-      expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
+      expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 20 });
 
       // A combat-only timed condition is absent from the sheet at removal. Adding a
       // different sheet condition during the recovery window must not replace that

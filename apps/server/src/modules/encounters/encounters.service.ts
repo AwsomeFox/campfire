@@ -4272,6 +4272,7 @@ export class EncountersService {
       // that actually changed during its short recovery window.
       const sheetStateAtRemoval = sheetAtRemoval == null ? null : {
         hpCurrent: sheetAtRemoval.hpCurrent,
+        hpMax: sheetAtRemoval.hpMax,
         hpTemp: sheetAtRemoval.hpTemp,
         spCurrent: sheetAtRemoval.spCurrent,
         spMax: sheetAtRemoval.spMax,
@@ -4315,7 +4316,11 @@ export class EncountersService {
         if (freshEncounter.currentCombatantId === combatantId) {
           const advanced = advanceEncounterTurn(advanceRoster, combatantId, freshEncounter.round, turnPhase, encounterHasLairSlotFromStatblocks(statblocks), lairResumeCombatantId);
           newCurrentId = advanced.currentCombatantId;
-          wrappedToNextRound = advanced.roundWrapped;
+          // Lair entry retains the round returned by the basic transition but
+          // deliberately reports no wrap: the lair action itself is still part
+          // of that next round. Derive the removal's round boundary from the
+          // resulting round so escalation and legendary refresh stay aligned.
+          wrappedToNextRound = advanced.round > freshEncounter.round;
           turnPhase = advanced.phase;
           lairResumeCombatantId = advanced.lairResumeCombatantId;
           startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
@@ -4464,7 +4469,7 @@ export class EncountersService {
         const storedSnapshot = fromJsonText<(typeof combatants.$inferSelect & {
           sheetUpdatedAtAtRemoval?: string | null;
           sheetStateAtRemoval?: {
-            hpCurrent: number; hpTemp: number; spCurrent: number; spMax: number;
+            hpCurrent: number; hpMax: number; hpTemp: number; spCurrent: number; spMax: number;
             rpCurrent: number; rpMax: number; deathState: string;
             deathSaveSuccesses: number; deathSaveFailures: number;
             conditions: string; conditionInstances: string | null;
@@ -4510,6 +4515,10 @@ export class EncountersService {
           // from the value captured at removal; otherwise restore the exact snapshot.
           if (sheet && sheetStateAtRemoval && sheet.updatedAt !== sheetUpdatedAtAtRemoval) {
             let pulledSheetState = false;
+            if (sheet.hpMax !== sheetStateAtRemoval.hpMax) {
+              snapshot.hpMax = sheet.hpMax;
+              pulledSheetState = true;
+            }
             if (sheet.hpCurrent !== sheetStateAtRemoval.hpCurrent) {
               snapshot.hpCurrent = Math.max(0, Math.min(sheet.hpCurrent, snapshot.hpMax));
               pulledSheetState = true;

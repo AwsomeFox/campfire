@@ -1436,7 +1436,7 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  *  - it commits reversible, narrowly-scoped mechanical state that the profile/undo machinery
  *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
  *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
- *    apply_action, undo_action, update_character_hp, set_character_conditions,
+ *    apply_action, undo_action, undo_remove_combatant, update_character_hp, set_character_conditions,
  *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
  *  - it is a scene/world-state nudge with no economy or disclosure blast radius
  *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
@@ -1456,6 +1456,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_combatant',
   'update_combatant',
   'remove_combatant',
+  'undo_remove_combatant',
   'resolve_action',
   'apply_action',
   'undo_action',

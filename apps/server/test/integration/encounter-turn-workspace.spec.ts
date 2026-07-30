@@ -351,6 +351,32 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(afterUndo).toMatchObject({ turnPhase: 'combatant', currentCombatantId: c1, lairResumeCombatantId: null });
   });
 
+  it('removing the final initiative-20 actor carries a lair-entry round wrap', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm.insert(rulePacks)
+      .values({ slug: 'lair-wrap-test', name: 'Lair wrap test', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning()
+      .all();
+    const [lairEntry] = orm.insert(ruleEntries)
+      .values({
+        packId: pack.id, slug: 'lair-wrap-monster', name: 'Lair wrap monster', type: 'monster', summary: '', body: '',
+        dataJson: JSON.stringify({ lairActions: [{ name: 'Crumbling floor' }] }), createdAt: ts, updatedAt: ts,
+      })
+      .returning()
+      .all();
+    orm.update(combatants).set({ initiative: 21, ruleEntryId: lairEntry.id }).where(eq(combatants.id, c1)).run();
+    orm.update(combatants).set({ initiative: 20 }).where(eq(combatants.id, c2)).run();
+    orm.update(encounters).set({ currentCombatantId: c2 }).where(eq(encounters.id, encounterId)).run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ round: 2, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
+  });
+
   it('delay / ready flags persist and are player-authorized on their own combatant', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();
