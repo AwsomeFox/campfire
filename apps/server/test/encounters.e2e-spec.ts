@@ -1,10 +1,11 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
   campaigns,
+  characters,
   encounters as encountersTable,
   rulePacks,
   ruleEntries,
@@ -12,6 +13,7 @@ import {
   npcs,
   encounterEvents as encounterEventsTable,
   diceRolls,
+  combatantRemovalUndos,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AuditService } from '../src/modules/audit/audit.service';
@@ -19,6 +21,7 @@ import { EncountersService } from '../src/modules/encounters/encounters.service'
 import { RollsService } from '../src/modules/rolls/rolls.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
+const otherDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-2' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
 const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'p-2' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
@@ -682,11 +685,508 @@ describe('encounters (e2e)', () => {
 
     it('dm removes a combatant', async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm);
+      const idempotencyKey = '7f5ccac1-fb3d-4ca5-a237-0385d22e0001';
+      const res = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
       expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ encounterId, combatantId: ruleMonsterId });
+      expect(res.body.undoToken).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(res.body.undoToken).not.toBe(idempotencyKey);
+      const replay = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual(res.body);
+
+      const otherEncounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Independent removal key' });
+      const otherCombatant = await request(server).post(`/api/v1/encounters/${otherEncounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Independent key target', hpMax: 2 });
+      const independent = await request(server).delete(`/api/v1/encounters/${otherEncounter.body.id}/combatants/${otherCombatant.body.id}`).set(dm).send({ idempotencyKey });
+      expect(independent.status).toBe(200);
+      expect(independent.body.undoToken).not.toBe(res.body.undoToken);
 
       const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
       expect(getRes.body.combatants.some((c: { id: number }) => c.id === ruleMonsterId)).toBe(false);
+    });
+
+    it('scopes removal idempotency receipts to the requesting DM', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Scoped removal receipt campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Scoped removal receipt' });
+      const dmTarget = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'DM scoped receipt', hpMax: 2 });
+      const otherDmTarget = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Other DM scoped receipt', hpMax: 2 });
+      const sharedKey = 'ba7a1d0f-8f86-45d7-8a86-c0e159c05d31';
+
+      // Two DMs can independently choose the same key without exposing each
+      // other's undo capability or suppressing the second removal.
+      const dmRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${dmTarget.body.id}`).set(dm).send({ idempotencyKey: sharedKey });
+      const otherDmRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${otherDmTarget.body.id}`).set(otherDm).send({ idempotencyKey: sharedKey });
+      expect(dmRemoval.status).toBe(200);
+      expect(otherDmRemoval.status).toBe(200);
+      expect(otherDmRemoval.body.undoToken).not.toBe(dmRemoval.body.undoToken);
+      const otherDmReplay = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${otherDmTarget.body.id}`).set(otherDm).send({ idempotencyKey: sharedKey });
+      expect(otherDmReplay.body).toEqual(otherDmRemoval.body);
+    });
+
+    it('removal undo is DM-gated, exact, and one-shot', async () => {
+      const server = ctx.app.getHttpServer();
+      const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Undo target', hpMax: 9 });
+      const id = added.body.id;
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${id}`).set(dm).send({ hpSet: 3, initiative: 14, addConditions: ['prone'] });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${id}`).set(dm);
+      expect(removed.status).toBe(200);
+      expect(typeof removed.body.undoToken).toBe('string');
+      const denied = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(player).send({ undoToken: removed.body.undoToken });
+      expect(denied.status).toBe(403);
+      const [restored, raced] = await Promise.all([
+        request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken }),
+        request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken }),
+      ]);
+      expect([restored.status, raced.status].filter((status) => status === 201)).toHaveLength(2);
+      const winner = restored;
+      expect(winner.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
+      const replay = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
+
+      // A later removal runs token cleanup. It must not erase this consumed
+      // receipt while the 30-second lost-response replay window is still open.
+      const cleanupTrigger = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Cleanup trigger', hpMax: 2 });
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${cleanupTrigger.body.id}`).set(dm)).status).toBe(200);
+      const replayAfterCleanup = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(replayAfterCleanup.status).toBe(201);
+      expect(replayAfterCleanup.body).toMatchObject({ id, hpCurrent: 3, initiative: 14, conditions: ['prone'] });
+
+      const expiring = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Expired undo', hpMax: 2 });
+      const expiredIdempotencyKey = 'e479599d-c776-4459-a3c6-b04483044d98';
+      const removedExpired = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm).send({ idempotencyKey: expiredIdempotencyKey });
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db.update(combatantRemovalUndos).set({ expiresAt: '2000-01-01T00:00:00.000Z' }).where(eq(combatantRemovalUndos.token, removedExpired.body.undoToken));
+      const expired = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedExpired.body.undoToken });
+      expect(expired.status).toBe(404);
+      const expiredRetry = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm).send({ idempotencyKey: expiredIdempotencyKey });
+      expect(expiredRetry.status).toBe(200);
+      expect(expiredRetry.body.undoToken).toBe(removedExpired.body.undoToken);
+      const nonIdempotentRetry = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${expiring.body.id}`).set(dm);
+      expect(nonIdempotentRetry.status).toBe(404);
+    });
+
+    it('undo nulls a rule entry reference removed during its recovery window', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', ruleEntryId });
+      expect(added.status).toBe(201);
+      const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+      await db.delete(ruleEntries).where(eq(ruleEntries.id, ruleEntryId));
+
+      const restored = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      expect(restored.body.ruleEntryId).toBeNull();
+    });
+
+    it('does not restore a removal token after its encounter is trashed', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed undo encounter' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Recovery target' });
+      const added = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Removed before trash', hpMax: 2 });
+      const idempotencyKey = 'b28cf782-39e7-4428-993a-2cf819d74f21';
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect(removed.status).toBe(200);
+      expect((await request(server).delete(`/api/v1/encounters/${encounter.body.id}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual(removed.body);
+
+      const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(404);
+    });
+
+    it('replays a removal retry after undo without removing the restored combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Fresh removal retry campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Fresh removal retry' });
+      const added = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Fresh retry target', hpMax: 2 });
+      const idempotencyKey = 'd2c59f5c-0e24-4dca-8ebb-a6f82e1a6959';
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken })).status).toBe(201);
+
+      const repeatedRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
+      expect(repeatedRemoval.status).toBe(200);
+      expect(repeatedRemoval.body).toEqual(removed.body);
+      const afterRetry = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      expect(afterRetry.body.combatants).toEqual(expect.arrayContaining([expect.objectContaining({ id: added.body.id })]));
+    });
+
+    it('replays a consumed undo after the restored combatant is removed again', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Consumed undo replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Consumed undo replay' });
+      const added = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Replay after removal', hpMax: 2 });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+
+      const laterRemoval = await request(server)
+        .delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`)
+        .set(dm)
+        .send({ idempotencyKey: 'a5368c9d-21e1-4a6e-8e44-57db0e36a36f' });
+      expect(laterRemoval.status).toBe(200);
+
+      const replay = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(restored.body);
+    });
+
+    it('replays the consumed undo response after the restored combatant changes', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo response replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Undo response replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Replay response target', hpMax: 5 });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      expect((await request(server)
+        .patch(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -2 })).body.hpCurrent).toBe(3);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(restored.body);
+    });
+
+    it('replays a consumed removal undo after the encounter ends', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Ended undo replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Ended undo replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Replay target', hpMax: 2 });
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/roll-initiative`).set(dm)).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken })).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/end`).set(dm)).status).toBe(201);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id: added.body.id, name: 'Replay target' });
+    });
+
+    it('replays a consumed removal undo after the encounter is trashed', async () => {
+      const server = ctx.app.getHttpServer();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed undo replay campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Trashed undo replay' });
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Trashed replay target', hpMax: 2 });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm);
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${encounter.body.id}`).set(dm)).status).toBe(200);
+
+      const replay = await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`)
+        .set(dm)
+        .send({ undoToken: removed.body.undoToken });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toMatchObject({ id: added.body.id, name: 'Trashed replay target' });
+    });
+
+    it('rolls back a removal when its audit write fails', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Audit rollback target', hpMax: 2 });
+      const id = added.body.id as number;
+      await db.run(sql.raw(`CREATE TRIGGER fail_combatant_remove_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'encounter.combatant.remove' AND NEW.entity_id = ${id} BEGIN SELECT RAISE(ABORT, 'injected combatant removal audit failure'); END`));
+      try {
+        const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${id}`).set(dm);
+        expect(removed.status).toBe(500);
+        expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.combatants.some((c: { id: number }) => c.id === id)).toBe(true);
+        expect((await db.select().from(combatantRemovalUndos).where(eq(combatantRemovalUndos.combatantId, id))).length).toBe(0);
+      } finally {
+        await db.run(sql`DROP TRIGGER IF EXISTS fail_combatant_remove_audit`);
+      }
+    });
+
+    it('rolls back combatant, encounter state, undo token, and escalation event when the event write fails', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db.insert(rulePacks).values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 }).onConflictDoNothing();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo event rollback', ruleSystem: 'archmage-srd' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Escalation rollback' });
+      const first = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'First', hpMax: 2 });
+      const last = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Last', hpMax: 2 });
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${first.body.id}`).set(dm).send({ initiative: 20 })).status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${last.body.id}`).set(dm).send({ initiative: 10 })).status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/next-turn`).set(dm)).status).toBe(201);
+      const before = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      expect(before.body.currentCombatantId).toBe(last.body.id);
+      const eventsBefore = (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounter.body.id))).length;
+      await db.run(sql.raw(`CREATE TRIGGER fail_combatant_remove_event BEFORE INSERT ON encounter_events WHEN NEW.encounter_id = ${encounter.body.id} BEGIN SELECT RAISE(ABORT, 'injected combatant removal event failure'); END`));
+      try {
+        const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${last.body.id}`).set(dm);
+        expect(removed.status).toBe(500);
+        const after = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+        expect(after.body).toMatchObject({ currentCombatantId: before.body.currentCombatantId, turnIndex: before.body.turnIndex, round: before.body.round, escalationDie: before.body.escalationDie, escalationDieHistory: before.body.escalationDieHistory });
+        expect(after.body.combatants.some((c: { id: number }) => c.id === last.body.id)).toBe(true);
+        expect((await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounter.body.id))).length).toBe(eventsBefore);
+        expect((await db.select().from(combatantRemovalUndos).where(eq(combatantRemovalUndos.combatantId, last.body.id))).length).toBe(0);
+      } finally {
+        await db.run(sql`DROP TRIGGER IF EXISTS fail_combatant_remove_event`);
+      }
+    });
+
+    it('undo restores exact Archmage escalation state and reconciles a newer turn index', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db.insert(rulePacks).values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 }).onConflictDoNothing();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo exact state', ruleSystem: 'archmage-srd' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Undo state' });
+      const high = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'High', hpMax: 2 });
+      const low = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Low', hpMax: 2 });
+      await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${high.body.id}`).set(dm).send({ initiative: 20 });
+      await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${low.body.id}`).set(dm).send({ initiative: 10 });
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/next-turn`).set(dm)).status).toBe(201);
+      const beforeRemoval = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      const beforeRemovalTurnVersion = (await db.select({ turnVersion: encountersTable.turnVersion }).from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get())!.turnVersion;
+      const eventsBeforeRemoval = (await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounter.body.id))).length;
+      expect(beforeRemoval.body.currentCombatantId).toBe(low.body.id);
+      const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${low.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+      const afterRemoval = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      const afterRemovalTurnVersion = (await db.select({ turnVersion: encountersTable.turnVersion }).from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get())!.turnVersion;
+      expect(afterRemoval.body.round).toBe(beforeRemoval.body.round + 1);
+      expect(afterRemovalTurnVersion).toBeGreaterThan(beforeRemovalTurnVersion);
+      const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(restored.status).toBe(201);
+      const afterUndo = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      const afterUndoTurnVersion = (await db.select({ turnVersion: encountersTable.turnVersion }).from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get())!.turnVersion;
+      expect(afterUndo.body).toMatchObject({ currentCombatantId: beforeRemoval.body.currentCombatantId, turnIndex: beforeRemoval.body.turnIndex, round: beforeRemoval.body.round, escalationDie: beforeRemoval.body.escalationDie, escalationDieHistory: beforeRemoval.body.escalationDieHistory });
+      expect(afterUndoTurnVersion).toBeGreaterThan(afterRemovalTurnVersion);
+      expect((await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounter.body.id))).length).toBe(eventsBeforeRemoval);
+
+      const removedHigh = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${high.body.id}`).set(dm);
+      expect(removedHigh.status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${low.body.id}`).set(dm).send({ initiative: 40 })).status).toBe(200);
+      const restoredAfterInitiativeEdit = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removedHigh.body.undoToken });
+      expect(restoredAfterInitiativeEdit.status).toBe(201);
+      const afterInitiativeEditUndo = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      expect(afterInitiativeEditUndo.body).toMatchObject({ currentCombatantId: low.body.id, turnIndex: 0 });
+
+      const removedHighAfterInitiativeEdit = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${high.body.id}`).set(dm);
+      expect(removedHighAfterInitiativeEdit.status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/next-turn`).set(dm)).status).toBe(201);
+      const restoredAfterTurn = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removedHighAfterInitiativeEdit.body.undoToken });
+      expect(restoredAfterTurn.status).toBe(201);
+      const reconciled = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      expect(reconciled.body).toMatchObject({ currentCombatantId: low.body.id, turnIndex: 0 });
+
+      // An ABA sequence can return every visible pointer field to the removal
+      // snapshot. Keep the newer logical-turn version so Undo reconciles rather
+      // than moving the pointer back and reviving a player action preview.
+      const removedLowAfterNewerTurn = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${low.body.id}`).set(dm);
+      expect(removedLowAfterNewerTurn.status).toBe(200);
+      const postRemoval = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      const postRemovalTurnVersion = (await db.select({ turnVersion: encountersTable.turnVersion }).from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get())!.turnVersion;
+      await db.update(encountersTable).set({ turnVersion: sql`${encountersTable.turnVersion} + 2` }).where(eq(encountersTable.id, encounter.body.id));
+      const restoredAfterAba = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removedLowAfterNewerTurn.body.undoToken });
+      expect(restoredAfterAba.status).toBe(201);
+      const afterAbaUndo = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      const afterAbaUndoTurnVersion = (await db.select({ turnVersion: encountersTable.turnVersion }).from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get())!.turnVersion;
+      expect(afterAbaUndo.body).toMatchObject({ currentCombatantId: postRemoval.body.currentCombatantId, turnIndex: 1, round: postRemoval.body.round });
+      expect(afterAbaUndoTurnVersion).toBe(postRemovalTurnVersion + 2);
+    });
+
+    it('undo restores the lair resume pointer without relying on a database foreign key', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      // This needs its own campaign so it can start a running encounter without
+      // contending with the shared full-flow fixture's authoritative live fight.
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo lair resume campaign' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Undo lair resume' });
+      const target = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Lair resume target', hpMax: 2 });
+      const other = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Lair resume other', hpMax: 2 });
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm).send({ initiative: 20 })).status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${other.body.id}`).set(dm).send({ initiative: 10 })).status).toBe(200);
+      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+      await db.update(encountersTable).set({ lairResumeCombatantId: target.body.id }).where(eq(encountersTable.id, encounter.body.id));
+
+      // Older additive schemas have no ON DELETE SET NULL constraint on this column.
+      // The service must still clear and restore it explicitly.
+      await db.run(sql.raw('PRAGMA foreign_keys = OFF'));
+      try {
+        const removed = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm);
+        expect(removed.status).toBe(200);
+        const afterRemoval = await db.select().from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get();
+        expect(afterRemoval?.lairResumeCombatantId).toBeNull();
+        // A later combatant write forces Undo down its reconcile path rather than
+        // the exact rewind path. It must still restore the pointer cleared solely
+        // because the removed combatant was the pending lair target.
+        expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${other.body.id}`).set(dm).send({ hpDelta: -1 })).status).toBe(200);
+        const restored = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+        expect(restored.status).toBe(201);
+        const afterUndo = await db.select().from(encountersTable).where(eq(encountersTable.id, encounter.body.id)).get();
+        expect(afterUndo?.lairResumeCombatantId).toBe(target.body.id);
+      } finally {
+        await db.run(sql.raw('PRAGMA foreign_keys = ON'));
+      }
+    });
+
+    it('undo conflicts cleanly when the same character was re-added during its window', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const character = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Undo identity conflict', hpCurrent: 8, hpMax: 8 });
+      const original = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
+      const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${original.body.id}`).set(dm);
+      const replacement = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
+      expect(replacement.status).toBe(201);
+      const undo = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removed.body.undoToken });
+      expect(undo.status).toBe(409);
+      expect(undo.body).toMatchObject({ code: 'COMBATANT_IDENTITY_CONFLICT', combatantId: replacement.body.id });
+      expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.combatants.filter((c: { characterId: number | null }) => c.characterId === character.body.id)).toHaveLength(1);
+      const [storedUndo] = await db.select().from(combatantRemovalUndos).where(eq(combatantRemovalUndos.token, removed.body.undoToken));
+      expect(storedUndo.consumedAt).toBeNull();
+    });
+
+    it('undo restores unlinked combatants after their character or NPC is permanently deleted', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const character = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Undo deleted character', hpCurrent: 8, hpMax: 8 });
+      const characterCombatant = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
+      const removedCharacter = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${characterCombatant.body.id}`).set(dm);
+      await db.delete(characters).where(eq(characters.id, character.body.id));
+      const restoredCharacter = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedCharacter.body.undoToken });
+      expect(restoredCharacter.status).toBe(201);
+      expect(restoredCharacter.body.characterId).toBeNull();
+
+      const npc = await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Undo deleted NPC' });
+      const npcCombatant = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId: npc.body.id, hpMax: 8 });
+      expect(npcCombatant.status).toBe(201);
+      const removedNpc = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${npcCombatant.body.id}`).set(dm);
+      expect(removedNpc.status).toBe(200);
+      await db.delete(npcs).where(eq(npcs.id, npc.body.id));
+      const restoredNpc = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedNpc.body.undoToken });
+      expect(restoredNpc.status).toBe(201);
+      expect(restoredNpc.body.npcId).toBeNull();
+    });
+
+    it('undo preserves encounter-local linked-combatant fields and only pulls a changed sheet', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const character = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Undo local override', hpCurrent: 8, hpMax: 8 });
+      const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm).send({ hpMax: 14, hpSet: 11 })).status).toBe(200);
+      const unchangedSheetRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      const unchangedSheetRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: unchangedSheetRemoval.body.undoToken });
+      expect(unchangedSheetRestore.body).toMatchObject({ hpCurrent: 11, hpMax: 14 });
+
+      const changedRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpCurrent: 4 })).status).toBe(200);
+      const changedRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: changedRemoval.body.undoToken });
+      expect(changedRestore.body).toMatchObject({ hpCurrent: 4, hpMax: 14 });
+
+      // A mid-window level-up mirrors both the sheet's raised maximum and its
+      // increased current HP into a live combatant. Undo must preserve that
+      // newer sheet slice rather than clamping it to the old local maximum.
+      const raisedMaxRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).post(`/api/v1/characters/${character.body.id}/level-up`).set(dm).send({ hpMax: 20 })).status).toBe(201);
+      const raisedMaxRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: raisedMaxRemoval.body.undoToken });
+      expect(raisedMaxRestore.body).toMatchObject({ hpCurrent: 16, hpMax: 20 });
+
+      // A sheet edit before removal is not an edit during the recovery window.
+      // Preserve the snapshot rather than comparing against its older sync stamp.
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed' })).status).toBe(200);
+      await db.update(combatantsTable).set({ hpCurrent: 7 }).where(eq(combatantsTable.id, added.body.id));
+      const preexistingMismatchRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect(preexistingMismatchRemoval.status).toBe(200);
+      const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
+      expect(preexistingMismatchRestore.status).toBe(201);
+      expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 20 });
+      // A name-only sheet edit changes updatedAt, but is not sheet-owned combat
+      // state. Preserve the encounter-local HP (and, by the same merge rule,
+      // local timed condition metadata) captured in the removal snapshot.
+      const nameOnlyRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed during removal' })).status).toBe(200);
+      const nameOnlyRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: nameOnlyRemoval.body.undoToken });
+      expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 20 });
+
+      // A maximum-only sheet reduction can leave its current HP unchanged while
+      // an encounter-local override is higher. Undo must clamp that local value
+      // to the newer sheet maximum even though there is no new sheet current HP
+      // to pull.
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpCurrent: 4, hpMax: 8 })).status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm).send({ hpSet: 12, hpMax: 14 })).status).toBe(200);
+      const loweredMaxRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpMax: 6 })).status).toBe(200);
+      const loweredMaxRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: loweredMaxRemoval.body.undoToken });
+      expect(loweredMaxRestore.body).toMatchObject({ hpCurrent: 6, hpMax: 6 });
+
+      // A combat-only timed condition is absent from the sheet at removal. Adding a
+      // different sheet condition during the recovery window must not replace that
+      // timed instance with the sheet's metadata-free copy (or drop it entirely).
+      const timedPoison = {
+        id: 'undo_timed_poison', name: 'poisoned', ruleEntryId: null, source: 'Giant spider',
+        sourceCombatantId: 777, durationRounds: 3, roundsRemaining: 2, timing: 'end-of-turn',
+        saveTiming: 'end-of-turn', saveDc: 13, saveAbility: 'con', isConcentration: false,
+        stacks: 1, notes: 'local timer', custom: false,
+      };
+      await db.update(combatantsTable)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([timedPoison]) })
+        .where(eq(combatantsTable.id, added.body.id));
+      const conditionRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).post(`/api/v1/characters/${character.body.id}/conditions`).set(dm).send({ add: ['blessed'] })).status).toBe(201);
+      const conditionRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: conditionRemoval.body.undoToken });
+      const restoredPoison = conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'poisoned');
+      expect(restoredPoison).toMatchObject({ sourceCombatantId: 777, roundsRemaining: 2, saveTiming: 'end-of-turn', notes: 'local timer' });
+      expect(conditionRestore.body.conditionInstances.find((instance: { name: string }) => instance.name === 'blessed')).toBeDefined();
+      // The sheet and encounter can both have a same-named condition. Removing the
+      // sheet-owned instance during the undo window must retain the distinct local
+      // timer/source instance rather than filtering every matching display name.
+      const sheetPoison = {
+        id: 'undo_sheet_poison', name: 'poisoned', ruleEntryId: null, source: null,
+        sourceCombatantId: null, durationRounds: null, roundsRemaining: null, timing: 'none',
+        saveTiming: 'none', saveDc: null, saveAbility: null, isConcentration: false,
+        stacks: 1, notes: '', custom: false,
+      };
+      const localPoison = { ...timedPoison, id: 'undo_distinct_local_poison', sourceCombatantId: 888 };
+      const removalWindowSheetUpdate = new Date(Date.now() + 1_000).toISOString();
+      await db.update(characters)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([sheetPoison]), updatedAt: removalWindowSheetUpdate })
+        .where(eq(characters.id, character.body.id));
+      await db.update(combatantsTable)
+        .set({ conditions: JSON.stringify(['poisoned']), conditionInstances: JSON.stringify([sheetPoison, localPoison]) })
+        .where(eq(combatantsTable.id, added.body.id));
+      const sameNameRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      const sheetRemovalUpdatedAt = new Date(Date.now() + 2_000).toISOString();
+      await db.update(characters)
+        .set({ conditions: JSON.stringify([]), conditionInstances: JSON.stringify([]), updatedAt: sheetRemovalUpdatedAt })
+        .where(eq(characters.id, character.body.id));
+      const sameNameRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: sameNameRemoval.body.undoToken });
+      expect(sameNameRestore.status).toBe(201);
+      expect(sameNameRestore.body.conditionInstances).toEqual([expect.objectContaining({ id: 'undo_distinct_local_poison', sourceCombatantId: 888, roundsRemaining: 2 })]);
+      // Keep the shared full-flow encounter eligible for its later HP write-back test.
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)).status).toBe(200);
     });
 
     it('combatant routes 404 when encounterId doesn\'t own the combatant (cross-parent-id pin)', async () => {
@@ -2237,6 +2737,12 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
 
   it('roll-initiative works while running and fills the late joiner (only null values)', async () => {
     const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const before = await db
+      .select({ combatantStateVersion: encountersTable.combatantStateVersion })
+      .from(encountersTable)
+      .where(eq(encountersTable.id, encounterId))
+      .get();
     const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
     expect(res.status).toBe(201);
     for (const c of res.body.combatants as CombatantShape[]) {
@@ -2245,6 +2751,12 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
     // Aria's manually-set initiative is left untouched.
     const aria = (res.body.combatants as CombatantShape[]).find((c) => c.id === ariaCombatantId);
     expect(aria?.initiative).toBe(12);
+    const after = await db
+      .select({ combatantStateVersion: encountersTable.combatantStateVersion })
+      .from(encountersTable)
+      .where(eq(encountersTable.id, encounterId))
+      .get();
+    expect(after?.combatantStateVersion).toBe((before?.combatantStateVersion ?? 0) + 1);
   });
 
   it('dm can set a specific initiative on any combatant while running', async () => {
@@ -6491,6 +7003,68 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
         .query({ status: 'bogus' })
         .set(dm);
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('starting hidden encounter and reveal SSE lifecycle (issue #1475)', () => {
+    it('starting a hidden encounter returns status running with warning and evaluates post-start visibility', async () => {
+      const server = ctx.app.getHttpServer();
+      const eventsService = ctx.app.get(CampaignEventsService);
+      const emittedEvents: any[] = [];
+      const sub = eventsService.streamFor(campaignId).subscribe((evt) => emittedEvents.push(evt));
+
+      // Create a hidden encounter with party character
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret Hidden Trap', hidden: true });
+      expect(enc.status).toBe(201);
+      const hiddenEncId = enc.body.id;
+
+      // Roll initiative so start is permitted
+      await request(server)
+        .post(`/api/v1/encounters/${hiddenEncId}/roll-initiative`)
+        .set(dm);
+
+      // Start hidden encounter
+      const startRes = await request(server)
+        .post(`/api/v1/encounters/${hiddenEncId}/start`)
+        .set(dm);
+
+      expect(startRes.status).toBe(201);
+      expect(startRes.body.status).toBe('running');
+      expect(startRes.body.hidden).toBe(true);
+
+      // Player GET should be 404 secrecy check
+      const playerReadBefore = await request(server)
+        .get(`/api/v1/encounters/${hiddenEncId}`)
+        .set(player);
+      expect(playerReadBefore.status).toBe(404);
+
+      // Verify no SSE event was emitted on stream for hidden start
+      const hiddenStartEvents = emittedEvents.filter((e) => e.encounterId === hiddenEncId);
+      expect(hiddenStartEvents).toHaveLength(0);
+
+      // Now DM reveals the encounter (hidden -> false)
+      const revealRes = await request(server)
+        .patch(`/api/v1/encounters/${hiddenEncId}`)
+        .set(dm)
+        .send({ hidden: false });
+      expect(revealRes.status).toBe(200);
+      expect(revealRes.body.hidden).toBe(false);
+
+      // Verify SSE event was emitted after reveal
+      const revealEvents = emittedEvents.filter((e) => e.encounterId === hiddenEncId && e.type === 'encounter.updated');
+      expect(revealEvents.length).toBeGreaterThan(0);
+
+      // Player can now read the running encounter
+      const playerReadAfter = await request(server)
+        .get(`/api/v1/encounters/${hiddenEncId}`)
+        .set(player);
+      expect(playerReadAfter.status).toBe(200);
+      expect(playerReadAfter.body.status).toBe('running');
+
+      sub.unsubscribe();
     });
   });
 });

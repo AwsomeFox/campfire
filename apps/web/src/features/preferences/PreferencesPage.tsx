@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
-import type { TextSize, TimeFormat, User } from '@campfire/schema';
+import type { DiceTheme, TextSize, TimeFormat, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { MCP_CATALOG_COUNTS } from '../../lib/mcp-catalog.generated';
 import { joinPublicBase } from '../../lib/public-base';
@@ -38,7 +38,6 @@ import {
   normalizeHex,
   paletteToCssVars,
 } from '../../app/accentPalette';
-import type { DiceTheme } from '@campfire/schema';
 import { DICE_THEMES, getDiceThemeSpec } from '../dice/diceThemes';
 import { useRollResultToast } from '../../components/RollResultToastContext';
 import { Card, ErrorNote } from '../../components/ui';

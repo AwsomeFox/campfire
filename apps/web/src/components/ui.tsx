@@ -2,7 +2,7 @@
  * Campfire UI primitives — mirror the design package (design/tokens.html).
  * Feature screens compose these; do not restyle geometry locally (issue #674).
  */
-import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ReactNode, type RefObject, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
 import { GameIcon } from './GameIcon';
 import { chipClass, type ChipVariant } from './chipVariants';
@@ -115,28 +115,59 @@ export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 
 /**
  * Accessible modal shell — the `.dialog` / `.dialog-backdrop` pattern from
- * nocturne.css with canonical density (issue #674). Prefer this over hand-rolled
- * dialog markup; ConfirmDialog composes it for destructive flows.
+ * nocturne.css with canonical density (issue #674). Every modal in the app
+ * routes through this primitive (issue #1783); ConfirmDialog and
+ * ConfirmDestructiveDialog compose it rather than hand-rolling the markup.
  */
 export function Dialog({
   title,
   titleId,
+  titleAs: TitleTag = 'p',
   children,
+  bodyId,
+  afterBody,
   actions,
   density = 'default',
   onBackdropClick,
   className = '',
   backdropClassName = '',
+  role = 'dialog',
+  descId,
+  ariaBusy,
+  initialFocusRef,
+  backdropTestId,
+  dialogTestId,
   'data-overlay': dataOverlay = 'dialog',
 }: {
   title?: ReactNode;
   titleId?: string;
+  /** Tag for the rendered title element. Defaults to `p`; pass `h2` for flows
+   * (e.g. a destructive type-to-confirm dialog) that need a heading landmark. */
+  titleAs?: 'p' | 'h2';
   children?: ReactNode;
+  /** id applied to the auto-rendered `.dialog-body` wrapper — wire to `descId`
+   * for `aria-describedby` when the description must target that region only. */
+  bodyId?: string;
+  /**
+   * Extra content rendered after `.dialog-body`, outside its dimmed styling
+   * (nocturne.css sets `.dialog-body { opacity: 0.85 }`). Use this for a
+   * caller-owned `<form>`/controls region — e.g. a type-to-confirm input —
+   * that must stay at full opacity and isn't part of the description.
+   */
+  afterBody?: ReactNode;
   actions?: ReactNode;
   density?: UiDensity;
   onBackdropClick?: () => void;
   className?: string;
   backdropClassName?: string;
+  /** @default 'dialog' — pass 'alertdialog' for destructive confirmations. */
+  role?: 'dialog' | 'alertdialog';
+  descId?: string;
+  ariaBusy?: boolean;
+  /** Prefer this element over the first focusable when focus enters the dialog. */
+  initialFocusRef?: RefObject<HTMLElement | null>;
+  backdropTestId?: string;
+  dialogTestId?: string;
   'data-overlay'?: string;
 }) {
   const dialogRef = useDialog<HTMLDivElement>({
@@ -144,28 +175,38 @@ export function Dialog({
     disabled: !onBackdropClick,
     autoFocus: true,
     inertBackground: true,
+    initialFocusRef,
   });
 
   return createPortal(
     <div
       className={`dialog-backdrop ${backdropClassName}`.trim()}
       data-overlay={dataOverlay}
+      data-testid={backdropTestId}
       onClick={onBackdropClick}
     >
       <div
         ref={dialogRef}
         className={`dialog ${densityClass(density)} ${className}`.trim()}
-        role="dialog"
+        role={role}
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={descId}
+        aria-busy={ariaBusy || undefined}
+        data-testid={dialogTestId}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <p className="dialog-title" id={titleId}>
+          <TitleTag className="dialog-title" id={titleId}>
             {title}
-          </p>
+          </TitleTag>
         )}
-        {children && <div className="dialog-body">{children}</div>}
+        {children && (
+          <div className="dialog-body" id={bodyId}>
+            {children}
+          </div>
+        )}
+        {afterBody}
         {actions && <div className="dialog-actions">{actions}</div>}
       </div>
     </div>,

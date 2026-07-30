@@ -1,7 +1,8 @@
 /**
- * Accessible confirmation dialog — the app's `.dialog` / `.dialog-backdrop`
- * pattern (see nocturne.css) wrapped as a reusable component. Replaces native
- * `confirm()` calls and QuestPage's hand-rolled inline dialog markup.
+ * Accessible confirmation dialog — composes the shared `Dialog` primitive
+ * (issue #1783; previously hand-rolled `.dialog-backdrop`/`.dialog` markup —
+ * see git history for the prior implementation). Replaces native `confirm()`
+ * calls and QuestPage's hand-rolled inline dialog markup.
  *
  * - role="dialog" + aria-modal="true" + aria-labelledby
  * - initial focus on the Cancel button (safe default for destructive actions)
@@ -14,9 +15,7 @@
  *   it once via a polite live region
  */
 import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Btn } from './ui';
-import { useDialog } from './useDialog';
+import { Btn, Dialog } from './ui';
 import { resolveBusyConfirmLabel } from './confirmDialogLabel';
 
 export function ConfirmDialog({
@@ -52,20 +51,6 @@ export function ConfirmDialog({
   const busyLabel = resolveBusyConfirmLabel(confirmLabel, pendingLabel);
   const confirmText = busy ? busyLabel : confirmLabel;
 
-  // Escape-to-close (suppressed while busy), focus trap, focus restore, and an
-  // inert background so mobile chrome under the portal cannot be activated.
-  const dialogRef = useDialog<HTMLDivElement>({
-    onClose: onCancel,
-    disabled: busy,
-    autoFocus: false,
-    inertBackground: true,
-  });
-
-  // Initial focus on Cancel — the safe default for a destructive confirmation.
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
-
   // Announce when busy becomes true, and again if busyLabel changes while busy
   // (locale switch / caller prop update). Clear when busy returns to false.
   const [liveStatus, setLiveStatus] = useState('');
@@ -79,31 +64,28 @@ export function ConfirmDialog({
     wasBusy.current = busy;
   }, [busy, busyLabel]);
 
-  // Portal above #root so sticky header / tab-bar stacking contexts cannot paint
-  // over the backdrop. Nested ConfirmDialogs keep open order via DOM order.
-  return createPortal(
-    <div className="dialog-backdrop" data-overlay="dialog" onClick={() => !busy && onCancel()}>
-      <div
-        ref={dialogRef}
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-busy={busy || undefined}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <p className="dialog-title" id={titleId}>
-          {title}
-        </p>
-        {body && <div className="dialog-body">{body}</div>}
-        {/* Unmount when empty — clearing a mounted role=status to '' can make
-            some screen readers announce “blank”. */}
-        {liveStatus ? (
+  return (
+    <Dialog
+      title={title}
+      titleId={titleId}
+      // Escape-to-close and backdrop-click-to-close are both suppressed while
+      // busy — Dialog disables its Escape handler whenever onBackdropClick is
+      // undefined, the same pattern SchedulePanel uses for its save-in-flight gate.
+      onBackdropClick={busy ? undefined : onCancel}
+      ariaBusy={busy}
+      // Initial focus on Cancel — the safe default for a destructive confirmation.
+      initialFocusRef={cancelRef}
+      afterBody={
+        // Unmount when empty — clearing a mounted role=status to '' can make
+        // some screen readers announce “blank”.
+        liveStatus ? (
           <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
             {liveStatus}
           </span>
-        ) : null}
-        <div className="dialog-actions">
+        ) : null
+      }
+      actions={
+        <>
           <Btn ghost ref={cancelRef} onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </Btn>
@@ -112,9 +94,10 @@ export function ConfirmDialog({
           <Btn danger={danger} onClick={onConfirm} busy={busy} disabled={busy || confirmDisabled}>
             {confirmText}
           </Btn>
-        </div>
-      </div>
-    </div>,
-    document.body,
+        </>
+      }
+    >
+      {body}
+    </Dialog>
   );
 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openDatabase } from '../src/db/db.module';
+import { openDatabase, RULE_ENTRIES_FTS_REPAIR_META_KEY } from '../src/db/db.module';
 
 describe('rule entries FTS startup repair', () => {
   it('rebuilds an incomplete legacy external-content index even after a new row is indexed', () => {
@@ -35,7 +35,7 @@ describe('rule entries FTS startup repair', () => {
       `).run(pack.id, 'newly-indexed', 'Newly Indexed', 'spell', 'NewlyIndexed1507', '', ts, ts);
       expect(first.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('NewlyIndexed1507')).toHaveLength(1);
       // A database created before the repair has no one-time upgrade marker.
-      first.sqlite.prepare("DELETE FROM __db_meta WHERE key = 'rule_entries_fts_repair_v1'").run();
+      first.sqlite.prepare('DELETE FROM __db_meta WHERE key = ?').run(RULE_ENTRIES_FTS_REPAIR_META_KEY);
     } finally {
       first.sqlite.close();
     }
@@ -45,7 +45,7 @@ describe('rule entries FTS startup repair', () => {
       expect(reopened.ftsAvailable).toBe(true);
       expect(reopened.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('LegacyNeedle1507')).toHaveLength(1);
       expect(reopened.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('NewlyIndexed1507')).toHaveLength(1);
-      expect(reopened.sqlite.prepare("SELECT value FROM __db_meta WHERE key = 'rule_entries_fts_repair_v1'").get()).toEqual({ value: 'complete' });
+      expect(reopened.sqlite.prepare('SELECT value FROM __db_meta WHERE key = ?').get(RULE_ENTRIES_FTS_REPAIR_META_KEY)).toEqual({ value: 'complete' });
     } finally {
       reopened.sqlite.close();
       fs.rmSync(dataDir, { recursive: true, force: true });

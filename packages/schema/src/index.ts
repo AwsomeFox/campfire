@@ -10018,6 +10018,14 @@ export const CombatantCreate = z.object({
   // Add from a saved campaign-library monster (snapshot copied server-side).
   libraryMonsterId: Id.optional(),
 });
+/** Retry key for a combatant removal whose response may be lost in transit. */
+export const CombatantRemoveRequest = z.object({ idempotencyKey: IdempotencyKey.optional() });
+export type CombatantRemoveRequest = z.infer<typeof CombatantRemoveRequest>;
+/** The committed removal receipt; retain every field to retry either side safely. */
+export const CombatantRemoveResult = z.object({ undoToken: z.string().uuid(), encounterId: Id, combatantId: Id });
+export type CombatantRemoveResult = z.infer<typeof CombatantRemoveResult>;
+export const CombatantRemoveUndo = z.object({ undoToken: z.string().uuid() });
+export type CombatantRemoveUndo = z.infer<typeof CombatantRemoveUndo>;
 /** How a target's saving throw changes a manually-applied damage roll. */
 export const DamageSaveOutcome = z.enum(['full', 'half']);
 export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;

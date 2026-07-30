@@ -729,7 +729,10 @@ describe('inventory & treasury (e2e)', () => {
         .post(`/api/v1/campaigns/${campaignId}/inventory`)
         .set(player)
         .send({ name: 'Cloak', ownerType: 'character', characterId: ownCharacterId });
-      await request(server).patch(`/api/v1/inventory/${created.body.id}`).set(player).send({ equipped: true, equipSlot: 'worn' });
+      await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'worn', equippedAction: { name: 'Cloak Flourish', kind: 'feature', toHit: '', damage: '', notes: '' } });
 
       const moved = await request(server)
         .patch(`/api/v1/inventory/${created.body.id}`)
@@ -738,6 +741,10 @@ describe('inventory & treasury (e2e)', () => {
       expect(moved.status).toBe(200);
       expect(moved.body.equipped).toBe(false);
       expect(moved.body.equipSlot).toBeNull();
+      // Coordinator review: the granted action does not silently survive the move to
+      // the (unredacted) party stash either — it would otherwise become visible to
+      // every campaign member the moment ownership changes.
+      expect(moved.body.equippedAction).toBeNull();
     });
 
     it('moving an equipped item to a DIFFERENT character auto-unequips it rather than arming the recipient or 409ing on their slots (review fix)', async () => {
@@ -754,7 +761,11 @@ describe('inventory & treasury (e2e)', () => {
       const sourceEquip = await request(server)
         .patch(`/api/v1/inventory/${created.body.id}`)
         .set(player)
-        .send({ equipped: true, equipSlot: 'review-move-slot' });
+        .send({
+          equipped: true,
+          equipSlot: 'review-move-slot',
+          equippedAction: { name: 'Handed-down Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' },
+        });
       expect(sourceEquip.status).toBe(200);
 
       // The recipient (dmCharacterId) already has something equipped in the same slot
@@ -778,6 +789,9 @@ describe('inventory & treasury (e2e)', () => {
       // Not silently armed on the new owner...
       expect(moved.body.equipped).toBe(false);
       expect(moved.body.equipSlot).toBeNull();
+      // ...and its granted action does not silently follow it either (coordinator
+      // review): a new owner never chose this attack, so it must not carry over.
+      expect(moved.body.equippedAction).toBeNull();
 
       // ...and the recipient's own equipped item is untouched.
       const recipientCheck = await request(server).get(`/api/v1/inventory/${recipientIncumbent.body.id}`).set(dm);

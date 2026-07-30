@@ -28,6 +28,37 @@ type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Issue #1326 review (coordinator) — THE single rule for every write path that can
+ * change which character (if any) owns an inventory item: `equipped`, `equipSlot`, and
+ * `equippedAction` reset to this "off" triple together, atomically, whenever ownership
+ * changes — never a partial clear. Three separate earlier review rounds on this PR each
+ * found a DIFFERENT path clearing only equipped/equipSlot and leaving equippedAction
+ * behind: bulk `move_inventory_owner`, clone/import's party fallback, and (this one)
+ * `InventoryService.update()`'s own move branch. An item left "unworn but pre-armed" is
+ * a state normal play can never produce on its own, and — because `equippedAction`
+ * visibility is keyed to `ownerType === 'character'` (see `redactEquippedActions`) — it
+ * is also a state where a previously-redacted, private character action silently
+ * becomes readable (by a new character's owner, or by every campaign member once the
+ * item reaches the party stash) the moment ownership changes, with no new secrecy
+ * decision made by anyone.
+ *
+ * Every owner-changing path uses this constant as the base "cleared" state, only
+ * overriding a field the SAME write explicitly re-establishes for the new owner:
+ *  - `InventoryService.update()`'s move branch (a caller may re-equip in the same PATCH);
+ *  - the bulk `move_inventory_owner` write in `CampaignLibraryService` (unconditional —
+ *    that request shape carries no equip fields of its own);
+ *  - that same bulk operation's `undoBulk()` restore (conditioned on the slot-safety
+ *    check already enforced there);
+ *  - campaign clone and campaign import's party-fallback branch in `CampaignsService`
+ *    (the source character wasn't copied/mapped, so there is no new owner to ask).
+ */
+export const CLEARED_EQUIP_STATE: { readonly equipped: false; readonly equipSlot: null; readonly equippedAction: null } = {
+  equipped: false,
+  equipSlot: null,
+  equippedAction: null,
+};
+
+/**
  * Bind an idempotency key to one qty operation *and* its accompanying mutable
  * fields so key reuse with a different payload 409s (qty, move, name, notes, icon,
  * equip — issue #1326 review: a combined "spend a charge and equip this" retry must
@@ -547,6 +578,18 @@ export class InventoryService {
         }
         if (input.equippedAction !== undefined) {
           update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
+        } else if (moved) {
+          // Issue #1326 review (coordinator): THE ownership-change clearing rule —
+          // equipped, equipSlot, and equippedAction reset together, atomically, unless
+          // THIS SAME write explicitly re-establishes a field for the new owner (handled
+          // by the branch above). Left uncleared, a character's private granted action
+          // would silently follow the item to its new owner: another character who never
+          // chose it, or the public party stash, which is never redaction-checked at all
+          // (see `redactEquippedActions`) — turning a previously-private action visible
+          // campaign-wide the moment ownership changes. Uses the same CLEARED_EQUIP_STATE
+          // every other owner-changing path (bulk move_inventory_owner + its undo, clone,
+          // import) treats as the base "off" state for this triple.
+          update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
         }
         if (equipWillChange) {
           if (nextEquipped) {
@@ -738,14 +781,17 @@ export class InventoryService {
 
     const [row] = await this.db
       .update(inventoryItems)
-      // Issue #1326 review (Codex/Devin): trashing an equipped item must clear its equip
-      // state, not merely tombstone it. Left untouched, a trashed "worn" row could sit
+      // Issue #1326 review (Codex/Devin/coordinator): trashing an equipped item must
+      // clear its FULL equip triple (CLEARED_EQUIP_STATE), not merely tombstone it and
+      // half-clear equipped/equipSlot. Left untouched, a trashed "worn" row could sit
       // behind a replacement that took its slot, and restore() puts the item back with NO
       // owner/slot validation of its own — so an equipped-and-trashed item reappearing
-      // unequipped (frees the slot up front) is what keeps every invariant `update()`
-      // enforces (character-only equip, one equipped item per slot) true across a
-      // trash/restore round trip without restore() having to re-run that validation.
-      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
+      // unequipped-but-still-granting-an-action would be the exact half-clear this PR's
+      // review kept finding on other paths. Clearing all three up front is what keeps
+      // every invariant `update()` enforces (character-only equip, one equipped item per
+      // slot, no dangling granted action) true across a trash/restore round trip without
+      // restore() having to re-run that validation.
+      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, ...CLEARED_EQUIP_STATE })
       .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
       .returning();
     if (!row) {

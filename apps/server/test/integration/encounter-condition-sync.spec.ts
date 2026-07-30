@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounters } from '../../src/db/schema';
+import { auditLog, campaigns, characters, combatants, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -157,6 +157,155 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     await ctx.charactersService.patchConditions(ctx.characterId, { add: ['poisoned'] }, dmUser, 'dm');
     expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).toContain('poisoned');
     expect(readConditions(ctx.orm, 'character', ctx.characterId)).toContain('poisoned');
+  });
+
+  it.each([
+    {
+      name: 'HP',
+      sync: (service: CharactersService, characterId: number, campaignId: number) =>
+        (service as unknown as {
+          syncActiveCombatants: (id: number, hpCurrent: number, hpMax?: number, opts?: { campaignId?: number }) => Promise<void>;
+        }).syncActiveCombatants(characterId, 13, undefined, { campaignId }),
+    },
+    {
+      name: 'conditions',
+      sync: (service: CharactersService, characterId: number, campaignId: number) =>
+        (service as unknown as {
+          syncActiveCombatantConditions: (id: number, conditions: string, opts?: { campaignId?: number }) => Promise<void>;
+        }).syncActiveCombatantConditions(characterId, JSON.stringify(['poisoned']), { campaignId }),
+    },
+  ])('does not bump the encounter revision when concurrent removal wins the $name mirror race', async ({ sync }) => {
+    const ctx = seedRunningFight();
+    const originalTransaction = ctx.orm.transaction.bind(ctx.orm);
+    let removedBeforeMirror = false;
+    const transactionSpy = jest.spyOn(ctx.orm, 'transaction').mockImplementation((callback) => {
+      // The mirror's roster query has already selected this combatant. Delete it just
+      // before the mirror transaction, which models a concurrent remove committing in
+      // that gap. Its UPDATE must affect zero rows and leave the undo revision alone.
+      if (!removedBeforeMirror) {
+        removedBeforeMirror = true;
+        ctx.orm.delete(combatants).where(eq(combatants.id, ctx.combatantId)).run();
+      }
+      return originalTransaction(callback);
+    });
+    try {
+      await sync(ctx.charactersService, ctx.characterId, ctx.campaignId);
+    } finally {
+      transactionSpy.mockRestore();
+    }
+
+    expect(removedBeforeMirror).toBe(true);
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.combatantStateVersion).toBe(0);
+  });
+
+  it('does not expose a sheet combatant write without its undo revision', async () => {
+    const ctx = seedRunningFight();
+    const [removedTurn] = ctx.orm.insert(combatants).values({
+      encounterId: ctx.encounterId,
+      kind: 'monster',
+      name: 'Removed turn',
+      initiative: 20,
+      initMod: 0,
+      hpCurrent: 10,
+      hpMax: 10,
+      conditions: '[]',
+      sortOrder: 1,
+    }).returning().all();
+    ctx.orm.update(encounters)
+      .set({ currentCombatantId: removedTurn.id, turnIndex: 0, combatantStateVersion: 0 })
+      .where(eq(encounters.id, ctx.encounterId))
+      .run();
+    const removal = await ctx.encountersService.removeCombatant(ctx.encounterId, removedTurn.id, dmUser, 'dm');
+
+    // The old implementation yielded after this linked combatant update and before it
+    // bumped combatantStateVersion. A queued undo then saw the removal's old revision and
+    // exactly rewound the pointer to the removed turn. The transaction makes that state
+    // unobservable: the undo either runs before the mirror or reconciles after its revision.
+    let patchSettled = false;
+    let undo: Promise<unknown> | undefined;
+    const interleaveUndo = () => {
+      const [linked] = ctx.orm.select({ hpCurrent: combatants.hpCurrent })
+        .from(combatants)
+        .where(eq(combatants.id, ctx.combatantId))
+        .limit(1)
+        .all();
+      if (!undo && linked?.hpCurrent === 13) {
+        undo = ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+      } else if (!patchSettled) {
+        queueMicrotask(interleaveUndo);
+      }
+    };
+    const patch = ctx.charactersService.patchHp(ctx.characterId, { set: 13 }, dmUser, 'dm')
+      .finally(() => { patchSettled = true; });
+    queueMicrotask(interleaveUndo);
+    await patch;
+    // With the fixed transaction the queued interleaver sees either no combatant write,
+    // or its already-incremented revision. It still represents the competing undo action.
+    undo ??= ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+    await undo;
+
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.currentCombatantId).toBe(ctx.combatantId);
+    expect(encounter.combatantStateVersion).toBeGreaterThan(1);
+    // The narrower transaction leaves the character write's established audit behavior intact.
+    const hpAudits = ctx.orm.select().from(auditLog)
+      .where(eq(auditLog.action, 'character.hp'))
+      .all()
+      .filter((audit) => audit.entityId === ctx.characterId);
+    expect(hpAudits).toEqual([expect.objectContaining({ actor: dmUser.id, campaignId: ctx.campaignId })]);
+  });
+
+  it('does not expose a live combatant addition without its undo revision', async () => {
+    const ctx = seedRunningFight();
+    const [removedTurn] = ctx.orm.insert(combatants).values({
+      encounterId: ctx.encounterId,
+      kind: 'monster',
+      name: 'Removed turn',
+      initiative: 20,
+      initMod: 0,
+      hpCurrent: 10,
+      hpMax: 10,
+      conditions: '[]',
+      sortOrder: 1,
+    }).returning().all();
+    ctx.orm.update(encounters)
+      .set({ currentCombatantId: removedTurn.id, turnIndex: 0, combatantStateVersion: 0 })
+      .where(eq(encounters.id, ctx.encounterId))
+      .run();
+    const removal = await ctx.encountersService.removeCombatant(ctx.encounterId, removedTurn.id, dmUser, 'dm');
+
+    // Before the fix the INSERT committed, then addCombatant yielded to re-read the roster
+    // before bumping combatantStateVersion. Let Undo run at that same interleaving point.
+    let addSettled = false;
+    let undo: Promise<unknown> | undefined;
+    const interleaveUndo = () => {
+      const hasAddition = ctx.orm.select({ id: combatants.id })
+        .from(combatants)
+        .where(eq(combatants.encounterId, ctx.encounterId))
+        .all()
+        .some((combatant) => combatant.id !== ctx.combatantId);
+      if (!undo && hasAddition) {
+        undo = ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+      } else if (!addSettled) {
+        queueMicrotask(interleaveUndo);
+      }
+    };
+    const addition = ctx.encountersService.addCombatant(
+      ctx.encounterId,
+      { kind: 'monster', name: 'Later arrival', hpMax: 6 },
+      dmUser,
+      'dm',
+    ).finally(() => { addSettled = true; });
+    queueMicrotask(interleaveUndo);
+    const added = await addition;
+    undo ??= ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+    await undo;
+
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.currentCombatantId).toBe(ctx.combatantId);
+    expect(ctx.orm.select().from(auditLog).where(eq(auditLog.entityId, added.id)).all())
+      .toEqual([expect.objectContaining({ action: 'encounter.combatant.add', actor: dmUser.id })]);
   });
 
   it('tracker addConditions survives /end onto the sheet', async () => {

@@ -28,9 +28,11 @@ test.describe('ruler readout units (issue #477)', () => {
   test('square grid labels', () => {
     expect(gridCellUnitAbbrev('square')).toBe('sq');
     expect(gridCellUnitPlural('square')).toBe('squares');
-    expect(rulerDistanceFeet(2.4, 5)).toBe(10);
-    expect(formatRulerReadout({ ...BASE, gridType: 'square' }, 'display')).toBe('2.4 sq · 10 ft');
-    expect(formatRulerReadout({ ...BASE, gridType: 'square' }, 'announce')).toBe('2.4 squares · 10 ft');
+    expect(rulerDistanceFeet(2.4, 5)).toBe(12);
+    expect(rulerDistanceFeet(2.6, 5)).toBe(13);
+    expect(rulerDistanceFeet(0.4, 5)).toBe(2);
+    expect(formatRulerReadout({ ...BASE, gridType: 'square' }, 'display')).toBe('2.4 sq · 12 ft');
+    expect(formatRulerReadout({ ...BASE, gridType: 'square' }, 'announce')).toBe('2.4 squares · 12 ft');
     expect(measureToolHelp('square')).toBe('Click-drag to measure distance in squares');
   });
 
@@ -38,20 +40,20 @@ test.describe('ruler readout units (issue #477)', () => {
     expect(gridCellUnitAbbrev('hex')).toBe('hex');
     expect(gridCellUnitPlural('hex')).toBe('hexes');
     expect(formatRulerReadout({ ...BASE, gridType: 'hex', hexOrientation: 'pointy' }, 'display')).toBe(
-      '2.4 hex · 10 ft',
+      '2.4 hex · 12 ft',
     );
     expect(formatRulerReadout({ ...BASE, gridType: 'hex', hexOrientation: 'pointy' }, 'announce')).toBe(
-      '2.4 hexes · 10 ft',
+      '2.4 hexes · 12 ft',
     );
     expect(measureToolHelp('hex')).toBe('Click-drag to measure distance in hexes');
   });
 
   test('flat-top hex grid labels match pointy-top copy', () => {
     expect(formatRulerReadout({ ...BASE, gridType: 'hex', hexOrientation: 'flat' }, 'display')).toBe(
-      '2.4 hex · 10 ft',
+      '2.4 hex · 12 ft',
     );
     expect(formatRulerReadout({ ...BASE, gridType: 'hex', hexOrientation: 'flat' }, 'announce')).toBe(
-      '2.4 hexes · 10 ft',
+      '2.4 hexes · 12 ft',
     );
   });
 

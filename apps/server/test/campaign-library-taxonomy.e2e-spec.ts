@@ -250,7 +250,17 @@ describe('campaign library taxonomy (issue #742)', () => {
     const [recipient] = await db.insert(characters).values({ campaignId, name: 'Undo-move recipient', createdAt: ts, updatedAt: ts }).returning();
     const [item] = await db
       .insert(inventoryItems)
-      .values({ campaignId, name: 'Undo-move blade', ownerType: 'character', characterId: source.id, equipped: true, equipSlot: 'main-hand', createdAt: ts, updatedAt: ts })
+      .values({
+        campaignId,
+        name: 'Undo-move blade',
+        ownerType: 'character',
+        characterId: source.id,
+        equipped: true,
+        equipSlot: 'main-hand',
+        equippedAction: JSON.stringify({ name: 'Blade Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
       .returning();
 
     const moved = await request(server)
@@ -258,7 +268,11 @@ describe('campaign library taxonomy (issue #742)', () => {
       .set(dm)
       .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: recipient.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
     expect(moved.status).toBe(201);
-    expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)?.equipped).toBe(false);
+    const afterMove = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterMove.equipped).toBe(false);
+    // Coordinator review: equippedAction clears together with equipped/equipSlot on the
+    // FORWARD move too — the recipient never silently inherits the source's action.
+    expect(afterMove.equippedAction).toBeNull();
 
     const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm);
     expect(undone.status).toBe(201);
@@ -266,6 +280,8 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(afterUndo.characterId).toBe(source.id);
     expect(afterUndo.equipped).toBe(true);
     expect(afterUndo.equipSlot).toBe('main-hand');
+    // The full triple round-trips through undo, not just equipped/equipSlot.
+    expect(JSON.parse(afterUndo.equippedAction!)).toMatchObject({ name: 'Blade Slash', damage: '1d8+3' });
   });
 
   it('undoing a bulk move_inventory_owner rejects re-equipping into a slot another item has since claimed', async () => {

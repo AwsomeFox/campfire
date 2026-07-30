@@ -1117,6 +1117,37 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
+  it('bumps combatant state when an action undo races a fight start', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    orm.update(encounters)
+      .set({ status: 'preparing', combatantStateVersion: 0 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+    const originalTransaction = orm.transaction.bind(orm);
+    let startedBeforeUndoTransaction = false;
+    const transactionSpy = jest.spyOn(orm, 'transaction').mockImplementation((callback) => {
+      if (!startedBeforeUndoTransaction) {
+        startedBeforeUndoTransaction = true;
+        orm.update(encounters).set({ status: 'running' }).where(eq(encounters.id, encounterId)).run();
+      }
+      return originalTransaction(callback);
+    });
+    try {
+      service.undo(encounterId, applied.undoToken!, alice, 'player');
+    } finally {
+      transactionSpy.mockRestore();
+    }
+
+    expect(startedBeforeUndoTransaction).toBe(true);
+    expect(orm.select().from(encounters).where(eq(encounters.id, encounterId)).get()!.combatantStateVersion).toBe(1);
+  });
+
   it('#1449: an undo token with an unknown chainId is rejected', () => {
     const { service, encounterId, actor } = seed();
     const bogus = ActionUndoToken.parse({
@@ -1391,7 +1422,60 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(applied.undoToken).toBeTruthy();
   });
 
-  it('#1451: replaying the same chainId at /actions/apply a second time is rejected (single-use)', () => {
+  it('#1474: applying the same chainId a second time is idempotent — returns stored undoToken and does not double-apply damage', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    const hpAfterFirst = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
+
+    // Retry with the exact same chainId (e.g. network timeout / double-click retry)
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    const hpAfterSecond = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
+
+    expect(hpAfterSecond).toBe(hpAfterFirst);
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
+    expect(res2.undoToken.targets).toEqual(res1.undoToken.targets);
+  });
+
+  it('#1474: retrying an already-undone chain is rejected', () => {
+    const { service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    service.undo(encounterId, res.undoToken, alice, 'player');
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /unknown or has already been applied/i,
+    );
+  });
+
+  it('#1474: re-applying a chainId after turn advancement returns stored undoToken without 403', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    // Advance the encounter turn so the actor is no longer active
+    orm.update(encounters).set({ currentCombatantId: drake, turnVersion: 2 }).where(eq(encounters.id, encounterId)).run();
+
+    // A network retry after turn advance should still succeed idempotently without throwing 403
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
+  });
+
+  it('#1474: replayed apply enforces original applier user identity', () => {
     const { service, encounterId, actor, drake } = seed();
     const preview = service.resolve(
       encounterId,
@@ -1400,9 +1484,37 @@ describe('action resolver (real SQLite, service layer)', () => {
       'player',
     );
     service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
-    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
-      /already (been )?applied/i,
+
+    // Another player attempting to replay Alice's chainId is rejected
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), bob, 'player')).toThrow(
+      /original applier or a DM/i,
     );
+
+    // The DM is allowed to replay it
+    const resDm = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), dmUser, 'dm');
+    expect(resDm.undoToken.chainId).toBe(preview.chainId);
+  });
+
+  it('#1474: replaying an already-completed chain returns stored undoToken even when safety hold is active', () => {
+    const { service, campaignId, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    // Activate safety hold on the campaign
+    (service as any).safety = {
+      assertNotHeld: (cId: number) => {
+        if (cId === campaignId) throw new Error('Safety hold active');
+      },
+    };
+
+    // Replay of the completed chain should bypass safety hold assertion and return the stored undo token
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
   });
 
   // ---------------------------------------------------------------------------
@@ -1528,7 +1640,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
-  it('#1451 review (Kilo, TOCTOU): two "simultaneous" applies of the same chainId — exactly one succeeds and damage lands exactly once', async () => {
+  it('#1474: two "simultaneous" applies of the same chainId — both fulfill idempotently and damage lands exactly once', async () => {
     const { orm, service, encounterId, actor, drake } = seed();
     const preview = service.resolve(
       encounterId,
@@ -1542,8 +1654,8 @@ describe('action resolver (real SQLite, service layer)', () => {
     const attempt = () =>
       Promise.resolve().then(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player'));
     const results = await Promise.allSettled([attempt(), attempt()]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(0);
 
     const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
     expect(drakeRow.hpCurrent).toBe(60 - honestDamage); // damage landed exactly once, never twice

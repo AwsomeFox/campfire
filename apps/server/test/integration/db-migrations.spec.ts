@@ -432,7 +432,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(MIGRATION_NAMES).toContain('0090_trash_soft_delete_701');
       expect(MIGRATION_NAMES).toContain('0149_ensure_soft_delete_columns_701');
-      expect(MIGRATION_NAMES).toContain('0150_inventory_items_equip_1326');
+      expect(MIGRATION_NAMES).toContain('0152_inventory_items_equip_1326');
       // Fresh DBs get the equip columns straight from BOOTSTRAP_SQL (issue #1326).
       expect(columnNames(sqlite, 'inventory_items')).toEqual(
         expect.arrayContaining(['equipped', 'equip_slot', 'equipped_action']),
@@ -2283,7 +2283,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
   });
 
   it('adds inventory_items equip/unequip columns when upgrading a pre-#1326 DB', () => {
-    expect(MIGRATION_NAMES).toContain('0150_inventory_items_equip_1326');
+    expect(MIGRATION_NAMES).toContain('0152_inventory_items_equip_1326');
 
     // Start from a fully-migrated DB, seed a live item, then rewind inventory_items to its
     // pre-#1326 shape (no equipped/equip_slot/equipped_action columns, migration un-recorded)
@@ -2308,7 +2308,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       legacy.exec('ALTER TABLE inventory_items DROP COLUMN equipped');
       legacy.exec('ALTER TABLE inventory_items DROP COLUMN equip_slot');
       legacy.exec('ALTER TABLE inventory_items DROP COLUMN equipped_action');
-      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0150_inventory_items_equip_1326');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0152_inventory_items_equip_1326');
       expect(columnNames(legacy, 'inventory_items')).not.toContain('equipped');
     } finally {
       legacy.close();
@@ -2322,8 +2322,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         (upgraded.sqlite
           .prepare('SELECT name FROM __migrations WHERE name = ?')
-          .get('0150_inventory_items_equip_1326') as { name?: string })?.name,
-      ).toBe('0150_inventory_items_equip_1326');
+          .get('0152_inventory_items_equip_1326') as { name?: string })?.name,
+      ).toBe('0152_inventory_items_equip_1326');
       expect(
         (upgraded.sqlite.pragma('index_list(inventory_items)') as Array<{ name: string }>).map((i) => i.name),
       ).toContain('idx_inventory_items_character_equipped');
@@ -2361,4 +2361,57 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       booted.sqlite.close();
     }
   });
+
+  it('upgrades removal receipt retries to actor-scoped keys without losing prior receipts (#1469)', () => {
+     expect(MIGRATION_NAMES).toContain('0150_combatant_remove_undo_1469');
+     expect(MIGRATION_NAMES).toContain('0151_combatant_remove_revision_1469');
+
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'combatant_removal_undos')).toEqual(expect.arrayContaining(['actor_id', 'request_key']));
+      const freshIndex = fresh.sqlite
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_combatant_removal_undos_request'")
+        .get() as { sql: string };
+      expect(freshIndex.sql).toContain('encounter_id, actor_id, request_key');
+    } finally {
+      fresh.sqlite.close();
+    }
+
+    // Rewind just the final revision to the shape shipped by the first #1469
+    // migration. Existing receipts must remain readable, while fresh receipts
+    // receive the actor-scoped key index.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      // The fixture only needs a historical receipt row; it intentionally does
+      // not seed the surrounding encounter tables.
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('DROP INDEX IF EXISTS idx_combatant_removal_undos_request');
+      legacy.exec('ALTER TABLE combatant_removal_undos DROP COLUMN actor_id');
+      legacy.exec('CREATE UNIQUE INDEX idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, request_key) WHERE request_key IS NOT NULL');
+      legacy
+        .prepare(`INSERT INTO combatant_removal_undos
+          (token, encounter_id, combatant_id, request_key, snapshot_json, before_encounter_json, after_encounter_json, expires_at, created_at)
+          VALUES (?, 1, 1, 'legacy-key', '{}', '{}', '{}', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`)
+        .run('legacy-removal-receipt');
+       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0151_combatant_remove_revision_1469');
+      legacy.pragma('foreign_keys = ON');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatant_removal_undos')).toContain('actor_id');
+      expect(
+        upgraded.sqlite.prepare('SELECT actor_id FROM combatant_removal_undos WHERE token = ?').get('legacy-removal-receipt'),
+      ).toEqual({ actor_id: '' });
+      const indexColumns = upgraded.sqlite
+        .prepare("SELECT name FROM pragma_index_info('idx_combatant_removal_undos_request') ORDER BY seqno")
+        .all() as Array<{ name: string }>;
+      expect(indexColumns.map((column) => column.name)).toEqual(['encounter_id', 'actor_id', 'request_key']);
+     } finally {
+       upgraded.sqlite.close();
+     }
+   });
 });

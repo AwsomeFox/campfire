@@ -12,8 +12,13 @@ import type { Character, RuleSystemAdapter } from '@campfire/schema';
 // @campfire/schema roll catalog — the SINGLE source of truth the server, the character sheet,
 // and the encounter card all read. Re-exported here under the historical names so existing
 // import sites keep working while the math lives in exactly one place.
-import { DND5E_ABILITY_KEYS, DND5E_SKILLS, dnd5eProficiencyBonus } from '@campfire/schema';
-import { abilityKeysForAdapter, abilityLabelForAdapter } from '@campfire/schema';
+import {
+  DND5E_ABILITY_KEYS,
+  DND5E_SKILLS,
+  abilityKeysForAdapter,
+  abilityLabelForAdapter,
+  dnd5eProficiencyBonus,
+} from '@campfire/schema';
 
 export const ABILITY_KEYS = DND5E_ABILITY_KEYS;
 export type Ability = string;

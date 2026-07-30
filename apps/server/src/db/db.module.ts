@@ -28,7 +28,7 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 
 /** Module-scoped logger for the free functions (openDatabase et al.) that run outside a Nest provider. */
 const dbLog = new Logger('Database');
-const RULE_ENTRIES_FTS_REPAIR_META_KEY = 'rule_entries_fts_repair_v1';
+export const RULE_ENTRIES_FTS_REPAIR_META_KEY = 'rule_entries_fts_repair_v2';
 
 /**
  * APP_VERSION (from common/build-metadata, issue #432) is recorded alongside the
@@ -87,26 +87,28 @@ export const CAMPAIGN_SEARCH_FTS_AVAILABLE = Symbol('CAMPAIGN_SEARCH_FTS_AVAILAB
  */
 function setupRuleEntriesFts(sqlite: Database.Database): boolean {
   try {
-    sqlite.exec(RULE_ENTRIES_FTS_SQL);
-    // External-content FTS tables read their content table for SELECT count(*),
-    // so that count cannot distinguish a populated-but-unindexed legacy table.
-    // Repair that historical no-FTS -> FTS upgrade exactly once. A persisted
-    // marker avoids rebuilding healthy indexes at every boot and handles both
-    // fully empty and partially backfilled legacy indexes without relying on
-    // token coverage (some valid rule entries have no tokenizable text).
     ensureDbMetaTable(sqlite);
     const repaired = sqlite
       .prepare('SELECT 1 FROM __db_meta WHERE key = ?')
       .get(RULE_ENTRIES_FTS_REPAIR_META_KEY);
     const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
     if (!repaired) {
+      sqlite.exec(`
+        DROP TABLE IF EXISTS rule_entries_fts;
+        DROP TRIGGER IF EXISTS rule_entries_ai;
+        DROP TRIGGER IF EXISTS rule_entries_ad;
+        DROP TRIGGER IF EXISTS rule_entries_au;
+      `);
+      sqlite.exec(RULE_ENTRIES_FTS_SQL);
       if (entries.count > 0) {
         sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
-        dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
+        dbLog.log(`rebuilt rule_entries FTS index with unicode61 remove_diacritics 2 for ${entries.count} existing entries`);
       }
       sqlite
-        .prepare('INSERT INTO __db_meta (key, value, updated_at) VALUES (?, ?, ?)')
+        .prepare('INSERT OR REPLACE INTO __db_meta (key, value, updated_at) VALUES (?, ?, ?)')
         .run(RULE_ENTRIES_FTS_REPAIR_META_KEY, 'complete', new Date().toISOString());
+    } else {
+      sqlite.exec(RULE_ENTRIES_FTS_SQL);
     }
     return true;
   } catch {
@@ -1564,11 +1566,13 @@ function migrateInventoryItemsCompendium738(sqlite: Database.Database): void {
 }
 
 /**
- * Migration 0150 (issue #1326): equip/unequip state on inventory items. `equipped`
+ * Migration 0152 (issue #1326): equip/unequip state on inventory items. `equipped`
  * defaults to 0 (false) so every existing row upgrades as unequipped — no item is
  * silently promoted to an active-loadout weapon just because it existed before this
  * column did. `equip_slot` / `equipped_action` are additive TEXT columns (NULL on
- * upgrade, same idiom as #738's compendium columns above).
+ * upgrade, same idiom as #738's compendium columns above). Originally recorded as
+ * 0150; renumbered to 0152 after merging main, where PR #1469 landed 0150/0151 first
+ * (this ordinal never shipped on any real database as 0150).
  */
 function migrateInventoryItemsEquip1326(sqlite: Database.Database): void {
   const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
@@ -4404,6 +4408,7 @@ function migrateActionApplyChains1449(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS action_apply_chains (
       id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+      applied_by_user_id TEXT,
       action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
       cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
       concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
@@ -4412,6 +4417,11 @@ function migrateActionApplyChains1449(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);
   `);
+  try {
+    sqlite.exec(`ALTER TABLE action_apply_chains ADD COLUMN applied_by_user_id TEXT;`);
+  } catch {
+    // column already exists
+  }
 }
 
 /**
@@ -4500,6 +4510,38 @@ function migrateActionPendingTurnVersion1316(sqlite: Database.Database): void {
   if (!pendingColumns.some((column) => column.name === 'turn_version')) {
     sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN turn_version INTEGER NOT NULL DEFAULT -1');
   }
+}
+
+function migrateCombatantRemoveUndo1469(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS combatant_removal_undos (
+      token TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE, combatant_id INTEGER NOT NULL,
+      request_key TEXT, actor_id TEXT NOT NULL DEFAULT '',
+      snapshot_json TEXT NOT NULL, before_encounter_json TEXT NOT NULL, after_encounter_json TEXT NOT NULL,
+      expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
+  `);
+}
+
+/** Keep removal retries distinct from server-minted undo capabilities. */
+function migrateCombatantRemovalRevision1469(sqlite: Database.Database): void {
+  const encounterColumns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (encounterColumns.length > 0 && !encounterColumns.some((column) => column.name === 'combatant_state_version')) {
+    sqlite.exec('ALTER TABLE encounters ADD COLUMN combatant_state_version INTEGER NOT NULL DEFAULT 0');
+  }
+  const undoColumns = sqlite.prepare('PRAGMA table_info(combatant_removal_undos)').all() as Array<{ name: string }>;
+  if (undoColumns.length > 0 && !undoColumns.some((column) => column.name === 'request_key')) {
+    sqlite.exec('ALTER TABLE combatant_removal_undos ADD COLUMN request_key TEXT');
+  }
+  if (undoColumns.length > 0 && !undoColumns.some((column) => column.name === 'actor_id')) {
+    sqlite.exec("ALTER TABLE combatant_removal_undos ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''");
+  }
+  sqlite.exec(`
+    DROP INDEX IF EXISTS idx_combatant_removal_undos_request;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request
+      ON combatant_removal_undos(encounter_id, actor_id, request_key) WHERE request_key IS NOT NULL;
+  `);
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
@@ -4804,8 +4846,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
   // #701 soft-delete schema safety check: guarantees all 14 entity tables carry `deleted_at`.
   { name: '0149_ensure_soft_delete_columns_701', run: migrateEnsureSoftDeleteColumns701 },
+  // #1469 originally used 0147, which main now owns. This never-shipped migration
+  // gets the next free ordinal after main's 0149 to preserve upgrade compatibility.
+  { name: '0150_combatant_remove_undo_1469', run: migrateCombatantRemoveUndo1469 },
+  { name: '0151_combatant_remove_revision_1469', run: migrateCombatantRemovalRevision1469 },
   // #1326 — inventory equip/unequip state + the equipped-item action projection.
-  { name: '0150_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
+  // Originally 0150, which #1469 claimed first on main; renumbered to the next free
+  // ordinal after merging main (never shipped on any real database as 0150).
+  { name: '0152_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
 ];
 
 /**

@@ -51,7 +51,7 @@ function toGridFrame(
 }
 
 /** Rotate a grid-frame point by +θ back to layer pixels. */
-function fromGridFrame(
+export function fromGridFrame(
   gx: { x: number; y: number },
   cal: GridCalibrationPx,
 ): { x: number; y: number } {
@@ -265,7 +265,7 @@ export function tokenFootprintDiameterPx(
 }
 
 /** Six vertices of one hex polygon in grid-frame pixels (for SVG overlay). */
-function hexVerticesGridFrac(
+export function hexVerticesGridFrac(
   axial: AxialCoord,
   cellPx: number,
   orientation: HexOrientation,
@@ -338,33 +338,6 @@ export function snapFogRectToHexGrid(
   const x = Math.min(tl.x, br.x);
   const y = Math.min(tl.y, br.y);
   return { x, y, w: Math.abs(br.x - tl.x), h: Math.abs(br.y - tl.y) };
-}
-
-/** Hex cells whose centres fall inside a circle AoE (hex grid mode). */
-export function hexCircleCells(
-  origin: MapPercent,
-  radiusCells: number,
-  cal: GridCalibration,
-  mapRect: Rect,
-  orientation: HexOrientation,
-): AxialCoord[] {
-  const center = mapPercentToAxial(origin, cal, mapRect, orientation);
-  return hexesInRadius(center, Math.max(0, Math.ceil(radiusCells)));
-}
-
-/** True when a map-percent point lies inside a hex-radius circle AoE. */
-export function pointInHexCircleAoe(
-  pt: MapPercent,
-  origin: MapPercent,
-  radiusCells: number,
-  cal: GridCalibration,
-  mapRect: Rect,
-  orientation: HexOrientation,
-): boolean {
-  const radius = Math.ceil(radiusCells);
-  const a = mapPercentToAxial(pt, cal, mapRect, orientation);
-  const b = mapPercentToAxial(origin, cal, mapRect, orientation);
-  return hexDistance(a, b) <= radius;
 }
 
 /** Keyboard nudge: one hex step in the arrow direction (layer pixels). */

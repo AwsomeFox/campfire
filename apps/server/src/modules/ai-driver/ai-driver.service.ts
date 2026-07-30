@@ -18,12 +18,14 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import { AiDmToolConfirmation, DriverSessionProfile, DriverToolPolicyClass } from '@campfire/schema';
 import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
+  AiDmToolConfirmation,
   buildNarrationLanguageContract,
+  DriverSessionProfile,
+  DriverToolPolicyClass,
   resolveNarrationLanguage,
   resolverImplementsSystemMath,
   ruleSystemAdapter,
@@ -1335,6 +1337,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_combatant',
   'update_combatant',
   'remove_combatant',
+  'undo_remove_combatant',
   // #414: structured action resolver — the driver resolves an action end-to-end
   // (roll → classify → preview → apply atomically) instead of chaining raw HP/condition
   // mutations, and can reverse it with undo_action.
@@ -1434,7 +1437,7 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  *  - it commits reversible, narrowly-scoped mechanical state that the profile/undo machinery
  *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
  *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
- *    apply_action, undo_action, update_character_hp, set_character_conditions,
+ *    apply_action, undo_action, undo_remove_combatant, update_character_hp, set_character_conditions,
  *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
  *  - it is a scene/world-state nudge with no economy or disclosure blast radius
  *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
@@ -1454,6 +1457,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_combatant',
   'update_combatant',
   'remove_combatant',
+  'undo_remove_combatant',
   'resolve_action',
   'apply_action',
   'undo_action',

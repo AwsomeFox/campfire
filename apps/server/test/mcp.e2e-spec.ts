@@ -2309,7 +2309,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(deniedInstall.isError).toBe(true);
   });
 
-  it('list_encounters, monster combatant gets DEX-derived initMod from its statblock, update_combatant and remove_combatant', async () => {
+  it('list_encounters, monster combatant gets DEX-derived initMod, and removal undo stays REST/MCP-compatible', async () => {
     const client = await mcpClient(dmToken);
 
     const createResult = await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ambush' } });
@@ -2342,15 +2342,52 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(damaged.hpCurrent).toBe(4);
     expect(damaged.conditions).toContain('prone');
 
-    const removeResult = await client.callTool({
-      name: 'remove_combatant',
-      arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id },
-    });
+    const removedViaRest = await dmAgent.delete(`/api/v1/encounters/${encounter.id}/combatants/${goblinCombatant.id}`);
+    expect(removedViaRest.status).toBe(200);
+    const restoredByMcp = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: encounter.id, undoToken: removedViaRest.body.undoToken } });
+    expect(restoredByMcp.isError).toBeFalsy();
+    expect(parseResult(restoredByMcp)).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });
+
+    const idempotencyKey = '3fd4d041-a13d-4dbd-a105-2b1abf15791b';
+    const removeResult = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id, idempotencyKey } });
     expect(removeResult.isError).toBeFalsy();
+    const removedByMcp = parseResult(removeResult) as { undoToken: string };
+    expect(typeof removedByMcp.undoToken).toBe('string');
+    const replayedRemove = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id, idempotencyKey } });
+    expect(replayedRemove.isError).toBeFalsy();
+    expect(parseResult(replayedRemove)).toEqual(removedByMcp);
+    const restoredViaRest = await dmAgent.post(`/api/v1/encounters/${encounter.id}/combatants/undo-remove`).send({ undoToken: removedByMcp.undoToken });
+    expect(restoredViaRest.status).toBe(201);
+    expect(restoredViaRest.body).toMatchObject({ id: goblinCombatant.id, hpCurrent: 4, conditions: ['prone'] });
 
     const getAfter = await client.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } });
     const afterRemoval = parseResult(getAfter) as { combatants: Array<{ id: number }> };
-    expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
+    expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(true);
+  });
+
+  it('replays committed removal and undo receipts through MCP after an encounter is trashed', async () => {
+    const client = await mcpClient(dmToken);
+    const encounter = parseResult(await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP trashed removal retry' } })) as { id: number };
+    const combatant = parseResult(await client.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'MCP retry target', hpMax: 2 } })) as { id: number };
+    const idempotencyKey = 'd3b9256b-5b63-4c65-9b05-22582b7cdb17';
+    const removed = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: combatant.id, idempotencyKey } });
+    expect(removed.isError).toBeFalsy();
+    expect((await dmAgent.delete(`/api/v1/encounters/${encounter.id}`)).status).toBe(200);
+
+    const replay = await client.callTool({ name: 'remove_combatant', arguments: { encounterId: encounter.id, combatantId: combatant.id, idempotencyKey } });
+    expect(replay.isError).toBeFalsy();
+    expect(parseResult(replay)).toEqual(parseResult(removed));
+
+    const undoEncounter = parseResult(await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP trashed undo retry' } })) as { id: number };
+    const undoCombatant = parseResult(await client.callTool({ name: 'add_combatant', arguments: { encounterId: undoEncounter.id, kind: 'monster', name: 'MCP undo target', hpMax: 2 } })) as { id: number };
+    const undoRemoval = parseResult(await client.callTool({ name: 'remove_combatant', arguments: { encounterId: undoEncounter.id, combatantId: undoCombatant.id } })) as { undoToken: string };
+    const restored = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: undoEncounter.id, undoToken: undoRemoval.undoToken } });
+    expect(restored.isError).toBeFalsy();
+    expect((await dmAgent.delete(`/api/v1/encounters/${undoEncounter.id}`)).status).toBe(200);
+
+    const undoReplay = await client.callTool({ name: 'undo_remove_combatant', arguments: { encounterId: undoEncounter.id, undoToken: undoRemoval.undoToken } });
+    expect(undoReplay.isError).toBeFalsy();
+    expect(parseResult(undoReplay)).toEqual(parseResult(restored));
   });
 
   // Issue #495: update_combatant addConditions is vocabulary-gated for non-DMs (same

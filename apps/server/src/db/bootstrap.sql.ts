@@ -1289,6 +1289,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
   turn_version INTEGER NOT NULL DEFAULT 0,
+  combatant_state_version INTEGER NOT NULL DEFAULT 0,
   escalation_die INTEGER NOT NULL DEFAULT 0,
   escalation_die_held INTEGER NOT NULL DEFAULT 0,
   escalation_die_override INTEGER,
@@ -1778,6 +1779,22 @@ CREATE TABLE IF NOT EXISTS combatants (
   statblock_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS combatant_removal_undos (
+  token TEXT PRIMARY KEY,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  combatant_id INTEGER NOT NULL,
+  request_key TEXT,
+  actor_id TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL,
+  before_encounter_json TEXT NOT NULL,
+  after_encounter_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_combatant_removal_undos_expiry ON combatant_removal_undos(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combatant_removal_undos_request ON combatant_removal_undos(encounter_id, actor_id, request_key) WHERE request_key IS NOT NULL;
+
 -- Campaign-scoped homebrew monster library (issue #425).
 CREATE TABLE IF NOT EXISTS campaign_library_monsters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2217,6 +2234,7 @@ CREATE INDEX IF NOT EXISTS idx_data_repair_findings_campaign ON data_repair_find
 CREATE TABLE IF NOT EXISTS action_apply_chains (
   id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+  applied_by_user_id TEXT,
   action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
   cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
   concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
@@ -2258,7 +2276,7 @@ ${CAMPAIGN_MODULES_DDL}`;
  */
 export const RULE_ENTRIES_FTS_SQL = `
 CREATE VIRTUAL TABLE IF NOT EXISTS rule_entries_fts USING fts5(
-  name, summary, body, content='rule_entries', content_rowid='id'
+  name, summary, body, content='rule_entries', content_rowid='id', tokenize = 'unicode61 remove_diacritics 2'
 );
 
 CREATE TRIGGER IF NOT EXISTS rule_entries_ai AFTER INSERT ON rule_entries BEGIN

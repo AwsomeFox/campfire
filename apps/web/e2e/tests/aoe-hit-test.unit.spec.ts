@@ -4,7 +4,7 @@
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { AoeTemplate } from '@campfire/schema';
+import type { AoeTemplate, TokenSize } from '@campfire/schema';
 import {
   aoePolygonVertices,
   combatantsInAoe,
@@ -13,10 +13,20 @@ import {
   tokenInAoe,
   type AoeHitTestContext,
 } from '../../src/features/encounters/aoeHitTest';
+import { resolveGridCalibration } from '../../src/features/encounters/mapRenderedBounds';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 
 const CTX: AoeHitTestContext = { gridSize: 10, gridScale: 5, mapRect: DEFAULT_AOE_MAP_RECT };
+
+const HEX_CTX: AoeHitTestContext = {
+  gridSize: 10,
+  gridScale: 5,
+  mapRect: DEFAULT_AOE_MAP_RECT,
+  gridType: 'hex',
+  calibration: resolveGridCalibration({ gridSize: 10 }),
+  hexOrientation: 'pointy',
+};
 
 function aoe(partial: Partial<AoeTemplate> & Pick<AoeTemplate, 'shape'>): AoeTemplate {
   return {
@@ -95,6 +105,49 @@ test.describe('tokenInAoe (issue #626)', () => {
   });
 });
 
+test.describe('tokenInAoe footprint (issue #1460)', () => {
+  test('circle: Large+ token whose centre is outside the radius is included when its footprint overlaps', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    // A gargantuan token (4 cells) centred at 72% has its centre 220 px from a 200 px radius,
+    // but its 200 px half-width brings the footprint inside.
+    expect(tokenInAoe({ x: 72, y: 50 }, template, CTX, 'gargantuan')).toBe(true);
+    // A medium token at 77.5% is 275 px out; even its 50 px half-width stays outside.
+    expect(tokenInAoe({ x: 77.5, y: 50 }, template, CTX, 'medium')).toBe(false);
+  });
+
+  test('circle: a Tiny token is excluded when its footprint only touches the edge', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    // Tiny token at 72.5%: centre is 225 px out, half-width 25 px, so it just touches the 200 px radius.
+    expect(tokenInAoe({ x: 72.5, y: 50 }, template, CTX, 'tiny')).toBe(false);
+    // At 70% the centre is exactly on the radius, but the footprint still overlaps the interior.
+    expect(tokenInAoe({ x: 70, y: 50 }, template, CTX, 'tiny')).toBe(true);
+  });
+
+  test('line: a Large token whose centre is outside the template is included when its footprint crosses it', () => {
+    const template = aoe({ shape: 'line', x: 20, y: 50, sizeFt: 30, angleDeg: 0 });
+    // Line is one cell wide (100 px) along y=500. Large token (2 cells) centred at 600 just
+    // peeks into the line from the north; a medium token only touches the far edge.
+    expect(tokenInAoe({ x: 20, y: 60 }, template, CTX, 'large')).toBe(true);
+    expect(tokenInAoe({ x: 20, y: 60 }, template, CTX, 'medium')).toBe(false);
+    // Far enough that even a Large token no longer overlaps.
+    expect(tokenInAoe({ x: 20, y: 65 }, template, CTX, 'large')).toBe(false);
+  });
+});
+
+test.describe('tokenInAoe hex grid (issue #1460)', () => {
+  test('circle: Large+ token whose centre is outside the radius is included when its footprint overlaps', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    expect(tokenInAoe({ x: 80, y: 50 }, template, HEX_CTX, 'gargantuan')).toBe(true);
+    expect(tokenInAoe({ x: 80, y: 50 }, template, HEX_CTX, 'medium')).toBe(false);
+  });
+
+  test('circle: a tiny token is excluded when its centre is outside the radius', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    expect(tokenInAoe({ x: 80, y: 50 }, template, HEX_CTX, 'tiny')).toBe(false);
+    expect(tokenInAoe({ x: 70, y: 50 }, template, HEX_CTX, 'tiny')).toBe(true);
+  });
+});
+
 test.describe('combatantsInAoe', () => {
   test('filters placed combatants inside a circle template', () => {
     const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
@@ -106,6 +159,18 @@ test.describe('combatantsInAoe', () => {
     ];
     const hits = combatantsInAoe(combatants, template, CTX);
     expect(hits.map((c) => c.id)).toEqual([1, 2]);
+  });
+
+  test('threads tokenSize and includes a Large+ combatant whose footprint overlaps', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    const combatants = [
+      { id: 1, name: 'Gargantuan', tokenX: 72, tokenY: 50, tokenSize: 'gargantuan' as TokenSize },
+      { id: 2, name: 'Tiny', tokenX: 72.5, tokenY: 50, tokenSize: 'tiny' as TokenSize },
+      { id: 3, name: 'Large', tokenX: 60, tokenY: 50, tokenSize: 'large' as TokenSize },
+      { id: 4, name: 'Medium', tokenX: 77.5, tokenY: 50, tokenSize: 'medium' as TokenSize },
+    ];
+    const hits = combatantsInAoe(combatants, template, CTX);
+    expect(hits.map((c) => c.id)).toEqual([1, 3]);
   });
 });
 

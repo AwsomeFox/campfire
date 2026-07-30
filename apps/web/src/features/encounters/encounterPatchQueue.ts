@@ -4,6 +4,7 @@ export type QueuedEncounterPatch = {
   pendingKey: string;
   observedUpdatedAt?: string;
   patch: Record<string, unknown>;
+  previousValues?: Record<string, unknown>;
 };
 
 /** Only an immediately repeated pending body is redundant; undo/redo may revisit an older one. */
@@ -49,4 +50,32 @@ export function reconcileEncounterPatchResponse<T extends object>(
   return Array.from(pending)
     .filter((entry) => entry.encounterId === encounterId && entry.queueId !== settledQueueId)
     .reduce<T>((snapshot, entry) => ({ ...snapshot, ...entry.patch }), updated);
+}
+
+/**
+ * When an encounter patch mutation fails, remove its optimistic patch from the query cache.
+ * Any key modified by the failed patch is restored to its previous value unless another
+ * remaining queued patch also modifies that key.
+ */
+export function rollbackEncounterPatchError<T extends object>(
+  current: T,
+  failedEntry: QueuedEncounterPatch,
+  remainingPending: Iterable<QueuedEncounterPatch>,
+  encounterId: number,
+): T {
+  if (!current || failedEntry.encounterId !== encounterId || !failedEntry.previousValues) return current;
+  const remaining = Array.from(remainingPending).filter(
+    (entry) => entry.encounterId === encounterId && entry.queueId !== failedEntry.queueId,
+  );
+
+  const updated = { ...current };
+  for (const [key, prevVal] of Object.entries(failedEntry.previousValues)) {
+    const overridingEntry = remaining.find((entry) => Object.prototype.hasOwnProperty.call(entry.patch, key));
+    if (overridingEntry) {
+      (updated as Record<string, unknown>)[key] = overridingEntry.patch[key];
+    } else {
+      (updated as Record<string, unknown>)[key] = prevVal;
+    }
+  }
+  return updated;
 }

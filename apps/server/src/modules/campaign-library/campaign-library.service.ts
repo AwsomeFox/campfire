@@ -245,15 +245,23 @@ export class CampaignLibraryService {
           }
         }
         const field = request.operation === 'set_status' ? (target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status') : request.operation === 'set_visibility' && target.entityType === 'location' ? 'status' : config.field;
-        // Issue #1326 review (Codex): equip state must round-trip through undo the same
-        // way move_inventory_owner/archive/restore already round-trip owner/deletion —
-        // so both snapshot branches also capture equipped/equip_slot for inventory_item
-        // targets (harmless — and always present — for every other entity type's plain
-        // scalar snapshot, since inventory_items is the only table with these columns).
+        // Issue #1326 review (Codex/coordinator): equip state must round-trip through
+        // undo the same way move_inventory_owner/archive/restore already round-trip
+        // owner/deletion — so both snapshot branches also capture equipped/equip_slot/
+        // equipped_action for inventory_item targets (harmless — and always present —
+        // for every other entity type's plain scalar snapshot, since inventory_items is
+        // the only table with these columns). All three travel together per
+        // CLEARED_EQUIP_STATE's rule: a partial snapshot (equip flags without the
+        // granted action, or vice versa) is exactly the half-clear this PR's review kept
+        // finding on other paths.
         const row = request.operation === 'move_inventory_owner'
-          ? tx.get(sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`)
+          ? tx.get(
+              sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+            )
           : target.entityType === 'inventory_item'
-            ? tx.get(sql`select ${sql.raw(field)} as value, equipped as equipped, equip_slot as equipSlot from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`)
+            ? tx.get(
+                sql`select ${sql.raw(field)} as value, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+              )
             : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
         snapshots.push({ entityType: target.entityType, entityId: target.entityId, value: row });
@@ -285,15 +293,23 @@ export class CampaignLibraryService {
           const field = target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status';
           tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${request.status}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
         } else if (request.operation === 'move_inventory_owner') {
-          // Issue #1326 review (Codex/Devin): this bulk move has no equip fields of its
-          // own (LibraryBulkRequest carries only ownerType/characterId here), so — same
-          // rule as InventoryService.update's single-item PATCH — a bulk owner change
-          // ALWAYS auto-unequips. Left unguarded, this bypassed the single-item PATCH's
-          // fix entirely: a bulk move to another character silently armed them with the
-          // item's equippedAction (or could 409 a legitimate future equip via a stale
-          // duplicate-slot row), and a bulk move to the party stash could leave
-          // equipped=1 on a party-owned row, which `update()` treats as invalid.
-          tx.run(sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+          // Issue #1326 review (Codex/Devin/coordinator): this bulk move has no equip
+          // fields of its own (LibraryBulkRequest carries only ownerType/characterId
+          // here), so — the CLEARED_EQUIP_STATE rule InventoryService.update's move
+          // branch also enforces — a bulk owner change ALWAYS clears equipped, equip_slot,
+          // AND equipped_action together (unconditional: nothing in this request could
+          // re-establish any of the three for the new owner). Left unguarded, this
+          // bypassed the single-item PATCH's fix entirely: a bulk move to another
+          // character silently armed them with the item's equippedAction (or could 409 a
+          // legitimate future equip via a stale duplicate-slot row), a bulk move to the
+          // party stash could leave equipped=1 on a party-owned row (invalid per
+          // `update()`), and — the read-side half of the same bug — a previously-redacted
+          // character-private action became visible campaign-wide the moment the item
+          // reached the party stash, since `redactEquippedActions` never checks a party
+          // item's equippedAction at all.
+          tx.run(
+            sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
+          );
         } else {
           // Issue #1326 review (Codex/Devin): mirrors InventoryService.remove() — an
           // inventory item archived through the bulk tool must also clear its equip
@@ -304,7 +320,7 @@ export class CampaignLibraryService {
           // timeline_event/attachment) is unaffected.
           const clearEquipOnArchive = request.operation === 'archive' && target.entityType === 'inventory_item';
           tx.run(
-            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
+            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL, equipped_action=NULL` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
           );
         }
       }
@@ -372,35 +388,51 @@ export class CampaignLibraryService {
             // and strictly safer (an old journal row is simply data, never re-validated
             // against today's business rules beyond what's read here).
             const before = z
-              .object({ ownerType: z.string(), characterId: z.number().int().nullable(), equipped: z.number().int().optional(), equipSlot: z.string().nullable().optional() })
+              .object({
+                ownerType: z.string(),
+                characterId: z.number().int().nullable(),
+                equipped: z.number().int().optional(),
+                equipSlot: z.string().nullable().optional(),
+                equippedAction: z.string().nullable().optional(),
+              })
               .parse(value);
             if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
-            // Issue #1326 review (Codex): restore the pre-move equip state too, but only
-            // when it is safe — the item can only be equipped on a character owner, and
-            // only if no OTHER item has since claimed that slot on that character. A
-            // conflict here is surfaced the same way the single-item PATCH surfaces it:
-            // reject, rather than silently dropping the equip or displacing the incumbent.
+            // Issue #1326 review (Codex/coordinator): restore the pre-move equip triple —
+            // equipped, equipSlot, AND equippedAction together (CLEARED_EQUIP_STATE's
+            // rule) — but only when it is safe: the item can only be equipped on a
+            // character owner, and only if no OTHER item has since claimed that slot on
+            // that character. A conflict here is surfaced the same way the single-item
+            // PATCH surfaces it: reject, rather than silently dropping the equip,
+            // displacing the incumbent, or restoring the triple only halfway.
             const canRestoreEquip = before.equipped === 1 && before.ownerType === 'character' && before.characterId != null && before.equipSlot != null;
             if (canRestoreEquip && this.inventoryEquipSlotConflict(tx, campaignId, before.characterId!, before.equipSlot!, row.entityId)) {
               throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
             }
             tx.run(
-              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${canRestoreEquip ? (before.equippedAction ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
           } else {
             const scalar = z
-              .object({ value: z.string().nullable(), equipped: z.number().int().optional(), equipSlot: z.string().nullable().optional() })
+              .object({
+                value: z.string().nullable(),
+                equipped: z.number().int().optional(),
+                equipSlot: z.string().nullable().optional(),
+                equippedAction: z.string().nullable().optional(),
+              })
               .parse(value);
             const after = request.operation === 'archive' ? operation.createdAt : null;
             if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and deleted_at is ${after}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             if (row.entityType === 'inventory_item' && request.operation === 'restore') {
               // Undoing a RESTORE re-archives the item. Its equip state was already
               // cleared when the original archive ran (mirrors InventoryService.remove()),
-              // so there is nothing to restore here — just clear it again for symmetry.
-              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              // so there is nothing to restore here — just clear the full triple again
+              // for symmetry (CLEARED_EQUIP_STATE).
+              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
             } else if (row.entityType === 'inventory_item' && request.operation === 'archive') {
               // Undoing an ARCHIVE un-deletes the item AND restores its pre-archive equip
-              // state — subject to the same slot-safety check as the move-owner undo above.
+              // triple — subject to the same slot-safety check as the move-owner undo
+              // above; equippedAction travels with equipped/equipSlot rather than being
+              // left behind (CLEARED_EQUIP_STATE's rule again).
               const owner = z.object({ characterId: z.number().int().nullable() }).parse(
                 tx.get(sql`select character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`),
               );
@@ -409,7 +441,7 @@ export class CampaignLibraryService {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
               tx.run(
-                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${canRestoreEquip ? (scalar.equippedAction ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
             } else {
               tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);

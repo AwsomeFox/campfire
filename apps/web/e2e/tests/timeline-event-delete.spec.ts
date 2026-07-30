@@ -158,4 +158,34 @@ test.describe('Timeline event deletion (issue #693)', () => {
       await restoreTimelineEvent(baseURL!, eventId);
     }
   });
+
+  // Issue #1783 — ConfirmDialog now composes the shared Dialog primitive.
+  // The other tests in this file already prove initial focus (Cancel),
+  // Escape-to-close, and focus-restore-to-trigger; this one proves the FULL
+  // Tab-trap cycle (forward wrap AND Shift+Tab wrap), which none of the
+  // existing ConfirmDialog coverage exercised end-to-end.
+  test('focus trap cycles within the dialog in both directions', async ({ page, baseURL }) => {
+    const title = `1783 FocusTrap ${Date.now()}`;
+    const eventId = await createTimelineEvent(baseURL!, title);
+    try {
+      const { dialog } = await openDeleteDialog(page, eventId, title);
+      const cancel = dialog.getByRole('button', { name: 'Cancel' });
+      const confirm = dialog.getByRole('button', { name: 'Delete event' });
+
+      await expect(cancel).toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(confirm).toBeFocused();
+      // Forward wrap: Tab past the last focusable returns to the first.
+      await page.keyboard.press('Tab');
+      await expect(cancel).toBeFocused();
+      // Backward wrap: Shift+Tab before the first focusable goes to the last.
+      await page.keyboard.press('Shift+Tab');
+      await expect(confirm).toBeFocused();
+
+      await cancel.click();
+      await expect(dialog).toHaveCount(0);
+    } finally {
+      await restoreTimelineEvent(baseURL!, eventId);
+    }
+  });
 });

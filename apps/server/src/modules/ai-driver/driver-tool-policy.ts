@@ -122,7 +122,7 @@ export const MAX_PENDING_TOOL_CONFIRMATIONS = 20;
  *    mode unusable — a single attack is a roll, a save, and an apply — and would burn the
  *    per-turn confirm budget on results nobody needs to approve. Applying is where the decision
  *    lives, and applying is gated.
- *  - `undo_action`. It exists to reverse a mistake. Putting a confirmation in front of the undo
+ *  - `undo_action` / `undo_remove_combatant`. They exist to reverse a mistake. Putting a confirmation in front of the undo
  *    button means a wrong outcome stays on the board until someone approves removing it.
  *  - Reads, canon writes (already `propose`), and anything already `confirm` or `deny` in the
  *    active profile — collaborative mode only ever tightens `auto`, never loosens anything.

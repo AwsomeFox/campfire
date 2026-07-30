@@ -2,23 +2,17 @@ name: Watch main CI
 
 # Issue #1703: every automated and human process here is PR-scoped (sweeps
 # enumerate open PRs, review bots comment on PRs, merge gating evaluates a
-# PR's head sha). Nothing watches `main`'s OWN push-triggered CI runs, so a
-# break that only shows up after merge — e.g. two individually-green PRs
-# combining into a duplicate import (#1702) — produces a red run nobody is
-# looking at. This workflow is the fix for the first checkbox only: poll the
-# latest push-triggered CI workflow on a schedule, and surface a genuine failure
-# where a human or agent will see it (a GitHub issue, created once and
-# updated/closed rather than duplicated on every run).
+# PR's head sha). Nothing watches `main`'s OWN check-runs, so a break that only
+# shows up after merge — e.g. two individually-green PRs combining into a
+# duplicate import (#1702) — produces a red run nobody is looking at.
 #
-# Deliberately out of scope here (left for separate work, see #1703):
-#   - the `strict_required_status_checks_policy` ruleset change
-#   - a duplicate-import guard
+# This workflow polls the latest commit on `main` through the GitHub Checks API
+# and opens/updates a tracking issue whenever the required aggregate `ci` check
+# fails, times out, or needs action. It closes the issue once a later main
+# commit is fully green again.
 #
-# Poll the latest push-triggered CI workflow run, rather than the latest main
-# commit's check-runs. That preserves a failure when a later docs-only commit
-# intentionally skips CI, and it naturally ignores a cancelled run once a newer
-# run exists. Only an explicit `failure` opens or updates the tracking issue;
-# queued, in-progress, cancelled, skipped, and neutral runs are not verdicts.
+# The ruleset recommendation (`strict_required_status_checks_policy`) and the
+# duplicate-import lint guard are handled elsewhere; see the PR for #1703.
 on:
   schedule:
     # Frequent enough that a break is caught within a working session.
@@ -26,7 +20,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: read
+  checks: read
   contents: read
   issues: write
 
@@ -47,9 +41,9 @@ jobs:
         run: |
           gh label create main-ci-broken --repo "$REPO" --force \
             --color b60205 \
-            --description "Opened automatically when the latest main CI workflow fails"
+            --description "Opened automatically when the latest main check-runs fail"
 
-      - name: Poll the latest main CI run and reconcile the tracking issue
+      - name: Poll the latest main check-runs and reconcile the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -57,79 +51,179 @@ jobs:
         run: |
           set -euo pipefail
 
-          ci_run=$(gh api \
-            "repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=1" \
-            --jq '.workflow_runs[0] // empty')
+          # The repository's aggregate required check is named `ci`. We only act
+          # on that verdict to avoid both false alarms from non-required checks
+          # and false all-clear when a docs-only push (paths-ignore in ci.yml)
+          # produces no real CI check-runs at all. We also derive the commit SHA
+          # from the `ci` run itself so we never rely on the ordering of the
+          # returned check-run array.
+          #
+          # If HEAD itself has no `ci` check-run, walk back the most recent main
+          # commits until we find the latest one with a `ci` run, so a red code
+          # commit is not silently dropped behind a CI-skipping push. We only
+          # skip past a commit if its changed files match `ci.yml`'s
+          # paths-ignore (docs/**, design/**, **/*.md, LICENSE); a non-docs
+          # commit without a `ci` run is either still in progress or a CI
+          # infrastructure break, and we refuse to inherit an older verdict or
+          # close the tracking issue on stale data. Paginate through commit
+          # history (up to a reasonable cap) rather than stopping at an
+          # arbitrary per-page limit.
+          is_docs_only_commit() {
+            local sha=$1
+            local files
+            if ! files=$(gh api "repos/${REPO}/commits/${sha}" 2>/dev/null \
+              | jq -r '.files[].filename // empty'); then
+              echo "GitHub API request failed while fetching commit ${sha}; aborting instead of masking the error." >&2
+              return 2
+            fi
+            [ -n "$files" ] || return 1
+            local f
+            while IFS= read -r f; do
+              case "$f" in
+                *.md|**/*.md|docs/**|design/**|LICENSE|**/LICENSE) continue ;;
+                *) return 1 ;;
+              esac
+            done <<< "$files"
+            return 0
+          }
 
-          if [ -z "$ci_run" ]; then
-            echo "No push-triggered CI run exists for main yet — nothing to do."
+          find_latest_ci_run() {
+            local page=1
+            local max_pages=2
+            local commits_json sha ci_run_for_sha found_this_page
+
+            while [ "$page" -le "$max_pages" ]; do
+              if ! commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=100&page=${page}" 2>/dev/null); then
+                echo "GitHub API request failed while listing main commits on page ${page}; aborting." >&2
+                return 2
+              fi
+
+              local found_this_page=0
+              while IFS= read -r sha; do
+                [ -n "$sha" ] || continue
+                found_this_page=$((found_this_page + 1))
+                if ! ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" 2>/dev/null \
+                  | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty'); then
+                  echo "GitHub API request failed while fetching check-runs for ${sha}; aborting." >&2
+                  return 2
+                fi
+                if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
+                  echo "$ci_run_for_sha"
+                  return 0
+                fi
+
+                # Only fall back past a commit if it was intentionally skipped
+                # by ci.yml paths-ignore. A non-docs commit without a `ci`
+                # run is not a safe signal to inherit an older verdict.
+                is_docs_only_commit "$sha"
+                docs_only_rc=$?
+                if [ "$docs_only_rc" -eq 2 ]; then
+                  echo "GitHub API request failed while checking files for ${sha}; aborting." >&2
+                  return 2
+                fi
+                if [ "$docs_only_rc" -ne 0 ]; then
+                  echo "Commit ${sha} has no aggregate 'ci' check-run and is not docs-only; not falling back." >&2
+                  return 1
+                fi
+              done <<< "$(echo "$commits_json" | jq -r '.[].sha')"
+
+              # If the page was not full, there are no older commits to check.
+              if [ "$found_this_page" -lt 100 ]; then
+                break
+              fi
+
+              page=$((page + 1))
+            done
+
+            return 1
+          }
+
+          set +e
+          ci_run=$(find_latest_ci_run)
+          find_exit=$?
+          set -e
+
+          if [ "$find_exit" -eq 2 ]; then
+            echo "GitHub API request failed while looking up the latest 'ci' run; failing the watcher step." >&2
+            exit 1
+          fi
+
+          if [ -z "$ci_run" ] || [ "$ci_run" = "null" ]; then
+            echo "No aggregate 'ci' check-run found on the latest main commits; no verdict available."
             exit 0
           fi
 
           sha=$(echo "$ci_run" | jq -r '.head_sha // empty')
-          status=$(echo "$ci_run" | jq -r '.status')
-          conclusion=$(echo "$ci_run" | jq -r '.conclusion // empty')
-          run_html_url=$(echo "$ci_run" | jq -r '.html_url // empty')
-          if ! [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || [ -z "$run_html_url" ]; then
-            echo "Latest CI run returned invalid metadata; refusing to reconcile issues." >&2
+          if ! [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Aggregate 'ci' check-run returned an invalid commit SHA; refusing to reconcile issues." >&2
             exit 1
           fi
-          echo "CI workflow status=${status} conclusion=${conclusion}"
+
+          ci_status=$(echo "$ci_run" | jq -r '.status')
+          ci_conclusion=$(echo "$ci_run" | jq -r '.conclusion')
+          ci_url=$(echo "$ci_run" | jq -r '.html_url // empty')
+          [ -n "$ci_url" ] || ci_url="https://github.com/${REPO}/actions"
+
+          if [ "$ci_status" != "completed" ]; then
+            echo "Aggregate 'ci' check is still ${ci_status} for ${sha}; no verdict yet."
+            exit 0
+          fi
 
           existing=$(gh issue list --repo "$REPO" --label "$TRACKING_LABEL" --state open \
             --json number --jq '.[0].number // empty')
 
-          if [ "$status" != "completed" ]; then
-            echo "ci is still ${status} on ${sha} — no verdict yet, not alerting."
-            exit 0
-          fi
+          case "$ci_conclusion" in
+            failure|timed_out|action_required)
+              body=$(printf '%s\n' \
+                "Main has a failing aggregate CI run on its latest tested commit." \
+                "" \
+                "- Commit: \`${sha}\`" \
+                "- Commit link: https://github.com/${REPO}/commit/${sha}" \
+                "- CI run: <${ci_url}>" \
+                "- Conclusion: \`${ci_conclusion}\`" \
+                "" \
+                "This issue is maintained automatically by \`.github/workflows/main-ci-watch.yml\`." \
+                "It will close after a later commit on \`main\` has a green aggregate \`ci\` check-run." \
+                "" \
+                "<!-- main-ci-watch:last-failing-sha=${sha} -->")
 
-          if [ "$conclusion" = "failure" ]; then
-            body=$(printf '%s\n' \
-              "CI failed on main's latest tested commit." \
-              "" \
-              "- Commit: ${sha}" \
-              "- Workflow run: ${run_html_url}" \
-              "- Commit: https://github.com/${REPO}/commit/${sha}" \
-              "" \
-              "This issue is maintained automatically by main-ci-watch.yml." \
-              "It will close after a later push-triggered CI workflow succeeds." \
-              "" \
-              "<!-- main-ci-watch:last-failing-sha=${sha} -->")
+              if [ -z "$existing" ]; then
+                echo "Opening a new tracking issue for ${sha}."
+                gh issue create --repo "$REPO" \
+                  --title "main check-runs are red (${sha:0:10})" \
+                  --label "$TRACKING_LABEL" \
+                  --body "$body"
+                exit 0
+              fi
 
-            if [ -z "$existing" ]; then
-              echo "Opening a new tracking issue for ${sha}."
-              gh issue create --repo "$REPO" \
-                --title "main CI is red (ci: failure at ${sha:0:10})" \
-                --label "$TRACKING_LABEL" \
-                --body "$body"
+              # Idempotent update: only touch the issue if this is a NEW
+              # failing commit since the last time we recorded one. Re-running
+              # every 15 minutes against the same still-broken sha must not
+              # post a fresh comment each time, or this gets muted within a day
+              # exactly like the issue warns.
+              last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
+                --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-fA-F]*' | cut -d= -f2 || true)
+
+              if [ "$last_recorded" = "$sha" ]; then
+                echo "Issue #${existing} already tracks ${sha} — nothing to update."
+                exit 0
+              fi
+
+              echo "Updating existing issue #${existing}: still red, now at ${sha}."
+              gh issue edit "$existing" --repo "$REPO" --body "$body"
               exit 0
-            fi
-
-            # Idempotent update: only touch the issue if this is a NEW
-            # failing commit since the last time we recorded one. Re-running
-            # every 15 minutes against the same still-broken sha must not
-            # post a fresh comment each time, or this gets muted within a
-            # day exactly like the issue warns.
-            last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
-              --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-fA-F]*' | cut -d= -f2 || true)
-
-            if [ "$last_recorded" = "$sha" ]; then
-              echo "Issue #${existing} already tracks ${sha} — nothing to update."
+              ;;
+            success)
+              if [ -n "$existing" ]; then
+                echo "Aggregate 'ci' is green on ${sha} — closing tracking issue #${existing}."
+                gh issue close "$existing" --repo "$REPO" \
+                  --comment "Aggregate 'ci' check is green again on ${sha} (${ci_url}). Closing."
+              else
+                echo "Aggregate 'ci' is green on ${sha} and no open tracking issue — nothing to do."
+              fi
+              ;;
+            *)
+              echo "Aggregate 'ci' check has unexpected conclusion '${ci_conclusion}' for ${sha}; taking no action." >&2
               exit 0
-            fi
-
-            echo "Updating existing issue #${existing}: still red, now at ${sha}."
-            gh issue edit "$existing" --repo "$REPO" --body "$body"
-            exit 0
-          fi
-
-          # Only success resolves the tracking issue. Cancelled, skipped, and
-          # neutral runs are ambiguous, so they leave any existing issue open.
-          if [ -n "$existing" ] && [ "$conclusion" = "success" ]; then
-            echo "ci is green on ${sha} — closing tracking issue #${existing}."
-            gh issue close "$existing" --repo "$REPO" \
-              --comment "CI is green again on ${sha} (${run_html_url}). Closing."
-          else
-            echo "Nothing to do (conclusion=${conclusion}, existing issue=${existing:-none})."
-          fi
+              ;;
+          esac

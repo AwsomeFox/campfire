@@ -9,15 +9,35 @@ import {
   type Rect,
 } from './mapRenderedBounds';
 
+export type GridRevealResult = FogRect | { reason: string };
+
 /**
  * Reveal one calibrated grid cell at a map-percent point (issue #472 — room/cell reveal
  * when a grid is configured). Returns an axis-aligned map-percent rect for unrotated grids;
  * for rotated grids returns the axis-aligned bounding box of the cell.
+ *
+ * Invalid or degenerate inputs surface a `reason` instead of returning a bare `null`, so
+ * callers can explain why a shift-click reveal was a no-op.
  */
-export function gridCellRevealRect(pt: MapPercent, cal: GridCalibration, mapRect: Rect): FogRect | null {
-  if (!(mapRect.width > 0) || !(mapRect.height > 0)) return null;
+export function gridCellRevealRect(
+  pt: MapPercent,
+  cal: GridCalibration | null,
+  mapRect: Rect,
+): GridRevealResult {
+  if (!(mapRect.width > 0) || !(mapRect.height > 0)) {
+    return { reason: 'Map has zero rendered size' };
+  }
+  if (!cal) {
+    return { reason: 'Grid calibration is missing' };
+  }
+  if (pt.x < 0 || pt.y < 0 || pt.x > 100 || pt.y > 100) {
+    return { reason: 'Reveal point is outside the map' };
+  }
+
   const calPx = calibrationToPx(cal, mapRect.width);
-  if (!(calPx.cellWpx > 0) || !(calPx.cellHpx > 0)) return null;
+  if (!(calPx.cellWpx > 0) || !(calPx.cellHpx > 0)) {
+    return { reason: 'Grid cell has zero rendered size' };
+  }
 
   const px = mapPercentToLayerPx(pt, mapRect);
   const cos = Math.cos(calPx.rotationRad);
@@ -57,6 +77,8 @@ export function gridCellRevealRect(pt: MapPercent, cal: GridCalibration, mapRect
   const y = clampPercent(minY);
   const w = clampPercent(maxX) - x;
   const h = clampPercent(maxY) - y;
-  if (w < 0.5 || h < 0.5) return null;
+  if (w <= 0 || h <= 0) {
+    return { reason: 'Revealed cell has zero size' };
+  }
   return { x, y, w, h };
 }

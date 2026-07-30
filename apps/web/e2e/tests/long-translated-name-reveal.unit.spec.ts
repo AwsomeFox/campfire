@@ -24,6 +24,7 @@ const TRASH_PAGE = resolve(ROOT, 'src/features/trash/TrashPage.tsx');
 const ROLL_RESULT_BANNER = resolve(ROOT, 'src/components/RollResultBanner.tsx');
 const CONFIRM_DIALOG = resolve(ROOT, 'src/components/ConfirmDialog.tsx');
 const CONFIRM_DESTRUCTIVE_DIALOG = resolve(ROOT, 'src/components/ConfirmDestructiveDialog.tsx');
+const UI_TSX = resolve(ROOT, 'src/components/ui.tsx');
 
 const GERMAN_120_CHAR_NAME =
   'Prinzessin Wilhelmina Franziska von Hohenzollern-Sigmaringen Die Erleuchtete Beschützerin des Alten Waldreichs IV von Bayern';
@@ -96,14 +97,19 @@ test.describe('Long translated name reveal & accessible truncation (issue #632)'
   });
 
   test('ConfirmDialog and ConfirmDestructiveDialog render full title and body without truncation', () => {
+    // Both compose the shared Dialog primitive (issue #1783) rather than
+    // rendering their own `.dialog-title` element — the untruncated-title
+    // guarantee now lives in ui.tsx, and each caller passes `title` through.
+    const uiSource = readFileSync(UI_TSX, 'utf8');
+    expect(uiSource).toMatch(/className="dialog-title"/);
+    expect(uiSource).not.toMatch(/dialog-title[^]*?truncate/);
+
     const confirmSource = readFileSync(CONFIRM_DIALOG, 'utf8');
-    expect(confirmSource).toMatch(/className="dialog-title"/);
-    expect(confirmSource).toMatch(/\{title\}/);
+    expect(confirmSource).toMatch(/title=\{title\}/);
     expect(confirmSource).not.toMatch(/truncate/);
 
     const destructiveSource = readFileSync(CONFIRM_DESTRUCTIVE_DIALOG, 'utf8');
-    expect(destructiveSource).toMatch(/className="dialog-title"/);
-    expect(destructiveSource).toMatch(/\{title\}/);
+    expect(destructiveSource).toMatch(/title=\{title\}/);
     expect(destructiveSource).not.toMatch(/truncate/);
   });
 });
