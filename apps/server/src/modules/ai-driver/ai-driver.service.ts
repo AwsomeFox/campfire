@@ -1404,7 +1404,6 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'encounterId',
   'expectedUpdatedAt',
   'mapAttachmentId',
-  'mapAlignment',
   'gridSize',
   'gridScale',
   'gridUnit',
@@ -1555,18 +1554,6 @@ export function guardDriverLivePlayArgs(
           message:
             'The driver may only rename or re-link an encounter it created this session. Ask the DM to change ' +
             `their own prepared encounters. Rejected: ${authoringKeys.join(', ')}.`,
-        };
-      }
-    }
-    if (args.mapAlignment === 'reset') {
-      const id = Number(args.mapAttachmentId);
-      const allowed = session.driverGeneratedMapIds ?? [];
-      if (!Number.isFinite(id) || !allowed.includes(id)) {
-        return {
-          ok: false,
-          code: 'forbidden_map_reset',
-          message:
-            'The driver may only reset encounter overlays when attaching a map it generated this session.',
         };
       }
     }
