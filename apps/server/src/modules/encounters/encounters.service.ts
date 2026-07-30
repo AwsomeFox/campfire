@@ -3354,23 +3354,28 @@ export class EncountersService {
   private assertCampaignWritableForFreshDeathSave(campaignId: number, tx: SyncDb): void;
   private assertCampaignWritableForFreshDeathSave(campaignId: number, tx?: SyncDb): Promise<void> | void {
     if (tx) {
-      const [campaign] = tx.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1).all();
-      if (campaign && campaign.status !== 'active') {
+      const [campaign] = tx
+        .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1)
+        .all();
+      if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
         throw new ForbiddenException(
-          `Campaign is ${campaign.status} (read-only) — set its status back to 'active' to make changes`,
+          `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
         );
       }
       return;
     }
     return this.db
-      .select({ status: campaigns.status })
+      .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1)
       .then(([campaign]) => {
-        if (campaign && campaign.status !== 'active') {
+        if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
           throw new ForbiddenException(
-            `Campaign is ${campaign.status} (read-only) — set its status back to 'active' to make changes`,
+            `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
           );
         }
       });

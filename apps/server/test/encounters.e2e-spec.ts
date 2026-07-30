@@ -11,6 +11,7 @@ import {
   combatants as combatantsTable,
   npcs,
   encounterEvents as encounterEventsTable,
+  diceRolls,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AuditService } from '../src/modules/audit/audit.service';
@@ -3604,6 +3605,71 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       ).filter((event) => event.targetId === trashCombatantId && event.detail.startsWith('death save d20 roll ')).length;
       expect(afterEvents).toBe(beforeEvents);
       expect((await request(server).get(`/api/v1/characters/${trashCharacterId}`).set(dm)).body).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when the campaign is trashed after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save campaign trash race' });
+    expect(trashCampaign.status).toBe(201);
+    const trashCampaignId = trashCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Campaign Trash Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const trashEncounter = await request(server)
+      .post(`/api/v1/campaigns/${trashCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Campaign trash race', hidden: false });
+    expect(trashEncounter.status).toBe(201);
+    const trashEncounterId = trashEncounter.body.id as number;
+    const trashCombatantId = trashEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeDice = (await db.select().from(diceRolls).where(eq(diceRolls.campaignId, trashCampaignId))).length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === trashCampaignId).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect((await request(server).delete(`/api/v1/campaigns/${trashCampaignId}`).set(dm)).status).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${trashEncounterId}/combatants/${trashCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-campaign-trash-race' });
+
+      expect(rejected.status).toBe(403);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await db.select().from(diceRolls).where(eq(diceRolls.campaignId, trashCampaignId))).length).toBe(beforeDice);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === trashCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      expect(
+        (await db.select().from(combatantsTable).where(eq(combatantsTable.id, trashCombatantId)).limit(1))[0],
+      ).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
     } finally {
       adapterSpy.mockRestore();
       rollSpy.mockRestore();
