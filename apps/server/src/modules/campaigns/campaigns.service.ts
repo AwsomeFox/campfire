@@ -658,7 +658,7 @@ export class CampaignsService {
     // while the campaign stays active (#857 Bugbot).
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
-      const { row, revoked, wasEnabled } = this.db.transaction((tx) => {
+      const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -683,11 +683,14 @@ export class CampaignsService {
           .where(eq(campaigns.id, id))
           .returning()
           .get();
+        let pinsCleared = 0;
         if (shouldResetPins) {
-          tx.update(locations)
+          const reset = tx
+            .update(locations)
             .set({ mapX: null, mapY: null, updatedAt: ts })
             .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
             .run();
+          pinsCleared = (reset as unknown as { changes?: number }).changes ?? 0;
         }
         const deleted = tx
           .delete(campaignInvites)
@@ -698,6 +701,7 @@ export class CampaignsService {
           row,
           revoked: deleted.length,
           wasEnabled: Boolean(before?.publicInvitesEnabled),
+          pinsCleared,
         };
       });
       await this.audit.log({
@@ -707,6 +711,7 @@ export class CampaignsService {
         entityType: 'campaign',
         entityId: id,
         campaignId: id,
+        detail: JSON.stringify({ mapAlignment: mapAlignment ?? 'preserve', pinsCleared }),
       });
       if (wasEnabled) {
         await this.audit.log({
@@ -736,8 +741,9 @@ export class CampaignsService {
     // Issue #870: replacing/removing the world map can optionally reset every location
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
     let updatedRow: typeof campaigns.$inferSelect | undefined;
+    let pinsCleared = 0;
     if (shouldResetPins) {
-      updatedRow = this.db.transaction((tx) => {
+      const resetResult = this.db.transaction((tx) => {
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -757,12 +763,15 @@ export class CampaignsService {
           .returning()
           .get();
         if (!row) throw new NotFoundException(`Campaign ${id} not found`);
-        tx.update(locations)
+        const reset = tx
+          .update(locations)
           .set({ mapX: null, mapY: null, updatedAt: ts })
           .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
           .run();
-        return row;
+        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0 };
       });
+      updatedRow = resetResult.row;
+      pinsCleared = resetResult.changes;
     }
 
     if (updatedRow === undefined) {
@@ -796,6 +805,7 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: id,
       campaignId: id,
+      detail: JSON.stringify({ mapAlignment: mapAlignment ?? 'preserve', pinsCleared }),
     });
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).

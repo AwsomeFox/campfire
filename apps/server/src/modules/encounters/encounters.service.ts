@@ -1623,12 +1623,14 @@ export class EncountersService {
         changedPredicates.push(sql`${encounters.sessionId} IS NOT ${input.sessionId}`);
       }
     }
+    const mapAttachmentIdChanging =
+      input.mapAttachmentId !== undefined && input.mapAttachmentId !== encounterRow.mapAttachmentId;
     if (input.mapAttachmentId !== undefined) {
       // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
       // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
       // canvas still gets it via the file route's encounter-map exception.
       await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
-      if (input.mapAttachmentId !== encounterRow.mapAttachmentId) {
+      if (mapAttachmentIdChanging) {
         set.mapAttachmentId = input.mapAttachmentId;
         changedPredicates.push(sql`${encounters.mapAttachmentId} IS NOT ${input.mapAttachmentId}`);
 
@@ -1651,62 +1653,86 @@ export class EncountersService {
         }
       }
     }
+
+    // When the map is being reset, the per-field grid/fog/AoE guards below must compare
+    // against the reset defaults (not the old row), otherwise explicit inputs equal to the
+    // old values are skipped and the reset null/default survives into the UPDATE.
+    const resetApplied = mapAttachmentIdChanging && input.mapAlignment === 'reset';
+    const baseline = resetApplied
+      ? {
+          ...encounterRow,
+          gridSize: null as number | null,
+          gridScale: null as number | null,
+          gridUnit: null as string | null,
+          gridSnap: false,
+          gridType: 'square' as const,
+          hexOrientation: 'pointy' as const,
+          gridOffsetX: 0,
+          gridOffsetY: 0,
+          gridCellHeight: null as number | null,
+          gridRotation: 0,
+          gridOpacity: 0.35,
+        }
+      : encounterRow;
+    const fogBaseline = resetApplied ? null : parseFog(encounterRow.fog);
+    const aoeBaseline = resetApplied ? [] : parseAoe(encounterRow.aoe);
+
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
-    if (input.gridSize !== undefined && input.gridSize !== encounterRow.gridSize) {
+    if (input.gridSize !== undefined && input.gridSize !== baseline.gridSize) {
       set.gridSize = input.gridSize;
       changedPredicates.push(sql`${encounters.gridSize} IS NOT ${input.gridSize}`);
     }
-    if (input.gridScale !== undefined && input.gridScale !== encounterRow.gridScale) {
+    if (input.gridScale !== undefined && input.gridScale !== baseline.gridScale) {
       set.gridScale = input.gridScale;
       changedPredicates.push(sql`${encounters.gridScale} IS NOT ${input.gridScale}`);
     }
-    if (input.gridUnit !== undefined && input.gridUnit !== encounterRow.gridUnit) {
+    if (input.gridUnit !== undefined && input.gridUnit !== baseline.gridUnit) {
       set.gridUnit = input.gridUnit;
       changedPredicates.push(sql`${encounters.gridUnit} IS NOT ${input.gridUnit}`);
     }
-    if (input.gridSnap !== undefined && input.gridSnap !== encounterRow.gridSnap) {
+    if (input.gridSnap !== undefined && input.gridSnap !== baseline.gridSnap) {
       set.gridSnap = input.gridSnap;
       changedPredicates.push(sql`${encounters.gridSnap} IS NOT ${input.gridSnap ? 1 : 0}`);
     }
-    if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
+    if (input.gridType !== undefined && input.gridType !== (baseline.gridType ?? 'square')) {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
     }
-    if (input.hexOrientation !== undefined && input.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) {
+    if (input.hexOrientation !== undefined && input.hexOrientation !== (baseline.hexOrientation ?? 'pointy')) {
       set.hexOrientation = input.hexOrientation;
       changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${input.hexOrientation}`);
     }
     // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
     // nullable (null restores square cells); the others carry non-null defaults. Same
     // null-safe no-op guard as the fields above so an unchanged write produces no audit/SSE.
-    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) {
+    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (baseline.gridOffsetX ?? 0)) {
       set.gridOffsetX = input.gridOffsetX;
       changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${input.gridOffsetX}`);
     }
-    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) {
+    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (baseline.gridOffsetY ?? 0)) {
       set.gridOffsetY = input.gridOffsetY;
       changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${input.gridOffsetY}`);
     }
-    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) {
+    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (baseline.gridCellHeight ?? null)) {
       set.gridCellHeight = input.gridCellHeight;
       changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${input.gridCellHeight}`);
     }
-    if (input.gridRotation !== undefined && input.gridRotation !== (encounterRow.gridRotation ?? 0)) {
+    if (input.gridRotation !== undefined && input.gridRotation !== (baseline.gridRotation ?? 0)) {
       set.gridRotation = input.gridRotation;
       changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${input.gridRotation}`);
     }
-    if (input.gridOpacity !== undefined && input.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) {
+    if (input.gridOpacity !== undefined && input.gridOpacity !== (baseline.gridOpacity ?? 0.35)) {
       set.gridOpacity = input.gridOpacity;
       changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${input.gridOpacity}`);
     }
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
-    if (input.fog !== undefined && !isDeepStrictEqual(input.fog, parseFog(encounterRow.fog))) {
+    if (input.fog !== undefined && !isDeepStrictEqual(input.fog, fogBaseline)) {
       const fog = input.fog === null ? null : toJsonText(input.fog);
       set.fog = fog;
       changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, parseAoe(encounterRow.aoe))) {
+    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, aoeBaseline)) {
       const aoe = toJsonText(input.aoe);
       set.aoe = aoe;
       changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
