@@ -2899,6 +2899,16 @@ export default function RunSessionPage() {
                 </div>
               </>
             )}
+            {lifecycle.undoTurn && (
+              <Btn
+                ghost
+                disabled={headerBusy || riskyBlocked}
+                onClick={undoTurn}
+                title="Undo turn"
+              >
+                ← Undo turn
+              </Btn>
+            )}
             {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
@@ -2913,14 +2923,6 @@ export default function RunSessionPage() {
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
-                </Btn>
-                <Btn
-                  ghost
-                  disabled={headerBusy || riskyBlocked}
-                  onClick={undoTurn}
-                  title="Undo turn"
-                >
-                  ← Undo turn
                 </Btn>
                 <Btn
                   disabled={headerBusy || riskyBlocked}
