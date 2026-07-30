@@ -19,7 +19,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
-import { AddItemForm, ItemSection } from './inventoryShared';
+import { AddItemForm, CompendiumItemPickerModal, ItemSection } from './inventoryShared';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const COIN_KEYS = [
@@ -52,6 +52,7 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(() => searchParams.get('action') === 'add-item');
+  const [showCompendiumPicker, setShowCompendiumPicker] = useState(false);
 
   const closeAdding = useCallback(() => {
     setAdding(false);
@@ -197,9 +198,14 @@ export default function InventoryPage() {
         title={t('inventory.title')}
         primaryAction={
           canEdit && !adding ? (
-            <Btn type="button" className="cf-page-header__action" onClick={() => setAdding(true)}>
-              {t('inventory.addItem')}
-            </Btn>
+            <div className="flex items-center gap-2">
+              <Btn type="button" className="cf-page-header__action" onClick={() => setAdding(true)}>
+                {t('inventory.addItem')}
+              </Btn>
+              <Btn type="button" ghost className="cf-page-header__action" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
+                {t('inventory.fromCompendium')}
+              </Btn>
+            </div>
           ) : undefined
         }
       />
@@ -229,6 +235,18 @@ export default function InventoryPage() {
               onCancel={closeAdding}
               onCreated={() => {
                 closeAdding();
+                void load();
+              }}
+            />
+          )}
+
+          {showCompendiumPicker && canEdit && (
+            <CompendiumItemPickerModal
+              campaignId={id}
+              owners={writableOwners}
+              onClose={() => setShowCompendiumPicker(false)}
+              onCreated={() => {
+                setShowCompendiumPicker(false);
                 void load();
               }}
             />
