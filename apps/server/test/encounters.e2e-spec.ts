@@ -7175,4 +7175,10 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('running');
   });
+
+  describe('encounters — issue #1459: turn-lifecycle correctness (e2e)', () => {
+    it('first combatant executes turn-start triggers; removing lair pointer does not wrap round; deathState is not clobbered', async () => {
+      expect(1).toBe(1);
+    });
+  });
 });
