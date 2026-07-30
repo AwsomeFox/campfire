@@ -18,7 +18,7 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import { AiDmToolConfirmation } from '@campfire/schema';
+import { AiDmToolConfirmation, DriverSessionProfile, DriverToolPolicyClass } from '@campfire/schema';
 import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
@@ -84,8 +84,6 @@ import {
   resolveDriverSessionProfile,
   resolveDriverToolPolicy,
   type AiDmPendingToolConfirmation,
-  type DriverSessionProfile,
-  type DriverToolPolicyClass,
 } from './driver-tool-policy';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import {
@@ -864,8 +862,14 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.tool === 'string'
     && !!recordOf(rec.args)
     && typeof rec.toolCallId === 'string'
-    && (rec.profile === 'prep' || rec.profile === 'live' || rec.profile === 'aftermath' || rec.profile === 'downtime')
-    && (rec.policy === 'auto' || rec.policy === 'confirm' || rec.policy === 'propose' || rec.policy === 'deny')
+    // #1495 (Devin review) — validated against the shared schema enums, not a hand-copied
+    // literal chain: DriverSessionProfile/DriverToolPolicyClass now live in @campfire/schema
+    // specifically so this file cannot drift from them again. A hand-maintained chain here
+    // would silently drop a persisted confirmation on hydration (storedGrantMap discards
+    // anything that fails this guard) the day a member is added to the schema enum but
+    // forgotten here.
+    && DriverSessionProfile.safeParse(rec.profile).success
+    && DriverToolPolicyClass.safeParse(rec.policy).success
     && typeof rec.requestedAt === 'string'
     && typeof rec.actor === 'string'
     && typeof rec.triggeredBy === 'string'
