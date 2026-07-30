@@ -1443,7 +1443,7 @@ export class ActionResolverService {
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
 
-    this.db.transaction((tx) => {
+    const earlyToken = this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
       // inside this transaction — not via a pre-transaction `SELECT` + `consumedAt` flag, which
       // is a TOCTOU: two concurrent `apply()` calls for the same chainId could both observe an
@@ -1772,7 +1772,13 @@ export class ActionResolverService {
           createdAt: nowIso(),
         })
         .run();
+
+      return undefined;
     });
+
+    if (earlyToken) {
+      return earlyToken;
+    }
 
     // Persist correlated combat-log chain after commit (a log failure must not roll back the apply).
     this.persistActionChain(committedEncounter, committedEncounter.round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
