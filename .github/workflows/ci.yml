@@ -335,7 +335,9 @@ jobs:
     # Browser-system setup can be delayed by an apt mirror. Keep that failure
     # separate from the fixed test budget below so it cannot cancel a shard
     # before Playwright selects a spec.
-    timeout-minutes: 25
+    # 30 minutes reserves eight minutes for checkout, cache, artifact, and
+    # typecheck overhead in addition to the explicit 12 + 10 minute caps.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -412,7 +414,9 @@ jobs:
     needs: build
     # Match e2e-web: apt-backed browser setup has its own explicit timeout and
     # cannot spend the runtime PWA suite's test budget.
-    timeout-minutes: 25
+    # 30 minutes reserves eight minutes for checkout, cache, artifact, and
+    # typecheck overhead in addition to the explicit 12 + 10 minute caps.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
