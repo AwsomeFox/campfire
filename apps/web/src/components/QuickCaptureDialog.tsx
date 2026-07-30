@@ -63,7 +63,7 @@ export function QuickCaptureDialog({
           <p className="text-sm text-muted mb-4">{t('keyboard.quickCaptureHint')}</p>
           {error && <ErrorNote message={error} />}
           {!isDm && (
-            <div className="flex gap-2 mb-3.5 text-xs">
+            <div className="flex gap-2 mb-3 text-xs">
               <button
                 type="button"
                 className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
