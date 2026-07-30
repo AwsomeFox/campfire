@@ -106,6 +106,20 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     });
   });
 
+  test('temporary HP absorption leaves an existing lifecycle state untouched', () => {
+    expect(
+      applyOptimisticHpDelta(
+        combatant({ hpCurrent: 5, hpTemp: 4, deathState: 'dead', deathSaveFailures: 3 }),
+        -2,
+      ),
+    ).toMatchObject({
+      hpCurrent: 5,
+      hpTemp: 2,
+      deathState: 'dead',
+      deathSaveFailures: 3,
+    });
+  });
+
   test('healing clears optimistic death pips', () => {
     expect(
       applyOptimisticHpDelta(
