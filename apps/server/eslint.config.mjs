@@ -8,11 +8,55 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import globals from 'globals';
 
+// Issue #1703: two PRs can add the same name to a shared `import type` block
+// and merge into a single declaration like `import type { A, A }` that tsc
+// rejects with TS2300. ESLint's `no-duplicate-imports` only compares separate
+// import declarations by source, so we add a local rule for duplicate
+// specifiers inside one declaration.
+const noDuplicateImportSpecifiers = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description: 'Disallow duplicate local identifiers within a single import declaration.',
+    },
+    messages: {
+      duplicate: "Duplicate import specifier '{{name}}' in the same import declaration.",
+    },
+    schema: [],
+  },
+  create(context) {
+    return {
+      ImportDeclaration(node) {
+        const seen = new Map();
+        for (const specifier of node.specifiers) {
+          const name = specifier.local.name;
+          if (seen.has(name)) {
+            context.report({
+              node: specifier,
+              messageId: 'duplicate',
+              data: { name },
+            });
+          } else {
+            seen.set(name, specifier);
+          }
+        }
+      },
+    };
+  },
+};
+
 export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', 'coverage/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    plugins: {
+      campfire: {
+        rules: {
+          'no-duplicate-import-specifiers': noDuplicateImportSpecifiers,
+        },
+      },
+    },
     rules: {
       // NestJS providers/DTOs lean on `any` at a handful of deliberate
       // boundaries (dynamic MCP tool args, generic adapters) — warn, don't block.
@@ -30,6 +74,10 @@ export default tseslint.config(
       // produce duplicate identifiers that only show up after merge. Catch them in
       // the lint gate rather than `tsc` / `nest build`.
       'no-duplicate-imports': ['error', { allowSeparateTypeImports: true }],
+      // `no-duplicate-imports` compares whole declarations by source; it does not
+      // see repeated specifiers inside one declaration (e.g. `import type { A, A }`).
+      // This catches the exact TS2300 shape from issue #1702 before merge.
+      'campfire/no-duplicate-import-specifiers': 'error',
       // A handful of modules deliberately use runtime `require()` (optional/
       // conditional CJS interop with better-sqlite3 native bindings, reading
       // package.json for version info, etc.) — long predates this lint gate

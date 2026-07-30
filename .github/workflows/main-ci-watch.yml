@@ -51,20 +51,36 @@ jobs:
         run: |
           set -euo pipefail
 
-          resp=$(gh api "repos/${REPO}/commits/main/check-runs?per_page=100")
-
           # The repository's aggregate required check is named `ci`. We only act
           # on that verdict to avoid both false alarms from non-required checks
           # and false all-clear when a docs-only push (paths-ignore in ci.yml)
           # produces no real CI check-runs at all. We also derive the commit SHA
           # from the `ci` run itself so we never rely on the ordering of the
           # returned check-run array.
-          ci_run=$(echo "$resp" | jq --arg name "ci" '
-            [ .check_runs[] | select(.name == $name) ] | first // empty
-          ')
+          #
+          # If HEAD itself has no `ci` check-run (e.g. a docs-only commit), walk
+          # back the most recent main commits until we find the latest one with a
+          # `ci` run, so a red code commit is not silently dropped behind a
+          # CI-skipping push.
+          find_latest_ci_run() {
+            local commits_json sha ci_run_for_sha
+            commits_json=$(gh api "repos/${REPO}/commits?sha=main&per_page=20")
 
+            while IFS= read -r sha; do
+              [ -n "$sha" ] || continue
+              ci_run_for_sha=$(gh api "repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=20" \
+                | jq '[.check_runs[] | select(.name == "ci")] | sort_by(.created_at) | last // empty')
+              if [ -n "$ci_run_for_sha" ] && [ "$ci_run_for_sha" != "null" ]; then
+                echo "$ci_run_for_sha"
+                return 0
+              fi
+            done <<< "$(echo "$commits_json" | jq -r '.[].sha')"
+            return 1
+          }
+
+          ci_run=$(find_latest_ci_run || true)
           if [ -z "$ci_run" ] || [ "$ci_run" = "null" ]; then
-            echo "No aggregate 'ci' check-run on main yet; no verdict available."
+            echo "No aggregate 'ci' check-run found on the latest main commits; no verdict available."
             exit 0
           fi
 
@@ -77,6 +93,7 @@ jobs:
           ci_status=$(echo "$ci_run" | jq -r '.status')
           ci_conclusion=$(echo "$ci_run" | jq -r '.conclusion')
           ci_url=$(echo "$ci_run" | jq -r '.html_url')
+          [ -n "$ci_url" ] || ci_url="https://github.com/${REPO}/actions"
 
           if [ "$ci_status" != "completed" ]; then
             echo "Aggregate 'ci' check is still ${ci_status} for ${sha}; no verdict yet."
