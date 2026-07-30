@@ -4466,11 +4466,24 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const mixedDifficulty = await request(server).get(`/api/v1/encounters/${mixed.body.id}/difficulty`).set(dm);
     expect(mixedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 2, totalMonsterXp: 11800, adjustedXp: 17700 });
 
+    const unresolvedPrep = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Unresolved NPC prep', hidden: false });
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${unresolvedPrep.body.id}/combatants`)
+          .set(dm)
+          .send({ kind: 'npc', npcId: mixedHostileNpcId, ruleEntryId: cr10EntryId })
+      ).status,
+    ).toBe(201);
+
     const db = ctx.app.get<DrizzleDb>(DB);
     await db.update(encountersTable).set({ status: 'ended' }).where(eq(encountersTable.id, npcOnly.body.id));
     const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
-    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(eq(npcs.id, hostileNpcId));
+    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(inArray(npcs.id, [hostileNpcId, mixedHostileNpcId]));
     const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
     const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
     expect(imported.status).toBe(201);
@@ -4481,6 +4494,14 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(importedNpcCombatant.npcId).toBeNull();
     const importedDifficulty = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}/difficulty`).set(dm);
     expect(importedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    const importedUnresolvedPrep = importedEncounters.body.find((encounter: { name: string }) => encounter.name === 'Unresolved NPC prep');
+    const importedUnresolvedPrepDetail = await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}`).set(dm);
+    const importedUnresolvedPrepCombatant = importedUnresolvedPrepDetail.body.combatants.find((combatant: { kind: string }) => combatant.kind === 'npc');
+    expect(importedUnresolvedPrepCombatant).toMatchObject({ npcId: null, npcDispositionSnapshot: null });
+    expect((await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}/difficulty`).set(dm)).body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+    expect((await request(server).post(`/api/v1/encounters/${importedUnresolvedPrep.id}/roll-initiative`).set(dm).send({})).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${importedUnresolvedPrep.id}/start`).set(dm).send({})).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}/difficulty`).set(dm)).body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
     await db.update(combatantsTable).set({ npcDispositionSnapshot: null }).where(eq(combatantsTable.encounterId, npcOnly.body.id));
     const legacyDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
     expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
