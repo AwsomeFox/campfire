@@ -1308,3 +1308,102 @@ describe('campaign export/import — organized-play decoration is dropped, not c
     expect(imported.body[0]).toMatchObject({ title: 'Legacy Night', location: "Sam's place", seriesId: null, venueId: null });
   });
 });
+
+/**
+ * Issue #1521 — an imported scheduled_sessions row whose `scheduledAt` SQLite's
+ * `julianday()` cannot parse used to be written verbatim and then satisfy
+ * NEITHER the Upcoming projection (`scheduleNotEnded`) NOR the Past projection
+ * (`scheduleEnded`), vanishing from every list a DM uses. The import boundary
+ * now validates + normalizes `scheduledAt`: a parseable value is normalized to
+ * canonical ISO UTC (matching every other write path), and an unparseable one is
+ * rejected with a 400 that names the offending row, so a bad value is surfaced
+ * instead of silently inserted.
+ */
+describe('campaign import — scheduledAt validation at the boundary (issue #1521)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    dmAgent = request.agent(ctx.app.getHttpServer());
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'sched-import-dm', password: 'dm-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rejects an unparseable scheduledAt with a 400 that names the offending row', async () => {
+    const doc = {
+      campaign: { name: 'Bad Schedule Import' },
+      scheduledSessions: [
+        {
+          id: 1,
+          scheduledAt: '2030-05-01T19:00:00.000Z',
+          durationMinutes: 240,
+          title: 'Good night',
+          status: 'scheduled',
+          rsvps: [],
+        },
+        {
+          id: 2,
+          scheduledAt: 'not-a-date',
+          durationMinutes: 240,
+          title: 'Corrupt night',
+          status: 'scheduled',
+          rsvps: [],
+        },
+      ],
+    };
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(400);
+    // The error names the offending row (1-based position + title) and the field.
+    expect(res.body.message).toMatch(/scheduled session #2/);
+    expect(res.body.message).toMatch(/Corrupt night/);
+    expect(res.body.message).toMatch(/scheduledAt/);
+    expect(res.body.message).toMatch(/not-a-date/);
+  });
+
+  it('rejects an empty-string scheduledAt the same way (a value julianday() NULLs)', async () => {
+    const doc = {
+      campaign: { name: 'Empty Schedule Import' },
+      scheduledSessions: [
+        { id: 1, scheduledAt: '', title: 'No timestamp', status: 'scheduled', rsvps: [] },
+      ],
+    };
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/scheduled session #1/);
+    expect(res.body.message).toMatch(/No timestamp/);
+  });
+
+  it('normalizes a parseable non-canonical scheduledAt to ISO UTC and keeps the row visible', async () => {
+    const doc = {
+      campaign: { name: 'Offset Schedule Import' },
+      scheduledSessions: [
+        {
+          id: 1,
+          // A +02:00 offset is valid ISO-8601 but not the canonical .000Z SQLite
+          // receives from every other write path. Import must normalize it rather
+          // than store it verbatim (the create path does the same).
+          scheduledAt: '2030-05-01T21:00:00+02:00',
+          durationMinutes: 240,
+          title: 'Offset night',
+          status: 'scheduled',
+          rsvps: [],
+        },
+      ],
+    };
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+    const schedule = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/schedule`);
+    expect(schedule.body).toHaveLength(1);
+    expect(schedule.body[0].scheduledAt).toBe('2030-05-01T19:00:00.000Z');
+    // Future-dated + canonical → reaches Upcoming. It has not vanished.
+    const upcoming = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/schedule/upcoming`);
+    expect(upcoming.body.map((s: { title: string }) => s.title)).toEqual(['Offset night']);
+    // ...and is NOT duplicated into Past (the strict complement still holds).
+    const past = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/schedule/past`);
+    expect(past.body.items.map((s: { title: string }) => s.title)).not.toContain('Offset night');
+  });
+});

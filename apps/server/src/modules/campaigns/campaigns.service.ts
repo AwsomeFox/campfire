@@ -1996,6 +1996,35 @@ export class CampaignsService {
     const importerId = String(user.id);
     const ts = nowIso();
 
+    // Issue #1521: validate + normalize every schedule row's `scheduledAt` at the
+    // import boundary — the one path that could write a value SQLite's `julianday()`
+    // cannot parse. The Upcoming/Past projections compare `scheduledAt` with
+    // `julianday()`, which returns NULL for an unparseable value; a NULL comparison
+    // is neither true nor false, so a row carrying a malformed timestamp (an empty
+    // string, a truncated value, a locale-formatted date) satisfied NEITHER
+    // `scheduleNotEnded` (Upcoming) NOR `scheduleEnded` (Past) and vanished from
+    // every list a DM uses — silent data loss worse than a rejected import. Every
+    // other write path normalizes via `new Date(iso).toISOString()` (see
+    // SchedulingService.normalizeScheduledAt); import wrote the raw value verbatim.
+    // Normalize a parseable value to canonical ISO UTC (guaranteeing `julianday()`
+    // can read it and matching every other writer) and reject an unparseable one
+    // with a 400 that names the offending row, so the operator is told exactly what
+    // to fix instead of losing the night silently. Runs BEFORE staging so a bad
+    // archive fails fast with zero bytes written, like the compendium preflight.
+    for (let i = 0; i < scheduledSessionRows.length; i++) {
+      const s = scheduledSessionRows[i];
+      const raw = s.scheduledAt;
+      if (typeof raw !== 'string' || Number.isNaN(Date.parse(raw))) {
+        const label = str(s.title) || 'untitled';
+        throw new BadRequestException(
+          `Cannot import scheduled session #${i + 1} (${label}): scheduledAt ${
+            typeof raw === 'string' ? `"${raw}"` : `(${typeof raw})`
+          } is not a valid ISO-8601 date-time. Fix the value in the export and re-import.`,
+        );
+      }
+      s.scheduledAt = new Date(raw).toISOString();
+    }
+
     // Issue #725: STAGE every attachment's bytes BEFORE any DB row is committed,
     // so a mid-import failure (anywhere — preflight, the DB transaction, or the
     // final publish) never leaves a partial import behind. The old order (commit
@@ -2173,7 +2202,13 @@ export class CampaignsService {
           .insert(scheduledSessions)
           .values({
             campaignId: cid,
-            scheduledAt: typeof s.scheduledAt === 'string' ? s.scheduledAt : ts,
+            // Issue #1521: validated + normalized to canonical ISO UTC in the
+            // boundary pre-pass above, so `julianday(scheduledAt)` always parses
+            // and the row can never vanish from both Upcoming and Past. Read
+            // directly — no `ts` fallback — because that pre-pass rejected any
+            // row whose scheduledAt was not a usable timestamp. The cast is
+            // sound: the pre-pass stored a `string` for every row that reaches here.
+            scheduledAt: s.scheduledAt as string,
             durationMinutes: intOr(s.durationMinutes, 240),
             title: str(s.title),
             location: str(s.location),

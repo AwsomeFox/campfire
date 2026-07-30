@@ -9,7 +9,7 @@ import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/main';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns } from '../src/db/schema';
+import { campaigns, scheduledSessions } from '../src/db/schema';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
@@ -1218,6 +1218,41 @@ describe('session scheduling (e2e)', () => {
       const settings = await request(server).get(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(dm);
       expect(settings.body).toEqual({ token: null, url: null, expiresAt: null });
     });
+  });
+
+  it('issue #1521: a row whose scheduledAt julianday() cannot parse lands in Past, not nowhere', async () => {
+    // Defence in depth for the projections. The import boundary now rejects
+    // unparseable scheduledAt values, so the only way such a row can exist is a
+    // direct DB edit / hand-corrupted row. scheduleEndedSql() treats an
+    // unclassifiable end instant as ended, so the row surfaces in Past (where an
+    // operator can find and fix it) instead of vanishing from BOTH Upcoming and
+    // Past — which is what a NULL julianday() comparison did before. Parseable
+    // rows are unaffected: the IS NULL arm is dead for them, so the strict
+    // live/past complement is preserved.
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Corrupt Schedule Campaign' });
+    const corruptCampaignId: number = camp.body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const corruptTs = new Date().toISOString();
+    const [bad] = await db
+      .insert(scheduledSessions)
+      .values({
+        campaignId: corruptCampaignId,
+        scheduledAt: 'not-a-real-date', // julianday() -> NULL
+        durationMinutes: 240,
+        title: 'Corrupt imported night',
+        status: 'scheduled',
+        createdAt: corruptTs,
+        updatedAt: corruptTs,
+      })
+      .returning()
+      .all();
+
+    const upcoming = await request(server).get(`/api/v1/campaigns/${corruptCampaignId}/schedule/upcoming`).set(dm);
+    expect(upcoming.body.find((s: { id: number }) => s.id === bad.id)).toBeUndefined();
+
+    const past = await request(server).get(`/api/v1/campaigns/${corruptCampaignId}/schedule/past`).set(dm);
+    expect(past.body.items.map((s: { id: number }) => s.id)).toContain(bad.id);
   });
 });
 
