@@ -8,6 +8,7 @@ import {
   REMOVE_COMBATANT_CONFIRM_BODY,
   withOptimisticHpLifecycle,
 } from '../../src/features/encounters/combatantLifecycle';
+import { applyOptimisticHpDelta } from '../../src/features/encounters/optimisticHp';
 
 function combatant(overrides: Partial<Combatant> = {}): Combatant {
   return {
@@ -65,7 +66,7 @@ test.describe('combatant lifecycle (issue #1469)', () => {
   });
 
   test('damage to 0 HP immediately renders a character as dying', () => {
-    expect(withOptimisticHpLifecycle(combatant(), 0)).toMatchObject({
+    expect(applyOptimisticHpDelta(combatant(), -5)).toMatchObject({
       hpCurrent: 0,
       deathState: 'dying',
     });
@@ -89,7 +90,7 @@ test.describe('combatant lifecycle (issue #1469)', () => {
 
   test('healing clears optimistic death pips', () => {
     expect(
-      withOptimisticHpLifecycle(
+      applyOptimisticHpDelta(
         combatant({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 2, deathSaveFailures: 1 }),
         1,
       ),

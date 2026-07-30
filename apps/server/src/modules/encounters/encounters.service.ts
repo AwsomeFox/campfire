@@ -4201,6 +4201,9 @@ export class EncountersService {
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      const sheetUpdatedAtAtRemoval = snapshot.characterId == null
+        ? null
+        : tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, snapshot.characterId)).get()?.updatedAt ?? null;
 
       const runningAdapter = freshEncounter.status === 'running' ? adapter : null;
       let newCurrentId = freshEncounter.currentCombatantId;
@@ -4276,7 +4279,7 @@ export class EncountersService {
         requestKey: idempotencyKey ?? null,
         encounterId,
         combatantId,
-        snapshotJson: toJsonText(snapshot),
+        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval }),
         beforeEncounterJson: toJsonText({
           currentCombatantId: freshEncounter.currentCombatantId,
           turnIndex: freshEncounter.turnIndex,
@@ -4313,8 +4316,9 @@ export class EncountersService {
         const adapter = ruleSystemAdapter(campaign?.ruleSystem);
         const undo = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
         if (!undo || undo.expiresAt <= nowIso()) throw new NotFoundException('Combatant removal undo is unavailable or expired.');
-        const snapshot = fromJsonText<typeof combatants.$inferSelect | null>(undo.snapshotJson, null);
-        if (!snapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
+        const storedSnapshot = fromJsonText<(typeof combatants.$inferSelect & { sheetUpdatedAtAtRemoval?: string | null }) | null>(undo.snapshotJson, null);
+        if (!storedSnapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
+        const { sheetUpdatedAtAtRemoval, ...snapshot } = storedSnapshot;
         // A committed undo may have lost its response. Replaying the restored row is safe;
         // never turn the client-visible Retry into a permanent 404 after success.
         if (undo.consumedAt != null) {
@@ -4342,7 +4346,7 @@ export class EncountersService {
           // Combatants intentionally permit encounter-local overrides (notably hpMax
           // and timed condition metadata). Pull sheet state only when the sheet was
           // edited during the removal window; otherwise restore the exact snapshot.
-          if (sheet && sheet.updatedAt !== snapshot.sheetSyncedUpdatedAt) Object.assign(snapshot, {
+          if (sheet && sheet.updatedAt !== sheetUpdatedAtAtRemoval) Object.assign(snapshot, {
             hpCurrent: Math.max(0, Math.min(sheet.hpCurrent, snapshot.hpMax)),
             hpTemp: sheet.hpTemp, spCurrent: sheet.spCurrent, spMax: sheet.spMax,
             rpCurrent: sheet.rpCurrent, rpMax: sheet.rpMax, deathState: sheet.deathState,

@@ -941,6 +941,7 @@ describe('encounters (e2e)', () => {
 
     it('undo preserves encounter-local linked-combatant fields and only pulls a changed sheet', async () => {
       const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
       const character = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Undo local override', hpCurrent: 8, hpMax: 8 });
       const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
       expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm).send({ hpMax: 14, hpSet: 11 })).status).toBe(200);
@@ -952,6 +953,14 @@ describe('encounters (e2e)', () => {
       expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpCurrent: 4 })).status).toBe(200);
       const changedRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: changedRemoval.body.undoToken });
       expect(changedRestore.body).toMatchObject({ hpCurrent: 4, hpMax: 14 });
+
+      // A sheet edit before removal is not an edit during the recovery window.
+      // Preserve the snapshot rather than comparing against its older sync stamp.
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ name: 'Undo local override renamed' })).status).toBe(200);
+      await db.update(combatantsTable).set({ hpCurrent: 7 }).where(eq(combatantsTable.id, added.body.id));
+      const preexistingMismatchRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      const preexistingMismatchRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: preexistingMismatchRemoval.body.undoToken });
+      expect(preexistingMismatchRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 14 });
     });
 
     it('combatant routes 404 when encounterId doesn\'t own the combatant (cross-parent-id pin)', async () => {

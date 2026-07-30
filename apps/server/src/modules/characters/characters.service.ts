@@ -753,6 +753,11 @@ export class CharactersService {
     }
     // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
     // without waiting for the poll (pairs with character.updated for the inline card).
+    for (const encounterId of touchedEncounterIds) {
+      await this.db.update(encounters)
+        .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')));
+    }
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
         this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
@@ -838,6 +843,11 @@ export class CharactersService {
       touchedEncounterIds.add(encounterId);
       campaignId ??= encCampaignId;
     }
+    for (const encounterId of touchedEncounterIds) {
+      await this.db.update(encounters)
+        .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')));
+    }
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
         this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
@@ -862,6 +872,12 @@ export class CharactersService {
         ...conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances),
         sheetSyncedUpdatedAt: sheetUpdatedAt,
       }).where(eq(combatants.id, combatant.id)).run();
+    }
+    for (const encounterId of new Set(rows.map((row) => row.encounterId))) {
+      tx.update(encounters)
+        .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
+        .run();
     }
     return rows.map((row) => row.encounterId);
   }

@@ -4,6 +4,7 @@ import {
   ruleSystemAdapter,
   STARFINDER_ADAPTER_ID,
 } from '@campfire/schema';
+import { withOptimisticHpLifecycle } from './combatantLifecycle';
 
 /**
  * Applies the client-side HP estimate for one pending mutation.
@@ -38,14 +39,14 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
     };
   }
   if (delta >= 0) {
-    return { ...c, hpCurrent: Math.min(c.hpMax, c.hpCurrent + delta) };
+    return withOptimisticHpLifecycle(c, Math.min(c.hpMax, c.hpCurrent + delta), false);
   }
   // Damage: temporary HP absorbs first, then real HP, floored at 0.
   const dmg = -delta;
   const temp = c.hpTemp ?? 0;
   const fromTemp = Math.min(temp, dmg);
   const overflow = dmg - fromTemp;
-  return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
+  return withOptimisticHpLifecycle({ ...c, hpTemp: temp - fromTemp }, Math.max(0, c.hpCurrent - overflow), overflow > 0);
 }
 
 export type OptimisticHpDelta = {
