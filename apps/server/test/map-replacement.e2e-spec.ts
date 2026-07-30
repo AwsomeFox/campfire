@@ -2,8 +2,8 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { attachments, campaigns, campaignInvites, combatants, encounters, locations } from '../src/db/schema';
-import { eq } from 'drizzle-orm';
+import { attachments, auditLog, campaigns, campaignInvites, combatants, encounters, locations } from '../src/db/schema';
+import { and, desc, eq } from 'drizzle-orm';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 
@@ -109,6 +109,10 @@ describe('map replacement lifecycle (issue #870)', () => {
         })
         .returning();
 
+      const prePinned = (await db.select().from(locations).where(eq(locations.campaignId, campaignId))).filter(
+        (l) => l.mapX != null,
+      ).length;
+
       const mapB = await uploadMap(server, 'd.png');
       const replace = await request(server)
         .patch(`/api/v1/campaigns/${campaignId}`)
@@ -119,6 +123,15 @@ describe('map replacement lifecycle (issue #870)', () => {
       const cleared = await db.select().from(locations).where(eq(locations.id, loc.id)).limit(1);
       expect(cleared[0]?.mapX).toBeNull();
       expect(cleared[0]?.mapY).toBeNull();
+
+      const [audit] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.action, 'campaign.update'), eq(auditLog.campaignId, campaignId)))
+        .orderBy(desc(auditLog.id))
+        .limit(1);
+      expect(audit).toBeDefined();
+      expect(JSON.parse(audit!.detail)).toEqual({ mapAlignment: 'reset', pinsCleared: prePinned });
     });
 
     it('rejects mapAlignment-only patches to an archived campaign', async () => {
@@ -217,6 +230,10 @@ describe('map replacement lifecycle (issue #870)', () => {
         updatedAt: new Date().toISOString(),
       });
 
+      const prePinned = (await db.select().from(locations).where(eq(locations.campaignId, campaignId))).filter(
+        (l) => l.mapX != null,
+      ).length;
+
       const mapB = await uploadMap(server, 'archive-b.png');
       const res = await request(server)
         .patch(`/api/v1/campaigns/${campaignId}?revokeInvites=true`)
@@ -235,6 +252,15 @@ describe('map replacement lifecycle (issue #870)', () => {
       const pin = await db.select().from(locations).where(eq(locations.id, loc.id)).limit(1);
       expect(pin[0]?.mapX).toBeNull();
       expect(pin[0]?.mapY).toBeNull();
+
+      const [audit] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.action, 'campaign.update'), eq(auditLog.campaignId, campaignId)))
+        .orderBy(desc(auditLog.id))
+        .limit(1);
+      expect(audit).toBeDefined();
+      expect(JSON.parse(audit!.detail)).toEqual({ mapAlignment: 'reset', pinsCleared: prePinned });
 
       const revealed = await db
         .select({ hidden: attachments.hidden })

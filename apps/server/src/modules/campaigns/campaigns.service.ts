@@ -711,7 +711,7 @@ export class CampaignsService {
         entityType: 'campaign',
         entityId: id,
         campaignId: id,
-        detail: JSON.stringify({ mapAlignment: mapAlignment ?? 'preserve', pinsCleared }),
+        detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
       });
       if (wasEnabled) {
         await this.audit.log({
@@ -805,7 +805,7 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: id,
       campaignId: id,
-      detail: JSON.stringify({ mapAlignment: mapAlignment ?? 'preserve', pinsCleared }),
+      detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
     });
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
