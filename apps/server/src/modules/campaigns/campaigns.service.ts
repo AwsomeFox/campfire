@@ -691,6 +691,7 @@ export class CampaignsService {
             .where(
               and(
                 eq(locations.campaignId, id),
+                notDeleted(locations.deletedAt),
                 or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
               ),
             )
@@ -774,6 +775,7 @@ export class CampaignsService {
           .where(
             and(
               eq(locations.campaignId, id),
+              notDeleted(locations.deletedAt),
               or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
             ),
           )
