@@ -4271,6 +4271,10 @@ function migrateTableSafetyHolds599(sqlite: Database.Database): void {
 }
 
 function migrateTableSafetyAttribution842(sqlite: Database.Database): void {
+  const exists = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='table_safety_holds'`)
+    .get();
+  if (!exists) return;
   const names = new Set((sqlite.prepare(`PRAGMA table_info(table_safety_holds)`).all() as Array<{ name: string }>).map((c) => c.name));
   if (!names.has('activated_by_user_id')) sqlite.exec(`ALTER TABLE table_safety_holds ADD COLUMN activated_by_user_id TEXT`);
   if (!names.has('released_by_user_id')) sqlite.exec(`ALTER TABLE table_safety_holds ADD COLUMN released_by_user_id TEXT`);

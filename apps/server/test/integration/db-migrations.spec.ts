@@ -1031,6 +1031,26 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         fresh.sqlite.close();
       }
 
+      // A partially repaired legacy install can have recorded #599 but no longer
+      // have its table. #842 must skip its ALTER in that state; bootstrap then
+      // recreates the current table shape instead of aborting startup.
+      const missingTable = new Database(dbFilePath(dataDir));
+      try {
+        missingTable.exec('DROP TABLE table_safety_holds');
+        missingTable.prepare('DELETE FROM __migrations WHERE name = ?').run('0130_table_safety_attribution_842');
+      } finally {
+        missingTable.close();
+      }
+      const recreated = openDatabase(dataDir);
+      try {
+        expect([...columnNames(recreated.sqlite, 'table_safety_holds')].sort()).toEqual(expected);
+        expect(
+          recreated.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0130_table_safety_attribution_842'),
+        ).toEqual({ name: '0130_table_safety_attribution_842' });
+      } finally {
+        recreated.sqlite.close();
+      }
+
       writeOldSchemaDb(upgradedDir);
       const upgraded = openDatabase(upgradedDir);
       try {

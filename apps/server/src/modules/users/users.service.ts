@@ -29,7 +29,6 @@ import {
   sessionZeroGuardianConsents,
   sessionRsvps,
   moderationReports,
-  moderationEvidence,
   moderationMutes,
   checkRequests,
   aiDmTranscriptEvents,
@@ -41,14 +40,8 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
-import { fromJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, type RequestUser } from '../../common/user.types';
-import {
-  moderationEvidenceHash,
-  moderationEvidenceMetadataHash,
-  type ModerationEvidencePayload,
-} from '../moderation/moderation-evidence';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
@@ -175,8 +168,8 @@ export class UsersService {
    * provenance.
    *
    * Historical rows retain those ids for authorization, block-listing, and provenance;
-   * their copied public labels must instead follow a rename or become neutral before
-   * deletion. On deletion, rendered notification copy is replaced as a whole with neutral
+   * copied public labels outside integrity-protected incident snapshots follow a rename or
+   * become neutral before deletion. On deletion, rendered notification copy is replaced as a whole with neutral
    * text instead of doing a substring replacement: it may contain quoted player prose or an
    * older label. Ordinary renames retain that event copy and change only structured attribution.
    * This is deliberately a synchronous transaction helper: callers get all labels changed
@@ -218,40 +211,9 @@ export class UsersService {
     tx.update(tableSafetyHolds).set({ activatedByName: nextLabel }).where(eq(tableSafetyHolds.activatedByUserId, stableUserId)).run();
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
 
-    // Moderation snapshots deliberately hash their copied author label. This is an
-    // authorized privacy rewrite, so re-stamp its metadata digest with the unchanged
-    // stable identity/content/context. A redacted row's content hash remains its
-    // pre-redaction anchor and must never be replaced with a placeholder hash.
-    const evidenceRows = tx.select().from(moderationEvidence).where(eq(moderationEvidence.authorUserId, stableUserId)).all();
-    for (const row of evidenceRows) {
-      // Evidence content is tamper-evident incident material, not mutable attribution.
-      const content = row.content;
-      const payload: ModerationEvidencePayload = {
-        campaignId: row.campaignId,
-        targetType: row.targetType,
-        targetId: row.targetId,
-        reason: row.reason,
-        source: row.source,
-        authorUserId: row.authorUserId,
-        authorName: nextLabel,
-        recipientUserId: row.recipientUserId,
-        anchorEntityType: row.anchorEntityType,
-        anchorEntityId: row.anchorEntityId,
-        revisionAt: row.revisionAt,
-        capturedAt: row.capturedAt,
-        context: fromJsonText<Record<string, unknown>>(row.contextJson, {}),
-        content,
-      };
-      tx.update(moderationEvidence)
-        .set({
-          authorName: nextLabel,
-          content,
-          metadataHash: moderationEvidenceMetadataHash(payload),
-          ...(row.redactedAt === null ? { contentHash: moderationEvidenceHash(payload) } : {}),
-        })
-        .where(eq(moderationEvidence.id, row.id))
-        .run();
-    }
+    // Moderation evidence is an integrity-protected incident snapshot. Every public
+    // attribution field it carries is covered by its stored hashes, so account
+    // relabeling must leave the entire snapshot untouched rather than re-sign it.
 
     if (pseudonymizeRenderedCopy) {
       tx.update(notifications)

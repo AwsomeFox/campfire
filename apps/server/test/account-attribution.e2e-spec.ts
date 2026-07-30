@@ -54,6 +54,7 @@ describe('account historical attribution privacy (e2e)', () => {
   let noteId: number;
   let characterId: number;
   let redactedEvidenceContentHash: string;
+  let tamperedEvidenceId: number;
   let importedNoteId: number;
   let importedCommentId: number;
   let importedRevisionId: number;
@@ -109,6 +110,30 @@ describe('account historical attribution privacy (e2e)', () => {
     };
   }
 
+  function evidenceVerdict(row: typeof moderationEvidence.$inferSelect) {
+    return verifyModerationEvidence(
+      {
+        campaignId: row.campaignId,
+        targetType: row.targetType,
+        targetId: row.targetId,
+        reason: row.reason,
+        source: row.source,
+        authorUserId: row.authorUserId,
+        authorName: row.authorName,
+        recipientUserId: row.recipientUserId,
+        anchorEntityType: row.anchorEntityType,
+        anchorEntityId: row.anchorEntityId,
+        revisionAt: row.revisionAt,
+        capturedAt: row.capturedAt,
+        context: JSON.parse(row.contextJson) as Record<string, unknown>,
+        content: row.content,
+      },
+      row.contentHash,
+      row.redactedAt,
+      row.metadataHash,
+    );
+  }
+
   function expectRetainedAttribution(
     db: DrizzleDb,
     label: string,
@@ -152,34 +177,12 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.rolls.every((row) => row.rollerName === label)).toBe(true);
     expect(rows.moderationReporter.every((row) => row.reporterName === label)).toBe(true);
     expect(rows.moderationSubject.every((row) => row.subjectName === label)).toBe(true);
-    expect(rows.moderationEvidence.every((row) => row.authorName === label)).toBe(true);
-    expect(
-      rows.moderationEvidence.every((row) =>
-        ['intact', 'redacted'].includes(
-          verifyModerationEvidence(
-            {
-              campaignId: row.campaignId,
-              targetType: row.targetType,
-              targetId: row.targetId,
-              reason: row.reason,
-              source: row.source,
-              authorUserId: row.authorUserId,
-              authorName: row.authorName,
-              recipientUserId: row.recipientUserId,
-              anchorEntityType: row.anchorEntityType,
-              anchorEntityId: row.anchorEntityId,
-              revisionAt: row.revisionAt,
-              capturedAt: row.capturedAt,
-              context: JSON.parse(row.contextJson) as Record<string, unknown>,
-              content: row.content,
-            },
-            row.contentHash,
-            row.redactedAt,
-            row.metadataHash,
-          ),
-        ),
-      ),
-    ).toBe(true);
+    // Evidence is a tamper-evident incident snapshot, not mutable public attribution.
+    expect(rows.moderationEvidence.every((row) => row.authorName === OLD_LABEL)).toBe(true);
+    expect(rows.moderationEvidence.filter((row) => row.id !== tamperedEvidenceId).every((row) => ['intact', 'redacted'].includes(evidenceVerdict(row)))).toBe(true);
+    const tamperedEvidence = rows.moderationEvidence.find((row) => row.id === tamperedEvidenceId);
+    expect(tamperedEvidence).toBeDefined();
+    expect(evidenceVerdict(tamperedEvidence!)).toBe('tampered');
     expect(rows.moderationEvidence.filter((row) => row.redactedAt !== null).every((row) => row.contentHash === redactedEvidenceContentHash)).toBe(true);
     expect(rows.moderationMutes.every((row) => row.userName === label)).toBe(true);
     expect(rows.checkRequests.every((row) => row.requestedByName === label)).toBe(true);
@@ -313,6 +316,8 @@ describe('account historical attribution privacy (e2e)', () => {
     const redactedStored = { ...redactedOriginal, content: '[redacted]' };
     redactedEvidenceContentHash = moderationEvidenceHash(redactedOriginal);
     db.insert(moderationEvidence).values({ ...redactedStored, contextJson: '{}', contentHash: redactedEvidenceContentHash, metadataHash: moderationEvidenceMetadataHash(redactedStored), redactedAt: ts, redactedBy: String(adminId), redactionReason: 'test', expiresAt: null }).run();
+    const tamperedOriginal = { ...evidencePayload, content: 'Original tamper-evident evidence' };
+    tamperedEvidenceId = db.insert(moderationEvidence).values({ ...tamperedOriginal, content: 'Altered evidence content', contextJson: '{}', contentHash: moderationEvidenceHash(tamperedOriginal), metadataHash: moderationEvidenceMetadataHash(tamperedOriginal), redactedAt: null, redactedBy: null, redactionReason: '', expiresAt: null }).returning().get().id;
     db.insert(moderationReports).values({ campaignId, targetType: 'conduct', targetId: null, reporterUserId: String(memberId), reporterName: OLD_LABEL, subjectUserId: String(memberId), subjectName: OLD_LABEL, reason: 'conduct', details: '', status: 'open', resolution: null, resolutionNote: '', evidenceId, quarantined: false, escalationReason: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(moderationMutes).values({ campaignId, userId: String(memberId), userName: OLD_LABEL, reason: 'test', createdBy: String(adminId), createdAt: ts, liftedAt: null, liftedBy: null }).run();
     db.insert(checkRequests).values({ campaignId, characterId, encounterId: null, checkId: 'save:DEX', checkLabel: 'DEX save', mode: 'flat', dc: null, consequence: '', status: 'pending', requestedByUserId: String(memberId), requestedByName: OLD_LABEL, rollId: null, createdAt: ts, resolvedAt: null }).run();
@@ -335,7 +340,7 @@ describe('account historical attribution privacy (e2e)', () => {
     await closeTestApp(ctx);
   });
 
-  it('renames every retained public label while retaining stable ids', async () => {
+  it('renames mutable retained labels while retaining stable ids', async () => {
     const renamed = await member.patch('/api/v1/me/preferences').send({ displayName: RENAMED_LABEL });
     expect(renamed.status).toBe(200);
     expect(renamed.body.displayName).toBe(RENAMED_LABEL);
@@ -374,7 +379,7 @@ describe('account historical attribution privacy (e2e)', () => {
     expectImportedProvenance(db);
   });
 
-  it('pseudonymizes every retained public label on deletion without rewriting audit identity', async () => {
+  it('pseudonymizes mutable retained labels on deletion without rewriting audit identity', async () => {
     const deleted = await admin.delete(`/api/v1/users/${memberId}`);
     expect(deleted.status).toBe(204);
 

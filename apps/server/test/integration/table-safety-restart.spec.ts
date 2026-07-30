@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { eq } from 'drizzle-orm';
 import { openDatabase, type DrizzleDb } from '../../src/db/db.module';
-import { campaigns } from '../../src/db/schema';
+import { campaigns, tableSafetyHolds } from '../../src/db/schema';
 import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
+import type { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { TableSafetyService } from '../../src/modules/safety/table-safety.service';
 import { makeTempDataDir } from './fixtures';
 
@@ -23,7 +25,10 @@ type DriverCtor = ConstructorParameters<typeof AiDriverService>;
 function makeSafety(orm: DrizzleDb): TableSafetyService {
   const audit = { log: jest.fn(async () => undefined) };
   const events = { emit: jest.fn() };
-  const notifications = { notifyCampaign: jest.fn(async () => undefined) };
+  const notifications: Pick<NotificationsService, 'notifyCampaign' | 'notifyCampaignIncludingActor'> = {
+    notifyCampaign: jest.fn(async () => undefined),
+    notifyCampaignIncludingActor: jest.fn(async () => undefined),
+  };
   return new TableSafetyService(
     orm,
     audit as unknown as ConstructorParameters<typeof TableSafetyService>[1],
@@ -176,9 +181,10 @@ describe('table safety hold survives a restart (#599, real SQLite)', () => {
     // Both resolve. There is no compare-and-set to lose and no state machine to reject, which
     // is the entire point: pausing twice is harmless, and any guarantee that could make a pause
     // fail is worth less than the pause.
-    const [a, b] = await Promise.all([safety.activate(campaignId, null), safety.activate(campaignId, null)]);
+    const [a, b] = await Promise.all([safety.activate(campaignId, { id: '1', name: 'Ana' }), safety.activate(campaignId, null)]);
     expect(a.active).toBe(true);
     expect(b.active).toBe(true);
-    expect(safety.getHold(campaignId).activationCount).toBe(1);
+    expect(safety.getHold(campaignId)).toMatchObject({ activationCount: 1, activatedByName: 'Ana', anonymous: false });
+    expect(first.orm.select().from(tableSafetyHolds).where(eq(tableSafetyHolds.campaignId, campaignId)).get()?.activatedByUserId).toBe('1');
   });
 });
