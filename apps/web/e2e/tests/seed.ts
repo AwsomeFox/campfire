@@ -84,13 +84,22 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
       }
     }
 
-    const getAmbush = async (): Promise<{ status: string }> => {
+    const getAmbush = async (): Promise<{ status: string; combatants?: Array<{ id: number }> }> => {
       const res = await dm.get(`/api/v1/encounters/${encounterId}`);
       if (!res.ok()) throw new Error(`GET seed encounter -> ${res.status()}: ${await readError(res)}`);
-      return (await res.json()) as { status: string };
+      return (await res.json()) as { status: string; combatants?: Array<{ id: number }> };
     };
 
-    let { status } = await getAmbush();
+    const ambushData = await getAmbush();
+    if (Array.isArray(ambushData.combatants)) {
+      for (const c of ambushData.combatants) {
+        if (c.id !== bossId && c.id !== skirmisherId) {
+          await dm.delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).catch(() => undefined);
+        }
+      }
+    }
+
+    let status = ambushData.status;
 
     if (status === 'ended') {
       // /reopen → running (preserving round/turn). May 409 with HP_SYNC_CONFLICT when

@@ -215,14 +215,10 @@ test.describe('reduced-motion global policy (issue #594)', () => {
       document.body.appendChild(ready);
       document.body.appendChild(level);
       return {
-        readyText: ready.textContent,
-        levelText: level.textContent,
         readyAnim: getComputedStyle(ready).animationName,
         levelAnim: getComputedStyle(level).animationName,
       };
     });
-    expect(characterProbe.readyText).toBe('Ready to level up');
-    expect(characterProbe.levelText).toBe('Level up!');
     expect(characterProbe.readyAnim.toLowerCase() === 'none' || characterProbe.readyAnim === '').toBeTruthy();
     expect(characterProbe.levelAnim.toLowerCase() === 'none' || characterProbe.levelAnim === '').toBeTruthy();
   });

@@ -1752,3 +1752,96 @@ describe('characters — optimistic concurrency (issue #746, e2e)', () => {
     expect(live.body.name).not.toBe('Proposed Rename');
   });
 });
+
+describe('POST /characters/:id/rest — individual character rest', () => {
+  let ctx: TestContext;
+  let campaignId: number;
+  let owner: { Authorization: string };
+  let nonOwner: { Authorization: string };
+  let dm: { Authorization: string };
+  let restCharId: number;
+
+  beforeAll(async () => {
+    ctx = await setupE2eTest();
+    const server = ctx.app.getHttpServer();
+
+    dm = await loginAs(server, 'dm');
+    owner = await loginAs(server, 'player');
+    nonOwner = await loginAs(server, 'viewer');
+
+    const campRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: `Rest Test Campaign ${Date.now()}` });
+    campaignId = campRes.body.id;
+
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .set(dm)
+      .send({ userId: 2, role: 'player' });
+
+    const charRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(owner)
+      .send({
+        name: 'Resting Hero',
+        className: 'Fighter',
+        level: 3,
+        hpMax: 30,
+        hpCurrent: 10,
+        spMax: 15,
+        spCurrent: 5,
+        rpMax: 3,
+        rpCurrent: 1,
+        deathState: 'stable',
+      });
+    restCharId = charRes.body.id;
+  });
+
+  afterAll(async () => {
+    await teardownE2eTest(ctx);
+  });
+
+  it('rejects a non-owner non-DM player with 403', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${restCharId}/rest`)
+      .set(nonOwner)
+      .send({ type: 'stamina' });
+    expect(res.status).toBe(403);
+  });
+
+  it('stamina rest consumes 1 RP and restores SP to max', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${restCharId}/rest`)
+      .set(owner)
+      .send({ type: 'stamina' });
+    expect(res.status).toBe(201);
+    expect(res.body.rpCurrent).toBe(0);
+    expect(res.body.spCurrent).toBe(15);
+  });
+
+  it('stamina rest with 0 RP returns 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${restCharId}/rest`)
+      .set(owner)
+      .send({ type: 'stamina' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('requires at least 1 Resolve Point');
+  });
+
+  it('night rest heals max(1, level) HP, resets deathState, and restores SP/RP to max', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${restCharId}/rest`)
+      .set(owner)
+      .send({ type: 'night' });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(13); // 10 + level(3) = 13
+    expect(res.body.spCurrent).toBe(15);
+    expect(res.body.rpCurrent).toBe(3);
+    expect(res.body.deathState).toBe('none');
+  });
+});

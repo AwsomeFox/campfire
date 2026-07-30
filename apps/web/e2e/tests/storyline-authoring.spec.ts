@@ -4,10 +4,16 @@ import { seed, stateFor } from './seed';
 type CreatedArc = { id: number; title: string; summary?: string };
 type CreatedBeat = { id: number; title: string; body?: string };
 
+const createdArcIds: number[] = [];
+
 async function create<T>(page: Page, path: string, data: unknown): Promise<T> {
   const response = await page.request.post(path, { data });
   expect(response.ok(), `${path} should create its fixture`).toBeTruthy();
-  return response.json() as Promise<T>;
+  const result = (await response.json()) as T;
+  if (path.endsWith('/arcs') && (result as { id?: number }).id) {
+    createdArcIds.push((result as { id: number }).id);
+  }
+  return result;
 }
 
 async function createArcWithBeat(page: Page, campaignId: number, arcTitle: string, beatTitle: string) {
@@ -18,6 +24,15 @@ async function createArcWithBeat(page: Page, campaignId: number, arcTitle: strin
 
 test.describe('storyline authoring (issue #856)', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.afterEach(async ({ page }) => {
+    while (createdArcIds.length > 0) {
+      const id = createdArcIds.pop();
+      if (id) {
+        await page.request.delete(`/api/v1/arcs/${id}`).catch(() => undefined);
+      }
+    }
+  });
 
   test('edits arc summary with preview, save, and cancel', async ({ page }) => {
     const { campaignId } = seed();

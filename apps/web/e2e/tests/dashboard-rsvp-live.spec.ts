@@ -36,7 +36,7 @@ test('dashboard RSVP cue reflects the viewer response and remote changes', async
       await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
         // Before the global-setup seed 'DLRNAV Saturday Game' (2032-07-24) so
         // this remains the soonest next-session projection.
-        data: { scheduledAt: '2027-10-05T18:00:00Z', title: 'E2E785 Table night' },
+        data: { scheduledAt: new Date(Date.now() + 86400000 * 30).toISOString(), title: 'E2E785 Table night' },
       }),
       'create issue #785 schedule',
     );

@@ -5,6 +5,12 @@ import { seed, stateFor } from './seed';
 test.describe('party XP recipient preview and historical correction (issue #814)', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.afterEach(async ({ request }) => {
+    const { xpRecipients } = seed();
+    await request.patch(`/api/v1/characters/${xpRecipients.active.id}`, { data: { xp: xpRecipients.active.xp } }).catch(() => undefined);
+    await request.patch(`/api/v1/characters/${xpRecipients.retired.id}`, { data: { xp: xpRecipients.retired.xp } }).catch(() => undefined);
+  });
+
   test('defaults to active, requires explicit legacy opt-in, and awards the exact keyboard-selected recipients', async ({ page }) => {
     const { campaignId, xpRecipients } = seed();
     await page.goto(`/c/${campaignId}/party`);
