@@ -59,11 +59,11 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       await expect(log).toContainText('Stealth check');
 
       const afterFirst = await announcements(viewerPage);
-      expect(afterFirst.filter((message) => message.includes(String(body.total)))).toHaveLength(1);
+      expect(afterFirst.filter((message) => /Rolled|rolled/i.test(message) && message.includes(String(body.total)))).toHaveLength(1);
 
       // Poll refetch must not re-announce the same roll id.
       await viewerPage.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
-      expect((await announcements(viewerPage)).filter((message) => message.includes(String(body.total)))).toHaveLength(1);
+      await expect.poll(async () => (await announcements(viewerPage)).filter((message) => /Rolled|rolled/i.test(message) && message.includes(String(body.total))).length).toBe(1);
     } finally {
       await dmContext.close();
     }
