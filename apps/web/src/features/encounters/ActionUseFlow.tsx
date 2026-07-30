@@ -68,7 +68,7 @@ export function ActionUsePanel({
   isDm: boolean;
   applyDisabled?: boolean;
   onDismiss: () => void;
-  onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy) => void;
+  onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
@@ -107,11 +107,12 @@ export function ActionUsePanel({
     // Issue #1451: apply takes the chainId returned by resolve — a lookup key only. The
     // server re-reads the exact resolution it computed and persisted at resolve time rather
     // than trusting anything the client echoes back.
-    mutationFn: (chainId: string) =>
-      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, { chainId }).then((r) => ({
+    mutationFn: ({ chainId, sourceEncounterId }: { chainId: string; sourceEncounterId: number }) =>
+      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${sourceEncounterId}/actions/apply`, { chainId }).then((r) => ({
         ...preview!,
         applied: true,
         undoToken: r.undoToken,
+        sourceEncounterId,
       })),
     onMutate: () => {
       setCommitSubmitted(true);
@@ -119,7 +120,7 @@ export function ActionUsePanel({
       onError(null);
     },
     onSuccess: (res) => {
-      if (res.undoToken) onApplied(res.undoToken, res.policy);
+      if (res.undoToken) onApplied(res.undoToken, res.policy, res.sourceEncounterId);
       announce(`${actionName} applied.`);
       onDismiss();
     },
@@ -276,7 +277,7 @@ export function ActionUsePanel({
                 disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
                 onClick={() => {
                   if (commitSubmitted || commit.isPending) return;
-                  commit.mutate(preview.chainId);
+                  commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
                 }}
               >
                 {commit.isPending ? 'Applying…' : 'Apply'}

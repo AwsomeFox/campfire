@@ -1081,6 +1081,7 @@ export default function RunSessionPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const trashedEncounterIdsRef = useRef(new Set<number>());
+  const trashedEncounterRevisionsRef = useRef(new Map<number, string>());
   const [pendingCombatantUndo, setPendingCombatantUndo] = useState<{ name: string; undoToken: string; encounterId: number } | null>(null);
   const [dismissTokenUndoNonce, setDismissTokenUndoNonce] = useState(0);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
@@ -1274,6 +1275,17 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  // An encounter can be restored by another client or API caller. A newer authoritative
+  // revision clears only that old local-trash marker, not the still-cached pre-trash row.
+  useEffect(() => {
+    if (!encounter) return;
+    const trashedRevision = trashedEncounterRevisionsRef.current.get(encounter.id);
+    if (trashedRevision && trashedRevision !== encounter.updatedAt) {
+      trashedEncounterIdsRef.current.delete(encounter.id);
+      trashedEncounterRevisionsRef.current.delete(encounter.id);
+    }
+  }, [encounter?.id, encounter?.updatedAt]);
 
   useEffect(() => {
     setEscalationOverrideDraft(encounter?.escalationDieOverride == null ? '' : String(encounter.escalationDieOverride));
@@ -1725,6 +1737,7 @@ export default function RunSessionPage() {
     onSuccess: () => {
       setConfirmDelete(false);
       trashedEncounterIdsRef.current.add(eid);
+      if (encounter?.updatedAt) trashedEncounterRevisionsRef.current.set(eid, encounter.updatedAt);
       dismissCompetingRecoveryUndos();
       setPendingTrashUndo(true);
     },
@@ -2116,6 +2129,7 @@ export default function RunSessionPage() {
   async function undoTrashEncounter() {
     await api.post(`${API}/encounters/${eid}/restore`);
     trashedEncounterIdsRef.current.delete(eid);
+    trashedEncounterRevisionsRef.current.delete(eid);
     setPendingTrashUndo(false);
     await invalidateEncounter(queryClient, eid);
   }
@@ -3320,11 +3334,11 @@ export default function RunSessionPage() {
           applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
-          onApplied={(token) => {
-            if (!isCurrentCombatantUndoEncounter(eid, activeEncounterIdRef.current)) return;
-            void invalidateEncounter(queryClient, eid);
+          onApplied={(token, _policy, sourceEncounterId) => {
+            if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
+            void invalidateEncounter(queryClient, sourceEncounterId);
             setPendingActionUse(null);
-            if (trashedEncounterIdsRef.current.has(eid)) return;
+            if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
             dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
           }}
