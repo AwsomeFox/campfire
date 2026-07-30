@@ -1726,7 +1726,7 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
   },
   'update_inventory_item': {
     allowed: new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']),
-    forbidden: new Set(['qty', 'ownerType', 'characterId', 'expectedUpdatedAt']),
+    forbidden: new Set(['qty', 'ownerType', 'characterId', 'expectedUpdatedAt', 'equipped', 'equipSlot', 'equippedAction']),
   },
 };
 
