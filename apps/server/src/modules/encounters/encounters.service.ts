@@ -153,27 +153,31 @@ function mergeRemovalUndoSheetConditionDelta(
   const capturedByKey = new Map(capturedSheet.map((instance) => [keyFor(instance), instance] as const));
   const currentByKey = new Map(currentSheet.map((instance) => [keyFor(instance), instance] as const));
   const snapshot = readConditionInstances(snapshotInstancesText, snapshotConditions);
-  const merged = new Map(snapshot.map((instance) => [keyFor(instance), instance] as const));
+  // Do not key the combat snapshot by condition name: encounter-local timed effects may
+  // legitimately share a name while differing in id, source, duration, or save metadata.
+  let merged = [...snapshot];
 
   for (const [key, priorSheetInstance] of capturedByKey) {
     const currentSheetInstance = currentByKey.get(key);
     if (!currentSheetInstance) {
-      merged.delete(key);
+      merged = merged.filter((instance) => keyFor(instance) !== key);
     } else if (currentSheetInstance.stacks !== priorSheetInstance.stacks) {
-      const priorCombatantInstance = merged.get(key);
-      merged.set(key, priorCombatantInstance
-        ? { ...priorCombatantInstance, stacks: currentSheetInstance.stacks }
-        : currentSheetInstance);
+      const hadCombatantInstance = merged.some((instance) => keyFor(instance) === key);
+      merged = merged.map((instance) => keyFor(instance) === key
+        ? { ...instance, stacks: currentSheetInstance.stacks }
+        : instance);
+      if (!hadCombatantInstance) merged.push(currentSheetInstance);
     }
   }
   for (const [key, currentSheetInstance] of currentByKey) {
     if (capturedByKey.has(key)) continue;
-    const priorCombatantInstance = merged.get(key);
-    merged.set(key, priorCombatantInstance
-      ? { ...priorCombatantInstance, stacks: currentSheetInstance.stacks }
-      : currentSheetInstance);
+    const hadCombatantInstance = merged.some((instance) => keyFor(instance) === key);
+    merged = merged.map((instance) => keyFor(instance) === key
+      ? { ...instance, stacks: currentSheetInstance.stacks }
+      : instance);
+    if (!hadCombatantInstance) merged.push(currentSheetInstance);
   }
-  return conditionWriteSetFromInstances([...merged.values()]);
+  return conditionWriteSetFromInstances(merged);
 }
 
 /** Clamp a 0–100 percent overlay coordinate, mirroring the campaign map's location-pin drag. */
@@ -4282,21 +4286,31 @@ export class EncountersService {
       const runningAdapter = freshEncounter.status === 'running' ? adapter : null;
       let newCurrentId = freshEncounter.currentCombatantId;
       let wrappedToNextRound = false;
-      if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
-        const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
-        const idx = sorted.findIndex((combatant) => combatant.id === combatantId);
-        const remaining = sorted.filter((combatant) => combatant.id !== combatantId);
-        if (remaining.length === 0) newCurrentId = null;
-        else if (sorted[idx + 1]) newCurrentId = sorted[idx + 1].id;
-        else {
-          newCurrentId = remaining[0].id;
-          wrappedToNextRound = true;
-        }
-      }
-
-      const lairResumeCombatantId = freshEncounter.lairResumeCombatantId === combatantId
+      let turnPhase = (freshEncounter.turnPhase as EncounterTurnPhase) ?? 'combatant';
+      let lairResumeCombatantId = freshEncounter.lairResumeCombatantId === combatantId
         ? null
         : freshEncounter.lairResumeCombatantId;
+      if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
+        const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
+        const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
+        const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
+        if (ruleEntryIds.length > 0) {
+          const entries = tx.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries)
+            .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, freshEncounter.campaignId)))).all();
+          for (const entry of entries) statblocks.set(entry.id, runningAdapter.mapStatblock(fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {})));
+        }
+        // Keep the removed actor in the ordered list so the pure helper can locate the
+        // successor, but make it ineligible for selection just as the post-delete roster
+        // would be. This preserves skip/lair semantics without ever persisting its id.
+        const advanceRoster = sorted.map((combatant) => combatant.id === combatantId
+          ? { ...combatant, hpCurrent: 0, deathState: combatant.kind === 'character' ? 'dead' : combatant.deathState }
+          : combatant);
+        const advanced = advanceEncounterTurn(advanceRoster, combatantId, freshEncounter.round, turnPhase, encounterHasLairSlotFromStatblocks(statblocks), lairResumeCombatantId);
+        newCurrentId = advanced.currentCombatantId;
+        wrappedToNextRound = advanced.roundWrapped;
+        turnPhase = advanced.phase;
+        lairResumeCombatantId = advanced.lairResumeCombatantId;
+      }
       let afterEncounter = {
         currentCombatantId: newCurrentId,
         turnIndex: freshEncounter.turnIndex,
@@ -4304,6 +4318,7 @@ export class EncountersService {
         escalationDie: freshEncounter.escalationDie,
         escalationDieHistory: freshEncounter.escalationDieHistory,
         lairResumeCombatantId,
+        turnPhase,
       };
       // Persist a scalar expected version with the undo snapshot. The database
       // update below still uses an expression for the actual increment.
@@ -4326,6 +4341,7 @@ export class EncountersService {
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? freshEncounter.escalationDieHistory,
           lairResumeCombatantId,
+          turnPhase,
         };
         // Only removal of the active combatant changes the logical turn. Removing
         // someone else and initiative re-sorts keep active player previews valid.
@@ -4339,6 +4355,7 @@ export class EncountersService {
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
+        turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
         updatedAt: now,
       }).where(eq(encounters.id, encounterId)).run();
