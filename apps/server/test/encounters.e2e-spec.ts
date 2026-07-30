@@ -7196,19 +7196,17 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${otherId}`).set(dm).send({ initiative: 10 });
       
       // 1. Setup turn-start condition on target (who will go first)
-      await request(server).post(`/api/v1/encounters/${encounterId}/combatants/${targetId}/condition-instances`).set(dm).send({
-        name: 'Poison',
-        type: 'standard',
-        turnStartEffects: [{ type: 'damage', roll: '2' }],
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm).send({
+        conditionInstances: [{ id: 'cond-1', name: 'Stunned', timing: 'start-of-turn', roundsRemaining: 1, stacks: 1, custom: true }],
       });
       
       // START the encounter
       await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
       
-      // Verify turn-start triggered
+      // Verify turn-start triggered and condition ticked/expired
       let state = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
       const targetState = state.body.combatants.find((c: any) => c.id === targetId);
-      expect(targetState.hpCurrent).toBe(18); // 20 - 2
+      expect(targetState.conditionInstances.find((ci: any) => ci.name === 'Stunned')).toBeUndefined();
       
       // 2. Verify removing lair pointer does not wrap round
       await db.update(encountersTable).set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: targetId }).where(eq(encountersTable.id, encounterId));
