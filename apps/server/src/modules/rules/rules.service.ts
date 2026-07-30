@@ -31,7 +31,6 @@ import {
   clampRuleSearchLimit,
   decodeRuleSearchCursor,
   encodeRuleSearchCursor,
-  nameMatchBucket,
   type BrowseCursor,
   type FtsCursor,
   type LikeCursor,
@@ -2484,7 +2483,10 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, packTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select()
+      .select({
+        entry: ruleEntries,
+        sortKey: sql<string>`lower(${ruleEntries.name})`,
+      })
       .from(ruleEntries)
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(sql`lower(${ruleEntries.name})`, asc(ruleEntries.id))
@@ -2492,16 +2494,15 @@ export class RulesService implements OnModuleInit {
 
     const hasMore = rows.length > opts.limit;
     const page = hasMore ? rows.slice(0, opts.limit) : rows;
-    const items = page.map(entryToDomain);
+    const items = page.map((r) => entryToDomain(r.entry));
     const last = page[page.length - 1];
-    // Cursor `n` must match SQL lower(name) used in ORDER BY / keyset (ASCII-oriented).
     const nextCursor =
       hasMore && last
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'browse',
-            n: last.name.toLowerCase(),
-            i: last.id,
+            n: last.sortKey,
+            i: last.entry.id,
           })
         : undefined;
     return { items, total, hasMore, nextCursor, limit: opts.limit, facets };
@@ -2546,7 +2547,11 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select({ entry: ruleEntries, ftsRank: sql<number>`rule_entries_fts.rank` })
+      .select({
+        entry: ruleEntries,
+        ftsRank: sql<number>`rule_entries_fts.rank`,
+        bucket: rankExpr,
+      })
       .from(ruleEntries)
       .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
       .where(and(...conditions))
@@ -2562,7 +2567,7 @@ export class RulesService implements OnModuleInit {
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'fts',
-            b: nameMatchBucket(opts.q, last.entry.name),
+            b: Number(last.bucket),
             r: Number(last.ftsRank),
             i: last.entry.id,
           })
@@ -2580,10 +2585,12 @@ export class RulesService implements OnModuleInit {
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'like') as LikeCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
-    const like = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const needle = foldForSearch(opts.q.trim().replace(/[%_]/g, ''));
+    const rawLike = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const foldedLike = `%${needle}%`;
     const baseConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.name} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${foldedLike})`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2599,7 +2606,7 @@ export class RulesService implements OnModuleInit {
 
     const matchConditions = [
       isNull(ruleEntries.campaignId),
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.name} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${foldedLike})`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
@@ -2609,7 +2616,10 @@ export class RulesService implements OnModuleInit {
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
-      .select()
+      .select({
+        entry: ruleEntries,
+        bucket: rankExpr,
+      })
       .from(ruleEntries)
       .where(and(...conditions))
       .orderBy(rankExpr, asc(ruleEntries.name), asc(ruleEntries.id))
@@ -2617,16 +2627,16 @@ export class RulesService implements OnModuleInit {
 
     const hasMore = rows.length > opts.limit;
     const page = hasMore ? rows.slice(0, opts.limit) : rows;
-    const items = page.map(entryToDomain);
+    const items = page.map((r) => entryToDomain(r.entry));
     const last = page[page.length - 1];
     const nextCursor =
       hasMore && last
         ? encodeRuleSearchCursor({
             v: 1,
             m: 'like',
-            b: nameMatchBucket(opts.q, last.name),
-            n: last.name,
-            i: last.id,
+            b: Number(last.bucket),
+            n: last.entry.name,
+            i: last.entry.id,
           })
         : undefined;
     return { items, total, hasMore, nextCursor, limit: opts.limit, facets };

@@ -25,6 +25,8 @@ export const SEARCH_FOLD_LOCALE = 'en-US';
  */
 export function foldForSearch(input: string): string {
   return input
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
     .normalize('NFKC')
     .toLocaleLowerCase(SEARCH_FOLD_LOCALE)
     // İ → "i" + COMBINING DOT ABOVE under en-US; plain "i" for ASCII parity.

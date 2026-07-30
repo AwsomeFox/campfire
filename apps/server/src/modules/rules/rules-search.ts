@@ -32,10 +32,9 @@ export function clampRuleSearchLimit(limit?: number): number {
  * 0 exact, 1 prefix, 2 contains, 3 body/summary-only.
  */
 export function nameMatchBucket(q: string, name: string): number {
-  // Needle folding matches SQL nameMatchRank(); column side uses SQL lower() (ASCII).
   const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
   if (!needle) return 3;
-  const folded = name.toLowerCase();
+  const folded = foldForSearch(name);
   if (folded === needle) return 0;
   if (folded.startsWith(needle)) return 1;
   if (folded.includes(needle)) return 2;

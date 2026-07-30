@@ -41,4 +41,17 @@ describe('rules-search helpers (issue #613)', () => {
     expect(decodeRuleSearchCursor(undefined, 'browse')).toBeUndefined();
     expect(() => decodeRuleSearchCursor('%%%not-base64%%%', 'browse')).toThrow(/cursor/i);
   });
+
+  it('round-trips non-ASCII names through cursor encode/decode unchanged (issue #1493)', () => {
+    const nonAsciiName = 'Æther Elemental';
+    const cursor = encodeRuleSearchCursor({ v: 1, m: 'browse', n: nonAsciiName, i: 101 });
+    const decoded = decodeRuleSearchCursor(cursor, 'browse');
+    expect(decoded).toEqual({ v: 1, m: 'browse', n: 'Æther Elemental', i: 101 });
+  });
+
+  it('matches accented names in nameMatchBucket (issue #1493)', () => {
+    expect(nameMatchBucket('zoe', 'Zoë')).toBe(0);
+    expect(nameMatchBucket('zoë', 'Zoe')).toBe(0);
+    expect(nameMatchBucket('resume', 'Résumé')).toBe(0);
+  });
 });

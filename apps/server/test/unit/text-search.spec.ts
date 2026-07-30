@@ -35,12 +35,24 @@ describe('foldForSearch (issue #624)', () => {
     expect(foldForSearch('İ')).toBe('i');
   });
 
+  it('strips diacritics so accented and unaccented terms match symmetrically (issue #1493)', () => {
+    expect(foldForSearch('Zoë')).toBe('zoe');
+    expect(foldForSearch('Zoe')).toBe('zoe');
+    expect(foldedIncludes('Zoë', foldForSearch('Zoe'))).toBe(true);
+    expect(foldedIncludes('Zoe', foldForSearch('Zoë'))).toBe(true);
+
+    expect(foldForSearch('Résumé')).toBe('resume');
+    expect(foldForSearch('Resume')).toBe('resume');
+    expect(foldedIncludes('Résumé', foldForSearch('Resume'))).toBe(true);
+    expect(foldedIncludes('Resume', foldForSearch('Résumé'))).toBe(true);
+  });
+
   it('keeps emoji stable under fold', () => {
     const withEmoji = 'Party at 🐉 Café 🎉';
     const folded = foldForSearch(withEmoji);
     expect(folded).toContain('🐉');
     expect(folded).toContain('🎉');
-    expect(folded).toBe('party at 🐉 café 🎉');
+    expect(folded).toBe('party at 🐉 cafe 🎉');
     expect(foldedIncludes(withEmoji, foldForSearch('🐉'))).toBe(true);
   });
 
