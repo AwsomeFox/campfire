@@ -723,41 +723,48 @@ export class CharactersService {
       .where(eq(characters.id, characterId))
       .limit(1);
     const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
-    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
-      const nextMax = hpMax ?? combatant.hpMax;
-      const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
-      const updatePayload: Partial<typeof combatants.$inferInsert> = {
-        hpCurrent: nextCurrent,
-        hpMax: nextMax,
-        ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
-      };
-      if (opts?.spCurrent !== undefined) updatePayload.spCurrent = opts.spCurrent;
-      if (opts?.spMax !== undefined) updatePayload.spMax = opts.spMax;
-      if (opts?.rpCurrent !== undefined) updatePayload.rpCurrent = opts.rpCurrent;
-      if (opts?.rpMax !== undefined) updatePayload.rpMax = opts.rpMax;
-      // Issue #1492: mirror the full death/temp-HP slice a sheet PATCH can now write, so
-      // reviving a downed PC mid-encounter (`deathState: 'none', deathSaveFailures: 0`)
-      // keeps the live tracker consistent. Without this, the combatant keeps the stale
-      // 'dead'/'dying' state after HP is mirrored, and /end's CAS write-back (which treats
-      // the combatant slice as authoritative) silently reverts the revive onto the sheet.
-      if (opts?.deathState !== undefined) updatePayload.deathState = opts.deathState;
-      if (opts?.deathSaveSuccesses !== undefined) updatePayload.deathSaveSuccesses = opts.deathSaveSuccesses;
-      if (opts?.deathSaveFailures !== undefined) updatePayload.deathSaveFailures = opts.deathSaveFailures;
-      if (opts?.hpTemp !== undefined) updatePayload.hpTemp = opts.hpTemp;
-      await this.db
-        .update(combatants)
-        .set(updatePayload)
-        .where(eq(combatants.id, combatant.id));
-      touchedEncounterIds.add(encounterId);
-      campaignId ??= encCampaignId;
-    }
-    // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
-    // without waiting for the poll (pairs with character.updated for the inline card).
-    for (const encounterId of touchedEncounterIds) {
-      await this.db.update(encounters)
-        .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
-        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')));
-    }
+    // Keep the mirrored combatant write and its optimistic-concurrency revision in one
+    // transaction. An undo removal uses that revision to decide whether it may exactly
+    // restore a turn pointer, so exposing the sheet write before its revision would let an
+    // undo incorrectly treat the encounter as unchanged.
+    this.db.transaction((tx) => {
+      for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
+        const nextMax = hpMax ?? combatant.hpMax;
+        const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
+        const updatePayload: Partial<typeof combatants.$inferInsert> = {
+          hpCurrent: nextCurrent,
+          hpMax: nextMax,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        };
+        if (opts?.spCurrent !== undefined) updatePayload.spCurrent = opts.spCurrent;
+        if (opts?.spMax !== undefined) updatePayload.spMax = opts.spMax;
+        if (opts?.rpCurrent !== undefined) updatePayload.rpCurrent = opts.rpCurrent;
+        if (opts?.rpMax !== undefined) updatePayload.rpMax = opts.rpMax;
+        // Issue #1492: mirror the full death/temp-HP slice a sheet PATCH can now write, so
+        // reviving a downed PC mid-encounter (`deathState: 'none', deathSaveFailures: 0`)
+        // keeps the live tracker consistent. Without this, the combatant keeps the stale
+        // 'dead'/'dying' state after HP is mirrored, and /end's CAS write-back (which treats
+        // the combatant slice as authoritative) silently reverts the revive onto the sheet.
+        if (opts?.deathState !== undefined) updatePayload.deathState = opts.deathState;
+        if (opts?.deathSaveSuccesses !== undefined) updatePayload.deathSaveSuccesses = opts.deathSaveSuccesses;
+        if (opts?.deathSaveFailures !== undefined) updatePayload.deathSaveFailures = opts.deathSaveFailures;
+        if (opts?.hpTemp !== undefined) updatePayload.hpTemp = opts.hpTemp;
+        tx.update(combatants)
+          .set(updatePayload)
+          .where(eq(combatants.id, combatant.id))
+          .run();
+        touchedEncounterIds.add(encounterId);
+        campaignId ??= encCampaignId;
+      }
+      // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
+      // without waiting for the poll (pairs with character.updated for the inline card).
+      for (const encounterId of touchedEncounterIds) {
+        tx.update(encounters)
+          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
+          .run();
+      }
+    });
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
         this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
@@ -824,30 +831,34 @@ export class CharactersService {
       opts?.conditionInstancesJson !== undefined
         ? readConditionInstances(opts.conditionInstancesJson, conditionsJson)
         : null;
-    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
-      await this.db
-        .update(combatants)
-        .set({
-          // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
-          // behind and the next tracker write derives the condition straight back (#423 ×
-          // #486). See common/conditions.ts.
-          ...(sheetInstances != null
-            ? conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances)
-            : conditionWriteSetFromNames(
-                fromJsonText<string[]>(conditionsJson, []),
-                combatant.conditionInstances,
-              )),
-          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
-        })
-        .where(eq(combatants.id, combatant.id));
-      touchedEncounterIds.add(encounterId);
-      campaignId ??= encCampaignId;
-    }
-    for (const encounterId of touchedEncounterIds) {
-      await this.db.update(encounters)
-        .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
-        .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')));
-    }
+    // The condition mirror shares the same removal-undo revision guard as HP sync.
+    this.db.transaction((tx) => {
+      for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
+        tx.update(combatants)
+          .set({
+            // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
+            // behind and the next tracker write derives the condition straight back (#423 ×
+            // #486). See common/conditions.ts.
+            ...(sheetInstances != null
+              ? conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances)
+              : conditionWriteSetFromNames(
+                  fromJsonText<string[]>(conditionsJson, []),
+                  combatant.conditionInstances,
+                )),
+            ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+          })
+          .where(eq(combatants.id, combatant.id))
+          .run();
+        touchedEncounterIds.add(encounterId);
+        campaignId ??= encCampaignId;
+      }
+      for (const encounterId of touchedEncounterIds) {
+        tx.update(encounters)
+          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
+          .run();
+      }
+    });
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
         this.emitEncounterUpdatedIfVisible(campaignId, encounterId);

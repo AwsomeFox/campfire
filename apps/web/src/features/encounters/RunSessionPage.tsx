@@ -74,7 +74,7 @@ import {
 } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
+import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
@@ -2217,9 +2217,10 @@ export default function RunSessionPage() {
       })
       .catch((error) => {
         // A response from the application conclusively rejected the intent. Keep
-        // the key for transient failures (including retryable HTTP 408/425/429)
-        // so Retry remains a safe replay even when the server committed first.
-        if (!isTransientError(error)) combatantRemovalKeys.current.delete(removalKey);
+        // the key for transient failures (including retryable HTTP 408/425/429) and
+        // ambiguous mutation timeouts, so Retry remains a safe replay even when the
+        // server committed first.
+        if (!isTransientError(error) && !isAmbiguousMutation(error)) combatantRemovalKeys.current.delete(removalKey);
         if (isCurrentCombatantUndoEncounter(requestEncounterId, activeEncounterIdRef.current)) reportError(error);
       })
       .finally(() => {

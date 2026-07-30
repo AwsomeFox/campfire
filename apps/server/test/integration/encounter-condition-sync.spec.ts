@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounters } from '../../src/db/schema';
+import { auditLog, campaigns, characters, combatants, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -157,6 +157,63 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     await ctx.charactersService.patchConditions(ctx.characterId, { add: ['poisoned'] }, dmUser, 'dm');
     expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).toContain('poisoned');
     expect(readConditions(ctx.orm, 'character', ctx.characterId)).toContain('poisoned');
+  });
+
+  it('does not expose a sheet combatant write without its undo revision', async () => {
+    const ctx = seedRunningFight();
+    const [removedTurn] = ctx.orm.insert(combatants).values({
+      encounterId: ctx.encounterId,
+      kind: 'monster',
+      name: 'Removed turn',
+      initiative: 20,
+      initMod: 0,
+      hpCurrent: 10,
+      hpMax: 10,
+      conditions: '[]',
+      sortOrder: 1,
+    }).returning().all();
+    ctx.orm.update(encounters)
+      .set({ currentCombatantId: removedTurn.id, turnIndex: 0, combatantStateVersion: 0 })
+      .where(eq(encounters.id, ctx.encounterId))
+      .run();
+    const removal = await ctx.encountersService.removeCombatant(ctx.encounterId, removedTurn.id, dmUser, 'dm');
+
+    // The old implementation yielded after this linked combatant update and before it
+    // bumped combatantStateVersion. A queued undo then saw the removal's old revision and
+    // exactly rewound the pointer to the removed turn. The transaction makes that state
+    // unobservable: the undo either runs before the mirror or reconciles after its revision.
+    let patchSettled = false;
+    let undo: Promise<unknown> | undefined;
+    const interleaveUndo = () => {
+      const [linked] = ctx.orm.select({ hpCurrent: combatants.hpCurrent })
+        .from(combatants)
+        .where(eq(combatants.id, ctx.combatantId))
+        .limit(1)
+        .all();
+      if (!undo && linked?.hpCurrent === 13) {
+        undo = ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+      } else if (!patchSettled) {
+        queueMicrotask(interleaveUndo);
+      }
+    };
+    const patch = ctx.charactersService.patchHp(ctx.characterId, { set: 13 }, dmUser, 'dm')
+      .finally(() => { patchSettled = true; });
+    queueMicrotask(interleaveUndo);
+    await patch;
+    // With the fixed transaction the queued interleaver sees either no combatant write,
+    // or its already-incremented revision. It still represents the competing undo action.
+    undo ??= ctx.encountersService.undoRemoveCombatant(ctx.encounterId, removal.undoToken, dmUser, 'dm');
+    await undo;
+
+    const [encounter] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(encounter.currentCombatantId).toBe(ctx.combatantId);
+    expect(encounter.combatantStateVersion).toBeGreaterThan(1);
+    // The narrower transaction leaves the character write's established audit behavior intact.
+    const hpAudits = ctx.orm.select().from(auditLog)
+      .where(eq(auditLog.action, 'character.hp'))
+      .all()
+      .filter((audit) => audit.entityId === ctx.characterId);
+    expect(hpAudits).toEqual([expect.objectContaining({ actor: dmUser.id, campaignId: ctx.campaignId })]);
   });
 
   it('tracker addConditions survives /end onto the sheet', async () => {
