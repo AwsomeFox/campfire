@@ -30,7 +30,7 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode } from '@campfire/schema';
-import { useAiDmSeat, useAiDmSession, invalidateAiDm } from '../../lib/query';
+import { useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
 import { useAiDmStream, type AiDmStreamEvent } from '../../lib/useAiDmStream';
 import { useAuth } from '../../app/auth';
 import { usePendingHydrate } from './usePendingHydrate';
@@ -238,6 +238,14 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
             campaignId,
             encounterId: event.encounterId,
           });
+        } else if (event.type === 'tool-confirmation') {
+          // #1494: thin signal — refetch the authoritative pending-confirmation
+          // queue. Without this the encounter-panel dock would only update on its
+          // 30s poll, so a newly-blocked AI action could arrive half a minute late
+          // on the one surface a DM mid-combat is looking at. Mirrors AiTablePage's
+          // handler (#1558); React Query deduplicates, so both surfaces invalidating
+          // on the same key is a no-op extra.
+          invalidateAiDmToolConfirmations(queryClient, campaignId);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||

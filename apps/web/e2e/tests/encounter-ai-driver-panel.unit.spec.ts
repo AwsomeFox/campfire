@@ -35,3 +35,26 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/transcriptReducer/);
   });
 });
+
+test.describe('encounter AI driver panel surfaces tool confirmations (issue #1494)', () => {
+  // #1494 — the confirm-policy mechanism (begin_encounter / end_encounter / award_xp / …)
+  // already shipped server-side and already mounts a panel on AiTablePage (#1558). The residual
+  // gap was the in-encounter dock: a DM mid-combat is on the encounter page, not the Table, so a
+  // confirmation queued there was invisible — the exact silent stall the issue reports. These
+  // assertions are the standing guard that the panel is mounted HERE too, not only on the Table.
+  test('EncounterAiDriverPanel mounts ToolConfirmationsPanel inside the disclosure region', () => {
+    const panel = readFileSync(PANEL, 'utf8');
+    // Match the import and mount individually so a formatting change (line break, prop reorder)
+    // does not break the guard — what matters is that the panel is imported and wired with these
+    // props, not the exact single-line spelling.
+    expect(panel).toMatch(/ToolConfirmationsPanel/);
+    expect(panel).toMatch(/<ToolConfirmationsPanel[\s\S]*campaignId=\{campaignId\}/);
+    expect(panel).toMatch(/isDm=\{isDm\}/);
+    expect(panel).toMatch(/knownEntities=\{confirmationEntities\}/);
+    // The id -> name lookup is assembled from data THIS panel already holds (the encounter's
+    // combatants + the roster it fetches), mirroring AiTablePage — no extra, authority-broadening
+    // fetch is added to make summaries prettier.
+    expect(panel).toMatch(/confirmationEntities/);
+    expect(panel).toMatch(/\.\.\.encounter\.combatants/);
+  });
+});
