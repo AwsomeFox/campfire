@@ -59,52 +59,54 @@ export function QuickCaptureDialog({
       ariaBusy={saving}
       data-keyboard-command-overlay
     >
-      <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
-      {error && <ErrorNote message={error} />}
-      {!isDm && (
-        <div className="flex gap-2 mb-2 text-xs">
-          <button
-            type="button"
-            className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
-            onClick={() => setDest('private')}
-          >
-            {t('keyboard.quickCapturePrivate')}
-          </button>
-          <button
-            type="button"
-            className={`btn btn-ghost cf-density-xs ${dest === 'inbox' ? 'btn-primary' : ''}`}
-            onClick={() => setDest('inbox')}
-          >
-            {t('keyboard.quickCaptureInbox')}
-          </button>
-        </div>
-      )}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void save();
-        }}
-        className="space-y-3"
-      >
-        <TextArea
-          ref={inputRef}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={4}
-          placeholder={dest === 'inbox' ? t('keyboard.quickCapturePlaceholderInbox') : t('keyboard.quickCapturePlaceholderPrivate')}
-          aria-label={t('keyboard.quickCaptureBodyLabel')}
-          aria-keyshortcuts={ariaKeyshortcuts}
-          disabled={saving}
-        />
-        <div className="flex justify-end gap-2">
-          <Btn type="button" ghost disabled={saving} onClick={onClose}>
-            {t('nav.cancel')}
-          </Btn>
-          <Btn type="submit" disabled={saving || !body.trim()}>
-            {saving ? t('nav.saving') : dest === 'inbox' ? t('keyboard.quickCaptureSend') : t('nav.save')}
-          </Btn>
-        </div>
-      </form>
+      <div className="space-y-3">
+        <p className="text-sm text-muted">{t('keyboard.quickCaptureHint')}</p>
+        {error && <ErrorNote message={error} />}
+        {!isDm && (
+          <div className="flex gap-2 text-xs">
+            <button
+              type="button"
+              className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
+              onClick={() => setDest('private')}
+            >
+              {t('keyboard.quickCapturePrivate')}
+            </button>
+            <button
+              type="button"
+              className={`btn btn-ghost cf-density-xs ${dest === 'inbox' ? 'btn-primary' : ''}`}
+              onClick={() => setDest('inbox')}
+            >
+              {t('keyboard.quickCaptureInbox')}
+            </button>
+          </div>
+        )}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+          className="space-y-3"
+        >
+          <TextArea
+            ref={inputRef}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={4}
+            placeholder={dest === 'inbox' ? t('keyboard.quickCapturePlaceholderInbox') : t('keyboard.quickCapturePlaceholderPrivate')}
+            aria-label={t('keyboard.quickCaptureBodyLabel')}
+            aria-keyshortcuts={ariaKeyshortcuts}
+            disabled={saving}
+          />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" ghost disabled={saving} onClick={onClose}>
+              {t('nav.cancel')}
+            </Btn>
+            <Btn type="submit" disabled={saving || !body.trim()}>
+              {saving ? t('nav.saving') : dest === 'inbox' ? t('keyboard.quickCaptureSend') : t('nav.save')}
+            </Btn>
+          </div>
+        </form>
+      </div>
     </Dialog>
   );
 }

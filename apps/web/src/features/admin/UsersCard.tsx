@@ -291,7 +291,7 @@ function NewUserForm({
             <option value="admin">Admin — server configuration and user management</option>
           </select>
           <p id={roleHelpId} className="mt-1 text-xs text-slate-400">
-            Server admins can manage users, system settings, and server backups.
+            Admins can manage users, system settings, and server backups.
           </p>
         </div>
 
@@ -302,7 +302,7 @@ function NewUserForm({
         )}
 
         <div className="dialog-actions">
-          <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+          <Btn ghost type="button" aria-label="Cancel creating user" onClick={onCancel} disabled={saving}>
             Cancel
           </Btn>
           <Btn type="submit" disabled={saving}>
