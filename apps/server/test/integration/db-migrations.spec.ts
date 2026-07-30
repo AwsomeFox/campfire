@@ -1135,6 +1135,44 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0154 adds session-share creator IDs on upgrade and skips a missing legacy table (#842)', () => {
+    expect(MIGRATION_NAMES).toContain('0154_session_shares_creator_842');
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'session_shares')).toContain('created_by_user_id');
+    } finally {
+      fresh.sqlite.close();
+    }
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE session_shares DROP COLUMN created_by_user_id');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0154_session_shares_creator_842');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'session_shares')).toContain('created_by_user_id');
+      const info = (upgraded.sqlite.pragma('table_info(session_shares)') as Array<{ name: string; notnull: number }>)
+        .find((entry) => entry.name === 'created_by_user_id');
+      expect(info).toMatchObject({ notnull: 0 });
+    } finally {
+      upgraded.sqlite.close();
+    }
+
+    const missing = new Database(dbFilePath(dataDir));
+    try {
+      missing.exec('DROP TABLE session_shares');
+      missing.prepare('DELETE FROM __migrations WHERE name = ?').run('0154_session_shares_creator_842');
+    } finally {
+      missing.close();
+    }
+    expect(() => openDatabase(dataDir).sqlite.close()).not.toThrow();
+  });
+
   it('0133 backfills ai_driver_control_state.phase on a legacy table (#1043)', () => {
     expect(MIGRATION_NAMES).toContain('0133_ai_session_phase_1043');
     // ALTERs the table 0118 creates, so it must run after it — runMigrations goes in array order
