@@ -28,5 +28,9 @@ test.describe('ActionUseFlow double-submit guard & error handling (issue #1474)'
 
     // 6. onClick guards against double dispatch
     expect(code).toMatch(/if \(commitSubmitted \|\| commit\.isPending\) return;/);
+
+    // 7. Unconfirmed state offers Retry button with same chainId and disables Back button
+    expect(code).toMatch(/data-testid="action-use-retry"/);
+    expect(code).toMatch(/disabled=\{commit\.isPending \|\| isUnconfirmed\}/);
   });
 });

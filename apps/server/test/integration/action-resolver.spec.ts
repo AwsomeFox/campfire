@@ -1324,6 +1324,24 @@ describe('action resolver (real SQLite, service layer)', () => {
     );
   });
 
+  it('#1474: re-applying a chainId after turn advancement returns stored undoToken without 403', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    // Advance the encounter turn so the actor is no longer active
+    orm.update(encounters).set({ currentCombatantId: drake, turnVersion: 2 }).where(eq(encounters.id, encounterId)).run();
+
+    // A network retry after turn advance should still succeed idempotently without throwing 403
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
+  });
+
   // ---------------------------------------------------------------------------
   // Issue #1451 review round — Devin/Codex/Kilo findings on the original PR.
   // ---------------------------------------------------------------------------

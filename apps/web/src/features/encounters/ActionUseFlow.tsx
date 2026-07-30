@@ -232,16 +232,28 @@ export function ActionUsePanel({
             </p>
           )}
           {isUnconfirmed && (
-            <p className="text-muted" style={{ fontSize: 11.5, margin: 0, color: 'var(--color-warning, #d97706)' }} data-testid="action-use-unconfirmed-text">
-              {t('encounters.errors.applyUnconfirmed', {
-                defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
-              })}
-            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p className="text-muted" style={{ fontSize: 11.5, margin: 0, color: 'var(--color-warning, #d97706)' }} data-testid="action-use-unconfirmed-text">
+                {t('encounters.errors.applyUnconfirmed', {
+                  defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
+                })}
+              </p>
+              <Btn
+                data-testid="action-use-retry"
+                disabled={commit.isPending}
+                onClick={() => {
+                  commit.mutate(preview.chainId);
+                }}
+              >
+                {commit.isPending ? 'Retrying…' : 'Retry'}
+              </Btn>
+            </div>
           )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               type="button"
               className="btn btn-ghost"
+              disabled={commit.isPending || isUnconfirmed}
               onClick={() => {
                 setStep('targets');
                 setPreview(null);
@@ -251,7 +263,7 @@ export function ActionUsePanel({
             >
               Back
             </button>
-            {(preview.canApply || (isDm && !preview.applied)) && (
+            {!isUnconfirmed && (preview.canApply || (isDm && !preview.applied)) && (
               <Btn
                 data-testid="action-use-apply"
                 disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
@@ -260,10 +272,10 @@ export function ActionUsePanel({
                   commit.mutate(preview.chainId);
                 }}
               >
-                {commit.isPending ? 'Applying…' : isUnconfirmed ? 'Unconfirmed' : 'Apply'}
+                {commit.isPending ? 'Applying…' : 'Apply'}
               </Btn>
             )}
-            {!preview.canApply && !isDm && (
+            {!preview.canApply && !isDm && !isUnconfirmed && (
               <Btn data-testid="action-use-done" onClick={onDismiss}>
                 Done
               </Btn>
