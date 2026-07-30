@@ -968,9 +968,9 @@ export class OidcService {
 
   /**
    * Auto-provisions on first login (matched by `sub`), else reuses the
-   * existing user. Syncs serverRole from the admin-group claim on EVERY
-   * login (up and down — but UsersService.syncOidcServerRole refuses to
-   * demote the last enabled admin, logging a warn instead).
+   * existing user. Syncs both public display attribution and serverRole from
+   * the current claims on EVERY login (up and down — but UsersService refuses
+   * to demote the last enabled admin, logging a warn instead).
    *
    * When an allowed-group is configured (OIDC_ALLOWED_GROUP or the in-app
    * `allowedGroup`), membership in that group — or in the admin group, since
@@ -998,7 +998,8 @@ export class OidcService {
 
     const existingRow = await this.usersService.getRowByOidcSub(claims.sub);
     if (existingRow) {
-      return this.usersService.syncOidcServerRole(existingRow.id, desiredRole);
+      const displayName = claims.name || claims.preferred_username || existingRow.username;
+      return this.usersService.syncOidcIdentity(existingRow.id, desiredRole, displayName);
     }
 
     const candidate = this.usernameCandidate(claims);

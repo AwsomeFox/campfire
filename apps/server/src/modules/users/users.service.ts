@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, like, ne, or, sql } from 'drizzle-orm';
+import { and, count, eq, like, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   CampaignDmRepair,
@@ -24,15 +24,30 @@ import {
   notes,
   comments,
   entityRevisions,
+  sessionZeroAcknowledgments,
+  sessionZeroBoundarySubmissions,
+  sessionZeroGuardianConsents,
   sessionRsvps,
+  moderationReports,
+  moderationEvidence,
+  moderationMutes,
+  checkRequests,
+  aiDmTranscriptEvents,
+  proposals,
   diceRolls,
   notifications,
   notificationDigestQueue,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
+import { fromJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, type RequestUser } from '../../common/user.types';
+import {
+  moderationEvidenceHash,
+  moderationEvidenceMetadataHash,
+  type ModerationEvidencePayload,
+} from '../moderation/moderation-evidence';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
@@ -154,45 +169,86 @@ export class UsersService {
   }
 
   /**
-   * Synchronize only display copies selected by their durable user-id columns.
+   * Synchronize mutable public display copies selected by their durable user-id columns.
    *
    * Historical rows retain those ids for authorization, block-listing, and provenance;
    * their copied public labels must instead follow a rename or become neutral before
-   * deletion. Notification title/body are included because schedule-RSVP notifications
-   * embed the same actor label in their already-rendered copy. This is deliberately a
-   * synchronous transaction helper: callers get all labels changed or none of them.
+   * deletion. Rendered notification copy is replaced as a whole with neutral text instead
+   * of doing a substring replacement: it may contain quoted player prose or an older label.
+   * This is deliberately a synchronous transaction helper: callers get all labels changed
+   * or none of them.
    */
-  private synchronizeRetainedAttributionTx(
+  synchronizeRetainedAttributionTx(
     tx: SyncDb,
     userId: number,
     previousLabel: string,
     nextLabel: string,
+    force = false,
   ): void {
-    if (previousLabel === nextLabel) return;
+    if (previousLabel === nextLabel && !force) return;
     const stableUserId = String(userId);
 
     tx.update(notes).set({ authorName: nextLabel }).where(eq(notes.authorUserId, stableUserId)).run();
     tx.update(comments).set({ authorName: nextLabel }).where(eq(comments.authorUserId, stableUserId)).run();
     tx.update(entityRevisions).set({ authorName: nextLabel }).where(eq(entityRevisions.authorUserId, stableUserId)).run();
     tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(eq(entityRevisions.replacedByUserId, stableUserId)).run();
+    tx.update(sessionZeroAcknowledgments).set({ userName: nextLabel }).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).run();
+    tx.update(sessionZeroBoundarySubmissions).set({ submitterName: nextLabel }).where(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId)).run();
+    tx.update(sessionZeroGuardianConsents).set({ userName: nextLabel }).where(eq(sessionZeroGuardianConsents.userId, stableUserId)).run();
+    tx.update(participantSupportPreferences).set({ ownerName: nextLabel }).where(eq(participantSupportPreferences.ownerUserId, stableUserId)).run();
     tx.update(sessionRsvps).set({ userName: nextLabel }).where(eq(sessionRsvps.userId, stableUserId)).run();
     tx.update(diceRolls).set({ rollerName: nextLabel }).where(eq(diceRolls.rollerUserId, stableUserId)).run();
+    tx.update(moderationReports).set({ reporterName: nextLabel }).where(eq(moderationReports.reporterUserId, stableUserId)).run();
+    tx.update(moderationReports).set({ subjectName: nextLabel }).where(eq(moderationReports.subjectUserId, stableUserId)).run();
+    tx.update(moderationMutes).set({ userName: nextLabel }).where(eq(moderationMutes.userId, stableUserId)).run();
+    tx.update(checkRequests).set({ requestedByName: nextLabel }).where(eq(checkRequests.requestedByUserId, stableUserId)).run();
+    tx.update(aiDmTranscriptEvents).set({ actorName: nextLabel }).where(eq(aiDmTranscriptEvents.actorUserId, stableUserId)).run();
+    tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
 
-    const replaceCopy = (column: typeof notifications.title | typeof notifications.body) =>
-      sql<string>`replace(${column}, ${previousLabel}, ${nextLabel})`;
+    // Moderation snapshots deliberately hash their copied author label. This is an
+    // authorized privacy rewrite, so re-stamp both digests with the unchanged stable
+    // user id/content/context rather than leaving a privacy update looking tampered.
+    const evidenceRows = tx.select().from(moderationEvidence).where(eq(moderationEvidence.authorUserId, stableUserId)).all();
+    for (const row of evidenceRows) {
+      const payload: ModerationEvidencePayload = {
+        campaignId: row.campaignId,
+        targetType: row.targetType,
+        targetId: row.targetId,
+        reason: row.reason,
+        source: row.source,
+        authorUserId: row.authorUserId,
+        authorName: nextLabel,
+        recipientUserId: row.recipientUserId,
+        anchorEntityType: row.anchorEntityType,
+        anchorEntityId: row.anchorEntityId,
+        revisionAt: row.revisionAt,
+        capturedAt: row.capturedAt,
+        context: fromJsonText<Record<string, unknown>>(row.contextJson, {}),
+        content: row.content,
+      };
+      tx.update(moderationEvidence)
+        .set({
+          authorName: nextLabel,
+          contentHash: moderationEvidenceHash(payload),
+          metadataHash: moderationEvidenceMetadataHash(payload),
+        })
+        .where(eq(moderationEvidence.id, row.id))
+        .run();
+    }
+
     tx.update(notifications)
       .set({
         actorName: nextLabel,
-        title: replaceCopy(notifications.title),
-        body: replaceCopy(notifications.body),
+        title: 'Campaign activity',
+        body: 'This notification has updated attribution.',
       })
       .where(eq(notifications.actorUserId, stableUserId))
       .run();
     tx.update(notificationDigestQueue)
       .set({
         actorName: nextLabel,
-        title: sql<string>`replace(${notificationDigestQueue.title}, ${previousLabel}, ${nextLabel})`,
-        body: sql<string>`replace(${notificationDigestQueue.body}, ${previousLabel}, ${nextLabel})`,
+        title: 'Campaign activity',
+        body: 'This notification has updated attribution.',
       })
       .where(eq(notificationDigestQueue.actorUserId, stableUserId))
       .run();
@@ -252,30 +308,39 @@ export class UsersService {
   }
 
   /**
-   * Syncs serverRole from the OIDC admin-group claim on every login (up AND
-   * down). Refuses to demote the last enabled admin — logs a warn and
-   * leaves the role untouched rather than throwing, since this runs inline
-   * in the login flow and must not block the user from signing in.
+   * Syncs display attribution and serverRole from OIDC claims on every login.
+   * The role demotion guard still lets a successful identity-label refresh proceed:
+   * a last admin must be able to use a newly asserted name without losing access.
    */
-  async syncOidcServerRole(id: number, desiredRole: 'admin' | 'user'): Promise<User> {
-    const existing = await this.getRowOrThrow(id);
-    if (existing.serverRole === desiredRole) return toDomain(existing);
+  async syncOidcIdentity(id: number, desiredRole: 'admin' | 'user', displayName: string): Promise<User> {
+    return this.db.transaction((tx) => {
+      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
 
-    if (desiredRole === 'user' && existing.serverRole === 'admin') {
-      const remaining = await this.countEnabledAdmins(id);
-      if (remaining === 0) {
-        // eslint-disable-next-line no-console
+      let nextRole = desiredRole;
+      if (desiredRole === 'user' && existing.serverRole === 'admin' && this.enabledAdminCountTx(tx, id) === 0) {
         console.warn(`[oidc] refusing to demote last enabled admin (user ${id}) via group sync`);
-        return toDomain(existing);
+        nextRole = existing.serverRole as 'admin';
       }
-    }
 
-    const [row] = await this.db
-      .update(users)
-      .set({ serverRole: desiredRole, updatedAt: nowIso() })
-      .where(eq(users.id, id))
-      .returning();
-    return toDomain(row);
+      if (existing.serverRole === nextRole && existing.displayName === displayName) return toDomain(existing);
+      if (existing.displayName !== displayName) {
+        this.synchronizeRetainedAttributionTx(
+          tx,
+          id,
+          this.publicAttribution(existing),
+          displayName || existing.username,
+        );
+      }
+
+      const row = tx
+        .update(users)
+        .set({ serverRole: nextRole, displayName, updatedAt: nowIso() })
+        .where(eq(users.id, id))
+        .returning()
+        .get();
+      return toDomain(row);
+    });
   }
 
   async update(id: number, input: UserUpdateInput): Promise<User> {
@@ -364,6 +429,7 @@ export class UsersService {
         id,
         this.publicAttribution(existing),
         DELETED_USER_ATTRIBUTION,
+        true,
       );
 
       // Keep every invariant-dependent read and all account/membership writes in

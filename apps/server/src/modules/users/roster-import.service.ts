@@ -29,6 +29,7 @@ import { generateResetCode, hashResetCode } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { parseCsv } from './roster-import.csv';
+import { UsersService } from './users.service';
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -63,6 +64,7 @@ export class RosterImportService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly usersService: UsersService,
   ) {}
 
   async run(input: RosterImportRequest, actor: RequestUser): Promise<RosterImportPreview | RosterImportCommitResult> {
@@ -192,6 +194,14 @@ export class RosterImportService {
             nextDisplay !== existing.displayName ||
             (row.oidcSub !== undefined && nextOidcSub !== existing.oidcSub);
           if (changed) {
+            if (nextDisplay !== existing.displayName) {
+              this.usersService.synchronizeRetainedAttributionTx(
+                tx,
+                userId,
+                existing.displayName || existing.username,
+                nextDisplay || existing.username,
+              );
+            }
             tx.update(users)
               .set({
                 displayName: nextDisplay,
