@@ -269,11 +269,13 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       .all();
     orm.update(combatants).set({ ruleEntryId: entry.id, turnState: JSON.stringify({ used: { legendary: 3 } }) }).where(eq(combatants.id, c1)).run();
 
+    await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'action', moveFt: 30 }, dmUser, 'dm');
     await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
     const removal = await service.removeCombatant(encounterId, c2, dmUser, 'dm');
 
     const [newRoundBoss] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
     expect(JSON.parse(newRoundBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
+    expect(JSON.parse(newRoundBoss.turnState ?? '{}')).toMatchObject({ used: {}, movementUsedFt: 0 });
     const [newRoundOtherBoss] = orm.select().from(combatants).where(eq(combatants.id, otherBoss.id)).limit(1).all();
     expect(JSON.parse(newRoundOtherBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
 
@@ -305,6 +307,21 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(afterRemoval).toMatchObject({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: eligible.id });
     expect(afterRemoval.lairResumeCombatantId).not.toBe(downed.id);
     expect(afterRemoval.lairResumeCombatantId).not.toBe(c1);
+  });
+
+  it('removing the final lair resume target carries the round wrap', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm.update(encounters)
+      .set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ round: 2, turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c1 });
   });
 
   it('undoing an active removal restores the combatant phase after entering a lair slot', async () => {

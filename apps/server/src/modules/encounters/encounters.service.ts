@@ -4336,7 +4336,9 @@ export class EncountersService {
           // A lair slot resumes after the actor it points to. If that actor is
           // removed, select its successor through advanceTurn so dead/downed rows
           // are skipped rather than using the lair helper's legacy raw fallback.
-          lairResumeCombatantId = advanceTurn(advanceRoster, combatantId, freshEncounter.round).currentCombatantId;
+          const resumed = advanceTurn(advanceRoster, combatantId, freshEncounter.round);
+          lairResumeCombatantId = resumed.currentCombatantId;
+          wrappedToNextRound = resumed.round > freshEncounter.round;
         }
       }
       let afterEncounter = {
@@ -4380,22 +4382,6 @@ export class EncountersService {
       }
 
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
-      // Removing the active actor can immediately start a later eligible actor's
-      // turn. Apply the same per-turn reset and start-of-turn condition tick as a
-      // regular advance, without manufacturing a second turn/audit event.
-      if (startingAfterRemoval) {
-        const starting = startingAfterRemoval;
-        const reset = resetTurnStateForStart(starting.turnState);
-        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
-        const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
-        if (
-          condTick.expired.length > 0 ||
-          condTick.kept.some((condition, index) => condition.roundsRemaining !== starting.conditionInstances?.[index]?.roundsRemaining)
-        ) {
-          Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
-        }
-        tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
-      }
       if (wrappedToNextRound) {
         for (const row of roster) {
           if (row.id === combatantId || row.ruleEntryId === null) continue;
@@ -4408,6 +4394,22 @@ export class EncountersService {
             tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
           }
         }
+      }
+      // Removing the active actor can immediately start a later eligible actor's
+      // turn. Apply the same per-turn reset and start-of-turn condition tick as a
+      // regular advance, without manufacturing a second turn/audit event.
+      if (startingAfterRemoval) {
+        const starting = startingAfterRemoval;
+        const reset = resetTurnStateForStart(wrappedToNextRound ? resetLegendaryUsage(starting.turnState) : starting.turnState);
+        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+        const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
+        if (
+          condTick.expired.length > 0 ||
+          condTick.kept.some((condition, index) => condition.roundsRemaining !== starting.conditionInstances?.[index]?.roundsRemaining)
+        ) {
+          Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+        }
+        tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       }
       tx.update(encounters).set({
         ...afterEncounter,
