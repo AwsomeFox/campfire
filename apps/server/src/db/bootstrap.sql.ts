@@ -2213,6 +2213,7 @@ CREATE INDEX IF NOT EXISTS idx_data_repair_findings_campaign ON data_repair_find
 CREATE TABLE IF NOT EXISTS action_apply_chains (
   id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+  applied_by_user_id TEXT,
   action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
   cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
   concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
