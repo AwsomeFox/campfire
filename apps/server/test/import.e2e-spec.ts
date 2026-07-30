@@ -1377,6 +1377,30 @@ describe('campaign import — scheduledAt validation at the boundary (issue #152
     expect(res.body.message).toMatch(/No timestamp/);
   });
 
+  it('rejects locale-formatted and zone-less values Date.parse() would silently accept', async () => {
+    // `Date.parse` accepts these, but they are exactly the malformed shapes the
+    // boundary must reject: a locale form is ambiguous, and a zone-less value
+    // would otherwise be read in the SERVER's local timezone (so the same archive
+    // imports to different UTC instants on hosts with different TZ settings).
+    // Each must produce a 400 naming the row, not a silent normalize-and-insert.
+    for (const bad of [
+      '05/01/2030 7:00 PM', // locale form
+      'May 1, 2030 7:00 PM', // locale form
+      '2030-05-01', // date only
+      '2030-05-01T19:00:00', // zone-less — local-TZ dependent
+    ]) {
+      const res = await dmAgent.post('/api/v1/campaigns/import').send({
+        campaign: { name: `Bad TZ Import ${bad}` },
+        scheduledSessions: [
+          { id: 1, scheduledAt: bad, title: 'Ambiguous night', status: 'scheduled', rsvps: [] },
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/scheduled session #1/);
+      expect(res.body.message).toMatch(/offset-bearing ISO-8601/);
+    }
+  });
+
   it('normalizes a parseable non-canonical scheduledAt to ISO UTC and keeps the row visible', async () => {
     const doc = {
       campaign: { name: 'Offset Schedule Import' },

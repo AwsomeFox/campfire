@@ -2006,20 +2006,30 @@ export class CampaignsService {
     // every list a DM uses — silent data loss worse than a rejected import. Every
     // other write path normalizes via `new Date(iso).toISOString()` (see
     // SchedulingService.normalizeScheduledAt); import wrote the raw value verbatim.
-    // Normalize a parseable value to canonical ISO UTC (guaranteeing `julianday()`
-    // can read it and matching every other writer) and reject an unparseable one
-    // with a 400 that names the offending row, so the operator is told exactly what
-    // to fix instead of losing the night silently. Runs BEFORE staging so a bad
+    //
+    // The gate deliberately requires an OFFSET-BEARING ISO-8601 date-time (a
+    // trailing `Z` or ±HH:MM), not merely `Date.parse()`-able, because `Date.parse`
+    // silently accepts locale forms ("05/01/2030 7:00 PM", "May 1, 2030", date-only)
+    // and reads a ZONE-LESS value in the SERVER's local timezone — so the same
+    // archive would import to different UTC instants on hosts with different TZ
+    // settings, silently moving the scheduled time. The stored invariant is "ISO
+    // UTC (normalized on write)", and exports round-trip the exact canonical
+    // `...Z` form `toISOString()` produces, so a real archive always carries an
+    // offset. A parseable, offset-bearing value is normalized to canonical ISO UTC;
+    // anything else rejects the import with a 400 that names the offending row, so
+    // the operator is told exactly what to fix. Runs BEFORE staging so a bad
     // archive fails fast with zero bytes written, like the compendium preflight.
+    const ISO_8601_WITH_OFFSET =
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
     for (let i = 0; i < scheduledSessionRows.length; i++) {
       const s = scheduledSessionRows[i];
       const raw = s.scheduledAt;
-      if (typeof raw !== 'string' || Number.isNaN(Date.parse(raw))) {
+      if (typeof raw !== 'string' || !ISO_8601_WITH_OFFSET.test(raw) || Number.isNaN(Date.parse(raw))) {
         const label = str(s.title) || 'untitled';
         throw new BadRequestException(
           `Cannot import scheduled session #${i + 1} (${label}): scheduledAt ${
             typeof raw === 'string' ? `"${raw}"` : `(${typeof raw})`
-          } is not a valid ISO-8601 date-time. Fix the value in the export and re-import.`,
+          } is not a valid offset-bearing ISO-8601 date-time (e.g. 2030-05-01T19:00:00.000Z). Fix the value in the export and re-import.`,
         );
       }
       s.scheduledAt = new Date(raw).toISOString();
