@@ -15,6 +15,7 @@ export function VisibleToPlayersBar({
   visible,
   onHide,
   onUndoHide,
+  onReveal,
 }: {
   /** Whether the entity is currently player-visible. */
   visible: boolean;
@@ -22,6 +23,8 @@ export function VisibleToPlayersBar({
   onHide: () => Promise<void>;
   /** Re-reveal after Hide (Undo). */
   onUndoHide: () => Promise<void>;
+  /** Reveal when currently hidden (issue #1475). */
+  onReveal?: () => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
@@ -41,6 +44,19 @@ export function VisibleToPlayersBar({
     }
   }
 
+  async function reveal() {
+    if (busy || !onReveal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onReveal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't reveal to players.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (pendingUndo) {
     return (
       <UndoSnackbar
@@ -55,7 +71,25 @@ export function VisibleToPlayersBar({
     );
   }
 
-  if (!visible) return null;
+  if (!visible) {
+    if (!onReveal) return null;
+    return (
+      <div
+        role="status"
+        data-testid="hidden-from-players-bar"
+        className="flex items-center gap-3 flex-wrap rounded border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+      >
+        <span className="font-semibold">Hidden from players</span>
+        <span className="text-xs text-amber-200/80 flex-1 min-w-[12rem]">
+          This encounter is hidden; players won't see it. Reveal when you are ready.
+        </span>
+        {error && <span className="text-xs text-rose-300">{error}</span>}
+        <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => void reveal()}>
+          {busy ? 'Revealing…' : 'Reveal now'}
+        </Btn>
+      </div>
+    );
+  }
 
   return (
     <div

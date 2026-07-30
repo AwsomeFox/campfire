@@ -5314,6 +5314,69 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.status).toBe(400);
     });
   });
+
+  describe('starting hidden encounter and reveal SSE lifecycle (issue #1475)', () => {
+    it('starting a hidden encounter returns status running with warning and evaluates post-start visibility', async () => {
+      const server = ctx.app.getHttpServer();
+      const eventsService = ctx.app.get(CampaignEventsService);
+      const emittedEvents: any[] = [];
+      const sub = eventsService.streamFor(campaignId).subscribe((evt) => emittedEvents.push(evt));
+
+      // Create a hidden encounter with party character
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret Hidden Trap', hidden: true });
+      expect(enc.status).toBe(201);
+      const hiddenEncId = enc.body.id;
+
+      // Roll initiative so start is permitted
+      await request(server)
+        .post(`/api/v1/encounters/${hiddenEncId}/roll-initiative`)
+        .set(dm);
+
+      // Start hidden encounter
+      const startRes = await request(server)
+        .post(`/api/v1/encounters/${hiddenEncId}/start`)
+        .set(dm);
+
+      expect(startRes.status).toBe(201);
+      expect(startRes.body.status).toBe('running');
+      expect(startRes.body.hidden).toBe(true);
+      expect(startRes.body.warning).toBe("This encounter is hidden; players won't see it.");
+
+      // Player GET should be 404 secrecy check
+      const playerReadBefore = await request(server)
+        .get(`/api/v1/encounters/${hiddenEncId}`)
+        .set(player);
+      expect(playerReadBefore.status).toBe(404);
+
+      // Verify no SSE event was emitted on stream for hidden start
+      const hiddenStartEvents = emittedEvents.filter((e) => e.encounterId === hiddenEncId);
+      expect(hiddenStartEvents).toHaveLength(0);
+
+      // Now DM reveals the encounter (hidden -> false)
+      const revealRes = await request(server)
+        .patch(`/api/v1/encounters/${hiddenEncId}`)
+        .set(dm)
+        .send({ hidden: false });
+      expect(revealRes.status).toBe(200);
+      expect(revealRes.body.hidden).toBe(false);
+
+      // Verify SSE event was emitted after reveal
+      const revealEvents = emittedEvents.filter((e) => e.encounterId === hiddenEncId && e.type === 'encounter.updated');
+      expect(revealEvents.length).toBeGreaterThan(0);
+
+      // Player can now read the running encounter
+      const playerReadAfter = await request(server)
+        .get(`/api/v1/encounters/${hiddenEncId}`)
+        .set(player);
+      expect(playerReadAfter.status).toBe(200);
+      expect(playerReadAfter.body.status).toBe('running');
+
+      sub.unsubscribe();
+    });
+  });
 });
 
 describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () => {
