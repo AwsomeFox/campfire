@@ -5561,21 +5561,6 @@ export class EncountersService {
         throw new BadRequestException('Encounter is not running');
       }
 
-      // Issue #1445: the snapshot belongs to the advance that produced the current encounter
-      // state. If the turn pointer moved without an advance (e.g. removing the current
-      // combatant) the newest 'turn' event's snapshot describes a different transition and
-      // must not be applied or consumed.
-      if (
-        snapshot &&
-        (
-          snapshot.toRound !== fresh.round ||
-          snapshot.toCurrentCombatantId !== fresh.currentCombatantId ||
-          snapshot.toPhase !== (fresh.turnPhase as EncounterTurnPhase) ||
-          snapshot.toLairResumeCombatantId !== (fresh.lairResumeCombatantId ?? null)
-        )
-      ) {
-        snapshot = undefined;
-      }
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
       const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
@@ -5603,6 +5588,25 @@ export class EncountersService {
       );
       newRound = round;
       newCurrentId = currentCombatantId;
+
+      // Issue #1445: the snapshot belongs to the advance being undone. Because the turn
+      // pointer can move without writing a snapshot (e.g. removing the current combatant),
+      // only apply the newest 'turn' event's snapshot when its post-advance state (round,
+      // current, phase, lair resume) or its ending combatant matches the state the undo
+      // is retreating to. This prevents applying a stale snapshot to an unrelated transition.
+      if (
+        snapshot &&
+        !(
+          (snapshot.toRound === round &&
+            snapshot.toCurrentCombatantId === currentCombatantId &&
+            snapshot.toPhase === phase &&
+            snapshot.toLairResumeCombatantId === (lairResumeCombatantId ?? null)) ||
+          snapshot.ending?.combatantId === currentCombatantId
+        )
+      ) {
+        snapshot = undefined;
+      }
+
       const escalation = this.nextEscalationState(adapter, fresh, round, 'undo');
       escalationValue = escalation.escalationDie;
       escalationLogDetail = escalation.logDetail;
