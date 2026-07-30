@@ -3,7 +3,11 @@ import {
   isDriverToolAllowed,
   guardDriverLivePlayArgs,
   formatDriverLootCombatLogDetail,
+  noteDriverEconomyGrant,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
 } from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
@@ -122,6 +126,142 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       code: 'forbidden_treasury_field',
       message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
     });
+  });
+
+  it('#1495: guardDriverLivePlayArgs enforces a grant-only, bounded-qty, party-only guard on add_inventory_item', () => {
+    const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
+
+    // a plain grant to the party pool, default qty, is allowed
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Potion of Healing' }, session)).toEqual({
+      ok: true,
+      args: { name: 'Potion of Healing' },
+    });
+
+    // an explicit party-pool grant with a modest qty is allowed
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Rope (50 ft)', ownerType: 'party', qty: 3 }, session),
+    ).toEqual({ ok: true, args: { name: 'Rope (50 ft)', ownerType: 'party', qty: 3 } });
+
+    // targeting a specific character is refused under the grant-only guard (#1495 acceptance criterion)
+    expect(
+      guardDriverLivePlayArgs(
+        'add_inventory_item',
+        { name: 'Vorpal Sword', ownerType: 'character', characterId: 4 },
+        session,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_owner',
+      message: 'The driver may only grant inventory items to the shared party pool (ownerType must be "party").',
+    });
+
+    // characterId alone (even with default/omitted ownerType) is refused
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Ring', characterId: 4 }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_owner',
+      message: 'The driver may not target a specific character with add_inventory_item; grants go to the party pool.',
+    });
+
+    // an absurd qty is rejected (#1495 — this is the "qty: 999999" scenario from the issue)
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Vorpal Sword', qty: 999_999 }, session),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_grant_limit',
+      message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
+    });
+
+    // a qty right at the per-call cap is allowed; one over is rejected
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Arrow', qty: DRIVER_INVENTORY_GRANT_MAX_QTY }, session),
+    ).toEqual({ ok: true, args: { name: 'Arrow', qty: DRIVER_INVENTORY_GRANT_MAX_QTY } });
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Arrow', qty: DRIVER_INVENTORY_GRANT_MAX_QTY + 1 }, session),
+    ).toMatchObject({ ok: false, code: 'forbidden_inventory_grant_limit' });
+
+    // zero/negative/non-integer qty is refused
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Arrow', qty: 0 }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+    });
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Arrow', qty: -1 }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+    });
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Arrow', qty: 1.5 }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_inventory_qty',
+    });
+  });
+
+  it('#1495: add_inventory_item and update_inventory_item share a cumulative per-session grant cap', () => {
+    const session = {
+      driverGeneratedMapIds: [] as number[],
+      generateMapCallsThisTurn: 0,
+      inventoryGrantQtyTotalThisSession: DRIVER_INVENTORY_SESSION_GRANT_CAP - 5,
+    };
+
+    // still 5 qty of room left in the session budget: a grant of 5 fits exactly...
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 5 }, session)).toEqual({
+      ok: true,
+      args: { name: 'Torch', qty: 5 },
+    });
+    // ...but one more than that overflows the session cap, even though it is well under the
+    // per-call cap on its own.
+    expect(guardDriverLivePlayArgs('add_inventory_item', { name: 'Torch', qty: 6 }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_inventory_session_cap',
+    });
+    // update_inventory_item draws on the SAME session budget (#1495) — a qtyDelta that would
+    // overflow it is rejected even though the per-call qtyDelta bound has no upper limit.
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 6 }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_inventory_session_cap',
+    });
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 5 }, session)).toEqual({
+      ok: true,
+      args: { itemId: 1, qtyDelta: 5 },
+    });
+  });
+
+  it('#1495: adjust_treasury enforces a cumulative per-session treasury grant cap regardless of call count', () => {
+    const session = {
+      driverGeneratedMapIds: [] as number[],
+      generateMapCallsThisTurn: 0,
+      treasuryGrantTotalThisSession: 0,
+    };
+    // Simulate many small, individually-legal grants accumulating toward the session cap.
+    const perCallGrant = 1_000;
+    const callsToFillCap = Math.floor(DRIVER_TREASURY_SESSION_GRANT_CAP / perCallGrant);
+    for (let i = 0; i < callsToFillCap; i++) {
+      const result = guardDriverLivePlayArgs('adjust_treasury', { delta: { gp: perCallGrant } }, session);
+      expect(result.ok).toBe(true);
+      noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: perCallGrant } });
+    }
+    expect(session.treasuryGrantTotalThisSession).toBe(callsToFillCap * perCallGrant);
+    // The next call, however small, is rejected once the cumulative session cap is reached —
+    // this is the "regardless of call count" requirement: no single call exceeded
+    // DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION, yet the sequence is still bounded.
+    expect(guardDriverLivePlayArgs('adjust_treasury', { delta: { gp: 1 } }, session)).toMatchObject({
+      ok: false,
+      code: 'forbidden_treasury_session_cap',
+    });
+  });
+
+  it('noteDriverEconomyGrant accumulates treasury and inventory grants and ignores non-economy tools', () => {
+    const session: { treasuryGrantTotalThisSession?: number; inventoryGrantQtyTotalThisSession?: number } = {};
+    noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: 25, sp: 10 } });
+    expect(session.treasuryGrantTotalThisSession).toBe(35);
+    noteDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 3 });
+    expect(session.inventoryGrantQtyTotalThisSession).toBe(3);
+    noteDriverEconomyGrant(session, 'update_inventory_item', { itemId: 1, qtyDelta: 2 });
+    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
+    // a negative/absent qtyDelta must not decrement or otherwise touch the counter
+    noteDriverEconomyGrant(session, 'update_inventory_item', { itemId: 1, qtyDelta: -1 });
+    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
+    noteDriverEconomyGrant(session, 'roll_dice', { expr: '1d20' });
+    expect(session.treasuryGrantTotalThisSession).toBe(35);
+    expect(session.inventoryGrantQtyTotalThisSession).toBe(5);
   });
 
   it('formatDriverLootCombatLogDetail summarizes treasury and inventory grants for the combat log', () => {

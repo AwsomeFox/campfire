@@ -69,10 +69,14 @@ import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-
 import {
   checkDriverPolicyRateLimits,
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
   DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
   DRIVER_UNDOABLE_TOOLS,
   isDriverForbiddenToolName,
+  isWithinAftermathWindow,
   MAX_PENDING_TOOL_CONFIRMATIONS,
   noteDriverConfirmToolAttempt,
   noteDriverPolicyViolation,
@@ -571,6 +575,30 @@ export interface AiDmSessionState {
   /** Policy violations (deny / guard / rate-limit) this turn (#474). */
   policyViolationsThisTurn?: number;
   /**
+   * The session profile as of the last-checked turn (#1495). Used only to detect a FRESH
+   * transition INTO `aftermath` — see {@link treasuryGrantTotalThisSession} below for why that
+   * transition matters. Not a policy input on its own.
+   */
+  lastSessionProfile?: DriverSessionProfile;
+  /**
+   * Cumulative treasury granted (summed across every denomination and every `adjust_treasury`
+   * call) during the CURRENT `aftermath` window (#1495). Deliberately NOT reset per turn like
+   * {@link generateMapCallsThisTurn} — bounding a single call's `delta`
+   * (DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) does nothing to stop a long run of
+   * individually-small `auto`-executed grants from adding up to an unlimited total while the
+   * profile stays `aftermath`. Reset to 0 whenever a NEW `aftermath` window opens (a later
+   * fight's aftermath gets its own budget instead of inheriting an earlier one's), tracked via
+   * {@link lastSessionProfile}.
+   */
+  treasuryGrantTotalThisSession?: number;
+  /**
+   * Cumulative inventory `qty` granted (summed across every `add_inventory_item` and
+   * `update_inventory_item` call) during the CURRENT `aftermath` window (#1495). Same
+   * not-reset-per-turn / reset-on-new-aftermath-window rule as
+   * {@link treasuryGrantTotalThisSession}.
+   */
+  inventoryGrantQtyTotalThisSession?: number;
+  /**
    * Pending DM confirmations for irreversible live-play tools (#474). Keyed
    * `${tool}:${toolCallId}`; each entry executes once when a DM approves it.
    */
@@ -591,6 +619,9 @@ type AiDmSessionPrivateGuardFields =
   | 'generateMapCallsThisTurn'
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
+  | 'lastSessionProfile'
+  | 'treasuryGrantTotalThisSession'
+  | 'inventoryGrantQtyTotalThisSession'
   | 'pendingToolConfirmations'
   | 'detached';
 
@@ -835,7 +866,7 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.tool === 'string'
     && !!recordOf(rec.args)
     && typeof rec.toolCallId === 'string'
-    && (rec.profile === 'prep' || rec.profile === 'live' || rec.profile === 'aftermath')
+    && (rec.profile === 'prep' || rec.profile === 'live' || rec.profile === 'aftermath' || rec.profile === 'downtime')
     && (rec.policy === 'auto' || rec.policy === 'confirm' || rec.policy === 'propose' || rec.policy === 'deny')
     && typeof rec.requestedAt === 'string'
     && typeof rec.actor === 'string'
@@ -1361,9 +1392,90 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  */
 export const DRIVER_LIVE_PLAY_TOOL_NAMES: readonly string[] = [...DRIVER_LIVE_PLAY_TOOLS];
 
+/**
+ * Live-play tools with a dedicated argument-level guard branch in
+ * {@link guardDriverLivePlayArgs} (#1495). Kept as an EXPLICIT list rather than derived from the
+ * function's source, so the mechanical coverage test in ai-driver-tool-policy.spec.ts can catch
+ * a tool that is claimed guarded here but has no real branch, or a branch that exists but was
+ * never added here — the exact shape of the #1495 bug (a docblock claimed add_inventory_item
+ * was guarded; it fell through to blanket allow with an unbounded qty).
+ *
+ * Every name in {@link DRIVER_LIVE_PLAY_TOOL_NAMES} must appear in EXACTLY ONE of this set or
+ * {@link DRIVER_UNGUARDED_LIVE_PLAY_TOOLS}.
+ */
+export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
+  'generate_map',
+  'generate_ai_map',
+  'refine_ai_map',
+  'create_encounter',
+  'update_encounter',
+  'adjust_treasury',
+  'add_inventory_item',
+  'update_inventory_item',
+]);
+
+/**
+ * Live-play tools with NO argument-level guard in {@link guardDriverLivePlayArgs}, and why that
+ * is safe (#1495). A tool belongs here, not silently omitted, because the coverage test
+ * requires every {@link DRIVER_LIVE_PLAY_TOOL_NAMES} entry to be accounted for in exactly one of
+ * this set or {@link DRIVER_GUARDED_LIVE_PLAY_TOOLS} — "nobody wrote a guard for it" and
+ * "a guard is deliberately unnecessary" must never look the same.
+ *
+ * Reasons a tool needs no argument-level guard:
+ *  - it is a dice/save roll with no persisted effect on its own — nothing has happened until
+ *    something else applies the result (roll_dice, roll_action_dice, roll_initiative,
+ *    roll_death_save, saving_throw);
+ *  - begin_encounter/end_encounter/remove_combatant are fully bounded by the PER-PROFILE policy
+ *    classes already (PROFILE_TOOL_OVERRIDES denies or confirms them outright in every profile
+ *    that matters — there is no argument shape to further restrict);
+ *  - it commits reversible, narrowly-scoped mechanical state that the profile/undo machinery
+ *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
+ *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
+ *    apply_action, undo_action, update_character_hp, set_character_conditions,
+ *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
+ *  - it is a scene/world-state nudge with no economy or disclosure blast radius
+ *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
+ *    set_location_discovery, whisper_to_player, add_note).
+ */
+export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
+  'roll_dice',
+  'roll_action_dice',
+  'roll_initiative',
+  'roll_death_save',
+  'saving_throw',
+  'commit_encounter',
+  'begin_encounter',
+  'end_encounter',
+  'next_turn',
+  'set_escalation_die',
+  'add_combatant',
+  'update_combatant',
+  'remove_combatant',
+  'resolve_action',
+  'apply_action',
+  'undo_action',
+  'update_character_hp',
+  'set_character_conditions',
+  'adjust_spell_slots',
+  'award_xp',
+  'level_up_character',
+  'long_rest',
+  'short_rest',
+  'reveal_map_region',
+  'check_objective',
+  'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
+  'whisper_to_player',
+  'add_note',
+]);
+
 export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_INVENTORY_GRANT_MAX_QTY,
+  DRIVER_INVENTORY_SESSION_GRANT_CAP,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_TREASURY_SESSION_GRANT_CAP,
 } from './driver-tool-policy';
 
 /** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
@@ -1393,6 +1505,41 @@ export function formatDriverLootCombatLogDetail(toolName: string, args: Record<s
     return 'Updated party inventory';
   }
   return null;
+}
+
+/**
+ * Record a SUCCESSFUL economy grant against the per-session cumulative caps (#1495):
+ * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}.
+ * Called only after the tool actually executed (auto, or a DM-approved confirmation) — a
+ * rejected or errored call never reserved any of the budget, so it must not consume it either.
+ */
+export function noteDriverEconomyGrant(
+  session: Pick<AiDmSessionState, 'treasuryGrantTotalThisSession' | 'inventoryGrantQtyTotalThisSession'>,
+  toolName: string,
+  args: Record<string, unknown>,
+): void {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return;
+    const rec = delta as Record<string, unknown>;
+    const total = TREASURY_DENOMS.reduce((sum, d) => {
+      const v = rec[d];
+      return typeof v === 'number' && v > 0 ? sum + v : sum;
+    }, 0);
+    if (total > 0) session.treasuryGrantTotalThisSession = (session.treasuryGrantTotalThisSession ?? 0) + total;
+    return;
+  }
+  if (toolName === 'add_inventory_item') {
+    const qty = typeof args.qty === 'number' && args.qty > 0 ? args.qty : 1;
+    session.inventoryGrantQtyTotalThisSession = (session.inventoryGrantQtyTotalThisSession ?? 0) + qty;
+    return;
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
+    if (qtyDelta > 0) {
+      session.inventoryGrantQtyTotalThisSession = (session.inventoryGrantQtyTotalThisSession ?? 0) + qtyDelta;
+    }
+  }
 }
 
 /**
@@ -1468,20 +1615,39 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
 }
 
 /**
- * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
- *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
- *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
+ * Execution-time guards for battle-map and economy live-play tools (#488 / #474 policy-lite /
+ * #1495). EVERY tool listed here has an explicit branch below — this docblock is a claim the
+ * function must actually keep (issue #1495 was exactly this docblock going stale: it never
+ * mentioned `add_inventory_item`, and the function had no branch for it either, so the tool
+ * fell through to blanket allow with an unbounded `qty`). See
+ * `ai-driver-tool-policy.spec.ts`'s coverage test for the mechanical check that keeps this list
+ * honest going forward.
+ *  - generate_map / generate_ai_map / refine_ai_map: bounded to
+ *    {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
+ *  - create_encounter: `hidden` is stripped (always DM-only prep on creation).
+ *  - update_encounter: VTT fields only, or authoring fields on the seat's OWN creations;
+ *    `hidden` is refused outright; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
- *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination
+ *    ({@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}) AND per session
+ *    ({@link DRIVER_TREASURY_SESSION_GRANT_CAP}).
+ *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
+ *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}) and per
+ *    session ({@link DRIVER_INVENTORY_SESSION_GRANT_CAP}).
  *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
- *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
+ *    qtyDelta, and owner-move fields (ownerType/characterId) are refused; qtyDelta shares
+ *    add_inventory_item's per-session cap.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
   args: Record<string, unknown>,
   session: Pick<
     AiDmSessionState,
-    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds'
+    | 'driverGeneratedMapIds'
+    | 'generateMapCallsThisTurn'
+    | 'driverAuthoredEncounterIds'
+    | 'treasuryGrantTotalThisSession'
+    | 'inventoryGrantQtyTotalThisSession'
   >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
@@ -1626,6 +1792,62 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
+    // #1495 — the per-call bound above stops one big grant; it does nothing to stop a long run
+    // of small ones. Bound the SESSION total too (see AiDmSessionState.treasuryGrantTotalThisSession).
+    const callTotal = entries.reduce((sum, [, value]) => sum + (value as number), 0);
+    const sessionTotal = session.treasuryGrantTotalThisSession ?? 0;
+    if (sessionTotal + callTotal > DRIVER_TREASURY_SESSION_GRANT_CAP) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_session_cap',
+        message: `The driver may grant at most ${DRIVER_TREASURY_SESSION_GRANT_CAP} treasury total per aftermath window (already granted ${sessionTotal}).`,
+      };
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'add_inventory_item') {
+    // Grant-only guard mirroring update_inventory_item's shape (#1495): the party/treasury
+    // pool only, never a specific character, and a bounded qty both per call and per session —
+    // the exact guard this tool was missing entirely before #1495 (it fell through to blanket
+    // allow with an unbounded qty).
+    if ('ownerType' in args && args.ownerType !== undefined && args.ownerType !== 'party') {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_owner',
+        message: 'The driver may only grant inventory items to the shared party pool (ownerType must be "party").',
+      };
+    }
+    if ('characterId' in args && args.characterId !== null && args.characterId !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_owner',
+        message: 'The driver may not target a specific character with add_inventory_item; grants go to the party pool.',
+      };
+    }
+    const qty = 'qty' in args && args.qty !== undefined ? args.qty : 1;
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty <= 0) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_qty',
+        message: 'add_inventory_item qty must be a positive integer.',
+      };
+    }
+    if (qty > DRIVER_INVENTORY_GRANT_MAX_QTY) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_grant_limit',
+        message: `The driver may grant at most ${DRIVER_INVENTORY_GRANT_MAX_QTY} of an item in one call.`,
+      };
+    }
+    const sessionQty = session.inventoryGrantQtyTotalThisSession ?? 0;
+    if (sessionQty + qty > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_session_cap',
+        message: `The driver may grant at most ${DRIVER_INVENTORY_SESSION_GRANT_CAP} item quantity total per aftermath window (already granted ${sessionQty}).`,
+      };
+    }
     return { ok: true, args: { ...args } };
   }
 
@@ -1655,6 +1877,16 @@ export function guardDriverLivePlayArgs(
           ok: false,
           code: 'forbidden_inventory_reduction',
           message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
+        };
+      }
+      // #1495 — shares add_inventory_item's per-session grant cap: both tools mint party
+      // inventory, so a session budget that only watched one of them would not bound anything.
+      const sessionQty = session.inventoryGrantQtyTotalThisSession ?? 0;
+      if (sessionQty + delta > DRIVER_INVENTORY_SESSION_GRANT_CAP) {
+        return {
+          ok: false,
+          code: 'forbidden_inventory_session_cap',
+          message: `The driver may grant at most ${DRIVER_INVENTORY_SESSION_GRANT_CAP} item quantity total per aftermath window (already granted ${sessionQty}).`,
         };
       }
     }
@@ -3254,17 +3486,26 @@ export class AiDriverService {
     };
   }
 
-  /** Resolve the driver session profile from encounter state (#474). */
+  /**
+   * Resolve the driver session profile from encounter state (#474 / #1495).
+   *
+   * `ended` still lists the campaign's full ended-encounter history (no cheap DB-level date
+   * filter exists for it), but `aftermath` no longer follows from that history being
+   * non-empty: only an encounter whose `endedAt` falls within
+   * {@link isWithinAftermathWindow}'s recency window counts. Once every ended encounter has
+   * aged out of that window, this returns `downtime` instead of clinging to `aftermath`.
+   */
   private async resolveSessionProfile(campaignId: number): Promise<DriverSessionProfile> {
     const [running, preparing, ended] = await Promise.all([
       this.encounters.listForCampaign(campaignId, 'running', 'dm'),
       this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
       this.encounters.listForCampaign(campaignId, 'ended', 'dm'),
     ]);
+    const now = Date.now();
     return resolveDriverSessionProfile({
       hasRunningEncounter: running.length > 0,
       hasPreparingEncounter: preparing.length > 0,
-      hasEndedEncounter: ended.length > 0,
+      hasRecentlyEndedEncounter: ended.some((encounter) => isWithinAftermathWindow(encounter.endedAt, now)),
     });
   }
 
@@ -3629,6 +3870,15 @@ export class AiDriverService {
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
     const sessionProfile = await this.resolveSessionProfile(campaignId);
+    // #1495 — a FRESH transition into `aftermath` opens a new economy-grant budget: a later
+    // fight's post-combat aftermath must not inherit whatever an earlier fight's aftermath
+    // already spent. Staying in `aftermath` across successive turns keeps accumulating (it is
+    // still the same post-combat window); only the prep/live/downtime -> aftermath edge resets.
+    if (sessionProfile === 'aftermath' && session.lastSessionProfile !== 'aftermath') {
+      session.treasuryGrantTotalThisSession = 0;
+      session.inventoryGrantQtyTotalThisSession = 0;
+    }
+    session.lastSessionProfile = sessionProfile;
     // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
     // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
     // denied live-play tools are withheld from the schema. Execution still enforces the same
@@ -5557,6 +5807,9 @@ export class AiDriverService {
       // combat log so awards survive reload (toast alone is not enough). Best-effort:
       // a log failure must not fail the grant that already committed.
       if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        // #1495 — count this grant against the per-session economy cap. Only reached once the
+        // tool actually executed, so a call the guard already rejected never gets here.
+        noteDriverEconomyGrant(session, call.name, args);
         const detail = formatDriverLootCombatLogDetail(call.name, args);
         if (detail) {
           try {
@@ -6106,6 +6359,9 @@ export class AiDriverService {
     if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
+      // #1495 — a DM-approved confirmation still counts against the per-session economy cap;
+      // see the auto-execute call site in executeToolCalls for the same accounting.
+      noteDriverEconomyGrant(session, pending.tool, pending.args);
       const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
       if (detail) {
         try {

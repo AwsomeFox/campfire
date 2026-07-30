@@ -218,7 +218,7 @@ export interface AiDmToolConfirmation {
   tool: string;
   args: Record<string, unknown>;
   toolCallId: string;
-  profile: 'prep' | 'live' | 'aftermath';
+  profile: 'prep' | 'live' | 'aftermath' | 'downtime';
   policy: 'auto' | 'confirm' | 'propose' | 'deny';
   requestedAt: string;
   actor: string;

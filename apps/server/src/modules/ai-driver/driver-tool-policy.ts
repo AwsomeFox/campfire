@@ -3,14 +3,26 @@ import type { DriverTool } from '../mcp/mcp-tools';
 /** How the driver may commit a tool call under the campaign policy (#474). */
 export type DriverToolPolicyClass = 'auto' | 'confirm' | 'propose' | 'deny';
 
-/** Session phase for per-profile policy (#474): prep, live combat, or post-fight aftermath. */
-export type DriverSessionProfile = 'prep' | 'live' | 'aftermath';
+/**
+ * Session phase for per-profile policy (#474): prep, live combat, a brief post-fight
+ * aftermath, or neutral downtime (#1495) — no encounter running, prepping, or recently ended.
+ * `aftermath` is intentionally NOT the campaign's steady state: see
+ * {@link resolveDriverSessionProfile} and {@link DRIVER_AFTERMATH_WINDOW_MS}.
+ */
+export type DriverSessionProfile = 'prep' | 'live' | 'aftermath' | 'downtime';
 
 /** Inputs for resolving the active session profile from encounter state. */
 export interface DriverSessionProfileInput {
   hasRunningEncounter: boolean;
   hasPreparingEncounter: boolean;
-  hasEndedEncounter: boolean;
+  /**
+   * Whether an encounter ended RECENTLY — within {@link DRIVER_AFTERMATH_WINDOW_MS} of now
+   * (#1495). This is NOT "has any encounter in this campaign ever ended": that reading made
+   * `aftermath`, and its auto-executed economy tools, the permanent steady state for the rest
+   * of the campaign's life the moment a single fight finished. Callers must apply the recency
+   * window themselves (see {@link isWithinAftermathWindow}) before setting this flag.
+   */
+  hasRecentlyEndedEncounter: boolean;
 }
 
 /** Context passed to {@link resolveDriverToolPolicy}. */
@@ -68,6 +80,37 @@ export const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
 /** Per-call treasury grant cap (per denomination) for autonomous live play. */
 export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+/**
+ * Per-call cap on the `qty` an autonomous `add_inventory_item` grant may create in one call
+ * (#1495) — mirrors {@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}'s per-call bound for
+ * treasury. Without this a single call could mint an arbitrarily large stack of an item
+ * (the schema-level `qty` field has no upper bound; it is deliberately unbounded for a human
+ * DM's own writes).
+ */
+export const DRIVER_INVENTORY_GRANT_MAX_QTY = 100;
+/**
+ * Cumulative cap on treasury granted (summed across every denomination and every
+ * `adjust_treasury` call) during one `aftermath` window (#1495). Bounding a single call is not
+ * enough: nothing stopped a runaway sequence of individually-small grants from repeating
+ * indefinitely while the profile stayed `aftermath`. See
+ * `AiDmSessionState.treasuryGrantTotalThisSession` for where the running total is kept and
+ * when it resets.
+ */
+export const DRIVER_TREASURY_SESSION_GRANT_CAP = 50_000;
+/**
+ * Cumulative cap on inventory `qty` granted (summed across every `add_inventory_item` and
+ * `update_inventory_item` call) during one `aftermath` window (#1495). Same rationale as
+ * {@link DRIVER_TREASURY_SESSION_GRANT_CAP}.
+ */
+export const DRIVER_INVENTORY_SESSION_GRANT_CAP = 1_000;
+/**
+ * Recency window for the post-combat `aftermath` profile (#1495). An encounter's `endedAt`
+ * must fall within this many milliseconds of "now" for the driver to still treat play as the
+ * immediate aftermath of that fight. Once the window elapses, {@link resolveDriverSessionProfile}
+ * steps back down to the neutral `downtime` profile on its own — `aftermath` is a brief
+ * post-combat window, not the campaign's permanent steady state.
+ */
+export const DRIVER_AFTERMATH_WINDOW_MS = 30 * 60 * 1000;
 /** Max confirm-policy tool calls queued or attempted per driver turn (#474). */
 export const DRIVER_CONFIRM_TOOL_ATTEMPTS_PER_TURN = 3;
 /** Policy violations (deny / rate-limit / guard reject) before an emergency pause (#474). */
@@ -181,14 +224,51 @@ const PROFILE_TOOL_OVERRIDES: Readonly<
     add_inventory_item: 'auto',
     update_inventory_item: 'auto',
   },
+  // #1495 — neutral steady state: no encounter running, prepping, or recently ended. This is
+  // where a campaign spends most of its time (exploration, downtime, social scenes, session
+  // zero), so the economy tools go back to `confirm` here exactly as they do in `prep`/`live` —
+  // `aftermath`'s `auto` grants are a narrow post-combat exception, not the default.
+  downtime: {
+    remove_combatant: 'deny',
+    end_encounter: 'deny',
+    begin_encounter: 'confirm',
+    award_xp: 'confirm',
+    level_up_character: 'confirm',
+    add_note: 'auto',
+    adjust_treasury: 'confirm',
+    add_inventory_item: 'confirm',
+    update_inventory_item: 'confirm',
+  },
 };
 
-/** Resolve the session profile from encounter presence (#474). */
+/**
+ * Whether an encounter's `endedAt` timestamp still falls within the aftermath recency window
+ * (#1495). `null`/`undefined`/unparseable timestamps, and timestamps in the future (clock
+ * skew or bad data), are never "recent" — fail closed toward the neutral `downtime` profile
+ * rather than toward the auto-executing `aftermath` one.
+ */
+export function isWithinAftermathWindow(endedAt: string | null | undefined, now: number = Date.now()): boolean {
+  if (!endedAt) return false;
+  const endedMs = Date.parse(endedAt);
+  if (Number.isNaN(endedMs)) return false;
+  const age = now - endedMs;
+  return age >= 0 && age <= DRIVER_AFTERMATH_WINDOW_MS;
+}
+
+/**
+ * Resolve the session profile from encounter presence (#474 / #1495).
+ *
+ * `aftermath` requires a RECENTLY-ended encounter (see {@link DriverSessionProfileInput.hasRecentlyEndedEncounter}
+ * and {@link isWithinAftermathWindow}) — never campaign history. Once nothing is running,
+ * preparing, or recently ended, the profile explicitly steps down to the neutral `downtime`,
+ * not back to `prep`: `prep` implies a fight is being readied, which is not what "the party is
+ * exploring three sessions after their last fight" means.
+ */
 export function resolveDriverSessionProfile(input: DriverSessionProfileInput): DriverSessionProfile {
   if (input.hasRunningEncounter) return 'live';
   if (input.hasPreparingEncounter) return 'prep';
-  if (input.hasEndedEncounter) return 'aftermath';
-  return 'prep';
+  if (input.hasRecentlyEndedEncounter) return 'aftermath';
+  return 'downtime';
 }
 
 /** Whether a tool name matches a forbidden prefix (hard deletes). */
