@@ -84,13 +84,13 @@ const FTS_DM_COLUMNS = '{title name body aux dm_secret title_fold name_fold body
  * The returned snippet always slices the original `text` so spelling is preserved.
  */
 function makeSnippet(text: string, foldedNeedle: string): string {
-  let idx = foldedIndexOf(text, foldedNeedle);
-  if (idx < 0) {
-    // Non-contiguous multi-token match (matchesSearchQuery): foldedIndexOf returns
-    // -1 for "red dragon" inside "red ancient dragon", so center the window on the
-    // first token-prefix match instead of the field's opening (issue #1481).
-    idx = firstTokenMatchIndex(text, foldedNeedle);
-  }
+  // Center on the first token-prefix match (what matchesSearchQuery actually
+  // matched). A contiguous indexOf can land on a NON-matching occurrence — e.g.
+  // query "ex" inside the word "context" — so the token-aware index is primary;
+  // the contiguous indexOf is only a defensive fallback for a needle that did
+  // not match as a token (issue #1481).
+  let idx = firstTokenMatchIndex(text, foldedNeedle);
+  if (idx < 0) idx = foldedIndexOf(text, foldedNeedle);
   if (idx < 0) return text.slice(0, SNIPPET_PAD * 2).trim();
   // Folded index is exact when NFKC is length-stable; clamp for compatibility forms.
   const approx = Math.min(Math.max(0, idx), text.length);

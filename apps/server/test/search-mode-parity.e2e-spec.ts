@@ -297,4 +297,52 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
       expect(hit!.snippet).not.toContain('OPENSENTINEL1481');
     });
   });
+
+  // The scheduling fallback projection must match per-field (like push), not via a
+  // title+date+notes composite: a composite prefilter accepts cross-field
+  // false-positives that push then drops, and on a capped scan those can fill the
+  // cap and trim a real per-field match — breaking FTS/fallback parity (#1481).
+  describe('fallback scheduling projection matches per-field, not a cross-field composite (issue #1481)', () => {
+    let ctx: TestAppContext;
+    let campaignId: number;
+    let validId: number;
+
+    beforeAll(async () => {
+      ctx = await createTestApp({ overrides: [{ token: CAMPAIGN_SEARCH_FTS_AVAILABLE, useValue: false }] });
+      const server = ctx.app.getHttpServer();
+      campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Scheduling Parity Camp' })).body.id;
+      const at = '2031-01-01T00:00:00.000Z';
+      // 51 sessions whose tokens are SPLIT across title ("Red ...") and notes
+      // ("... dragon") — a composite hit, but no single field matches "red
+      // dragon", so push drops them. Created first so they sort ahead of the
+      // valid session (same scheduledAt → lower id first); 51 exceeds the
+      // min(limit, 50) cap so a composite prefilter would trim the valid one.
+      for (let i = 1; i <= 51; i += 1) {
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/schedule`)
+          .set(dm)
+          .send({ title: `Red Sky ${i}`, scheduledAt: at, notes: 'dragon cult planning' });
+      }
+      // The one session whose title actually contains the whole query.
+      validId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/schedule`)
+          .set(dm)
+          .send({ title: 'Red Dragon Council', scheduledAt: at, notes: '' })
+      ).body.id;
+    });
+
+    afterAll(() => closeTestApp(ctx));
+
+    it('returns the per-field match even when cross-field composite matches fill the cap', async () => {
+      const res = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('red dragon')}`)
+        .set(dm);
+      expect(res.status).toBe(200);
+      const ids = (res.body.results as Result[])
+        .filter((r) => r.type === 'scheduled_session')
+        .map((r) => r.id);
+      expect(ids).toContain(validId);
+    });
+  });
 });

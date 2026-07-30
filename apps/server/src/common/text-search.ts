@@ -95,14 +95,17 @@ export function firstTokenMatchIndex(haystack: string, foldedNeedle: string): nu
   const need = searchTokens(foldedNeedle);
   if (need.length === 0) return -1;
   const folded = foldForSearch(haystack);
-  let best = -1;
-  for (const token of searchTokens(folded)) {
-    if (need.some((nt) => token.startsWith(nt))) {
-      const at = folded.indexOf(token);
-      if (at >= 0 && (best < 0 || at < best)) best = at;
+  // Walk each alphanumeric token at its REAL start offset. matchAll is position-
+  // ordered and respects token boundaries, so a query token is never matched
+  // inside an earlier, longer, non-matching word (a plain indexOf(token) would
+  // return the first substring occurrence — e.g. "red" found inside "predators" —
+  // and mis-center the snippet) (issue #1481).
+  for (const match of folded.matchAll(/[\p{L}\p{N}]+/gu)) {
+    if (need.some((nt) => match[0].startsWith(nt))) {
+      return match.index ?? 0;
     }
   }
-  return best;
+  return -1;
 }
 
 /**

@@ -139,4 +139,17 @@ describe('firstTokenMatchIndex (issue #1481 — snippet centering for non-contig
     expect(idx).toBeGreaterThan(padding.length - 10);
     expect(text.slice(idx, idx + 40)).toMatch(/dragon|wyrm/);
   });
+
+  it('uses token boundaries, not substring, to locate the match', () => {
+    // 'red' is a substring of 'predators' (p-r-e-d) near the start, but
+    // 'predators' does not START with 'red', so it is not a token-prefix match.
+    // The index must be the standalone 'red' token, not the false-positive inside
+    // 'predators' — otherwise the snippet would mis-center on the field opening.
+    const text = 'predators attacked the red dragon';
+    const idx = firstTokenMatchIndex(text, foldForSearch('red'));
+    expect(idx).toBeGreaterThan(1);
+    expect(text.slice(idx, idx + 3).toLowerCase()).toBe('red');
+    const idx2 = firstTokenMatchIndex(text, foldForSearch('red dragon'));
+    expect(text.slice(idx2, idx2 + 3).toLowerCase()).toBe('red');
+  });
 });

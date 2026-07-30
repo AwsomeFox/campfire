@@ -533,14 +533,17 @@ export class SchedulingService {
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
     const matches = rows.filter((r) => {
-      // Mirror the FTS5 aux column for scheduled_session, which stores the ISO
-      // date alongside a space-separated copy (T/:/- → space) so date/time tokens
-      // like "19:30" or "2031-09-20" prefix-match. Matching only the raw ISO would
-      // leave "19" buried inside "20T19" and diverge from the index; prefix-token
-      // matching (matchesSearchQuery) keeps this bounded read on the same
-      // semantics as FTS5 (issue #1481).
-      const composite = `${r.title} ${scheduledAtSearchText(r.scheduledAt)} ${r.notes}`;
-      return matchesSearchQuery(composite, folded);
+      // Per-field predicate, identical to SearchService.push for scheduled_session
+      // (title / scheduledAt composite / notes). Matching a single composite across
+      // those fields would also accept sessions whose query tokens are split across
+      // fields — which push then drops — and on a capped scan those cross-field
+      // false-positives could fill the cap and trim a real per-field match, breaking
+      // FTS/fallback parity (issue #1481). Each field is matched on its own; the
+      // scheduledAt field mirrors the FTS5 aux column's space-separated date tokens
+      // (T/:/- → space) so date/time fragments like "19:30" prefix-match.
+      return matchesSearchQuery(r.title, folded)
+        || matchesSearchQuery(scheduledAtSearchText(r.scheduledAt), folded)
+        || matchesSearchQuery(r.notes, folded);
     });
     // Same read-time link reconciliation as every other projection: search must not
     // hand back a sessionId pointing at a trashed recap either.
