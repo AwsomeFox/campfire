@@ -720,6 +720,80 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
 });
 
 /**
+ * Issue #1326 review (Codex/Devin) — import PRESERVES equip state (covered above) but
+ * must also ENFORCE its invariants: an untrusted or hand-edited export can claim
+ * equipped=true with no slot, or two items sharing one (character, slot) pair — both
+ * of which InventoryService.update() refuses at the API boundary. This suite crafts a
+ * permissive import document (bypassing the API's own validation entirely) and confirms
+ * the import writer resolves it deterministically: the FIRST item to claim a slot (in
+ * array order) wins it, everyone else importing into that same (character, slot) pair
+ * lands unequipped, and an equipped item with no slot at all is unequipped too.
+ */
+describe('campaign import — equip-invariant enforcement (issue #1326 review)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i1326-dm', password: 'dm-password-1' });
+  });
+  afterAll(async () => closeTestApp(ctx));
+
+  it('resolves duplicate equipped slots deterministically (first wins) and unequips a slotless equip claim', async () => {
+    const doc = {
+      campaign: { name: 'Permissive Import', ruleSystem: '', dmControlsProgression: false, dmControlsTurns: false, requireDmTurnConfirmation: false, publicRecapSharingEnabled: true, catalogPrivacy: 'private', aiExternalContentPolicy: 'blocked', narrationLanguage: 'en', status: 'active' },
+      characters: [{ id: 9001, name: 'Import Hero', className: 'Fighter', level: 3, ownerUserId: null }],
+      inventory: [
+        // Two items claim the SAME slot on the same character — a hand-edited or
+        // corrupted export the API itself would never produce.
+        { id: 5001, ownerType: 'character', characterId: 9001, name: 'First Claimant', qty: 1, equipped: true, equipSlot: 'main-hand', equippedAction: { name: 'First Strike', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' } },
+        { id: 5002, ownerType: 'character', characterId: 9001, name: 'Second Claimant', qty: 1, equipped: true, equipSlot: 'main-hand', equippedAction: { name: 'Second Strike', kind: 'melee', toHit: '+4', damage: '1d6+2', notes: '' } },
+        // A THIRD item is equipped=true but carries no slot at all.
+        { id: 5003, ownerType: 'character', characterId: 9001, name: 'Slotless Claimant', qty: 1, equipped: true, equipSlot: null },
+        // A different slot on the same character is unaffected by the conflict above.
+        { id: 5004, ownerType: 'character', characterId: 9001, name: 'Off-hand Claimant', qty: 1, equipped: true, equipSlot: 'off-hand' },
+      ],
+    };
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const inv = await dmAgent.get(`/api/v1/campaigns/${imported.id}/inventory`);
+    const first = inv.body.find((i: { name: string }) => i.name === 'First Claimant');
+    const second = inv.body.find((i: { name: string }) => i.name === 'Second Claimant');
+    const slotless = inv.body.find((i: { name: string }) => i.name === 'Slotless Claimant');
+    const offHand = inv.body.find((i: { name: string }) => i.name === 'Off-hand Claimant');
+
+    // First-wins: the first row to claim main-hand keeps it equipped.
+    expect(first.equipped).toBe(true);
+    expect(first.equipSlot).toBe('main-hand');
+    // The second claimant for the SAME slot is imported unequipped, not silently
+    // dropped or duplicated — the item itself still exists.
+    expect(second.equipped).toBe(false);
+    expect(second.equipSlot).toBeNull();
+    // equipped=true with no slot at all is invalid regardless of conflicts.
+    expect(slotless.equipped).toBe(false);
+    expect(slotless.equipSlot).toBeNull();
+    // A different, uncontested slot on the same character is untouched.
+    expect(offHand.equipped).toBe(true);
+    expect(offHand.equipSlot).toBe('off-hand');
+
+    // No two live equipped items share a (character, slot) pair — the exact invariant
+    // a subsequent PATCH equip would 409 on if it were violated.
+    const equippedSlots = inv.body.filter((i: { equipped: boolean }) => i.equipped).map((i: { equipSlot: string }) => i.equipSlot.toLowerCase());
+    expect(new Set(equippedSlots).size).toBe(equippedSlots.length);
+
+    // The resolution is recorded in the audit log, not silent.
+    const audit = await dmAgent.get(`/api/v1/campaigns/${imported.id}/audit`);
+    const importEntry = audit.body.find((e: { action: string }) => e.action === 'campaign.import');
+    expect(importEntry.detail).toContain('auto-unequipped 2 inventory items with an invalid or conflicting equip slot');
+  });
+});
+
+/**
  * Issue #725 — atomic staged import. A failure at ANY commit boundary must roll
  * the whole import back: no campaign row, no child rows, no audit row, no
  * orphaned attachment files, and no leftover staging directory. The old code

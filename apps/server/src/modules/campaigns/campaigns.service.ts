@@ -2446,19 +2446,36 @@ export class CampaignsService {
       // Party/character inventory (issue #266) after characters — a character-owned item
       // remaps its characterId through charMap. If that character is missing (dangling
       // ref), the item falls back to party-owned rather than pointing at a stale id.
+      //
+      // Issue #1326 review (Codex/Devin): preserving equip state is a DIFFERENT job from
+      // ENFORCING its invariants — copying the export's equipped/equipSlot/equippedAction
+      // verbatim would let untrusted or stale import data recreate exactly what
+      // InventoryService.update() refuses: equipped=true with no slot, or two items
+      // sharing one (character, slot) pair. Both are enforced here, deterministically
+      // (never a hard reject — an import already committed the rest of the campaign):
+      // an equipped item without a non-empty slot is unequipped, and the FIRST item to
+      // claim a (character, slot) pair (in export order) wins it; every later claimant
+      // for that same pair is imported unequipped. `equippedClaims` tracks that
+      // first-wins bookkeeping; `equipIssuesResolved` counts how many rows this touched,
+      // recorded on the campaign.import audit row below so the DM can see it happened.
+      let equipIssuesResolved = 0;
+      const equippedClaims = new Set<string>();
       for (const item of inventoryRows) {
         const ownerType = str(item.ownerType, 'party') === 'character' ? 'character' : 'party';
         const charSrc = intOrNull(item.characterId);
         const mappedChar = charSrc != null ? (charMap.get(charSrc) ?? null) : null;
         const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
-        // Issue #1326 review (Codex/Devin): preserve equip state from the imported JSON
-        // (untrusted external input — validated, not trusted). A party-fallback item
-        // (its character wasn't imported/mapped) always lands unequipped, same as clone.
         // `equippedAction` is re-validated against CharacterAction rather than trusted
         // verbatim — a malformed or foreign-shaped import drops the field rather than
         // storing garbage the resolver would later fail to parse.
-        const importedEquipSlot = typeof item.equipSlot === 'string' ? item.equipSlot.slice(0, 60) : null;
         const importedActionParse = CharacterAction.safeParse(item.equippedAction);
+        const wantsEquip = resolvedOwner === 'character' && item.equipped === true;
+        const trimmedSlot = typeof item.equipSlot === 'string' ? item.equipSlot.trim().slice(0, 60) : '';
+        const claimKey = wantsEquip && mappedChar != null ? `${mappedChar}:${trimmedSlot.toLowerCase()}` : null;
+        // Invalid (no slot) or a slot already claimed by an earlier row: land unequipped.
+        const grantEquip = wantsEquip && trimmedSlot.length > 0 && claimKey !== null && !equippedClaims.has(claimKey);
+        if (wantsEquip && !grantEquip) equipIssuesResolved += 1;
+        if (grantEquip && claimKey) equippedClaims.add(claimKey);
         tx.insert(inventoryItems)
           .values({
             campaignId: cid,
@@ -2475,8 +2492,8 @@ export class CampaignsService {
             // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
             // and surface a detached link rather than pretending it can be refreshed.
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
-            equipped: resolvedOwner === 'character' && item.equipped === true,
-            equipSlot: resolvedOwner === 'character' ? importedEquipSlot : null,
+            equipped: grantEquip,
+            equipSlot: grantEquip ? trimmedSlot : null,
             equippedAction: importedActionParse.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
@@ -3005,7 +3022,14 @@ export class CampaignsService {
           action: 'campaign.import',
           entityType: 'campaign',
           entityId: cid,
-          detail: `imported "${name}" from a Campfire export`,
+          detail:
+            `imported "${name}" from a Campfire export` +
+            // Issue #1326 review: record when the import-side equip-invariant
+            // enforcement actually changed something, so a DM auditing the import
+            // can see why an item they expected to be equipped is not.
+            (equipIssuesResolved > 0
+              ? ` (auto-unequipped ${equipIssuesResolved} inventory item${equipIssuesResolved === 1 ? '' : 's'} with an invalid or conflicting equip slot)`
+              : ''),
           createdAt: ts,
         })
         .run();

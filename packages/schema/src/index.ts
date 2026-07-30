@@ -4374,47 +4374,6 @@ export interface RuleSystemAdapter {
    * the fallback adapter.
    */
   readonly restModel?: RestModel;
-  /**
-   * OPTIONAL — ADVISORY equipment-slot vocabulary for this system's inventory UI (issue
-   * #1326): 5e/PF2e-shaped systems offer main hand / off hand / armor / worn; a system
-   * with a different loadout model declares its own. This is advisory only — the server
-   * does not restrict `InventoryItem.equipSlot` to this list (a homebrew slot name always
-   * works), it only rejects two equipped items sharing the same character+slot string.
-   * Omitting it falls back to {@link NEUTRAL_EQUIPMENT_SLOTS} via
-   * {@link equipmentSlotsForAdapter}, never to 5e's slots, so a non-5e campaign's item
-   * picker doesn't suggest slots that system doesn't have.
-   */
-  readonly equipmentSlots?: readonly EquipmentSlotDef[];
-}
-
-/**
- * One adapter-suggested equipment slot (issue #1326) — a label the inventory UI can
- * offer when a player equips an item. Purely descriptive; see {@link RuleSystemAdapter.equipmentSlots}.
- */
-export interface EquipmentSlotDef {
-  /** Stable key stored in `InventoryItem.equipSlot` when the UI offers this suggestion. */
-  readonly key: string;
-  readonly label: string;
-}
-
-/** Neutral fallback equipment-slot suggestion for adapters that don't declare their own. */
-export const NEUTRAL_EQUIPMENT_SLOTS: readonly EquipmentSlotDef[] = [{ key: 'equipped', label: 'Equipped' }];
-
-/** D&D 5e / PF2e-shaped equipment slots (issue #1326): weapon hands, armor, worn items. */
-export const DND5E_EQUIPMENT_SLOTS: readonly EquipmentSlotDef[] = [
-  { key: 'main-hand', label: 'Main Hand' },
-  { key: 'off-hand', label: 'Off Hand' },
-  { key: 'armor', label: 'Armor' },
-  { key: 'worn', label: 'Worn / Accessory' },
-];
-
-/**
- * Resolve the advisory equipment-slot vocabulary for an adapter (issue #1326). Falls
- * back to {@link NEUTRAL_EQUIPMENT_SLOTS} when the adapter hasn't declared one — never
- * to 5e's, so an unaudited/homebrew system's UI never suggests slots it doesn't have.
- */
-export function equipmentSlotsForAdapter(adapter: Pick<RuleSystemAdapter, 'equipmentSlots'>): readonly EquipmentSlotDef[] {
-  return adapter.equipmentSlots ?? NEUTRAL_EQUIPMENT_SLOTS;
 }
 
 /** Standard system resource pool definition (issue #422). */
@@ -4597,8 +4556,6 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   supportsDirectDamageRules: true,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
-  // 5e/PF2e-shaped equipment slots (issue #1326): main hand / off hand / armor / worn.
-  equipmentSlots: DND5E_EQUIPMENT_SLOTS,
   // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
   gridDistanceRule: { square: 'euclidean', hex: 'hex' },
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -10508,11 +10465,11 @@ export const InventoryItem = z.object({
   /**
    * Free-form slot identifier ('main-hand', 'armor', a homebrew label, …), required
    * when equipped=true and cleared automatically on unequip. Deliberately NOT
-   * restricted to a fixed enum: what slots exist is ruleset-dependent (see
-   * `equipmentSlotsForAdapter` for the adapter-declared ADVISORY vocabulary the UI can
-   * offer), so the server only enforces "at most one equipped item per (character, slot
-   * string) pair" — a rule that holds for every rule system without guessing its slot
-   * model.
+   * restricted to a fixed enum: what slots exist is ruleset-dependent, so the server
+   * only enforces "at most one equipped item per (character, slot string) pair" — a
+   * rule that holds for every rule system without guessing its slot model. A
+   * ruleset-aware suggested-slot vocabulary for the UI is deferred to the follow-up
+   * that actually builds the equip affordance (issue #1326).
    */
   equipSlot: z.string().max(60).nullable().default(null),
   /**
