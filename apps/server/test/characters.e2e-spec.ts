@@ -1754,34 +1754,22 @@ describe('characters — optimistic concurrency (issue #746, e2e)', () => {
 });
 
 describe('POST /characters/:id/rest — individual character rest', () => {
-  let ctx: TestContext;
-  let campaignId: number;
-  let owner: { Authorization: string };
-  let nonOwner: { Authorization: string };
-  let dm: { Authorization: string };
+  let ctx: TestAppContext;
+  let restCampaignId: number;
   let restCharId: number;
 
   beforeAll(async () => {
-    ctx = await setupE2eTest();
+    ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
-
-    dm = await loginAs(server, 'dm');
-    owner = await loginAs(server, 'player');
-    nonOwner = await loginAs(server, 'viewer');
 
     const campRes = await request(server)
       .post('/api/v1/campaigns')
       .set(dm)
       .send({ name: `Rest Test Campaign ${Date.now()}` });
-    campaignId = campRes.body.id;
-
-    await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/members`)
-      .set(dm)
-      .send({ userId: 2, role: 'player' });
+    restCampaignId = campRes.body.id;
 
     const charRes = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .post(`/api/v1/campaigns/${restCampaignId}/characters`)
       .set(owner)
       .send({
         name: 'Resting Hero',
@@ -1799,7 +1787,7 @@ describe('POST /characters/:id/rest — individual character rest', () => {
   });
 
   afterAll(async () => {
-    await teardownE2eTest(ctx);
+    await closeTestApp(ctx);
   });
 
   it('rejects a non-owner non-DM player with 403', async () => {
