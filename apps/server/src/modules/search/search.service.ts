@@ -285,7 +285,7 @@ export class SearchService {
       capScan(this.characters.listForCampaign(campaignId, user, role)),
       capScan(this.notes.listAllForCampaign(campaignId, user, role, {})),
       capScan(this.timeline.listEvents(campaignId, role)),
-      capScan(this.inventory.listForCampaign(campaignId)),
+      capScan(this.inventory.listForCampaign(campaignId, user, role)),
       capScan(this.comments.listForCampaign(campaignId, role)),
       // Story arcs/beats are DM-only prep content (issue #27) — never fetch them
       // for a non-DM, so a player's search can't surface a planned twist.

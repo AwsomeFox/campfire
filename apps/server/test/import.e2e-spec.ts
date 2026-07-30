@@ -644,7 +644,15 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Vesper', className: 'Rogue', level: 4 });
     characterId = charRes.body.id;
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Guild Signet', qty: 1, ownerType: 'party' });
-    await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
+    const daggers = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
+    // Issue #1326 review: an equipped item + its granted action must survive export/import.
+    await dmAgent.patch(`/api/v1/inventory/${daggers.body.id}`).send({
+      equipped: true,
+      equipSlot: 'off-hand',
+      equippedAction: { name: 'Dagger Throw', kind: 'ranged', toHit: '+6', damage: '1d4+3 piercing', notes: '' },
+    });
     // Issue #582: absolute { set } now requires expectedUpdatedAt (CAS). Fetch the
     // current row version first so this setup write is accepted.
     const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
@@ -736,6 +744,10 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     expect(partyItem.ownerType).toBe('party');
     expect(charItem.ownerType).toBe('character');
     expect(charItem.characterId).toBe(vesper.id);
+    // Issue #1326 review: equip state + granted action carried through import.
+    expect(charItem.equipped).toBe(true);
+    expect(charItem.equipSlot).toBe('off-hand');
+    expect(charItem.equippedAction).toMatchObject({ name: 'Dagger Throw', damage: '1d4+3 piercing' });
     const treasury = await dmAgent.get(`/api/v1/campaigns/${imported.id}/treasury`);
     expect(treasury.body.gp).toBe(150);
     expect(treasury.body.sp).toBe(40);
@@ -743,6 +755,117 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     // The source campaign is untouched.
     const sourceFacs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/factions`);
     expect(sourceFacs.body[0].id).toBe(factionId);
+  });
+});
+
+/**
+ * Issue #1326 review (Codex/Devin) — import PRESERVES equip state (covered above) but
+ * must also ENFORCE its invariants: an untrusted or hand-edited export can claim
+ * equipped=true with no slot, or two items sharing one (character, slot) pair — both
+ * of which InventoryService.update() refuses at the API boundary. This suite crafts a
+ * permissive import document (bypassing the API's own validation entirely) and confirms
+ * the import writer resolves it deterministically: the FIRST item to claim a slot (in
+ * array order) wins it, everyone else importing into that same (character, slot) pair
+ * lands unequipped, and an equipped item with no slot at all is unequipped too.
+ */
+describe('campaign import — equip-invariant enforcement (issue #1326 review)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i1326-dm', password: 'dm-password-1' });
+  });
+  afterAll(async () => closeTestApp(ctx));
+
+  it('resolves duplicate equipped slots deterministically (first wins) and unequips a slotless equip claim', async () => {
+    const doc = {
+      campaign: { name: 'Permissive Import', ruleSystem: '', dmControlsProgression: false, dmControlsTurns: false, requireDmTurnConfirmation: false, publicRecapSharingEnabled: true, catalogPrivacy: 'private', aiExternalContentPolicy: 'blocked', narrationLanguage: 'en', status: 'active' },
+      characters: [{ id: 9001, name: 'Import Hero', className: 'Fighter', level: 3, ownerUserId: null }],
+      inventory: [
+        // Two items claim the SAME slot on the same character — a hand-edited or
+        // corrupted export the API itself would never produce.
+        { id: 5001, ownerType: 'character', characterId: 9001, name: 'First Claimant', qty: 1, equipped: true, equipSlot: 'main-hand', equippedAction: { name: 'First Strike', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' } },
+        { id: 5002, ownerType: 'character', characterId: 9001, name: 'Second Claimant', qty: 1, equipped: true, equipSlot: 'main-hand', equippedAction: { name: 'Second Strike', kind: 'melee', toHit: '+4', damage: '1d6+2', notes: '' } },
+        // A THIRD item is equipped=true but carries no slot at all.
+        { id: 5003, ownerType: 'character', characterId: 9001, name: 'Slotless Claimant', qty: 1, equipped: true, equipSlot: null },
+        // A different slot on the same character is unaffected by the conflict above.
+        { id: 5004, ownerType: 'character', characterId: 9001, name: 'Off-hand Claimant', qty: 1, equipped: true, equipSlot: 'off-hand' },
+      ],
+    };
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const inv = await dmAgent.get(`/api/v1/campaigns/${imported.id}/inventory`);
+    const first = inv.body.find((i: { name: string }) => i.name === 'First Claimant');
+    const second = inv.body.find((i: { name: string }) => i.name === 'Second Claimant');
+    const slotless = inv.body.find((i: { name: string }) => i.name === 'Slotless Claimant');
+    const offHand = inv.body.find((i: { name: string }) => i.name === 'Off-hand Claimant');
+
+    // First-wins: the first row to claim main-hand keeps it equipped.
+    expect(first.equipped).toBe(true);
+    expect(first.equipSlot).toBe('main-hand');
+    // The second claimant for the SAME slot is imported unequipped, not silently
+    // dropped or duplicated — the item itself still exists.
+    expect(second.equipped).toBe(false);
+    expect(second.equipSlot).toBeNull();
+    // equipped=true with no slot at all is invalid regardless of conflicts.
+    expect(slotless.equipped).toBe(false);
+    expect(slotless.equipSlot).toBeNull();
+    // A different, uncontested slot on the same character is untouched.
+    expect(offHand.equipped).toBe(true);
+    expect(offHand.equipSlot).toBe('off-hand');
+
+    // No two live equipped items share a (character, slot) pair — the exact invariant
+    // a subsequent PATCH equip would 409 on if it were violated.
+    const equippedSlots = inv.body.filter((i: { equipped: boolean }) => i.equipped).map((i: { equipSlot: string }) => i.equipSlot.toLowerCase());
+    expect(new Set(equippedSlots).size).toBe(equippedSlots.length);
+
+    // The resolution is recorded in the audit log, not silent.
+    const audit = await dmAgent.get(`/api/v1/campaigns/${imported.id}/audit`);
+    const importEntry = audit.body.find((e: { action: string }) => e.action === 'campaign.import');
+    expect(importEntry.detail).toContain('auto-unequipped 2 inventory items with an invalid or conflicting equip slot');
+  });
+
+  // Issue #1326 review (coordinator): when an equipped item's character has no mapping
+  // (a dangling characterId — the referenced character isn't in the import document, or
+  // failed its own validation), the item falls back to the party stash. equipped/
+  // equipSlot/equippedAction must ALL clear together — never a half-clear (unequipped but
+  // still carrying a granted action), which would silently arm whoever claims the item
+  // next in the new campaign with an attack nobody there chose.
+  it('a dangling characterId falls back to the party stash fully unarmed: equipped, equipSlot, AND equippedAction all clear together', async () => {
+    const doc = {
+      campaign: { name: 'Dangling Owner Import', ruleSystem: '', dmControlsProgression: false, dmControlsTurns: false, requireDmTurnConfirmation: false, publicRecapSharingEnabled: true, catalogPrivacy: 'private', aiExternalContentPolicy: 'blocked', narrationLanguage: 'en', status: 'active' },
+      // No characters array at all — characterId 9999 below has no mapping.
+      inventory: [
+        {
+          id: 5010,
+          ownerType: 'character',
+          characterId: 9999,
+          name: 'Orphaned Axe',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'main-hand',
+          equippedAction: { name: 'Phantom Cleave', kind: 'melee', toHit: '+9', damage: '9d9+9 force', notes: '' },
+        },
+      ],
+    };
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+
+    const inv = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/inventory`);
+    const axe = inv.body.find((i: { name: string }) => i.name === 'Orphaned Axe');
+    expect(axe).toBeDefined();
+    expect(axe.ownerType).toBe('party');
+    expect(axe.characterId).toBeNull();
+    expect(axe.equipped).toBe(false);
+    expect(axe.equipSlot).toBeNull();
+    expect(axe.equippedAction).toBeNull();
   });
 });
 

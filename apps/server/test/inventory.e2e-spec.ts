@@ -622,6 +622,456 @@ describe('inventory & treasury (e2e)', () => {
     });
   });
 
+  describe('equip/unequip (issue #1326)', () => {
+    it('round-trips: equip requires a slot, unequip clears it, state persists on GET', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Longsword', ownerType: 'character', characterId: ownCharacterId });
+      expect(created.body.equipped).toBe(false);
+      expect(created.body.equipSlot).toBeNull();
+      const itemId = created.body.id;
+
+      // Equipping without a slot is rejected.
+      const noSlot = await request(server).patch(`/api/v1/inventory/${itemId}`).set(player).send({ equipped: true });
+      expect(noSlot.status).toBe(400);
+
+      const equipRes = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(equipRes.status).toBe(200);
+      expect(equipRes.body.equipped).toBe(true);
+      expect(equipRes.body.equipSlot).toBe('main-hand');
+
+      const getRes = await request(server).get(`/api/v1/inventory/${itemId}`).set(player);
+      expect(getRes.body.equipped).toBe(true);
+      expect(getRes.body.equipSlot).toBe('main-hand');
+
+      const unequipRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(player).send({ equipped: false });
+      expect(unequipRes.status).toBe(200);
+      expect(unequipRes.body.equipped).toBe(false);
+      // Unequipping clears the slot rather than leaving a stale value behind.
+      expect(unequipRes.body.equipSlot).toBeNull();
+    });
+
+    it('only the dm or the owning player may equip a character\'s item; a party-stash item cannot be equipped', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Shield', ownerType: 'character', characterId: ownCharacterId });
+      const itemId = created.body.id;
+
+      const otherEquip = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(otherPlayer)
+        .send({ equipped: true, equipSlot: 'off-hand' });
+      expect(otherEquip.status).toBe(403);
+
+      const dmEquip = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'off-hand' });
+      expect(dmEquip.status).toBe(200);
+      expect(dmEquip.body.equipped).toBe(true);
+
+      const partyItem = await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(dm).send({ name: 'Rope' });
+      const partyEquip = await request(server)
+        .patch(`/api/v1/inventory/${partyItem.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'worn' });
+      expect(partyEquip.status).toBe(400);
+    });
+
+    it('rejects a second item equipped into an already-occupied slot on the same character (409)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const sword = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Rapier', ownerType: 'character', characterId: ownCharacterId });
+      const dagger = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${sword.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(first.status).toBe(200);
+
+      const conflict = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('INVENTORY_SLOT_CONFLICT');
+
+      // Unequipping the incumbent frees the slot for the second item.
+      const freed = await request(server).patch(`/api/v1/inventory/${sword.body.id}`).set(player).send({ equipped: false });
+      expect(freed.status).toBe(200);
+      const retry = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(retry.status).toBe(200);
+    });
+
+    it('moving an equipped character item to the party stash auto-unequips it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Cloak', ownerType: 'character', characterId: ownCharacterId });
+      await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'worn', equippedAction: { name: 'Cloak Flourish', kind: 'feature', toHit: '', damage: '', notes: '' } });
+
+      const moved = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ ownerType: 'party', characterId: null });
+      expect(moved.status).toBe(200);
+      expect(moved.body.equipped).toBe(false);
+      expect(moved.body.equipSlot).toBeNull();
+      // Coordinator review: the granted action does not silently survive the move to
+      // the (unredacted) party stash either — it would otherwise become visible to
+      // every campaign member the moment ownership changes.
+      expect(moved.body.equippedAction).toBeNull();
+    });
+
+    it('moving an equipped item to a DIFFERENT character auto-unequips it rather than arming the recipient or 409ing on their slots (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Unique slot strings throughout: this describe block shares ownCharacterId/
+      // dmCharacterId (and never unequips) across earlier tests in this file, so
+      // reusing a common name like 'main-hand' here would collide with THEIR leftover
+      // equipped items rather than exercising the scenario this test targets.
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Handed-down sword', ownerType: 'character', characterId: ownCharacterId });
+      const sourceEquip = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({
+          equipped: true,
+          equipSlot: 'review-move-slot',
+          equippedAction: { name: 'Handed-down Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' },
+        });
+      expect(sourceEquip.status).toBe(200);
+
+      // The recipient (dmCharacterId) already has something equipped in the same slot
+      // string — a plain move (no equip requested) must NOT be rejected as a slot
+      // conflict, because the caller never asked to equip anything for the recipient.
+      const recipientIncumbent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Recipient shield', ownerType: 'character', characterId: dmCharacterId });
+      const recipientEquip = await request(server)
+        .patch(`/api/v1/inventory/${recipientIncumbent.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'review-move-slot' });
+      expect(recipientEquip.status).toBe(200);
+
+      const moved = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(dm)
+        .send({ ownerType: 'character', characterId: dmCharacterId });
+      expect(moved.status).toBe(200);
+      // Not silently armed on the new owner...
+      expect(moved.body.equipped).toBe(false);
+      expect(moved.body.equipSlot).toBeNull();
+      // ...and its granted action does not silently follow it either (coordinator
+      // review): a new owner never chose this attack, so it must not carry over.
+      expect(moved.body.equippedAction).toBeNull();
+
+      // ...and the recipient's own equipped item is untouched.
+      const recipientCheck = await request(server).get(`/api/v1/inventory/${recipientIncumbent.body.id}`).set(dm);
+      expect(recipientCheck.body.equipped).toBe(true);
+      expect(recipientCheck.body.equipSlot).toBe('review-move-slot');
+    });
+
+    it('a move + explicit equip in the SAME request is honored against the new owner\'s slots', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Gifted dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const moveAndEquip = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(dm)
+        .send({ ownerType: 'character', characterId: dmCharacterId, equipped: true, equipSlot: 'review-move-and-equip-slot' });
+      expect(moveAndEquip.status).toBe(200);
+      expect(moveAndEquip.body.characterId).toBe(dmCharacterId);
+      expect(moveAndEquip.body.equipped).toBe(true);
+      expect(moveAndEquip.body.equipSlot).toBe('review-move-and-equip-slot');
+    });
+
+    it('reusing an idempotencyKey with the same qtyDelta but a different equip payload is rejected, not silently replayed (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Charged wand', ownerType: 'character', characterId: ownCharacterId, qty: 3 });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'wand-use-and-equip', equipped: true, equipSlot: 'review-idempotency-slot' });
+      expect(first.status).toBe(200);
+      expect(first.body.equipped).toBe(true);
+
+      // Same key, same qtyDelta, but a DIFFERENT equip instruction — must 409, not replay.
+      const reused = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'wand-use-and-equip', equipped: false });
+      expect(reused.status).toBe(409);
+      expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The original equip from the first call is still intact — the reuse attempt
+      // neither replayed silently nor mutated the item.
+      const getRes = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(player);
+      expect(getRes.body.equipped).toBe(true);
+      expect(getRes.body.qty).toBe(2);
+    });
+
+    it('a qty-only idempotency retry spanning the #1326 upgrade still replays rather than 409ing (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Pre-upgrade potion', qty: 5 });
+      const id = created.body.id as number;
+      const key = 'pre-upgrade-qty-retry';
+
+      // Simulate a row persisted by the PRE-#1326 binary: its qtyFingerprint never
+      // had the equip keys at all (they didn't exist yet), and its stored response
+      // carries no equip fields either.
+      const { DB } = await import('../src/db/db.module');
+      const { inventoryQtyIdempotency } = await import('../src/db/schema');
+      const db = ctx.app.get(DB);
+      const preUpgradeResponse = { ...created.body, qty: 4 };
+      const legacyFingerprint = 'delta:-1|{"name":null,"notes":null,"iconSlug":null,"ownerType":null,"characterId":null}';
+      db.insert(inventoryQtyIdempotency)
+        .values({
+          key,
+          itemId: id,
+          userId: 'dev:dm-1',
+          fingerprint: legacyFingerprint,
+          responseJson: JSON.stringify(preUpgradeResponse),
+          createdAt: new Date().toISOString(),
+        })
+        .run();
+
+      // The identical qty-only request, retried on the now-upgraded binary, must
+      // replay the pre-upgrade response — not 409 IDEMPOTENCY_KEY_REUSE just because
+      // the fingerprint format grew new (unused-here) equip fields.
+      const retry = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: -1, idempotencyKey: key });
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(preUpgradeResponse);
+    });
+
+    it('trashing an equipped item clears its equip state, so restoring it never resurrects a slot conflict (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Old shield', ownerType: 'character', characterId: ownCharacterId });
+      const originalEquip = await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-restore-slot' });
+      expect(originalEquip.status).toBe(200);
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(player);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.equipped).toBe(false);
+      expect(deleteRes.body.equipSlot).toBeNull();
+
+      // A replacement now claims the same slot while the original sits in the trash.
+      const replacement = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'New shield', ownerType: 'character', characterId: ownCharacterId });
+      const equipReplacement = await request(server)
+        .patch(`/api/v1/inventory/${replacement.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-restore-slot' });
+      expect(equipReplacement.status).toBe(200);
+
+      // Restoring the original does NOT resurrect a two-items-one-slot conflict — it
+      // comes back unequipped, because remove() already cleared its equip state.
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(player);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+
+      // The replacement remains equipped in that slot, undisturbed.
+      const replacementCheck = await request(server).get(`/api/v1/inventory/${replacement.body.id}`).set(player);
+      expect(replacementCheck.body.equipped).toBe(true);
+      expect(replacementCheck.body.equipSlot).toBe('review-trash-restore-slot');
+    });
+
+    it('redacts equippedAction from a non-owner, non-dm read on the SERIALISED payload — not just the type (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Secret Blade', ownerType: 'character', characterId: ownCharacterId });
+      const grantedAction = { name: 'Hidden Strike', kind: 'melee', toHit: '+9', damage: '3d6+9 necrotic', notes: 'A distinctive telltale phrase.' };
+      const equipRes = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-redaction-slot', equippedAction: grantedAction });
+      expect(equipRes.status).toBe(200);
+      expect(equipRes.body.equippedAction).toMatchObject(grantedAction);
+
+      // The DM sees the full action — both via GET and the campaign list.
+      const dmGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(dm);
+      expect(dmGet.body.equippedAction).toMatchObject(grantedAction);
+      const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+      expect(dmList.body.find((i: { id: number }) => i.id === created.body.id).equippedAction).toMatchObject(grantedAction);
+
+      // The owning player sees it too.
+      const ownerGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(player);
+      expect(ownerGet.body.equippedAction).toMatchObject(grantedAction);
+
+      // A DIFFERENT player gets equippedAction: null — assert on the raw response TEXT
+      // (the serialised payload a TypeScript `Omit` could still leak at runtime), not
+      // merely the parsed field, per the review's explicit ask.
+      const otherGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(otherPlayer);
+      expect(otherGet.status).toBe(200);
+      expect(otherGet.body.equippedAction).toBeNull();
+      expect(otherGet.text).not.toContain('Hidden Strike');
+      expect(otherGet.text).not.toContain('A distinctive telltale phrase');
+
+      const otherList = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(otherPlayer);
+      expect(otherList.status).toBe(200);
+      expect(otherList.body.find((i: { id: number }) => i.id === created.body.id).equippedAction).toBeNull();
+      expect(otherList.text).not.toContain('Hidden Strike');
+      expect(otherList.text).not.toContain('A distinctive telltale phrase');
+
+      // A viewer (not even a player) also gets it redacted.
+      const viewerGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(viewer);
+      expect(viewerGet.body.equippedAction).toBeNull();
+      expect(viewerGet.text).not.toContain('Hidden Strike');
+
+      // Non-secret fields (name/qty/equipped/equipSlot) remain visible to everyone —
+      // only equippedAction carries the sheet-action secrecy precedent.
+      expect(otherGet.body.name).toBe('Secret Blade');
+      expect(otherGet.body.equipped).toBe(true);
+      expect(otherGet.body.equipSlot).toBe('review-redaction-slot');
+    });
+
+    it('trashing and restoring a character item preserves equippedAction while clearing equipped/equipSlot (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const grantedAction = { name: 'Trashed Strike', kind: 'melee', toHit: '+7', damage: '2d6+5', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Keepsake blade', ownerType: 'character', characterId: ownCharacterId });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-preserve-slot', equippedAction: grantedAction });
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(player);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.equipped).toBe(false);
+      expect(deleteRes.body.equipSlot).toBeNull();
+      expect(deleteRes.body.equippedAction).toMatchObject(grantedAction);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(player);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+      expect(restoreRes.body.equippedAction).toMatchObject(grantedAction);
+    });
+
+    it('restoring a trashed item to the party stash clears equippedAction (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const tempChar = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Temp departee' });
+      expect(tempChar.status).toBe(201);
+
+      const grantedAction = { name: 'Lost Strike', kind: 'melee', toHit: '+7', damage: '2d6+5', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Departing blade', ownerType: 'character', characterId: tempChar.body.id });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'review-restore-party-slot', equippedAction: grantedAction });
+
+      await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/characters/${tempChar.body.id}`).set(dm);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(dm);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.ownerType).toBe('party');
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+      expect(restoreRes.body.equippedAction).toBeNull();
+    });
+
+    it('reject patching equippedAction onto a party-stash item (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const partyItem = await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(dm).send({ name: 'Stash scroll' });
+      const action = { name: 'Stash Strike', kind: 'melee', toHit: '+5', damage: '1d8', notes: '' };
+      const patchRes = await request(server)
+        .patch(`/api/v1/inventory/${partyItem.body.id}`)
+        .set(dm)
+        .send({ equippedAction: action });
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toContain('Only character-owned items may carry an equipped action');
+    });
+
+    it('moving an item to the party stash with equippedAction: null succeeds (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const action = { name: 'Departing Strike', kind: 'melee', toHit: '+6', damage: '1d10+2', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Departing blade', ownerType: 'character', characterId: ownCharacterId });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'departing-slot', equippedAction: action });
+
+      const moveRes = await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ ownerType: 'party', characterId: null, equippedAction: null });
+      expect(moveRes.status).toBe(200);
+      expect(moveRes.body.ownerType).toBe('party');
+      expect(moveRes.body.equipped).toBe(false);
+      expect(moveRes.body.equipSlot).toBeNull();
+      expect(moveRes.body.equippedAction).toBeNull();
+    });
+  });
+
   describe('treasury', () => {
     it('GET returns a zeroed treasury before any writes', async () => {
       const server = ctx.app.getHttpServer();

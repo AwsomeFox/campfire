@@ -1566,6 +1566,31 @@ function migrateInventoryItemsCompendium738(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0152 (issue #1326): equip/unequip state on inventory items. `equipped`
+ * defaults to 0 (false) so every existing row upgrades as unequipped — no item is
+ * silently promoted to an active-loadout weapon just because it existed before this
+ * column did. `equip_slot` / `equipped_action` are additive TEXT columns (NULL on
+ * upgrade, same idiom as #738's compendium columns above). Originally recorded as
+ * 0150; renumbered to 0152 after merging main, where PR #1469 landed 0150/0151 first
+ * (this ordinal never shipped on any real database as 0150).
+ */
+function migrateInventoryItemsEquip1326(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return; // fresh DB — BOOTSTRAP_SQL creates the columns directly.
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'equipped')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((c) => c.name === 'equip_slot')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equip_slot TEXT');
+  }
+  if (!columns.some((c) => c.name === 'equipped_action')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped_action TEXT');
+  }
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_inventory_items_character_equipped ON inventory_items(character_id, equipped)');
+}
+
+/**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
  * no table rebuild needed, same shape as the icon_slug migrations above. Existing
@@ -4871,6 +4896,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // gets the next free ordinal after main's 0149 to preserve upgrade compatibility.
   { name: '0150_combatant_remove_undo_1469', run: migrateCombatantRemoveUndo1469 },
   { name: '0151_combatant_remove_revision_1469', run: migrateCombatantRemovalRevision1469 },
+  // #1326 — inventory equip/unequip state + the equipped-item action projection.
+  // Originally 0150, which #1469 claimed first on main; renumbered to the next free
+  // ordinal after merging main (never shipped on any real database as 0150).
+  { name: '0152_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
 ];
 
 /**

@@ -20,6 +20,7 @@ import {
   CompendiumRef,
   CompendiumSnapshot,
   normalizeOffsetIsoDateTime,
+  CharacterAction,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1513,6 +1514,17 @@ export class CampaignsService {
           const ownerType = item.ownerType === 'character' ? 'character' : 'party';
           const mappedChar = item.characterId != null ? (charMap.get(item.characterId) ?? null) : null;
           const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+          // Issue #1326 review (Codex/Devin/coordinator): a character-owned item's FULL
+          // equip triple carries over 1:1 to its cloned character (slot conflicts can't
+          // arise — every clone maps at most one source character to one destination
+          // character, so relative slot assignments stay unique). An item that falls back
+          // to the party stash (its character wasn't cloned/mapped) lands unequipped AND
+          // clears its equippedAction too — not just equipped/equipSlot. A half-clear
+          // (unequipped but still carrying a granted action) is a state normal play can
+          // never produce: the item would silently arm whoever equips it in the new
+          // campaign with an attack nobody there authored. Landing the fallback item fully
+          // clean means claiming and equipping it in the new campaign is a deliberate act
+          // that grants only what the NEW campaign's players/DM choose to attach.
           tx.insert(inventoryItems)
             .values({
               campaignId: cloneId,
@@ -1526,6 +1538,9 @@ export class CampaignsService {
               compendiumRef: item.compendiumRef,
               compendiumSnapshot: item.compendiumSnapshot,
               compendiumState: item.compendiumState,
+              equipped: resolvedOwner === 'character' && item.equipped,
+              equipSlot: resolvedOwner === 'character' ? item.equipSlot : null,
+              equippedAction: resolvedOwner === 'character' ? item.equippedAction : null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -2529,11 +2544,44 @@ export class CampaignsService {
       // Party/character inventory (issue #266) after characters — a character-owned item
       // remaps its characterId through charMap. If that character is missing (dangling
       // ref), the item falls back to party-owned rather than pointing at a stale id.
+      //
+      // Issue #1326 review (Codex/Devin): preserving equip state is a DIFFERENT job from
+      // ENFORCING its invariants — copying the export's equipped/equipSlot/equippedAction
+      // verbatim would let untrusted or stale import data recreate exactly what
+      // InventoryService.update() refuses: equipped=true with no slot, or two items
+      // sharing one (character, slot) pair. Both are enforced here, deterministically
+      // (never a hard reject — an import already committed the rest of the campaign):
+      // an equipped item without a non-empty slot is unequipped, and the FIRST item to
+      // claim a (character, slot) pair (in export order) wins it; every later claimant
+      // for that same pair is imported unequipped. `equippedClaims` tracks that
+      // first-wins bookkeeping; `equipIssuesResolved` counts how many rows this touched,
+      // recorded on the campaign.import audit row below so the DM can see it happened.
+      let equipIssuesResolved = 0;
+      const equippedClaims = new Set<string>();
       for (const item of inventoryRows) {
         const ownerType = str(item.ownerType, 'party') === 'character' ? 'character' : 'party';
         const charSrc = intOrNull(item.characterId);
         const mappedChar = charSrc != null ? (charMap.get(charSrc) ?? null) : null;
         const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+        // `equippedAction` is re-validated against CharacterAction rather than trusted
+        // verbatim — a malformed or foreign-shaped import drops the field rather than
+        // storing garbage the resolver would later fail to parse. It is ALSO dropped
+        // whenever the item falls back to the party stash (issue #1326 review,
+        // coordinator): a party item can never be equipped, so keeping a granted action
+        // around for an item nobody can currently equip is a half-clear — the item would
+        // silently arm whoever later claims and equips it with an attack nobody in THIS
+        // campaign chose. This is conditioned on `resolvedOwner`, not `grantEquip`: a
+        // character-owned item that merely lost a slot-conflict race still keeps its
+        // action (normal play — unequip the winner, equip this one instead), exactly like
+        // a single-item PATCH slot conflict.
+        const importedActionParse = resolvedOwner === 'character' ? CharacterAction.safeParse(item.equippedAction) : null;
+        const wantsEquip = resolvedOwner === 'character' && item.equipped === true;
+        const trimmedSlot = typeof item.equipSlot === 'string' ? item.equipSlot.trim().slice(0, 60) : '';
+        const claimKey = wantsEquip && mappedChar != null ? `${mappedChar}:${trimmedSlot.toLowerCase()}` : null;
+        // Invalid (no slot) or a slot already claimed by an earlier row: land unequipped.
+        const grantEquip = wantsEquip && trimmedSlot.length > 0 && claimKey !== null && !equippedClaims.has(claimKey);
+        if (wantsEquip && !grantEquip) equipIssuesResolved += 1;
+        if (grantEquip && claimKey) equippedClaims.add(claimKey);
         tx.insert(inventoryItems)
           .values({
             campaignId: cid,
@@ -2550,6 +2598,9 @@ export class CampaignsService {
             // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
             // and surface a detached link rather than pretending it can be refreshed.
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
+            equipped: grantEquip,
+            equipSlot: grantEquip ? trimmedSlot : null,
+            equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
           })
@@ -3081,7 +3132,14 @@ export class CampaignsService {
           action: 'campaign.import',
           entityType: 'campaign',
           entityId: cid,
-          detail: `imported "${name}" from a Campfire export`,
+          detail:
+            `imported "${name}" from a Campfire export` +
+            // Issue #1326 review: record when the import-side equip-invariant
+            // enforcement actually changed something, so a DM auditing the import
+            // can see why an item they expected to be equipped is not.
+            (equipIssuesResolved > 0
+              ? ` (auto-unequipped ${equipIssuesResolved} inventory item${equipIssuesResolved === 1 ? '' : 's'} with an invalid or conflicting equip slot)`
+              : ''),
           createdAt: ts,
         })
         .run();

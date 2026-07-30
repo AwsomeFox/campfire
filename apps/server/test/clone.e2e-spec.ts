@@ -604,6 +604,8 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
   let encounterId: number;
   let mapAttachmentId: number;
   let battleMapAttachmentId: number;
+  let equippedCharacterId: number;
+  let equippedItemId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -665,6 +667,22 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     });
 
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Healing potion', qty: 3 });
+
+    // Issue #1326 review: a character-owned EQUIPPED item (with a granted action) must
+    // round-trip through clone with its equip state and remapped character intact.
+    const equippedChar = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Loadout Hero' });
+    equippedCharacterId = equippedChar.body.id;
+    const equippedItem = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Heirloom Blade', ownerType: 'character', characterId: equippedCharacterId });
+    equippedItemId = equippedItem.body.id;
+    const equipRes = await dmAgent.patch(`/api/v1/inventory/${equippedItemId}`).send({
+      equipped: true,
+      equipSlot: 'main-hand',
+      equippedAction: { name: 'Heirloom Slash', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', notes: '' },
+    });
+    expect(equipRes.status).toBe(200);
+
     const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
     await dmAgent
       .patch(`/api/v1/campaigns/${campaignId}/treasury`)
@@ -733,6 +751,19 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     expect(treasury.body.gp).toBe(120);
     expect(treasury.body.sp).toBe(45);
 
+    // Issue #1326 review: equip state + granted action survive clone, remapped to the
+    // cloned character (never the source characterId).
+    const clonedChars = await dmAgent.get(`/api/v1/campaigns/${cloneId}/characters`);
+    const clonedHero = clonedChars.body.find((c: { name: string }) => c.name === 'Loadout Hero');
+    expect(clonedHero).toBeDefined();
+    const clonedBlade = inventory.body.find((i: { name: string }) => i.name === 'Heirloom Blade');
+    expect(clonedBlade).toBeDefined();
+    expect(clonedBlade.characterId).toBe(clonedHero.id);
+    expect(clonedBlade.characterId).not.toBe(equippedCharacterId);
+    expect(clonedBlade.equipped).toBe(true);
+    expect(clonedBlade.equipSlot).toBe('main-hand');
+    expect(clonedBlade.equippedAction).toMatchObject({ name: 'Heirloom Slash', damage: '1d8+3 slashing' });
+
     const encDetail = await dmAgent.get(`/api/v1/encounters/${clonedEncs.body[0].id}`);
     expect(encDetail.body.mapAttachmentId).not.toBeNull();
     expect(encDetail.body.mapAttachmentId).not.toBe(battleMapAttachmentId);
@@ -751,5 +782,43 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     const clonedRevisions = await dmAgent.get(`/api/v1/revisions/quest/${clonedQuestId}`);
     expect(clonedRevisions.body.length).toBe(sourceRevisions.body.length);
     expect(clonedRevisions.body[0].snapshot.body).toBe(sourceRevisions.body[0].snapshot.body);
+  });
+
+  // Issue #1326 review (coordinator): when an equipped item's character does NOT survive
+  // the copy (here: the character was trashed before cloning, so it's excluded from
+  // characterRows and the item's characterId has no entry in charMap), equipped/equipSlot/
+  // equippedAction must ALL clear together — never a half-clear (unequipped but still
+  // carrying a granted action), which is a state normal play can never reach and would
+  // silently arm whoever claims the fallen-back item next with an attack nobody in the new
+  // campaign chose.
+  it('full clone lands a party-fallback item (its character was trashed) fully unarmed: equipped, equipSlot, AND equippedAction all clear together', async () => {
+    const doomedChar = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Doomed Hero' });
+    const doomedItem = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Cursed Axe', ownerType: 'character', characterId: doomedChar.body.id });
+    const equipRes = await dmAgent.patch(`/api/v1/inventory/${doomedItem.body.id}`).send({
+      equipped: true,
+      equipSlot: 'main-hand',
+      equippedAction: { name: 'Cursed Cleave', kind: 'melee', toHit: '+6', damage: '2d6+4 necrotic', notes: '' },
+    });
+    expect(equipRes.status).toBe(200);
+
+    // The character is trashed BEFORE cloning — clone's characterRows query excludes
+    // soft-deleted characters, so this item's characterId has no mapping.
+    const del = await dmAgent.delete(`/api/v1/characters/${doomedChar.body.id}`);
+    expect(del.status).toBe(200);
+
+    const res = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Fallback Copy' });
+    expect(res.status).toBe(201);
+    const cloneId = res.body.id;
+
+    const inventory = await dmAgent.get(`/api/v1/campaigns/${cloneId}/inventory`);
+    const axe = inventory.body.find((i: { name: string }) => i.name === 'Cursed Axe');
+    expect(axe).toBeDefined();
+    expect(axe.ownerType).toBe('party');
+    expect(axe.characterId).toBeNull();
+    expect(axe.equipped).toBe(false);
+    expect(axe.equipSlot).toBeNull();
+    expect(axe.equippedAction).toBeNull();
   });
 });

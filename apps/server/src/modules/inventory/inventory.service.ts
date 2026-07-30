@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import { CharacterAction, CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
@@ -28,8 +28,52 @@ type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Issue #1326 review (coordinator) — THE single rule for every write path that can
+ * change which character (if any) owns an inventory item: `equipped`, `equipSlot`, and
+ * `equippedAction` reset to this "off" triple together, atomically, whenever ownership
+ * changes — never a partial clear. Three separate earlier review rounds on this PR each
+ * found a DIFFERENT path clearing only equipped/equipSlot and leaving equippedAction
+ * behind: bulk `move_inventory_owner`, clone/import's party fallback, and (this one)
+ * `InventoryService.update()`'s own move branch. An item left "unworn but pre-armed" is
+ * a state normal play can never produce on its own, and — because `equippedAction`
+ * visibility is keyed to `ownerType === 'character'` (see `redactEquippedActions`) — it
+ * is also a state where a previously-redacted, private character action silently
+ * becomes readable (by a new character's owner, or by every campaign member once the
+ * item reaches the party stash) the moment ownership changes, with no new secrecy
+ * decision made by anyone.
+ *
+ * Every owner-changing path uses this constant as the base "cleared" state, only
+ * overriding a field the SAME write explicitly re-establishes for the new owner:
+ *  - `InventoryService.update()`'s move branch (a caller may re-equip in the same PATCH);
+ *  - the bulk `move_inventory_owner` write in `CampaignLibraryService` (unconditional —
+ *    that request shape carries no equip fields of its own);
+ *  - that same bulk operation's `undoBulk()` restore (conditioned on the slot-safety
+ *    check already enforced there);
+ *  - campaign clone and campaign import's party-fallback branch in `CampaignsService`
+ *    (the source character wasn't copied/mapped, so there is no new owner to ask).
+ */
+export const CLEARED_EQUIP_STATE: { readonly equipped: false; readonly equipSlot: null; readonly equippedAction: null } = {
+  equipped: false,
+  equipSlot: null,
+  equippedAction: null,
+};
+
+/**
  * Bind an idempotency key to one qty operation *and* its accompanying mutable
- * fields so key reuse with a different payload 409s (qty, move, name, notes, icon).
+ * fields so key reuse with a different payload 409s (qty, move, name, notes, icon,
+ * equip — issue #1326 review: a combined "spend a charge and equip this" retry must
+ * not silently drop a changed equip instruction just because qty/name/etc. match).
+ *
+ * Issue #1326 review (Devin): the three equip keys are appended ONLY when this
+ * request actually touches equip. A request that never touches equip therefore
+ * computes the EXACT SAME JSON shape a pre-#1326 binary would have stored (same key
+ * order, same fields) — so an in-flight qty retry spanning this upgrade (started
+ * before, retried after) still matches its persisted fingerprint and replays, rather
+ * than 409ing IDEMPOTENCY_KEY_REUSE just because the fingerprint format grew new
+ * fields. A request that DOES touch equip still detects a changed replay: appending
+ * a new key where none existed (or changing an existing one) both fail the equality
+ * check, which is exactly the reuse-with-a-different-payload case this fingerprint
+ * exists to catch.
  */
 function qtyFingerprint(input: InventoryItemUpdateInput): string {
   const qtyPart =
@@ -38,13 +82,19 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
       : `set:${input.qty}@${input.expectedUpdatedAt ?? ''}`;
   // Deterministic JSON with explicit nulls for omitted fields — undefined must
   // not collapse into "absent key" vs "present null" differences across retries.
-  const restPart = JSON.stringify({
+  const rest: Record<string, unknown> = {
     name: input.name ?? null,
     notes: input.notes ?? null,
     iconSlug: input.iconSlug ?? null,
     ownerType: input.ownerType ?? null,
     characterId: input.characterId ?? null,
-  });
+  };
+  if (input.equipped !== undefined || input.equipSlot !== undefined || input.equippedAction !== undefined) {
+    rest.equipped = input.equipped ?? null;
+    rest.equipSlot = input.equipSlot ?? null;
+    rest.equippedAction = input.equippedAction ?? null;
+  }
+  const restPart = JSON.stringify(rest);
   return `${qtyPart}|${restPart}`;
 }
 
@@ -62,6 +112,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
   const ref = parsedRef.success ? parsedRef.data : null;
   const snapshot = row.compendiumSnapshot ? sanitizeCompendiumSnapshot(safeJson(row.compendiumSnapshot)) : null;
+  const parsedAction = row.equippedAction ? CharacterAction.safeParse(safeJson(row.equippedAction)) : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -75,6 +126,9 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     compendiumRef: ref,
     compendiumSnapshot: snapshot,
     compendiumState: InventoryItem.shape.compendiumState.safeParse(row.compendiumState).success ? InventoryItem.shape.compendiumState.parse(row.compendiumState) : null,
+    equipped: row.equipped,
+    equipSlot: row.equipSlot ?? null,
+    equippedAction: parsedAction?.success ? parsedAction.data : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -106,12 +160,12 @@ export class InventoryService {
 
   // ---------- items ----------
 
-  async listForCampaign(campaignId: number): Promise<InventoryItem[]> {
+  async listForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<InventoryItem[]> {
     const rows = await this.db
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return this.withCompendiumStates(rows);
+    return this.redactEquippedActions(await this.withCompendiumStates(rows), user, role);
   }
 
   /**
@@ -131,13 +185,13 @@ export class InventoryService {
     return row?.value ?? 0;
   }
 
-  async listTrashForCampaign(campaignId: number): Promise<InventoryItem[]> {
+  async listTrashForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<InventoryItem[]> {
     const rows = await this.db
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), isNotNull(inventoryItems.deletedAt)))
       .orderBy(desc(inventoryItems.deletedAt));
-    return rows.map(toDomain);
+    return this.redactEquippedActions(rows.map(toDomain), user, role);
   }
 
   async getRowOrThrow(id: number, opts?: { includeDeleted?: boolean }) {
@@ -148,8 +202,63 @@ export class InventoryService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<InventoryItem> {
-    return this.withCompendiumState(await this.getRowOrThrow(id));
+  async getOrThrow(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const item = await this.withCompendiumState(await this.getRowOrThrow(id));
+    const [redacted] = await this.redactEquippedActions([item], user, role);
+    return redacted;
+  }
+
+  /**
+   * Issue #1326 review (Codex P1): `equippedAction` carries the same `CharacterAction`
+   * shape as `Character.actions`, which `CharactersService.listForCampaign` treats as
+   * PRIVATE mechanical state — a non-DM only ever sees their OWN character's sheet
+   * actions, never another player's (see that method's doc comment). Inventory rows
+   * are otherwise visible campaign-wide (name/qty/notes carry no such secrecy — any
+   * member can already see the party's and other characters' loot), so this redacts
+   * ONLY the one field that inherits the sheet-action precedent: a character-owned
+   * item's `equippedAction` is nulled out for any reader who is neither the DM nor
+   * that character's owning player. Party-stash items are never redacted — `equipped`
+   * can never be true there, and the shared stash has never been private.
+   */
+  /** Fail-closed redaction of `equippedAction` for a single, already-resolved owner. */
+  private redactEquippedActionForOwner(
+    item: InventoryItem,
+    user: RequestUser,
+    role: Role,
+    ownerUserId?: string | null,
+  ): InventoryItem {
+    if (role === 'dm') return item;
+    if (item.equippedAction == null) return item;
+    if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
+    if (ownerUserId != null && ownerUserId === user.id) return item;
+    return { ...item, equippedAction: null };
+  }
+
+  private async redactEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
+    if (role === 'dm') return items;
+    const characterIds = [
+      ...new Set(
+        items
+          .filter((item) => item.ownerType === 'character' && item.characterId != null && item.equippedAction != null)
+          .map((item) => item.characterId as number),
+      ),
+    ];
+    const owners =
+      characterIds.length > 0
+        ? await this.db
+            .select({ id: characters.id, ownerUserId: characters.ownerUserId })
+            .from(characters)
+            .where(inArray(characters.id, characterIds))
+        : [];
+    const ownerById = new Map(owners.map((owner) => [owner.id, owner.ownerUserId]));
+    return items.map((item) => {
+      if (item.equippedAction == null) return item;
+      // Party-stash items should never carry an equippedAction, and a character-owned item
+      // without a resolvable owner is treated as fail-closed rather than fail-open.
+      if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
+      if (ownerById.get(item.characterId) === user.id) return item;
+      return { ...item, equippedAction: null };
+    });
   }
 
   /** Compute volatile linked_updated without mutating snapshots or player-owned fields. */
@@ -257,7 +366,8 @@ export class InventoryService {
       entityId: row.id,
       campaignId,
     });
-    return toDomain(row);
+    const created = toDomain(row);
+    return (await this.redactEquippedActions([created], user, role))[0];
   }
 
   async acquireFromCompendium(campaignId: number, input: InventoryFromCompendiumInput, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -281,6 +391,16 @@ export class InventoryService {
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
     if (!snapshot) throw new BadRequestException('ruleEntryId must identify a play-safe item entry');
     const fingerprint = JSON.stringify({ campaignId, ruleEntryId: entry.id, ownerType, characterId, qty: input.qty, notes: input.notes, duplicateMode: input.duplicateMode });
+    const duplicateOwnerUserId =
+      ownerType === 'character' && characterId != null
+        ? (
+            await this.db
+              .select({ ownerUserId: characters.ownerUserId })
+              .from(characters)
+              .where(eq(characters.id, characterId))
+              .get()
+          )?.ownerUserId
+        : undefined;
     let row!: typeof inventoryItems.$inferSelect; let replayed = false;
     this.db.transaction((tx) => {
       if (input.idempotencyKey) {
@@ -297,7 +417,11 @@ export class InventoryService {
         const candidateRef = CompendiumRef.safeParse(candidate.compendiumRef ? safeJson(candidate.compendiumRef) : null);
         return candidateRef.success && compendiumRefKey(candidateRef.data) === compendiumRefKey(ref);
       });
-      if (existing && input.duplicateMode === 'confirm') throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: toDomain(existing) });
+      if (existing && input.duplicateMode === 'confirm')
+        throw new ConflictException({
+          code: 'INVENTORY_COMPENDIUM_DUPLICATE',
+          existing: this.redactEquippedActionForOwner(toDomain(existing), user, role, duplicateOwnerUserId),
+        });
       const ts = nowIso();
       if (existing && input.duplicateMode === 'increment') {
         [row] = tx.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing.id)).returning().all();
@@ -307,7 +431,8 @@ export class InventoryService {
       if (input.idempotencyKey) tx.insert(inventoryQtyIdempotency).values({ key: input.idempotencyKey, itemId: row.id, userId: user.id, fingerprint, responseJson: JSON.stringify(row), createdAt: ts }).run();
     });
     if (!replayed) await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
-    return this.withCompendiumState(row);
+    const acquired = await this.withCompendiumState(row);
+    return (await this.redactEquippedActions([acquired], user, role))[0];
   }
 
   async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -331,7 +456,8 @@ export class InventoryService {
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return this.withCompendiumState(row);
+    const refreshed = await this.withCompendiumState(row);
+    return (await this.redactEquippedActions([refreshed], user, role))[0];
   }
 
   async setCompendiumState(id: number, state: 'overridden' | 'detached', user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -347,7 +473,8 @@ export class InventoryService {
       campaignId: existing.campaignId,
       detail: state,
     });
-    return this.withCompendiumState(row);
+    const stateItem = await this.withCompendiumState(row);
+    return (await this.redactEquippedActions([stateItem], user, role))[0];
   }
 
   async update(id: number, input: InventoryItemUpdateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -377,6 +504,46 @@ export class InventoryService {
       }
     }
 
+    // Issue #1326: equip/unequip transition, validated against the FINAL owner (post-move).
+    // Field-level checks run here; the slot-conflict check runs inside the transaction
+    // below (against the freshly-read row) so two concurrent equips into the same slot
+    // serialize through SQLite rather than racing on a pre-transaction snapshot.
+    //
+    // Review (Codex/Devin): a move to a DIFFERENT owner — party OR another character —
+    // must never silently carry the OLD equipped=true forward. Left unguarded, that
+    // either raises a bogus 409 against a recipient who never asked to equip anything,
+    // or silently arms them with an action they never chose. So on ANY ownership change
+    // the item lands UNEQUIPPED unless this SAME request explicitly asks to equip it
+    // (equipped:true + equipSlot) for the new owner — never inherited from the old state.
+    const equipTouched = input.equipped !== undefined || input.equipSlot !== undefined;
+    let nextEquipped = moved ? input.equipped === true : (input.equipped !== undefined ? input.equipped : existing.equipped);
+    let nextEquipSlot: string | null = input.equipSlot !== undefined ? input.equipSlot : moved ? null : existing.equipSlot;
+    if (finalOwnerType !== 'character') {
+      // An explicit request to equip a party-stash item is rejected outright — it is
+      // never valid, whether the item was already party-owned or is moving there in
+      // this same request.
+      if (input.equipped === true) {
+        throw new BadRequestException('Only character-owned items may be equipped');
+      }
+      if (input.equippedAction != null) {
+        throw new BadRequestException('Only character-owned items may carry an equipped action');
+      }
+      // Otherwise: moving an item OFF a character (or an already party-owned item)
+      // auto-unequips it rather than leaving a dangling equip/slot state — a party
+      // item can never legitimately be equipped=true.
+      nextEquipped = false;
+      nextEquipSlot = null;
+    } else if (nextEquipped) {
+      const trimmedSlot = typeof nextEquipSlot === 'string' ? nextEquipSlot.trim() : '';
+      if (!trimmedSlot) {
+        throw new BadRequestException('equipSlot is required to equip an item');
+      }
+      nextEquipSlot = trimmedSlot;
+    } else {
+      nextEquipSlot = null;
+    }
+    const equipWillChange = equipTouched || moved;
+
     // Issue #782: quantity writes — atomic delta (preferred) or absolute CAS set.
     const hasQtyDelta = input.qtyDelta !== undefined;
     const hasQtySet = input.qty !== undefined;
@@ -397,6 +564,30 @@ export class InventoryService {
     const qtyTouch = hasQtyDelta || hasQtySet;
     const idempotencyKey = qtyTouch ? input.idempotencyKey : undefined;
     const fingerprint = qtyTouch ? qtyFingerprint(input) : undefined;
+
+    // Resolve the current and final owner's user ids up-front so the transaction can
+    // redact `equippedAction` for idempotent/live responses and 409 bodies without
+    // issuing an async query inside the synchronous better-sqlite3 transaction.
+    const existingOwnerUserId =
+      existing.ownerType === 'character' && existing.characterId != null
+        ? (
+            await this.db
+              .select({ ownerUserId: characters.ownerUserId })
+              .from(characters)
+              .where(eq(characters.id, existing.characterId))
+              .get()
+          )?.ownerUserId
+        : undefined;
+    const finalOwnerUserId =
+      finalOwnerType === 'character'
+        ? (
+            await this.db
+              .select({ ownerUserId: characters.ownerUserId })
+              .from(characters)
+              .where(eq(characters.id, finalCharacterId as number))
+              .get()
+          )?.ownerUserId
+        : undefined;
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -449,6 +640,51 @@ export class InventoryService {
           update.ownerType = finalOwnerType;
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
         }
+        if (input.equippedAction !== undefined) {
+          update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
+        } else if (moved) {
+          // Issue #1326 review (coordinator): THE ownership-change clearing rule —
+          // equipped, equipSlot, and equippedAction reset together, atomically, unless
+          // THIS SAME write explicitly re-establishes a field for the new owner (handled
+          // by the branch above). Left uncleared, a character's private granted action
+          // would silently follow the item to its new owner: another character who never
+          // chose it, or the public party stash, which is never redaction-checked at all
+          // (see `redactEquippedActions`) — turning a previously-private action visible
+          // campaign-wide the moment ownership changes. Uses the same CLEARED_EQUIP_STATE
+          // every other owner-changing path (bulk move_inventory_owner + its undo, clone,
+          // import) treats as the base "off" state for this triple.
+          update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
+        }
+        if (equipWillChange) {
+          if (nextEquipped) {
+            // Slot conflict (issue #1326): reject a second equipped item claiming the same
+            // (character, slot) pair rather than silently displacing the incumbent. Read
+            // inside this transaction so two concurrent equips into the same slot serialize.
+            const conflict = tx
+              .select({ id: inventoryItems.id, name: inventoryItems.name })
+              .from(inventoryItems)
+              .where(
+                and(
+                  eq(inventoryItems.characterId, finalCharacterId as number),
+                  eq(inventoryItems.campaignId, existing.campaignId),
+                  eq(inventoryItems.equipped, true),
+                  isNull(inventoryItems.deletedAt),
+                  sql`lower(${inventoryItems.equipSlot}) = lower(${nextEquipSlot})`,
+                  ne(inventoryItems.id, id),
+                ),
+              )
+              .limit(1)
+              .all();
+            if (conflict.length > 0) {
+              throw new ConflictException({
+                code: 'INVENTORY_SLOT_CONFLICT',
+                message: `Slot "${nextEquipSlot}" is already occupied by "${conflict[0].name}" on this character — unequip it first.`,
+              });
+            }
+          }
+          update.equipped = nextEquipped;
+          update.equipSlot = nextEquipSlot;
+        }
 
         if (hasQtyDelta) {
           // Atomic `qty = qty + ?` — SQLite resolves the RHS column to the live row
@@ -477,7 +713,7 @@ export class InventoryService {
         if (updated.length === 0) {
           // CAS mismatch on absolute qty: another client wrote between the snapshot
           // and this write. Stash live values for the 409 body, then roll back.
-          qtyConflict = toDomain(fresh);
+          qtyConflict = this.redactEquippedActionForOwner(toDomain(fresh), user, role, existingOwnerUserId);
           throw new InventoryQtyConflictMarker();
         }
 
@@ -488,7 +724,7 @@ export class InventoryService {
           );
         }
 
-        committed = toDomain(next);
+        committed = this.redactEquippedActionForOwner(toDomain(next), user, role, finalOwnerUserId);
 
         if (idempotencyKey && fingerprint) {
           try {
@@ -546,6 +782,11 @@ export class InventoryService {
     // Idempotent replay returns the first committed response without re-auditing.
     if (replayed) return committed;
 
+    // Issue #1326: record the equip transition (if any) alongside the existing qty detail
+    // rather than a separate audit action — this is still one `item.update` write.
+    const equipChanged = existing.equipped !== committed.equipped || existing.equipSlot !== committed.equipSlot;
+    const hasDetail = qtyTouch || equipChanged;
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -553,14 +794,26 @@ export class InventoryService {
       entityType: 'inventory_item',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: qtyTouch
+      detail: hasDetail
         ? JSON.stringify({
             actor: { id: user.id, name: user.name, role },
-            kind: hasQtyDelta ? 'delta' : 'set',
-            ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
-            after: committed.qty,
-            ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
-            ...(idempotencyKey ? { idempotencyKey } : {}),
+            ...(qtyTouch
+              ? {
+                  kind: hasQtyDelta ? 'delta' : 'set',
+                  ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
+                  after: committed.qty,
+                  ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
+                  ...(idempotencyKey ? { idempotencyKey } : {}),
+                }
+              : {}),
+            ...(equipChanged
+              ? {
+                  equip: {
+                    from: { equipped: existing.equipped, equipSlot: existing.equipSlot },
+                    to: { equipped: committed.equipped, equipSlot: committed.equipSlot },
+                  },
+                }
+              : {}),
           })
         : undefined,
     });
@@ -586,11 +839,18 @@ export class InventoryService {
       iconSlug: existing.iconSlug,
       ownerType: existing.ownerType,
       characterId: existing.characterId,
+      equipped: existing.equipped,
+      equipSlot: existing.equipSlot,
     };
 
     const [row] = await this.db
       .update(inventoryItems)
-      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts })
+      // Issue #1326 review (coordinator): trashing an equipped item must clear
+      // equipped/equipSlot so a replacement can claim the slot, but equippedAction is
+      // inert while equipped is false and should round-trip with the tombstone. Nulled
+      // here, the granted action is unrecoverable because the audit snapshot (above)
+      // does not record it and restore() does not rewrite it.
+      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
       .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
       .returning();
     if (!row) {
@@ -610,7 +870,7 @@ export class InventoryService {
       detail: JSON.stringify({ snapshot }),
     });
 
-    return domain;
+    return (await this.redactEquippedActions([domain], user, role))[0];
   }
 
   /**
@@ -626,7 +886,7 @@ export class InventoryService {
     await this.assertCanRestore(existing, user, role, actor);
 
     if (!existing.deletedAt) {
-      return toDomain(existing);
+      return (await this.redactEquippedActions([toDomain(existing)], user, role))[0];
     }
 
     // Verify the original owner still exists; otherwise restore to the party stash.
@@ -643,15 +903,20 @@ export class InventoryService {
     }
 
     const ts = nowIso();
+    const restoreUpdate: Record<string, unknown> = {
+      ownerType,
+      characterId,
+      deletedAt: null,
+      deletedBy: null,
+      updatedAt: ts,
+    };
+    if (ownerType === 'party') {
+      // Party-owned items can never legitimately carry an equipped action.
+      restoreUpdate.equippedAction = null;
+    }
     const [row] = await this.db
       .update(inventoryItems)
-      .set({
-        ownerType,
-        characterId,
-        deletedAt: null,
-        deletedBy: null,
-        updatedAt: ts,
-      })
+      .set(restoreUpdate)
       .where(eq(inventoryItems.id, id))
       .returning();
 
@@ -676,7 +941,7 @@ export class InventoryService {
       }),
     });
 
-    return domain;
+    return (await this.redactEquippedActions([domain], user, role))[0];
   }
 
   private async assertCanRestore(

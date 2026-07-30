@@ -10481,6 +10481,32 @@ export const InventoryItem = z.object({
   compendiumRef: CompendiumRef.nullable().default(null),
   compendiumSnapshot: CompendiumSnapshot.nullable().default(null),
   compendiumState: z.enum(['linked', 'linked_updated', 'overridden', 'detached']).nullable().default(null),
+  // ---- equip state (issue #1326) ----
+  // Only meaningful for ownerType='character' — a party-stash item cannot be worn/wielded.
+  // The server enforces that constraint (and slot-conflict rejection); this shape just
+  // carries the state. Not settable at creation — an item is always created unequipped
+  // and moves to equipped only via an explicit PATCH, keeping the transition validation
+  // (owner, slot required, slot conflict) in one place.
+  equipped: z.boolean().default(false),
+  /**
+   * Free-form slot identifier ('main-hand', 'armor', a homebrew label, …), required
+   * when equipped=true and cleared automatically on unequip. Deliberately NOT
+   * restricted to a fixed enum: what slots exist is ruleset-dependent, so the server
+   * only enforces "at most one equipped item per (character, slot string) pair" — a
+   * rule that holds for every rule system without guessing its slot model. A
+   * ruleset-aware suggested-slot vocabulary for the UI is deferred to the follow-up
+   * that actually builds the equip affordance (issue #1326).
+   */
+  equipSlot: z.string().max(60).nullable().default(null),
+  /**
+   * Optional structured action this item grants while equipped (issue #1326) — the same
+   * shape as a hand-authored `Character.actions` row, so the resolver can merge it in
+   * without a second action representation. Authored directly (by a player or DM) or,
+   * in future, hydrated from compendium data; that derivation is out of scope here (the
+   * source item's `dataJson` is too thin to auto-generate an attack — see issue #1326).
+   * Inert while unequipped.
+   */
+  equippedAction: CharacterAction.nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -10499,6 +10525,9 @@ export const InventoryItemCreate = InventoryItem.omit({
   compendiumRef: true,
   compendiumSnapshot: true,
   compendiumState: true,
+  equipped: true,
+  equipSlot: true,
+  equippedAction: true,
 }).partial().required({ name: true });
 
 /** Acquire a play-safe snapshot of an installed compendium item. */
@@ -10525,6 +10554,13 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   // Client-generated per-action key (UUID). Required with qtyDelta; optional on an
   // absolute qty set so a lost-response retry can replay the committed item.
   idempotencyKey: z.string().min(1).max(128).optional(),
+  // Issue #1326: equip/unequip is a PATCH, not a create-time field (see InventoryItem
+  // comment above) — the server validates ownerType='character', requires a non-empty
+  // equipSlot when equipping, clears it on unequip, and rejects a slot already occupied
+  // by another equipped item on the same character (409 INVENTORY_SLOT_CONFLICT).
+  equipped: z.boolean().optional(),
+  equipSlot: z.string().max(60).nullable().optional(),
+  equippedAction: CharacterAction.nullable().optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).

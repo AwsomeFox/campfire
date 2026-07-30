@@ -1710,8 +1710,8 @@ export class McpToolsService {
         'client-side by ownerType ("party"|"character") and characterId.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.inventory.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.inventory.listForCampaign(campaignId as number, user, role);
       },
     );
 
@@ -1722,8 +1722,8 @@ export class McpToolsService {
       { itemId: Id.describe('Inventory item id — from list_inventory') },
       async ({ itemId }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.inventory.getOrThrow(itemId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.inventory.getOrThrow(itemId as number, user, role);
       },
     );
 
@@ -4827,7 +4827,10 @@ export class McpToolsService {
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
         'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
         'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +
-        'without changing the item.',
+        'without changing the item. Equip/unequip (issue #1326): equipped:true requires a character-owned item and ' +
+        'a non-empty equipSlot (400 otherwise); a slot already occupied by another equipped item on the same ' +
+        'character 409s (INVENTORY_SLOT_CONFLICT). equippedAction attaches a structured action the item grants ' +
+        'while equipped, surfaced by list_usable_actions for the item\'s character.',
       { itemId: Id.describe('Inventory item id — from list_inventory'), ...InventoryItemUpdate.shape },
       async ({ itemId, ...fields }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);

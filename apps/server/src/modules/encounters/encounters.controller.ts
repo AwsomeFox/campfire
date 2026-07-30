@@ -751,11 +751,12 @@ export class EncountersController {
 
   @Get(':id/combatants/:cid/actions')
   @ApiOperation({
-    summary: 'List a combatant’s usable structured actions (issue #414)',
+    summary: 'List a combatant’s usable structured actions (issue #414, #1326)',
     description:
       'Requires campaign membership. Returns the combatant’s sheet actions with their structured spec + a `resolvable` ' +
-      'flag (false ⇒ the UI shows the inline statblock rather than a guided Use flow). A player may list only their own ' +
-      'character’s actions; the DM may list any combatant’s.',
+      'flag (false ⇒ the UI shows the inline statblock rather than a guided Use flow). For a character, any currently ' +
+      'EQUIPPED inventory item carrying an authored action is appended after the sheet actions (issue #1326). A player ' +
+      'may list only their own character’s actions; the DM may list any combatant’s.',
   })
   @ApiResponse({ status: 200, description: 'Usable actions with resolvability + preserved freeform statblock text.' })
   @ApiResponse({ status: 403, description: 'A player listing another combatant’s actions.' })

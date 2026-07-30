@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryBulkOperations, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -158,6 +158,249 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)?.ownerType).toBe('party');
     const bad = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'quest', entityId: quest.id }, { entityType: 'inventory_item', entityId: item.id }] });
     expect(bad.status).toBe(400);
+  });
+
+  it('bulk move_inventory_owner auto-unequips a worn item rather than arming the new owner or leaving an invalid party-equipped row (issue #1326 review)', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [source] = await db.insert(characters).values({ campaignId, name: 'Bulk source', createdAt: ts, updatedAt: ts }).returning();
+    const [recipient] = await db.insert(characters).values({ campaignId, name: 'Bulk recipient', createdAt: ts, updatedAt: ts }).returning();
+    const [equippedItem] = await db
+      .insert(inventoryItems)
+      .values({
+        campaignId,
+        name: 'Bulk-moved sword',
+        ownerType: 'character',
+        characterId: source.id,
+        equipped: true,
+        equipSlot: 'main-hand',
+        equippedAction: JSON.stringify({ name: 'Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    // Bulk move to a DIFFERENT character never silently arms them with the action.
+    const movedToChar = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: recipient.id, targets: [{ entityType: 'inventory_item', entityId: equippedItem.id }] });
+    expect(movedToChar.status).toBe(201);
+    const afterCharMove = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, equippedItem.id))).at(0)!;
+    expect(afterCharMove.characterId).toBe(recipient.id);
+    expect(afterCharMove.equipped).toBe(false);
+    expect(afterCharMove.equipSlot).toBeNull();
+
+    // Bulk move to the party stash never leaves an invalid equipped=true party row.
+    await db.update(inventoryItems).set({ equipped: true, equipSlot: 'main-hand' }).where(eq(inventoryItems.id, equippedItem.id));
+    const movedToParty = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'party', targets: [{ entityType: 'inventory_item', entityId: equippedItem.id }] });
+    expect(movedToParty.status).toBe(201);
+    const afterPartyMove = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, equippedItem.id))).at(0)!;
+    expect(afterPartyMove.ownerType).toBe('party');
+    expect(afterPartyMove.equipped).toBe(false);
+    expect(afterPartyMove.equipSlot).toBeNull();
+  });
+
+  it('bulk move_inventory_owner to the same owner leaves equip state intact (issue #1326 review)', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [owner] = await db.insert(characters).values({ campaignId, name: 'No-op owner', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({
+        campaignId,
+        name: 'No-op sword',
+        ownerType: 'character',
+        characterId: owner.id,
+        equipped: true,
+        equipSlot: 'main-hand',
+        equippedAction: JSON.stringify({ name: 'Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    const noOp = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: owner.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(noOp.status).toBe(201);
+    const afterNoOp = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterNoOp.ownerType).toBe('character');
+    expect(afterNoOp.characterId).toBe(owner.id);
+    expect(afterNoOp.equipped).toBe(true);
+    expect(afterNoOp.equipSlot).toBe('main-hand');
+    expect(afterNoOp.equippedAction).not.toBeNull();
+  });
+
+  it('bulk archive clears equip state so a later bulk restore cannot resurrect a slot conflict (issue #1326 review)', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [character] = await db.insert(characters).values({ campaignId, name: 'Archive owner', createdAt: ts, updatedAt: ts }).returning();
+    const [original] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Archived shield', ownerType: 'character', characterId: character.id, equipped: true, equipSlot: 'off-hand', createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const archived = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: original.id }] });
+    expect(archived.status).toBe(201);
+    const afterArchive = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, original.id))).at(0)!;
+    expect(afterArchive.deletedAt).not.toBeNull();
+    expect(afterArchive.equipped).toBe(false);
+    expect(afterArchive.equipSlot).toBeNull();
+
+    // A replacement claims the freed slot while the original is archived.
+    const [replacement] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Replacement shield', ownerType: 'character', characterId: character.id, equipped: true, equipSlot: 'off-hand', createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const restored = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'restore', targets: [{ entityType: 'inventory_item', entityId: original.id }] });
+    expect(restored.status).toBe(201);
+    const afterRestore = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, original.id))).at(0)!;
+    expect(afterRestore.deletedAt).toBeNull();
+    // Restored unequipped — no two-items-one-slot conflict resurrected.
+    expect(afterRestore.equipped).toBe(false);
+    const replacementCheck = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, replacement.id))).at(0)!;
+    expect(replacementCheck.equipped).toBe(true);
+    expect(replacementCheck.equipSlot).toBe('off-hand');
+  });
+
+  // Issue #1326 review (Codex): the enumeration of bulk operations that must preserve
+  // equip state round-trips is: move, archive, restore, UNDO, clone, import. These
+  // three tests close the "undo" gap in that set.
+  it('undoing a bulk move_inventory_owner restores the pre-move equip state when the slot is still free', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [source] = await db.insert(characters).values({ campaignId, name: 'Undo-move source', createdAt: ts, updatedAt: ts }).returning();
+    const [recipient] = await db.insert(characters).values({ campaignId, name: 'Undo-move recipient', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({
+        campaignId,
+        name: 'Undo-move blade',
+        ownerType: 'character',
+        characterId: source.id,
+        equipped: true,
+        equipSlot: 'main-hand',
+        equippedAction: JSON.stringify({ name: 'Blade Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: recipient.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(moved.status).toBe(201);
+    const afterMove = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterMove.equipped).toBe(false);
+    // Coordinator review: equippedAction clears together with equipped/equipSlot on the
+    // FORWARD move too — the recipient never silently inherits the source's action.
+    expect(afterMove.equippedAction).toBeNull();
+
+    const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm);
+    expect(undone.status).toBe(201);
+    const afterUndo = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterUndo.characterId).toBe(source.id);
+    expect(afterUndo.equipped).toBe(true);
+    expect(afterUndo.equipSlot).toBe('main-hand');
+    // The full triple round-trips through undo, not just equipped/equipSlot.
+    expect(JSON.parse(afterUndo.equippedAction!)).toMatchObject({ name: 'Blade Slash', damage: '1d8+3' });
+  });
+
+  it('undoing a bulk move_inventory_owner rejects re-equipping into a slot another item has since claimed', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [source] = await db.insert(characters).values({ campaignId, name: 'Undo-move-conflict source', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Undo-move-conflict blade', ownerType: 'character', characterId: source.id, equipped: true, equipSlot: 'main-hand', createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'party', targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(moved.status).toBe(201);
+
+    // Something else now claims that same slot on the source character.
+    await db.insert(inventoryItems).values({ campaignId, name: 'Interloper blade', ownerType: 'character', characterId: source.id, equipped: true, equipSlot: 'main-hand', createdAt: ts, updatedAt: ts });
+
+    const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm);
+    expect(undone.status).toBe(409);
+    // The move itself is unwound (best-effort), never left half-applied with the item
+    // silently re-equipped over the interloper.
+    const afterUndo = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterUndo.equipped).toBe(false);
+  });
+
+  it('undoing a bulk archive restores the pre-archive equip state when the slot is still free', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [character] = await db.insert(characters).values({ campaignId, name: 'Undo-archive owner', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Undo-archive shield', ownerType: 'character', characterId: character.id, equipped: true, equipSlot: 'off-hand', createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const archived = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(archived.status).toBe(201);
+
+    const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${archived.body.operationId}/undo`).set(dm);
+    expect(undone.status).toBe(201);
+    const afterUndo = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterUndo.deletedAt).toBeNull();
+    expect(afterUndo.equipped).toBe(true);
+    expect(afterUndo.equipSlot).toBe('off-hand');
+  });
+
+  // Issue #1326 review (coordinator): a bulk move_inventory_owner journal recorded by
+  // the PRE-#1326 binary never had equipped/equip_slot in its snapshot at all — the
+  // parse schema must tolerate that shape, not require it, or undo permanently 404s/
+  // 500s for every such pre-upgrade record after deploy.
+  it('undoes a pre-upgrade bulk move_inventory_owner journal (no equip fields recorded) without failing, leaving the item unequipped', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [source] = await db.insert(characters).values({ campaignId, name: 'Pre-upgrade source', createdAt: ts, updatedAt: ts }).returning();
+    const [recipient] = await db.insert(characters).values({ campaignId, name: 'Pre-upgrade recipient', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({ campaignId, name: 'Pre-upgrade blade', ownerType: 'character', characterId: source.id, createdAt: ts, updatedAt: ts })
+      .returning();
+
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: recipient.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(moved.status).toBe(201);
+
+    // Rewrite the just-recorded journal to the EXACT shape a pre-#1326 binary would
+    // have written: the snapshot's `value` has only ownerType/characterId, nothing else.
+    const recorded = (await db.select().from(campaignLibraryBulkOperations).where(eq(campaignLibraryBulkOperations.id, moved.body.operationId))).at(0)!;
+    const legacyJournal = JSON.parse(recorded.beforeJson);
+    legacyJournal.snapshots = legacyJournal.snapshots.map((snap: { value: Record<string, unknown> }) => ({
+      ...snap,
+      value: { ownerType: snap.value.ownerType, characterId: snap.value.characterId },
+    }));
+    await db
+      .update(campaignLibraryBulkOperations)
+      .set({ beforeJson: JSON.stringify(legacyJournal), inverseJson: JSON.stringify(legacyJournal) })
+      .where(eq(campaignLibraryBulkOperations.id, moved.body.operationId));
+
+    const undone = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm);
+    expect(undone.status).toBe(201);
+    const afterUndo = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterUndo.characterId).toBe(source.id);
+    // A pre-upgrade record never claimed the item was equipped — it lands unequipped.
+    expect(afterUndo.equipped).toBe(false);
+    expect(afterUndo.equipSlot).toBeNull();
   });
 
   it('moves an item to a campaign character and undoes it without parsing a scalar journal', async () => {

@@ -18,16 +18,16 @@ export class CampaignInventoryController {
   @ApiOperation({ summary: 'List inventory items in a campaign', description: 'Requires campaign membership. Party stash and per-character items together; group client-side by ownerType/characterId.' })
   @ApiResponse({ status: 200, description: 'Inventory items.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, campaignId);
-    return this.inventory.listForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.inventory.listForCampaign(campaignId, user, role);
   }
 
   @Get('trash')
   @ApiOperation({ summary: 'List trashed inventory items', description: 'Soft-deleted items in this campaign, newest first. Player+ required.' })
   @ApiResponse({ status: 200, description: 'Trashed inventory items.' })
   async listTrash(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'player');
-    return this.inventory.listTrashForCampaign(campaignId);
+    const role = await this.access.requireRole(user, campaignId, 'player');
+    return this.inventory.listTrashForCampaign(campaignId, user, role);
   }
 
   @Post()
@@ -94,8 +94,8 @@ export class InventoryController {
   @ApiResponse({ status: 200, description: 'Inventory item.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.inventory.getOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.inventory.getOrThrow(id, user, role);
   }
 
   @Patch(':id')
@@ -104,12 +104,16 @@ export class InventoryController {
     description:
       'player role required; character items only by dm or the owning player. May also move the item (ownerType/characterId) — moving requires write access at both the source and the destination. ' +
       'Quantity (issue #782): prefer `{ qtyDelta, idempotencyKey }` for atomic +/- (retries with the same key replay the committed item); ' +
-      'an absolute `{ qty }` reconciliation requires `expectedUpdatedAt` (CAS) and returns 409 with the live item on conflict.',
+      'an absolute `{ qty }` reconciliation requires `expectedUpdatedAt` (CAS) and returns 409 with the live item on conflict. ' +
+      'Equip/unequip (issue #1326): `{ equipped: true, equipSlot }` — only a character-owned item may be equipped, equipSlot is ' +
+      'required, and a second item equipped into the same (character, slot) returns 409 INVENTORY_SLOT_CONFLICT; ' +
+      '`{ equipped: false }` clears the slot. `equippedAction` attaches a structured action the item grants while equipped ' +
+      '(surfaced by GET .../actions on the item\'s character combatant).',
   })
   @ApiResponse({ status: 200, description: 'Updated item.' })
-  @ApiResponse({ status: 400, description: 'qty without expectedUpdatedAt, qtyDelta without idempotencyKey, both qty shapes, or a delta that would go negative.' })
+  @ApiResponse({ status: 400, description: 'qty without expectedUpdatedAt, qtyDelta without idempotencyKey, both qty shapes, a delta that would go negative, equipping a party-stash item, or equipping without equipSlot.' })
   @ApiResponse({ status: 403, description: 'Not the dm or the owning player of the item\'s character.' })
-  @ApiResponse({ status: 409, description: 'Absolute qty CAS mismatch (INVENTORY_QTY_CONFLICT) or idempotency key reused with a different payload.' })
+  @ApiResponse({ status: 409, description: 'Absolute qty CAS mismatch (INVENTORY_QTY_CONFLICT), idempotency key reused with a different payload, or equipSlot already occupied (INVENTORY_SLOT_CONFLICT).' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: InventoryItemUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
