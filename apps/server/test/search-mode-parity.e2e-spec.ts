@@ -89,12 +89,12 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
     // NEITHER backend now that the fallback is prefix-token aligned. The date
     // queries exercise the scheduled-session fallback, which has to mirror the
     // FTS5 aux column's space-separated date tokens (issue #1481).
-    const queries = ['vex', 'fox', 'ex', 'vexley', 'saturday', '2031-09-20', '19:30'];
+    const queries = ['vex', 'fox', 'ex', 'vexley', 'saturday', '2031-09-20', '19:30', 'find ledger', 'red dragon'];
     let ftsResults: Record<string, Result[]>;
     let fallbackResults: Record<string, Result[]>;
 
     async function seedCorpus(server: ReturnType<TestAppContext['app']['getHttpServer']>, campaignId: number): Promise<void> {
-      for (const name of ['Vexley', 'Vexor', 'Vex Hand', 'Foxglove', 'Roxy']) {
+      for (const name of ['Vexley', 'Vexor', 'Vex Hand', 'Foxglove', 'Roxy', 'Red Ancient Dragon']) {
         await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name, body: 'A person.' });
       }
       await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Find the Vex Ledger' });
@@ -154,12 +154,101 @@ describe('campaign search mode, truncation, and parity (issue #1481)', () => {
       expect(fallbackResults.ex).toEqual([]);
     });
 
+    it('matches a non-contiguous multi-token query on BOTH backends (FTS hydration parity)', () => {
+      // "find ledger" is NOT a contiguous substring of "Find the Vex Ledger", and
+      // "red dragon" is NOT contiguous in "Red Ancient Dragon". The old contiguous-
+      // substring hydration dropped such candidates on the FTS path while the
+      // fallback's prefix-token match kept them — the per-deployment divergence
+      // #1481 set out to eliminate. Both backends must now return the same hit.
+      const keys = (set: Result[]) => set.map((r) => `${r.type}:${r.id}`).sort();
+      expect(keys(ftsResults['find ledger'])).toEqual(keys(fallbackResults['find ledger']));
+      expect(ftsResults['find ledger'].some((r) => r.type === 'quest')).toBe(true);
+      expect(fallbackResults['find ledger'].some((r) => r.type === 'quest')).toBe(true);
+      expect(keys(ftsResults['red dragon'])).toEqual(keys(fallbackResults['red dragon']));
+      expect(ftsResults['red dragon'].some((r) => r.type === 'npc')).toBe(true);
+      expect(fallbackResults['red dragon'].some((r) => r.type === 'npc')).toBe(true);
+    });
+
     it('agrees on the matched field for every shared hit', () => {
       for (const query of queries) {
         const ftsFields = ftsResults[query].map((r) => `${r.type}:${r.id}:${r.matchedField}`).sort();
         const fallbackFields = fallbackResults[query].map((r) => `${r.type}:${r.id}:${r.matchedField}`).sort();
         expect(fallbackFields).toEqual(ftsFields);
       }
+    });
+  });
+
+  // The encounter/schedule/session projections self-cap at min(limit, 50) on the
+  // fallback path. Before the fix they silently sliced to the cap and never raised
+  // the truncation flag, so a campaign with 55 matching encounters reported
+  // truncated:false — defeating the headline contract of #1481.
+  describe('fallback bounded projections report truncation when they self-cap (issue #1481)', () => {
+    let ctx: TestAppContext;
+    let campaignId: number;
+
+    beforeAll(async () => {
+      ctx = await createTestApp({ overrides: [{ token: CAMPAIGN_SEARCH_FTS_AVAILABLE, useValue: false }] });
+      const server = ctx.app.getHttpServer();
+      campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Bounded Cap Camp' })).body.id;
+      // 55 visible encounters that all match "captest" — strictly more than the
+      // min(limit, 50) self-cap the bounded projections apply.
+      for (let i = 1; i <= 55; i += 1) {
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/encounters`)
+          .set(dm)
+          .send({ name: `Captest Encounter ${i}`, hidden: false });
+      }
+    });
+
+    afterAll(() => closeTestApp(ctx));
+
+    it('raises truncated=true when a bounded projection hits its cap (fallback mode)', async () => {
+      const res = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('captest')}`)
+        .set(dm);
+      expect(res.status).toBe(200);
+      expect(res.body.truncated).toBe(true);
+      expect(res.body.results.length).toBeLessThanOrEqual(50);
+      expect(res.body.results.every((r: Result) => r.type === 'encounter')).toBe(true);
+    });
+  });
+
+  // Decoupling match text from display text (issue #1481): the scheduled-session
+  // fallback must match the space-separated date composite but render the clean
+  // ISO timestamp, matching the FTS path's snippet.
+  describe('fallback scheduled-session snippets are clean, not doubled (issue #1481)', () => {
+    let ctx: TestAppContext;
+    let campaignId: number;
+    let scheduleId: number;
+
+    beforeAll(async () => {
+      ctx = await createTestApp({ overrides: [{ token: CAMPAIGN_SEARCH_FTS_AVAILABLE, useValue: false }] });
+      const server = ctx.app.getHttpServer();
+      campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Snippet Camp' })).body.id;
+      scheduleId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/schedule`)
+          .set(dm)
+          .send({ title: 'Solstice Game', scheduledAt: '2031-09-20T19:30:00.000Z', notes: 'Bring dice.' })
+      ).body.id;
+    });
+
+    afterAll(() => closeTestApp(ctx));
+
+    it('renders the raw timestamp, not the space-separated composite', async () => {
+      const res = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('19:30')}`)
+        .set(dm);
+      expect(res.status).toBe(200);
+      const hit = (res.body.results as Array<{ type: string; id: number; snippet: string }>).find(
+        (r) => r.type === 'scheduled_session' && r.id === scheduleId,
+      );
+      expect(hit).toBeTruthy();
+      // The composite emits "<iso> <iso with T/:/- → space>", e.g. a trailing
+      // "2031 09 20 19 30 00.000Z" — a clean snippet must never contain that
+      // space-separated duplicate of the timestamp.
+      expect(hit!.snippet).not.toMatch(/\d{4} \d{2} \d{2} \d{2} \d{2}/);
+      expect(hit!.snippet).toContain('2031-09-20T19:30:00.000Z');
     });
   });
 });

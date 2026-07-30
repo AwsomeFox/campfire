@@ -224,7 +224,7 @@ function MobileSearchButton({ campaignId }: { campaignId: number }) {
       onClick={() => navigate(`/c/${campaignId}/search`)}
       aria-label={t('nav.searchAria')}
       title={t('nav.searchAria')}
-      className="inline-flex items-center justify-center rounded-md shrink-0"
+      className="inline-flex items-center justify-center rounded-md shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--color-accent)]"
       style={{
         minHeight: 34,
         minWidth: 34,

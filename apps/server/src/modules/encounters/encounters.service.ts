@@ -1305,7 +1305,9 @@ export class EncountersService {
           || matchesSearchQuery(r.questLabel ?? '', folded)
           || matchesSearchQuery(r.sessionLabel ?? '', folded),
       )
-      .slice(0, boundedLimit);
+      // One extra row is a cap sentinel: the search fallback detects it and
+      // raises the response truncation flag without a second count (issue #1481).
+      .slice(0, boundedLimit + 1);
   }
 
 

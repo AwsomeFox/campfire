@@ -558,7 +558,9 @@ export class SchedulingService {
         // Cancelled nights stay discoverable where they can be labelled: the Schedule
         // tab's Past list badges them "Cancelled" and offers Restore.
         .filter((s) => s.status !== 'cancelled')
-        .slice(0, boundedLimit)
+        // One extra row is a cap sentinel for the search fallback (issue #1481):
+        // it detects the over-cap length and flags the response truncated.
+        .slice(0, boundedLimit + 1)
     );
   }
 

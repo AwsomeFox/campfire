@@ -332,7 +332,9 @@ export class SessionsService {
           || matchesSearchQuery(s.dmSecret, folded)
         );
       })
-      .slice(0, boundedLimit);
+      // One extra row is a cap sentinel for the search fallback (issue #1481):
+      // it detects the over-cap length and flags the response truncated.
+      .slice(0, boundedLimit + 1);
   }
 
   async getRowOrThrow(id: number, includeDeleted = false) {

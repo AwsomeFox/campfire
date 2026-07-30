@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
-import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
+import { compareSearchText, foldForSearch, foldedIndexOf, matchesSearchQuery, scheduledAtSearchText } from '../../common/text-search';
 import { notDeleted } from '../../common/soft-delete';
 import { anchorVisibilitySql } from '../../common/anchor-visibility';
 import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
@@ -53,8 +53,16 @@ const FALLBACK_COLLECTION_SCAN_CAP = 1000;
 /** Characters of context to show on each side of a body/recap match in the snippet. */
 const SNIPPET_PAD = 60;
 
-/** One searchable field of an entity: which field it is, and its text. */
-type Field = { field: string; text: string };
+/**
+ * One searchable field of an entity: which field it is, its display `text` (used
+ * for the snippet, original spelling preserved), and an optional `matchText`
+ * that overrides only what the query is matched against. `matchText` lets a field
+ * match against a tokenized form that differs from its display value — e.g. a
+ * scheduled-session date matches the space-separated token composite the FTS5
+ * aux column stores, while the snippet still shows the clean ISO timestamp
+ * (issue #1481).
+ */
+type Field = { field: string; text: string; matchText?: string };
 type Candidate = { type: SearchResultType; id: number; rank: number };
 type HitInput = {
   type: SearchResultType;
@@ -259,14 +267,35 @@ export class SearchService {
       this.scheduling.searchForCampaign(campaignId, needle, limit),
       this.sessions.searchForCampaign(campaignId, role, needle, limit),
     ]);
+    // The bounded search projections (encounters / scheduled sessions / sessions)
+    // self-cap at min(limit, 50) and return one extra row as a cap sentinel, so
+    // the fallback can detect that cap and propagate truncation without a second
+    // count (issue #1481): if any projection returned more than its cap, more
+    // matches exist than were kept and the response must be flagged incomplete.
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    const encounterCapped = encounterHits.length > boundedLimit;
+    const scheduledSessionCapped = scheduledSessionHits.length > boundedLimit;
+    const sessionCapped = sessionHits.length > boundedLimit;
+    if (encounterCapped || scheduledSessionCapped || sessionCapped) {
+      scanCapped = true;
+    }
+    const encounterRows = encounterCapped ? encounterHits.slice(0, boundedLimit) : encounterHits;
+    const scheduledSessionRows = scheduledSessionCapped ? scheduledSessionHits.slice(0, boundedLimit) : scheduledSessionHits;
+    const sessionRows = sessionCapped ? sessionHits.slice(0, boundedLimit) : sessionHits;
 
     const results: SearchResult[] = [];
     const push = (type: SearchResultType, id: number, title: string, fields: Field[], extra?: Partial<SearchResult>) => {
       // Prefix-token match (matchesSearchQuery) keeps the fallback on the SAME
       // semantics as the FTS5 index, so a query returns the same set on either
       // backend (issue #1481) — plain substring (foldedIncludes) used to make
-      // "ex" match "Vexley" only here, never on FTS.
-      const hit = fields.find((f) => f.text && matchesSearchQuery(f.text, needle));
+      // "ex" match "Vexley" only here, never on FTS. Matching reads `matchText`
+      // when present (the token form) but the snippet always renders `text` (the
+      // clean display value, e.g. a raw ISO date rather than its space-separated
+      // twin).
+      const hit = fields.find((f) => {
+        const candidateText = f.matchText ?? f.text;
+        return candidateText && matchesSearchQuery(candidateText, needle);
+      });
       if (!hit) return;
       results.push({
         type,
@@ -324,7 +353,7 @@ export class SearchService {
         { field: 'dmSecret', text: ch.dmSecret },
       ]);
     }
-    for (const s of sessionHits) {
+    for (const s of sessionRows) {
       const title = s.title.trim() || `Session ${s.number}`;
       push('session', s.id, title, [
         { field: 'title', text: title },
@@ -333,7 +362,7 @@ export class SearchService {
         { field: 'dmSecret', text: s.dmSecret },
       ]);
     }
-    for (const encounter of encounterHits) {
+    for (const encounter of encounterRows) {
       push('encounter', encounter.id, encounter.name, [
         { field: 'name', text: encounter.name },
         { field: 'location', text: encounter.locationLabel },
@@ -341,16 +370,17 @@ export class SearchService {
         { field: 'session', text: encounter.sessionLabel },
       ]);
     }
-    for (const scheduled of scheduledSessionHits) {
+    for (const scheduled of scheduledSessionRows) {
       const title = scheduled.title.trim()
         || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
-      // The re-check matches the SAME date form scheduling.searchForCampaign (and
-      // the FTS5 aux column) use, else a date/time query that the bounded read
-      // matched would be dropped here because "19" is buried in the raw "20T19"
-      // token (issue #1481).
+      // Match against the SAME composite scheduling.searchForCampaign (and the
+      // FTS5 aux column) use — else a date/time query the bounded read matched
+      // would be dropped here because "19" is buried in the raw "20T19" token
+      // (issue #1481) — but keep the raw ISO as the display/snippet text so the
+      // rendered snippet is the clean timestamp, not the doubled composite.
       push('scheduled_session', scheduled.id, title, [
         { field: 'title', text: scheduled.title },
-        { field: 'scheduledAt', text: scheduledAtSearchText(scheduled.scheduledAt) },
+        { field: 'scheduledAt', text: scheduled.scheduledAt, matchText: scheduledAtSearchText(scheduled.scheduledAt) },
         { field: 'notes', text: scheduled.notes },
       ]);
     }
@@ -823,7 +853,10 @@ export class SearchService {
           || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
         addHit({ type: 'scheduled_session', id: scheduled.id, title, fields: [
           { field: 'title', text: scheduled.title },
-          { field: 'scheduledAt', text: scheduled.scheduledAt },
+          // matchText mirrors the FTS5 aux column (space-separated date tokens)
+          // so a date/time candidate the index matched survives the prefix-token
+          // re-check; text stays the raw ISO for a clean snippet (issue #1481).
+          { field: 'scheduledAt', text: scheduled.scheduledAt, matchText: scheduledAtSearchText(scheduled.scheduledAt) },
           { field: 'notes', text: scheduled.notes },
         ] });
       }
@@ -836,7 +869,16 @@ export class SearchService {
       if (pushed.has(key)) continue;
       const hit = byKey.get(key);
       if (!hit) continue;
-      const matched = hit.fields.find((f) => f.text && foldedIncludes(f.text, needle));
+      // Same prefix-token predicate as the fallback push (issue #1481): the FTS5
+      // index matches an order-independent token AND, so re-checking with a
+      // contiguous-substring test (foldedIncludes) dropped every multi-token
+      // candidate whose query words were not adjacent in a single field (e.g.
+      // "find ledger" vs "Find the Vex Ledger"), making the default FTS path
+      // return a different set than the fallback for the same query.
+      const matched = hit.fields.find((f) => {
+        const candidateText = f.matchText ?? f.text;
+        return candidateText && matchesSearchQuery(candidateText, needle);
+      });
       if (!matched) continue;
       pushed.add(key);
       results.push({

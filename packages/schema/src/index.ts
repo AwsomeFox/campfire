@@ -11708,11 +11708,15 @@ export type SearchResult = z.infer<typeof SearchResult>;
 // The total/truncated fields (issue #1481) surface silent truncation: `results`
 // is already sliced to the request limit, so a campaign with 200 matches is
 // indistinguishable from one with exactly `limit` without them. `total` is the
-// number of matches the server actually found (before slicing); `truncated` is
-// true when `total > results.length` (more matches exist than are returned).
-// `total` may itself undercount on the degraded fallback path when a per-
-// collection scan cap is hit — `truncated` is also raised then, so the flag is
-// the honest "this list is not complete" signal regardless of mode.
+// number of matches the server actually found within the (possibly bounded)
+// scan, before slicing; `truncated` is true whenever the returned page does not
+// contain every existing match — either because `total > results.length`
+// (paging a known set), or because a scan/index cap was hit (the FTS candidate
+// LIMIT, a fallback per-collection scan cap, or a fallback bounded projection
+// cap) and more matches may exist that were never examined. In that capped case
+// `total` is a lower bound, so `truncated` is the authoritative “this list may
+// be incomplete” signal regardless of mode; clients must not treat `total` as a
+// complete count when `truncated` is true.
 export const SearchResponse = z.object({
   query: z.string(),
   results: z.array(SearchResult),
