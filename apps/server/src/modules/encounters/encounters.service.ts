@@ -4243,12 +4243,13 @@ export class EncountersService {
         : undefined;
       if (prior) {
         if (prior.combatantId !== combatantId) throw new ConflictException('Idempotency key was reused for a different combatant removal');
-        if (prior.consumedAt == null) {
-          receiptUndoToken = prior.token as typeof undoToken;
-          replayed = true;
-          emittedEncounter = freshEncounter;
-          return;
-        }
+        // A key identifies the original DELETE request, not an open removal window.
+        // Undo can consume its capability while a delayed client retry is in flight; that
+        // retry must replay its original response rather than delete the restored row.
+        receiptUndoToken = prior.token as typeof undoToken;
+        replayed = true;
+        emittedEncounter = freshEncounter;
+        return;
       }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
@@ -4334,9 +4335,6 @@ export class EncountersService {
         }
       }
 
-      // A consumed receipt represents an undo that already restored this combatant.
-      // Reusing its key is a new removal, so replace the consumed receipt atomically.
-      if (prior) tx.delete(combatantRemovalUndos).where(eq(combatantRemovalUndos.token, prior.token)).run();
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
       tx.update(encounters).set({
         ...afterEncounter,

@@ -1940,6 +1940,12 @@ export class ActionResolverService {
     );
 
     this.db.transaction((tx) => {
+      // `encounter` was read before this transaction for token and authorization
+      // validation. Use a transaction-local row for the combat-state marker: a fight
+      // can start in the interval, and its action undo must still invalidate a removal
+      // undo's exact-pointer snapshot.
+      const committedEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!committedEncounter) throw new NotFoundException(`Encounter ${encounterId} not found.`);
       // Claim the chain (single-use) FIRST, inside the same transaction as the revert. A
       // concurrent second undo either sees `undoneAt` already set above and never reaches
       // here, or loses this conditional UPDATE (0 rows changed) and is rejected instead of
@@ -2043,7 +2049,7 @@ export class ActionResolverService {
           }
         }
       }
-      if (encounter.status === 'running') {
+      if (committedEncounter.status === 'running') {
         tx.update(encounters)
           .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
           .where(eq(encounters.id, encounterId))

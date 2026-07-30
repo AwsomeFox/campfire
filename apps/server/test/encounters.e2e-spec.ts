@@ -796,7 +796,7 @@ describe('encounters (e2e)', () => {
       expect(restored.status).toBe(404);
     });
 
-    it('treats a removal retry after undo as a fresh removal', async () => {
+    it('replays a removal retry after undo without removing the restored combatant', async () => {
       const server = ctx.app.getHttpServer();
       const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Fresh removal retry campaign' });
       const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Fresh removal retry' });
@@ -807,8 +807,9 @@ describe('encounters (e2e)', () => {
 
       const repeatedRemoval = await request(server).delete(`/api/v1/encounters/${encounter.body.id}/combatants/${added.body.id}`).set(dm).send({ idempotencyKey });
       expect(repeatedRemoval.status).toBe(200);
-      expect(repeatedRemoval.body.undoToken).not.toBe(removed.body.undoToken);
-      expect((await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants/undo-remove`).set(dm).send({ undoToken: repeatedRemoval.body.undoToken })).status).toBe(201);
+      expect(repeatedRemoval.body).toEqual(removed.body);
+      const afterRetry = await request(server).get(`/api/v1/encounters/${encounter.body.id}`).set(dm);
+      expect(afterRetry.body.combatants).toEqual(expect.arrayContaining([expect.objectContaining({ id: added.body.id })]));
     });
 
     it('replays a consumed removal undo after the encounter ends', async () => {
