@@ -34,6 +34,14 @@
       "checking": "Checking committed state — confirming whether that change was saved before you act again.",
       "done": "Checked. Displayed state now matches the server."
     },
+    "sync": {
+      "overridePrompt": "You may be working from stale state.",
+      "overrideConfirm": "Continue anyway",
+      "overrideActive": "Override active — acting on possibly stale data until sync returns.",
+      "bannerOverrideOffline": "Offline — showing last-known encounter. Acting on possibly stale data until sync returns.",
+      "bannerOverrideReconnecting": "Reconnecting — acting on possibly stale data until live again.",
+      "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced."
+    },
     "errors": {
       "load": "Couldn't load encounters.",
       "create": "Couldn't create the encounter.",

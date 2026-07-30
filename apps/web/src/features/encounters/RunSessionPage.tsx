@@ -190,14 +190,25 @@ import {
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
 import {
+  CONNECTING_GRACE_MS,
+  confirmEncounterOverride,
   deriveEncounterSyncState,
-  encounterRiskyActionsBlocked,
+  ENCOUNTER_OVERRIDE_INACTIVE,
+  encounterActionsBlocked,
+  encounterOverrideAuthorized,
+  encounterOverrideOfferable,
   encounterSyncBannerMessage,
   encounterSyncChipClass,
   encounterSyncChipLabel,
+  encounterSyncOverrideBannerKey,
   encounterSyncRevisionFromUpdatedAt,
   ENCOUNTER_SYNC_BANNER_TESTID,
   ENCOUNTER_SYNC_CHIP_TESTID,
+  isConnectingGraceElapsed,
+  revokeEncounterOverrideIfUnauthorized,
+  settleEncounterOverride,
+  type EncounterOverrideAuthority,
+  type EncounterOverrideState,
   type EncounterSyncRevision,
 } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
@@ -1054,6 +1065,42 @@ export default function RunSessionPage() {
   const [encounterReadStale, setEncounterReadStale] = useState(false);
   const [resyncPending, setResyncPending] = useState(false);
   const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
+  // Issue #1446: session-scoped "continue anyway" override for the stale-sync gate, and
+  // the first-load `connecting` grace timer that lets a genuine SSE outage (never
+  // connects at all) become overridable instead of blocking forever.
+  const [encounterSyncOverride, setEncounterSyncOverride] = useState<EncounterOverrideState>(ENCOUNTER_OVERRIDE_INACTIVE);
+  const connectingSinceRef = useRef<number | null>(null);
+  const [connectingGraceElapsed, setConnectingGraceElapsed] = useState(false);
+  // Issue #1446 review fix (round 5) — one level up from the encounter-switch fix below:
+  // `eventStatus`, the connecting-grace timer, and `encounterSyncOverride` all belong to
+  // the CAMPAIGN's SSE stream (or, for the override, the identity that granted it) — they
+  // outlive an encounter switch but NOT a campaign switch or a signed-in-identity change.
+  // `RunSessionPage` is reused across BOTH: a cross-campaign SPA navigation (e.g.
+  // following a notification link — NotificationsBell.tsx — into a different campaign's
+  // encounter) keeps this component mounted with a new `cid`, exactly like an encounter
+  // switch keeps it mounted with a new `eid`. Without this, a DM's override confirmed in
+  // campaign A would silently authorize stale-state writes in campaign B — a cross-
+  // campaign leak of a trust decision, strictly worse than the ergonomic bug it started
+  // as. A user-identity change (re-auth as someone else without an intervening route
+  // change/remount) is the same class of leak one level further up and is covered by the
+  // same key. Rather than another special-cased reset effect (the failure mode behind the
+  // last two review rounds — an effect with the wrong dependency array, or a second effect
+  // whose reset the first effect's timer didn't expect), this state is explicitly KEYED to
+  // `(campaignId, userId)`: the key is compared during render (React's documented
+  // "adjust state while rendering" pattern), and a mismatch is corrected in the SAME
+  // render that detects it, before any effect below ever observes stream state that
+  // belongs to a different campaign or identity. Both behaviors (persist across an
+  // encounter switch, reset across a campaign/identity switch) fall out of this one
+  // comparison — no per-transition special case to keep re-discovering.
+  const campaignStreamKey = `${cid}:${me?.user.id ?? ''}`;
+  const [ownedCampaignStreamKey, setOwnedCampaignStreamKey] = useState(campaignStreamKey);
+  if (ownedCampaignStreamKey !== campaignStreamKey) {
+    setOwnedCampaignStreamKey(campaignStreamKey);
+    setEventStatus(null);
+    connectingSinceRef.current = null;
+    setConnectingGraceElapsed(false);
+    setEncounterSyncOverride(ENCOUNTER_OVERRIDE_INACTIVE);
+  }
   // The player display is deliberately a separate browsing context: navigating this
   // cockpit to `/screen` used to strand the DM without initiative or turn controls.
   // Keep only the window handle and non-secret status here; cast capabilities never
@@ -1265,14 +1312,93 @@ export default function RunSessionPage() {
     eventStatus,
     charactersQuery.isFetching && !charactersQuery.isLoading,
   );
+  // Issue #1446: track how long the CURRENT first-load `connecting` attempt has run so a
+  // genuine "SSE never connects" outage degrades to overridable after a bounded grace
+  // period rather than blocking forever. The effect body only re-fires when `eventStatus`
+  // itself changes, so the `setTimeout` set here still fires later even though nothing
+  // else re-renders while the stream stays stuck connecting.
+  useEffect(() => {
+    const isConnectingLike = eventStatus === null || eventStatus === 'connecting';
+    if (!isConnectingLike) {
+      connectingSinceRef.current = null;
+      setConnectingGraceElapsed(false);
+      return;
+    }
+    if (connectingSinceRef.current == null) connectingSinceRef.current = Date.now();
+    if (isConnectingGraceElapsed(connectingSinceRef.current, Date.now())) {
+      setConnectingGraceElapsed(true);
+      return;
+    }
+    const remaining = CONNECTING_GRACE_MS - (Date.now() - connectingSinceRef.current);
+    const timer = setTimeout(() => setConnectingGraceElapsed(true), remaining);
+    return () => clearTimeout(timer);
+  }, [eventStatus]);
+
   const encounterSync = deriveEncounterSyncState({
     eventStatus,
     readStale: encounterReadStale,
     resyncPending,
     staleIdentity,
+    connectingGraceElapsed,
   });
-  const riskyBlocked = encounterRiskyActionsBlocked(encounterSync);
-  const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
+  // Issue #1446, final review round: every precondition the "continue anyway" override
+  // needs to authorize anything, named once — see `encounterOverrideAuthorized`'s doc for
+  // the full enumeration and why each one is there. Five prior review rounds each found a
+  // different transition that silently satisfied some of these and bypassed one:
+  // canDmWrite alone (a demoted player kept acting), then campaign/identity match (a
+  // cross-campaign or cross-identity carry-over), and now staleIdentity — AuthProvider's
+  // documented contract for a cached-identity restore is that membership may be obsolete,
+  // so the override must be neither offerable nor valid while it is true, however long
+  // the outage has lasted or who confirmed it.
+  const overrideAuthority: EncounterOverrideAuthority = {
+    canDmWrite,
+    staleIdentity,
+    campaignId: cid,
+    userId: me?.user.id ?? null,
+  };
+  // A confirmed override is scoped to ONE outage — consumed the moment the stream is live
+  // again, so a later, separate outage prompts again rather than silently sailing through
+  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost DM
+  // authority, or the identity went stale) — regaining authority requires a fresh
+  // confirmation rather than silently resuming the earlier one.
+  useEffect(() => {
+    setEncounterSyncOverride((prev) =>
+      revokeEncounterOverrideIfUnauthorized(
+        settleEncounterOverride(prev, encounterSync),
+        overrideAuthority.canDmWrite && !overrideAuthority.staleIdentity,
+      ),
+    );
+  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.staleIdentity]);
+  // Belt-and-braces alongside the effect above: `encounterOverrideAuthorized` is THE
+  // single gate (every precondition, including the campaign/identity tag match),
+  // re-evaluated synchronously at render time too — so there is no one-render gap between
+  // any precondition changing and the stored flag actually being treated as inactive,
+  // where a disqualified viewer's mutations could still slip through.
+  const effectiveEncounterSyncOverride: EncounterOverrideState = encounterOverrideAuthorized(
+    encounterSyncOverride,
+    overrideAuthority,
+  )
+    ? encounterSyncOverride
+    : ENCOUNTER_OVERRIDE_INACTIVE;
+  const riskyBlocked = encounterActionsBlocked(encounterSync, effectiveEncounterSyncOverride);
+  // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
+  // issue text) — a player confirming it would re-enable their own owned-combatant HP /
+  // death-save / action mutations against possibly-stale data, and a stale-identity
+  // viewer confirming it would authorize mutations against a membership snapshot that may
+  // no longer be true (final review round). Neither has a path to ever set
+  // encounterSyncOverride.active; they stay blocked (with the informational banner) for
+  // the duration.
+  const encounterSyncOverrideOfferable =
+    overrideAuthority.canDmWrite
+    && !overrideAuthority.staleIdentity
+    && encounterOverrideOfferable(encounterSync)
+    && !effectiveEncounterSyncOverride.active;
+  // Issue #1446 review fix: once the override is active, controls ARE actionable again —
+  // the base banner's "combat actions are paused" copy would be actively false (and
+  // contradict the enabled controls for both screen-reader and sighted users). Swap to an
+  // override-aware i18n variant that keeps the stale-data warning without that claim.
+  const overrideBannerKey = effectiveEncounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
+  const encounterSyncBanner = overrideBannerKey ? t(overrideBannerKey) : encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
     if (syncRevision?.lastSyncAt == null) return undefined;
@@ -1308,13 +1434,46 @@ export default function RunSessionPage() {
   const [showMapGuidance, setShowMapGuidance] = useState(false);
   // Drop action errors (and any lingering map-attach guidance) when navigating to a
   // different encounter.
+  // Issue #1446 review fix (round 3) — the encounter-switch lifecycle, considered as a
+  // whole rather than one symptom at a time. `RunSessionPage` is reused across encounters
+  // within the SAME campaign, so every piece of sync state here has to be deliberately
+  // classified as ENCOUNTER-scoped (this encounter's own history — reset on `eid` change)
+  // or STREAM/SESSION-scoped (belongs to the campaign SSE connection or the DM's outage
+  // acknowledgement, which both outlive any one encounter — must NOT reset here):
+  //
+  //   ENCOUNTER-scoped (reset below):
+  //     - actionError / showMapGuidance: this encounter's own action-error and
+  //       post-map-attach UI state.
+  //     - encounterReadStale / resyncPending: this encounter's own REST-read staleness.
+  //     - syncRevision: this encounter's own updatedAt/lastSyncAt watermark.
+  //
+  //   STREAM/SESSION-scoped (deliberately left untouched here):
+  //     - eventStatus: tracks `useCampaignEvents(cid, …)` below, keyed on `cid` — the
+  //       SAME connection survives an encounter switch, and the reconnect loop only calls
+  //       onStatusChange when the status actually CHANGES, so a still-`connected` stream
+  //       never re-announces itself. Nulling this here used to strand the derived sync
+  //       state on a stale `connecting` (review round 2 regression).
+  //     - connectingSinceRef / connectingGraceElapsed: how long the CURRENT connecting
+  //       attempt has run is a stream-level fact, computed entirely inside the
+  //       `[eventStatus]`-keyed effect below. Resetting these two HERE, on a dependency
+  //       array that does not include `eventStatus`, used to leave that other effect
+  //       never re-firing (its own dependency hadn't changed) — so the grace timer could
+  //       never be re-armed for the new encounter and it sat on `Connecting` forever with
+  //       no override offered (review round 3 regression: the exact permanent block this
+  //       issue exists to remove). They now live ENTIRELY in that other effect.
+  //     - encounterSyncOverride: a "continue anyway" acknowledgement about the STREAM's
+  //       health, not about any one encounter's data — an outage that started while
+  //       viewing encounter A is still the same outage after switching to encounter B, so
+  //       clearing it here would reintroduce exactly the "confirm on every click" friction
+  //       the issue asks to eliminate. Settled only by `settleEncounterOverride` (stream
+  //       back to `live`), by losing DM authority, or by a campaign/identity change (see
+  //       `campaignStreamKey` above) — never by an encounter switch.
   useEffect(() => {
     setActionError(null);
     setShowMapGuidance(false);
     setEncounterReadStale(false);
     setResyncPending(false);
     setSyncRevision(null);
-    setEventStatus(null);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -1474,12 +1633,16 @@ export default function RunSessionPage() {
     setActionError(message ? makeActionError(message) : null);
   }, []);
   const reportTurnAdvanceError = useCallback((err: unknown) => {
+    // Issue #1446 review fix: this used to hardcode its own English string here, so the
+    // errors.json TURN_ALREADY_ADVANCED catalog entry — including the "someone else
+    // already advanced the turn" wording this issue asked for — was dead code; nothing
+    // ever rendered it. Route through the same i18n seam every other server error uses.
     if (err instanceof ApiError && err.code === 'TURN_ALREADY_ADVANCED') {
-      surfaceActionError('Another device already advanced the turn. The tracker has refreshed.');
+      surfaceActionError(t('errors.TURN_ALREADY_ADVANCED'));
       return;
     }
     reportError(err);
-  }, [reportError, surfaceActionError]);
+  }, [reportError, surfaceActionError, t]);
 
   // Issue #580 — the ambiguous-outcome gate. When a combat write times out or its socket
   // drops, the outcome is genuinely unknown: the server may have committed. Showing a
@@ -2561,6 +2724,9 @@ export default function RunSessionPage() {
               </>
             )}
             {lifecycle.end && (
+              // Issue #1446: End writes an HP/condition/death-state snapshot back to each
+              // linked character sheet (cross-entity, no CAS guard) — genuinely conflict-prone,
+              // so it stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
@@ -2581,6 +2747,11 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.delete && (
+              // Issue #1446: delete has no revision/CAS guard server-side and clears the
+              // campaign's active-encounter pointer — a stale tab can trash an encounter
+              // another DM/the AI driver is actively updating. Racing a destructive,
+              // effectively unrecoverable action is worse than racing a turn advance, so
+              // this stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
                 {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
@@ -2600,6 +2771,45 @@ export default function RunSessionPage() {
         >
           {encounterSyncBanner}
         </p>
+      )}
+
+      {/* Issue #1446: while not live, conflict-prone actions are blocked but confirmable —
+          a stuck stream (proxy buffering, a terminated long-lived connection, …) must not
+          brick combat permanently. Granting the override does not touch the banner above,
+          which stays visible for as long as the stream is unhealthy so the DM never loses
+          track of which mode they're in. DM-only (canDmWrite): the issue frames "continue
+          anyway" as a DM decision — a player has no path to grant it, so a player's own
+          combatant mutations stay blocked for the whole outage. */}
+      {encounterSyncOverrideOfferable && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="encounter-sync-override-prompt"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+        >
+          <span>{t('encounters.sync.overridePrompt')}</span>
+          <Btn
+            density="xs"
+            ghost
+            className="text-xs"
+            data-testid="encounter-sync-override-confirm"
+            onClick={() => {
+              // Defense in depth alongside the gate above — never let a non-DM or a
+              // stale-identity viewer grant the override even if this handler is somehow
+              // reachable; the tag is set from THIS context, satisfying the campaign/
+              // identity preconditions by construction.
+              if (!overrideAuthority.canDmWrite || overrideAuthority.staleIdentity) return;
+              setEncounterSyncOverride(confirmEncounterOverride(overrideAuthority.campaignId, overrideAuthority.userId));
+            }}
+          >
+            {t('encounters.sync.overrideConfirm')}
+          </Btn>
+        </div>
+      )}
+      {effectiveEncounterSyncOverride.active && encounterSync !== 'live' && (
+        <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
+          {t('encounters.sync.overrideActive')}
+        </span>
       )}
 
       {isArchmage && encounter.status === 'running' && (
@@ -2625,6 +2835,12 @@ export default function RunSessionPage() {
               {encounter.escalationDieOverride != null ? ` · override +${encounter.escalationDieOverride}` : ''}
             </span>
             {canDmWrite && (
+              // Issue #1446 re-audit (2nd pass): `updateEscalationDie` has concurrent writers
+              // beyond this one tab — the REST controller lets any campaign DM call it, and
+              // `set_escalation_die` (mcp-tools.ts) exposes the same unconditional, no-CAS
+              // service write over MCP. A stale tab can clobber a newer override/hold set by a
+              // co-DM or an MCP caller — genuinely shared state, so these stay gated like the
+              // other conflict-prone controls.
               <div className="flex items-center gap-2 flex-wrap ml-auto">
                 <Btn density="xs"
                   ghost
