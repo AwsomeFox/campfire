@@ -2201,8 +2201,9 @@ export class CampaignsService {
       }
 
       // Scheduled sessions (issue #436): planned game nights with RSVPs. Inserted
-      // early — no cross-refs to other entity types. RSVP userIds are install-local,
-      // so reassign to the importer while preserving userName/status/note provenance.
+      // early — no cross-refs to other entity types. Source RSVP identities cannot
+      // name local accounts, so each copied reply gets a deterministic reserved proxy
+      // rather than falsely assigning attendance to the importing DM.
       for (const s of scheduledSessionRows) {
         // Issue #504: the lifecycle status round-trips too. Dropping it would import a
         // cancelled night back as a LIVE one — re-listed under Upcoming, re-armed for
@@ -2244,11 +2245,11 @@ export class CampaignsService {
           })
           .returning()
           .all();
-        for (const rsvp of asArr(s.rsvps)) {
+        for (const [rsvpIndex, rsvp] of asArr(s.rsvps).entries()) {
           tx.insert(sessionRsvps)
             .values({
               scheduledSessionId: row.id,
-              userId: importerId,
+              userId: `imported-rsvp:${cid}:${row.id}:${rsvpIndex}`,
               userName: str(rsvp.userName),
               userImported: true,
               status: str(rsvp.status, 'maybe'),

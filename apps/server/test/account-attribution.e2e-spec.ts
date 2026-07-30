@@ -366,7 +366,16 @@ describe('account historical attribution privacy (e2e)', () => {
   });
 
   it('renames mutable retained labels while retaining stable ids', async () => {
-    const renamed = await member.patch('/api/v1/me/preferences').send({ displayName: RENAMED_LABEL });
+    const token = await member.post('/api/v1/tokens').send({
+      name: 'attribution-rename-token',
+      scope: 'player',
+      writeScope: 'direct',
+    });
+    expect(token.status).toBe(201);
+    const renamed = await request(ctx.app.getHttpServer())
+      .patch('/api/v1/me/preferences')
+      .set('Authorization', `Bearer ${token.body.token}`)
+      .send({ displayName: RENAMED_LABEL });
     expect(renamed.status).toBe(200);
     expect(renamed.body.displayName).toBe(RENAMED_LABEL);
 
@@ -388,8 +397,8 @@ describe('account historical attribution privacy (e2e)', () => {
       .all()
       .find((row) => row.action === 'user.preferences.update');
     expect(preferenceAudit).toMatchObject({
-      actor: String(memberId),
-      actorRole: 'player',
+      actor: 'token:attribution-rename-token',
+      actorRole: 'dm',
       detail: `user:${memberId}: displayName`,
     });
   });

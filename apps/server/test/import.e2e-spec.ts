@@ -126,6 +126,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     const scheduleRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/schedule`)
       .send({ scheduledAt: '2099-07-01T20:00:00.000Z', title: 'Heist night', notes: 'Dark moon' });
+    await dmAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'yes', note: 'GM confirms' });
     await playerAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'maybe', note: 'Checking schedule' });
     // Issue #504: cancelling retains the row, so a cancelled night now reaches the export.
     const cancelledScheduleRes = await dmAgent
@@ -259,7 +260,12 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     const importedHeist = schedules.body.find((s: { title: string }) => s.title === 'Heist night');
     expect(importedHeist).toBeDefined();
     expect(importedHeist.status).toBe('scheduled');
-    expect(importedHeist.rsvps.some((r: { status: string; note: string }) => r.status === 'maybe' && r.note === 'Checking schedule')).toBe(true);
+    expect(importedHeist.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'yes', note: 'GM confirms' }),
+        expect.objectContaining({ status: 'maybe', note: 'Checking schedule' }),
+      ]),
+    );
 
     // Issue #504: the cancelled lifecycle state round-trips. Importing it back as a LIVE
     // night would resurrect a called-off game into Upcoming, the reminder sweep and the
@@ -318,7 +324,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       db.select({ imported: notes.authorImported }).from(notes).where(eq(notes.campaignId, imported.id)),
       db.select({ imported: comments.authorImported }).from(comments).where(eq(comments.campaignId, imported.id)),
       db
-        .select({ imported: sessionRsvps.userImported })
+        .select({ imported: sessionRsvps.userImported, userId: sessionRsvps.userId })
         .from(sessionRsvps)
         .where(eq(sessionRsvps.scheduledSessionId, importedHeist.id)),
       db
@@ -328,7 +334,10 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     ]);
     expect(noteAttribution).not.toHaveLength(0);
     expect(commentAttribution).not.toHaveLength(0);
-    expect(rsvpAttribution).toEqual([{ imported: true }]);
+    expect(rsvpAttribution).toEqual([
+      { imported: true, userId: `imported-rsvp:${imported.id}:${importedHeist.id}:0` },
+      { imported: true, userId: `imported-rsvp:${imported.id}:${importedHeist.id}:1` },
+    ]);
     expect(revisionAttribution).not.toHaveLength(0);
     expect(noteAttribution.every((row) => row.imported)).toBe(true);
     expect(commentAttribution.every((row) => row.imported)).toBe(true);

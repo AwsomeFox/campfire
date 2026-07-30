@@ -364,7 +364,7 @@ export class UsersService {
   }
 
   /** Self-service preferences (display name + accent color + reading mode) — PATCH /me/preferences. */
-  async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
+  async updatePreferences(id: number, input: PreferencesUpdateInput, actor: RequestUser): Promise<User> {
     return this.db.transaction((tx) => {
       const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
       if (!existing) throw new NotFoundException(`User ${id} not found`);
@@ -387,8 +387,8 @@ export class UsersService {
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
       if (input.displayName !== undefined && input.displayName !== existing.displayName) {
         this.audit.logInTx(tx, {
-          actor: String(id),
-          actorRole: existing.serverRole === 'admin' ? 'admin' : 'player',
+          actor: auditActor(actor),
+          actorRole: auditActorRole(actor),
           action: 'user.preferences.update',
           entityType: 'user',
           entityId: id,

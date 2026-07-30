@@ -689,7 +689,8 @@ export const sessionRsvps = sqliteTable('session_rsvps', {
   scheduledSessionId: integer('scheduled_session_id').notNull(),
   userId: text('user_id').notNull(),
   userName: text('user_name').notNull().default(''),
-  // Imported RSVP ownership is a local proxy; preserve its source name on account relabeling.
+  // Imported RSVP ownership uses a reserved per-row proxy, never a local account;
+  // preserve its source name on account relabeling.
   userImported: integer('user_imported', { mode: 'boolean' }).notNull().default(false),
   status: text('status').notNull(), // 'yes' | 'no' | 'maybe'
   note: text('note').notNull().default(''),

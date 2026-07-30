@@ -276,7 +276,7 @@ export class MeController {
     if (user.id.startsWith('dev:')) {
       throw new UnauthorizedException('Preferences are not available for dev-auth users');
     }
-    return this.usersService.updatePreferences(Number(user.id), body);
+    return this.usersService.updatePreferences(Number(user.id), body, user);
   }
 
   /**
