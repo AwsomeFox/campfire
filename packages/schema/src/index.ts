@@ -10019,7 +10019,7 @@ export const CombatantCreate = z.object({
   libraryMonsterId: Id.optional(),
 });
 /** Retry key for a combatant removal whose response may be lost in transit. */
-export const CombatantRemoveRequest = z.object({ idempotencyKey: z.string().uuid().optional() });
+export const CombatantRemoveRequest = z.object({ idempotencyKey: IdempotencyKey });
 export type CombatantRemoveRequest = z.infer<typeof CombatantRemoveRequest>;
 /** The committed removal receipt; retain every field to retry either side safely. */
 export const CombatantRemoveResult = z.object({ undoToken: z.string().uuid(), encounterId: Id, combatantId: Id });
