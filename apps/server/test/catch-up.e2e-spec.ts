@@ -108,3 +108,50 @@ describe('catch-up cursor mark (real auth, e2e)', () => {
     expect(quiet.body.totalCount).toBe(0);
   });
 });
+
+describe('catch-up mark is exempt from the campaign archive gate (issue #1480)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const admin = request.agent(ctx.app.getHttpServer());
+    expect((await admin.post('/api/v1/auth/setup').send({ username: 'archcatch-admin', password: 'admin-password-1' })).status).toBe(201);
+    expect((await admin.post('/api/v1/users').send({ username: 'archcatch-dm', password: 'dm-password-1', serverRole: 'user' })).status).toBe(201);
+
+    dm = request.agent(ctx.app.getHttpServer());
+    expect((await dm.post('/api/v1/auth/login').send({ username: 'archcatch-dm', password: 'dm-password-1' })).status).toBe(201);
+
+    // The creator is a campaign member (its DM). Archive it so shared writes are
+    // read-only — the regression is that catch-up mark still works anyway.
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Archived Catch-up Campaign' });
+    expect(campaign.status).toBe(201);
+    campaignId = campaign.body.id;
+    const archive = await dm.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'completed' });
+    expect(archive.status).toBe(200);
+    expect(archive.body.status).toBe('completed');
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a member of an archived campaign can still mark catch-up and dismiss the banner (201, not 403)', async () => {
+    // Regression (issue #1480): catch-up mark bumps only the caller's OWN
+    // per-user read cursor (personal read-state, like a notification read
+    // marker), so it is EXEMPT from the archive read-only gate. A 403 here
+    // would trap the dashboard "since you were here" banner forever on a
+    // paused/completed campaign. The archive gate is role-agnostic, so covering
+    // it with the DM (a member) proves the exemption for any member.
+    const mark = await dm.post(`/api/v1/campaigns/${campaignId}/catch-up/mark`).send({});
+    expect(mark.status).toBe(201);
+    expect(mark.body.lastCaughtUpAt).toBeTruthy();
+
+    // The stored cursor is honored by the next GET — the banner stays dismissed.
+    const quiet = await dm.get(`/api/v1/campaigns/${campaignId}/catch-up`);
+    expect(quiet.status).toBe(200);
+    expect(quiet.body.lastCaughtUpAt).toBe(mark.body.lastCaughtUpAt);
+    expect(quiet.body.totalCount).toBe(0);
+  });
+});

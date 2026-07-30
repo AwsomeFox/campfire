@@ -48,9 +48,16 @@ export class CatchUpController {
     @Body() body: CatchUpMarkDto,
     @CurrentUser() user: RequestUser,
   ) {
-    // Bumping the catch-up cursor is a member-level write, so the archive
-    // read-only gate applies alongside membership (issue #1480).
-    await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    // DELIBERATE archive exemption (issue #1480): marking catch-up bumps only
+    // the caller's OWN per-user, per-campaign read cursor (consumed by
+    // GET /catch-up) — personal read-state like a notification read marker, not
+    // shared campaign content another member can observe. So the membership
+    // gate still applies, but the archive read-only gate does NOT: a member of
+    // a paused/completed campaign must be able to clear the dashboard banner
+    // (the web client only dismisses it on a successful POST). Other member
+    // writes (RSVP, proposal withdraw/revise) DO mutate shared table state and
+    // stay archive-gated via requireMemberOnWritableCampaign().
+    await this.access.requireMember(user, campaignId);
     const userId = numericUserId(user.id);
     if (userId === null) {
       throw new BadRequestException('Catch-up cursor requires a real user account.');

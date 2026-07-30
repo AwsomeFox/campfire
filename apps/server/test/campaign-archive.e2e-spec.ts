@@ -152,7 +152,7 @@ describe('campaign archive read-only enforcement (e2e)', () => {
       expect(reject.status).toBe(403);
     });
 
-    it('member-level writes that used to skip the archive gate: RSVP, proposal withdraw/revise, catch-up mark (issue #1480)', async () => {
+    it('member-level writes that used to skip the archive gate: RSVP, proposal withdraw/revise (issue #1480)', async () => {
       // RSVP upsert — any member; the archive gate now applies.
       const rsvp = await request(server).put(`/api/v1/schedule/${scheduleId}/rsvp`).set(player).send({ status: 'yes' });
       expect(rsvp.status).toBe(403);
@@ -171,12 +171,18 @@ describe('campaign archive read-only enforcement (e2e)', () => {
         .send({ payload: { title: 'Revised While Archived' } });
       expect(revise.status).toBe(403);
       expect(revise.body.message).toContain('read-only');
+    });
 
-      // Catch-up mark — bumps the caller's own read cursor; still a write, still
-      // blocked. The gate fires before the numeric-user-id check.
+    it('catch-up mark is EXEMPT from the archive gate — personal read-state (issue #1480)', async () => {
+      // The catch-up cursor is the caller's OWN per-user read marker (consumed
+      // by GET /catch-up); nobody else can observe it, so the archive read-only
+      // gate must NOT fire — otherwise the dashboard banner is un-dismissible on
+      // a paused/completed campaign. This dev-auth player has no numeric id, so
+      // the request passes the gate and reaches the numeric-user guard (400),
+      // NOT a 403 read-only: the archive gate was skipped. The full 201 path
+      // for a real authenticated member is covered in catch-up.e2e-spec.ts.
       const mark = await request(server).post(`/api/v1/campaigns/${campaignId}/catch-up/mark`).set(player).send({});
-      expect(mark.status).toBe(403);
-      expect(mark.body.message).toContain('read-only');
+      expect(mark.status).not.toBe(403);
     });
 
     it('attachment upload and delete are blocked', async () => {
