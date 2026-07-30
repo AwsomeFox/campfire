@@ -99,7 +99,12 @@ type EncounterEventFields = {
 /** Narrow extension point for an action whose idempotent response is not just a combatant. */
 type CombatantUpdateTransactionOptions = {
   beforeWriteInTransaction?: CombatantTransactionHook;
-  afterWriteInTransaction?: (tx: SyncDb, committed: Combatant, fresh: typeof combatants.$inferSelect) => void;
+  afterWriteInTransaction?: (
+    tx: SyncDb,
+    committed: Combatant,
+    fresh: typeof combatants.$inferSelect,
+    freshEncounter: typeof encounters.$inferSelect,
+  ) => void;
   /** The caller inserted every death-save event with its keyed write, so do not append duplicates after commit. */
   deathSaveEventsInTransaction?: boolean;
   operation?: EncounterOpClaim['operation'];
@@ -3267,7 +3272,7 @@ export class EncountersService {
           // `updateCombatant` applies this server-only face after the hook returns.
           deathSavePatch.deathSaveRoll = result.total;
         },
-        afterWriteInTransaction: (tx, committed, fresh) => {
+        afterWriteInTransaction: (tx, committed, fresh, freshEncounter) => {
           // This evidence is part of the authoritative action: commit it with the
           // combatant outcome, dice row, audit entry, and idempotency replay response,
           // or roll all five back. A retry then cannot replay an outcome whose combat
@@ -3283,15 +3288,15 @@ export class EncountersService {
           });
           if (committed.deathState === 'dead' && fresh.deathState !== 'dead') {
             const actor =
-              encounter.currentCombatantId === null || encounter.currentCombatantId === combatantId
+              freshEncounter.currentCombatantId === null || freshEncounter.currentCombatantId === combatantId
                 ? null
                 : tx
                     .select({ id: combatants.id, name: combatants.name })
                     .from(combatants)
-                    .where(and(eq(combatants.id, encounter.currentCombatantId), eq(combatants.encounterId, encounterId)))
+                    .where(and(eq(combatants.id, freshEncounter.currentCombatantId), eq(combatants.encounterId, encounterId)))
                     .limit(1)
                     .all()[0] ?? null;
-            this.appendEventInTransaction(tx, encounterId, encounter.round, 'death', {
+            this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'death', {
               actor: actor?.name ?? null,
               target: committed.name,
               actorId: actor?.id ?? null,
@@ -3299,7 +3304,7 @@ export class EncountersService {
               detail: 'died',
             });
           }
-          this.appendEventInTransaction(tx, encounterId, encounter.round, 'roll', {
+          this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'roll', {
             target: committed.name,
             targetId: combatantId,
             detail: deathSaveRollEventDetail(
@@ -3626,6 +3631,9 @@ export class EncountersService {
         // transaction-local encounter row, never the stale preflight snapshot.
         const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        if (!fresh || fresh.encounterId !== encounterId) {
+          throw new NotFoundException(`Combatant ${combatantId} not found`);
+        }
         // A caller may attach a tightly-scoped transactional side effect after the
         // fresh lifecycle read but before this mutation. A failure rolls both it and
         // the ensuing combatant write back. Used only for #1462's mandatory dice-log
@@ -3863,7 +3871,7 @@ export class EncountersService {
             .run();
         }
 
-        options?.afterWriteInTransaction?.(tx, combatantToDomain(row), fresh);
+        options?.afterWriteInTransaction?.(tx, combatantToDomain(row), fresh, freshEncounter);
 
         // The claim lands LAST but in the SAME transaction as everything above, carrying the
         // exact response body this call will return. Both commit or neither does — there is

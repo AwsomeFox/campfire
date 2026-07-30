@@ -3610,6 +3610,65 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     }
   });
 
+  it('returns not found when a combatant is removed after death-save preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const raceCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save combatant race' });
+    expect(raceCampaign.status).toBe(201);
+    const raceCampaignId = raceCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${raceCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Vanishing Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const raceEncounter = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Combatant race', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceEncounterId = raceEncounter.body.id as number;
+    const raceCombatantId = raceEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        expect(
+          (await request(server).delete(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`).set(dm)).status,
+        ).toBe(200);
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const beforeRolls = (await request(server).get(`/api/v1/campaigns/${raceCampaignId}/rolls`).set(player)).body.length;
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-combatant-remove-race' });
+
+      expect(rejected.status).toBe(404);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await request(server).get(`/api/v1/campaigns/${raceCampaignId}/rolls`).set(player)).body).toHaveLength(beforeRolls);
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
   it('replays a committed REST death save after encounter trashing without allowing a fresh key', async () => {
     const server = ctx.app.getHttpServer();
     const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash replay' });

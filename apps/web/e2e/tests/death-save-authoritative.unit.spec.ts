@@ -7,6 +7,8 @@ const runSessionSource = readFileSync(resolve(__dirname, '../../src/features/enc
 
 test('TurnWorkspace keeps the server-authoritative death save single-flight', () => {
   expect(source).toContain('deathSavePending?: boolean');
+  expect(source).toContain("const isDying = turn.current.deathState === 'dying';");
+  expect(source).toContain('{isDying && hasDeathSaves && (');
   expect(source).toContain('disabled={controlsDisabled || deathSavePending || !onRollDeathSave}');
   expect(source).not.toContain('Math.random()');
   expect(source).not.toContain('onPatchCombatant');
