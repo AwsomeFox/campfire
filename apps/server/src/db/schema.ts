@@ -497,6 +497,7 @@ export const sessionShares = sqliteTable('session_shares', {
   campaignId: integer('campaign_id').notNull(),
   label: text('label').notNull().default(''),
   createdBy: text('created_by').notNull().default(''),
+  createdByUserId: text('created_by_user_id'),
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
   expiresAt: text('expires_at'),
@@ -514,6 +515,7 @@ export const castSessions = sqliteTable('cast_sessions', {
   campaignId: integer('campaign_id').notNull(),
   label: text('label').notNull().default(''),
   createdBy: text('created_by').notNull().default(''),
+  createdByUserId: text('created_by_user_id'),
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
   exitPinHash: text('exit_pin_hash').notNull(),
@@ -687,6 +689,9 @@ export const sessionRsvps = sqliteTable('session_rsvps', {
   scheduledSessionId: integer('scheduled_session_id').notNull(),
   userId: text('user_id').notNull(),
   userName: text('user_name').notNull().default(''),
+  // Imported RSVP ownership uses a reserved per-row proxy, never a local account;
+  // preserve its source name on account relabeling.
+  userImported: integer('user_imported', { mode: 'boolean' }).notNull().default(false),
   status: text('status').notNull(), // 'yes' | 'no' | 'maybe'
   note: text('note').notNull().default(''),
   createdAt: text('created_at').notNull(),
@@ -698,6 +703,8 @@ export const notes = sqliteTable('notes', {
   campaignId: integer('campaign_id').notNull(),
   authorUserId: text('author_user_id').notNull(),
   authorName: text('author_name').notNull().default(''),
+  // Imported ownership is a local proxy; the copied name remains source provenance.
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   kind: text('kind').notNull().default('note'),
   visibility: text('visibility').notNull().default('private'),
   entityType: text('entity_type'),
@@ -746,6 +753,8 @@ export const comments = sqliteTable('comments', {
   parentId: integer('parent_id'),
   authorUserId: text('author_user_id').notNull(),
   authorName: text('author_name').notNull().default(''),
+  // Imported ownership is a local proxy; the copied name remains source provenance.
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
   // Immutable creation-time character attribution (issue #787). character_id is
@@ -800,12 +809,14 @@ export const entityRevisions = sqliteTable('entity_revisions', {
   // Version author (issue #813). Empty when authorship_known=0 (legacy rows).
   authorUserId: text('author_user_id').notNull().default(''),
   authorName: text('author_name').notNull().default(''),
+  authorImported: integer('author_imported', { mode: 'boolean' }).notNull().default(false),
   authorSource: text('author_source').notNull().default('human'), // 'human' | 'ai' | 'tool'
   authorSourceDetail: text('author_source_detail').notNull().default(''),
   createdAt: text('created_at').notNull().default(''), // authored-at; '' when unknown (legacy)
   // Replacing actor/time — null replaced_at marks the current tip (still live).
   replacedByUserId: text('replaced_by_user_id').notNull().default(''),
   replacedByName: text('replaced_by_name').notNull().default(''),
+  replacedByImported: integer('replaced_by_imported', { mode: 'boolean' }).notNull().default(false),
   replacedBySource: text('replaced_by_source').notNull().default('human'),
   replacedBySourceDetail: text('replaced_by_source_detail').notNull().default(''),
   replacedAt: text('replaced_at'),
@@ -2511,10 +2522,9 @@ export const campaignExportRequests = sqliteTable(
 // on a race, so "two participants tapped at once" resolves to one held table instead of a
 // conflict either of them has to retry.
 //
-// Note the column that is ABSENT: there is no activated_by_user_id. An anonymous activation
-// keeps its promise by never handing the identity to this layer at all, so no projection,
-// export, or audit join can reconstruct it. `activatedByName` is populated only when the
-// participant explicitly chose attribution.
+// Note the column that is absent: an anonymous activation must not hand an identity to this
+// layer at all. The facilitator's release id is a separate accountable action, not an
+// activator identity, and is retained only so its public label can follow an account change.
 export const tableSafetyHolds = sqliteTable('table_safety_holds', {
   campaignId: integer('campaign_id').primaryKey(),
   /** True while play is frozen. The single field every gate reads. */
@@ -2529,6 +2539,7 @@ export const tableSafetyHolds = sqliteTable('table_safety_holds', {
   releasedAt: text('released_at'),
   /** The facilitator who released it. Always recorded: releasing is an accountable act. */
   releasedBy: text('released_by'),
+  releasedByUserId: text('released_by_user_id'),
   /** A SafetyHoldRecovery value: resume | rewind | veil | scene_change | end. */
   recovery: text('recovery'),
   facilitatorNote: text('facilitator_note'),

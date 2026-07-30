@@ -1,15 +1,14 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, like, ne, or } from 'drizzle-orm';
+import { and, count, eq, like, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
+  CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
   CampaignDmRepair,
   PreferencesUpdate,
   UserCreate,
   UserUpdate,
-  type MembershipIntegrityCampaign,
-  type MembershipIntegrityReport,
-  type User,
 } from '@campfire/schema';
+import type { MembershipIntegrityCampaign, MembershipIntegrityReport, User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   users,
@@ -21,17 +20,39 @@ import {
   characters,
   membershipIntegrityRepairs,
   participantSupportPreferences,
+  notes,
+  comments,
+  entityRevisions,
+  sessionZeroAcknowledgments,
+  sessionZeroBoundarySubmissions,
+  sessionZeroGuardianConsents,
+  sessionRsvps,
+  moderationReports,
+  moderationMutes,
+  checkRequests,
+  aiDmTranscriptEvents,
+  proposals,
+  tableSafetyHolds,
+  diceRolls,
+  encounterEvents,
+  notifications,
+  notificationDigestQueue,
+  sessionShares,
+  castSessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
-import { auditActor, type RequestUser } from '../../common/user.types';
+import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
 type PreferencesUpdateInput = z.infer<typeof PreferencesUpdate>;
 type CampaignDmRepairInput = z.infer<typeof CampaignDmRepair>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/** Public attribution used after an account is removed, never a prior account label. */
+const DELETED_USER_ATTRIBUTION = 'Deleted user';
 
 function toDomain(row: typeof users.$inferSelect): User {
   return {
@@ -138,6 +159,151 @@ export class UsersService {
       .map((membership) => membership.campaignName);
   }
 
+  /** The label every real-session write derives from this account. */
+  private publicAttribution(row: Pick<typeof users.$inferSelect, 'displayName' | 'username'>): string {
+    return row.displayName || row.username;
+  }
+
+  /**
+   * Synchronize mutable public display copies selected by durable user ids, excluding
+   * explicit import-local proxies that retain source provenance.
+   *
+   * Historical rows retain those ids for authorization, block-listing, and provenance;
+   * copied public labels outside integrity-protected incident snapshots follow a rename or
+   * become neutral before deletion. On deletion, rendered notification copy is replaced as a whole with neutral
+   * text instead of doing a substring replacement: it may contain quoted player prose or an
+   * older label. Ordinary renames retain that event copy and change only structured attribution.
+   * This is deliberately a synchronous transaction helper: callers get all labels changed
+   * or none of them.
+   */
+  private synchronizeRetainedAttributionTx(
+    tx: SyncDb,
+    userId: number,
+    previousLabel: string,
+    nextLabel: string,
+    force = false,
+    pseudonymizeRenderedCopy = false,
+  ): void {
+    if (previousLabel === nextLabel && !force) return;
+    const stableUserId = String(userId);
+
+    tx.update(notes).set({ authorName: nextLabel }).where(and(eq(notes.authorUserId, stableUserId), eq(notes.authorImported, false))).run();
+    tx.update(comments).set({ authorName: nextLabel }).where(and(eq(comments.authorUserId, stableUserId), eq(comments.authorImported, false))).run();
+    tx.update(entityRevisions).set({ authorName: nextLabel }).where(and(eq(entityRevisions.authorUserId, stableUserId), eq(entityRevisions.authorImported, false))).run();
+    tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(and(eq(entityRevisions.replacedByUserId, stableUserId), eq(entityRevisions.replacedByImported, false))).run();
+    tx.update(sessionZeroAcknowledgments).set({ userName: nextLabel }).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).run();
+    tx.update(sessionZeroBoundarySubmissions)
+      .set({ submitterName: nextLabel })
+      .where(and(eq(sessionZeroBoundarySubmissions.submitterUserId, stableUserId), eq(sessionZeroBoundarySubmissions.anonymous, false)))
+      .run();
+    tx.update(sessionZeroGuardianConsents).set({ userName: nextLabel }).where(eq(sessionZeroGuardianConsents.userId, stableUserId)).run();
+    tx.update(participantSupportPreferences).set({ ownerName: nextLabel }).where(eq(participantSupportPreferences.ownerUserId, stableUserId)).run();
+    tx.update(sessionRsvps).set({ userName: nextLabel }).where(and(eq(sessionRsvps.userId, stableUserId), eq(sessionRsvps.userImported, false))).run();
+    tx.update(diceRolls).set({ rollerName: nextLabel }).where(eq(diceRolls.rollerUserId, stableUserId)).run();
+    tx.update(moderationReports).set({ reporterName: nextLabel }).where(eq(moderationReports.reporterUserId, stableUserId)).run();
+    tx.update(moderationReports).set({ subjectName: nextLabel }).where(eq(moderationReports.subjectUserId, stableUserId)).run();
+    tx.update(moderationMutes).set({ userName: nextLabel }).where(eq(moderationMutes.userId, stableUserId)).run();
+    tx.update(checkRequests).set({ requestedByName: nextLabel }).where(eq(checkRequests.requestedByUserId, stableUserId)).run();
+    tx.update(aiDmTranscriptEvents).set({ actorName: nextLabel }).where(eq(aiDmTranscriptEvents.actorUserId, stableUserId)).run();
+    tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
+    tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
+    tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
+    tx.update(castSessions).set({ createdBy: nextLabel }).where(eq(castSessions.createdByUserId, stableUserId)).run();
+    // encounter_events.actorId is a numeric combatant id. Token-batch operators
+    // instead retain their durable user id in performedByJson.
+    tx.update(encounterEvents)
+      .set({ actor: nextLabel })
+      .where(
+        and(
+          eq(encounterEvents.type, 'token_batch'),
+          sql`json_extract(${encounterEvents.performedByJson}, '$.userId') = ${stableUserId}`,
+        ),
+      )
+      .run();
+
+    // Moderation evidence is an integrity-protected incident snapshot. Every public
+    // attribution field it carries is covered by its stored hashes, so account
+    // relabeling must leave the entire snapshot untouched rather than re-sign it.
+
+    if (pseudonymizeRenderedCopy) {
+      tx.update(notifications)
+        .set({ actorName: nextLabel })
+        .where(eq(notifications.actorUserId, stableUserId))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ actorName: nextLabel })
+        .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+        .run();
+      // Lifecycle rows are already actor-free. Critical notices need equally
+      // actor-free, type-specific copy: a generic privacy message must not turn a
+      // live safety stop or charter acknowledgement into an opaque bell item.
+      tx.update(notifications)
+        .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(
+          and(
+            eq(notifications.actorUserId, stableUserId),
+            notInArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published', 'ai_dm_alert']),
+          ),
+        )
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'Campaign activity', body: 'This notification has updated attribution.' })
+        .where(
+          and(
+            eq(notificationDigestQueue.actorUserId, stableUserId),
+            notInArray(notificationDigestQueue.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold', 'charter_published', 'ai_dm_alert']),
+          ),
+        )
+        .run();
+      tx.update(notifications)
+        .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
+        .where(
+          and(
+            eq(notifications.actorUserId, stableUserId),
+            eq(notifications.type, 'safety_hold'),
+            ne(notifications.title, 'The table safety hold was resolved'),
+          ),
+        )
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'The table is paused', body: 'A participant used the safety hold. Play is paused until a facilitator resolves it.' })
+        .where(
+          and(
+            eq(notificationDigestQueue.actorUserId, stableUserId),
+            eq(notificationDigestQueue.type, 'safety_hold'),
+            ne(notificationDigestQueue.title, 'The table safety hold was resolved'),
+          ),
+        )
+        .run();
+      tx.update(notifications)
+        .set({ title: 'The table safety hold was resolved', body: 'A facilitator resolved the table safety hold. Review the table status before continuing.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'safety_hold'), eq(notifications.title, 'The table safety hold was resolved')))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'The table safety hold was resolved', body: 'A facilitator resolved the table safety hold. Review the table status before continuing.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'safety_hold'), eq(notificationDigestQueue.title, 'The table safety hold was resolved')))
+        .run();
+      tx.update(notifications)
+        .set({ title: 'Charter updated', body: 'Review the campaign charter for the current agreement.' })
+        .where(and(eq(notifications.actorUserId, stableUserId), eq(notifications.type, 'charter_published')))
+        .run();
+      tx.update(notificationDigestQueue)
+        .set({ title: 'Charter updated', body: 'Review the campaign charter for the current agreement.' })
+        .where(and(eq(notificationDigestQueue.actorUserId, stableUserId), eq(notificationDigestQueue.type, 'charter_published')))
+        .run();
+    } else {
+      tx.update(notifications).set({ actorName: nextLabel }).where(eq(notifications.actorUserId, stableUserId)).run();
+      tx.update(notificationDigestQueue)
+        .set({ actorName: nextLabel })
+        .where(eq(notificationDigestQueue.actorUserId, stableUserId))
+        .run();
+    }
+  }
+
+  synchronizeRosterAttributionTx(tx: SyncDb, userId: number, previousLabel: string, nextLabel: string): void {
+    this.synchronizeRetainedAttributionTx(tx, userId, previousLabel, nextLabel);
+  }
+
   /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */
   async countEnabledAdmins(excludeId?: number): Promise<number> {
     const rows = await this.db
@@ -204,7 +370,6 @@ export class UsersService {
     if (desiredRole === 'user' && existing.serverRole === 'admin') {
       const remaining = await this.countEnabledAdmins(id);
       if (remaining === 0) {
-        // eslint-disable-next-line no-console
         console.warn(`[oidc] refusing to demote last enabled admin (user ${id}) via group sync`);
         return toDomain(existing);
       }
@@ -239,7 +404,15 @@ export class UsersService {
       }
 
       const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
-      if (input.displayName !== undefined) update.displayName = input.displayName;
+      if (input.displayName !== undefined) {
+        update.displayName = input.displayName;
+        this.synchronizeRetainedAttributionTx(
+          tx,
+          id,
+          this.publicAttribution(existing),
+          input.displayName || existing.username,
+        );
+      }
       if (input.serverRole !== undefined) update.serverRole = input.serverRole;
       if (input.disabled !== undefined) update.disabled = input.disabled;
 
@@ -249,21 +422,42 @@ export class UsersService {
   }
 
   /** Self-service preferences (display name + accent color + reading mode) — PATCH /me/preferences. */
-  async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
-    await this.getRowOrThrow(id);
+  async updatePreferences(id: number, input: PreferencesUpdateInput, actor: RequestUser): Promise<User> {
+    return this.db.transaction((tx) => {
+      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
 
-    const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
-    if (input.displayName !== undefined) update.displayName = input.displayName;
-    if (input.accentColor !== undefined) update.accentColor = input.accentColor;
-    if (input.textSize !== undefined) update.textSize = input.textSize;
-    if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
-    if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
+      const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
+      if (input.displayName !== undefined) {
+        update.displayName = input.displayName;
+        this.synchronizeRetainedAttributionTx(
+          tx,
+          id,
+          this.publicAttribution(existing),
+          input.displayName || existing.username,
+        );
+      }
+      if (input.accentColor !== undefined) update.accentColor = input.accentColor;
+      if (input.textSize !== undefined) update.textSize = input.textSize;
+      if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
+      if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
 
-    const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
-    return toDomain(row);
+      const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
+      if (input.displayName !== undefined && input.displayName !== existing.displayName) {
+        this.audit.logInTx(tx, {
+          actor: auditActor(actor),
+          actorRole: auditActorRole(actor),
+          action: 'user.preferences.update',
+          entityType: 'user',
+          entityId: id,
+          detail: `user:${id}: displayName`,
+        });
+      }
+      return toDomain(row);
+    });
   }
 
-  async remove(id: number): Promise<void> {
+  async remove(id: number, actor: RequestUser): Promise<void> {
     this.db.transaction((tx) => {
       const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
       if (!existing) throw new NotFoundException(`User ${id} not found`);
@@ -280,6 +474,15 @@ export class UsersService {
         }
       }
 
+      this.synchronizeRetainedAttributionTx(
+        tx,
+        id,
+        this.publicAttribution(existing),
+        DELETED_USER_ATTRIBUTION,
+        true,
+        true,
+      );
+
       // Keep every invariant-dependent read and all account/membership writes in
       // this synchronous transaction so delete races serialize with #654 paths.
       tx.delete(userSessions).where(eq(userSessions.userId, id)).run();
@@ -294,6 +497,14 @@ export class UsersService {
         .where(eq(characters.ownerUserId, String(id)))
         .run();
       tx.delete(users).where(eq(users.id, id)).run();
+      this.audit.logInTx(tx, {
+        actor: auditActor(actor),
+        actorRole: auditActorRole(actor),
+        action: 'user.delete',
+        entityType: 'user',
+        entityId: id,
+        detail: `user:${id}`,
+      });
     });
   }
 

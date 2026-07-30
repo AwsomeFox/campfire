@@ -321,6 +321,65 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
       expect(foreign.status).toBe(404);
     });
 
+    it('keeps reports of ordinary DM notifications in the campaign moderation queue', async () => {
+      const note = await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/notes`)
+        .send({ body: 'DM-authored notification routing regression', visibility: 'party_shared' });
+      expect(note.status).toBe(201);
+
+      const bell = await victim.get('/api/v1/notifications?limit=20');
+      expect(bell.status).toBe(200);
+      const items = bell.body.items ?? bell.body;
+      const mine = items.find(
+        (item: { id: number; actorName: string; type: string }) => item.type === 'note_shared' && item.actorName === 'mod-dm',
+      );
+      expect(mine).toBeTruthy();
+
+      const report = await fileReport(victim, { targetType: 'notification', targetId: mine.id, reason: 'harassment' });
+      expect(report.status).toBe(201);
+      expect(report.body.status).toBe('open');
+      expect(report.body.subjectUserId).toBe('');
+      const queue = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports`);
+      expect(queue.status).toBe(200);
+      expect(queue.body.items.some((item: { id: number }) => item.id === report.body.id)).toBe(true);
+    });
+
+    it('keeps an attributed safety-hold notification non-resolvable for moderation actions', async () => {
+      const sqlite = openDb();
+      let safetyNotificationId: number;
+      try {
+        const inserted = sqlite
+          .prepare(
+            `INSERT INTO notifications (user_id, campaign_id, type, title, body, entity_type, entity_id, comment_id, data, actor_name, actor_user_id, read_at, created_at)
+             VALUES (?, ?, 'safety_hold', ?, ?, NULL, NULL, NULL, NULL, ?, ?, NULL, ?)`,
+          )
+          .run(
+            victimId,
+            campaignId,
+            'The table is paused',
+            'A participant used the safety hold.',
+            'mod-abuser',
+            String(abuserId),
+            new Date().toISOString(),
+          );
+        safetyNotificationId = Number(inserted.lastInsertRowid);
+      } finally {
+        sqlite.close();
+      }
+
+      const report = await fileReport(victim, {
+        targetType: 'notification',
+        targetId: safetyNotificationId!,
+        reason: 'harassment',
+      });
+      expect(report.status).toBe(201);
+      expect(report.body.subjectUserId).toBe('');
+      const mute = await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'mute' });
+      expect(mute.status).toBe(400);
+    });
+
     it('rejects reporter-supplied content for a server-captured target, and vice versa', async () => {
       const commentId = await postComment(abuser, 'a perfectly ordinary comment golf');
       const withContent = await fileReport(victim, {

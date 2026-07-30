@@ -81,8 +81,8 @@ export class TableSafetyController {
     // name or an id to persist, log, or broadcast. Doing it here rather than "hiding" the
     // identity downstream is what makes the guarantee auditable — there is exactly one place
     // to check, and no storage column that could ever be un-redacted by a later change.
-    const actorName = body.anonymous ? null : (user.name?.trim() || user.id);
-    return this.safety.activate(campaignId, actorName);
+    const actor = body.anonymous ? null : { id: user.id, name: user.name?.trim() || user.id };
+    return this.safety.activate(campaignId, actor);
   }
 
   @Post('release')
@@ -120,6 +120,6 @@ export class TableSafetyController {
       }
     }
 
-    return this.safety.release(campaignId, facilitator, body.recovery, body.note ?? null);
+    return this.safety.release(campaignId, facilitator, body.recovery, body.note ?? null, user.id);
   }
 }

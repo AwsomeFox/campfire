@@ -364,7 +364,7 @@ describe('audit log (e2e)', () => {
         (e) => e.action === 'user.delete' && e.entityId === userId,
       );
       expect(entry).toBeDefined();
-      expect(entry!.detail).toContain('to-delete');
+      expect(entry!.detail).toBe(`user:${userId}`);
     });
 
     it('updating server settings writes a settings.update row', async () => {

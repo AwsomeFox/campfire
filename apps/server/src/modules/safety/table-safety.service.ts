@@ -12,6 +12,8 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
+type AttributedSafetyActor = { id: string; name: string };
+
 /**
  * The table safety hold — an X-Card with teeth (issue #599).
  *
@@ -53,8 +55,8 @@ import { NotificationsService } from '../notifications/notifications.service';
  *      (c) the NOTIFICATION goes to EVERY member including the activator. `notifyCampaign`
  *          normally excludes the actor, which would have made the one participant who did not
  *          get the ping the one who raised it — attribution by conspicuous absence, delivered
- *          to the whole table. Passing a null actor closes it, uniformly for anonymous and
- *          attributed holds so the delivery pattern itself is not a signal.
+ *          to the whole table. Anonymous holds pass a null actor; attributed holds retain a
+ *          stable id but use the same include-everyone fan-out, so delivery is not a signal.
  *    What none of this closes is documented on {@link TableSafetyHold.activatedByName}: the
  *    server operator, and deduction at a very small table.
  *
@@ -182,11 +184,11 @@ export class TableSafetyService {
   /**
    * Raise a hold. Idempotent, unilateral, and never throws on a race.
    *
-   * `actorName` is the DISPLAY NAME of an attributed activation, or null for an anonymous one.
-   * The caller is expected to have already discarded the user id for the anonymous case — this
-   * signature takes no user id at all so there is nothing to leak by accident.
+   * Anonymous activations receive null. Attributed HTTP calls retain a stable id only for their
+   * notification row, while legacy direct callers may still provide just a display name.
    */
-  async activate(campaignId: number, actorName: string | null): Promise<TableSafetyHold> {
+  async activate(campaignId: number, actor: AttributedSafetyActor | null): Promise<TableSafetyHold> {
+    const actorName = actor?.name ?? null;
     const anonymous = actorName === null;
     const ts = nowIso();
     const existing = this.readRow(campaignId);
@@ -207,6 +209,7 @@ export class TableSafetyService {
           activationCount: 1,
           releasedAt: null,
           releasedBy: null,
+          releasedByUserId: null,
           recovery: null,
           facilitatorNote: null,
           updatedAt: ts,
@@ -223,6 +226,7 @@ export class TableSafetyService {
             // hold ended, and a live hold has not ended.
             releasedAt: null,
             releasedBy: null,
+            releasedByUserId: null,
             recovery: null,
             facilitatorNote: null,
             updatedAt: ts,
@@ -237,7 +241,7 @@ export class TableSafetyService {
     this.fireFreezeHooks(campaignId, true);
 
     if (!alreadyHeld) {
-      await this.recordActivation(campaignId, actorName, anonymous);
+      await this.recordActivation(campaignId, actor, anonymous);
     }
     return this.getHold(campaignId);
   }
@@ -256,6 +260,7 @@ export class TableSafetyService {
     facilitatorName: string,
     recovery: SafetyHoldRecovery,
     note: string | null,
+    facilitatorUserId?: string,
   ): Promise<TableSafetyHold> {
     const ts = nowIso();
     // Idempotent in the same way activation is: releasing an already-released table is a no-op
@@ -271,6 +276,7 @@ export class TableSafetyService {
         activationCount: 0,
         releasedAt: ts,
         releasedBy: facilitatorName,
+        releasedByUserId: facilitatorUserId ?? null,
         recovery,
         facilitatorNote: note,
         updatedAt: ts,
@@ -285,6 +291,7 @@ export class TableSafetyService {
           activatedByName: null,
           releasedAt: ts,
           releasedBy: facilitatorName,
+          releasedByUserId: facilitatorUserId ?? null,
           recovery,
           facilitatorNote: note,
           updatedAt: ts,
@@ -293,7 +300,7 @@ export class TableSafetyService {
       .run();
 
     this.fireFreezeHooks(campaignId, false);
-    await this.recordRelease(campaignId, facilitatorName, recovery, note);
+    await this.recordRelease(campaignId, facilitatorName, recovery, note, facilitatorUserId);
     return this.getHold(campaignId);
   }
 
@@ -301,9 +308,10 @@ export class TableSafetyService {
 
   private async recordActivation(
     campaignId: number,
-    actorName: string | null,
+    actor: AttributedSafetyActor | null,
     anonymous: boolean,
   ): Promise<void> {
+    const actorName = actor?.name ?? null;
     this.emitHoldEvent(campaignId, true);
     await this.audit
       .log({
@@ -330,6 +338,7 @@ export class TableSafetyService {
       anonymous
         ? 'Someone at the table used the safety hold. Play is paused until a facilitator resolves it.'
         : `${actorName} used the safety hold. Play is paused until a facilitator resolves it.`,
+      actor,
     );
   }
 
@@ -338,6 +347,7 @@ export class TableSafetyService {
     facilitatorName: string,
     recovery: SafetyHoldRecovery,
     note: string | null,
+    facilitatorUserId?: string,
   ): Promise<void> {
     this.emitHoldEvent(campaignId, false);
     await this.audit
@@ -356,6 +366,7 @@ export class TableSafetyService {
       campaignId,
       'The table safety hold was resolved',
       `${facilitatorName} resolved the hold (${recovery}).${note ? ` ${note}` : ''}`,
+      facilitatorUserId ? { id: facilitatorUserId, name: facilitatorName } : null,
     );
   }
 
@@ -368,24 +379,35 @@ export class TableSafetyService {
   }
 
   /**
-   * Notify the whole table with a NULL actor, always.
+   * Notify the whole table, including the actor, always. Anonymous holds retain no identity.
    *
    * `notifyCampaign` excludes the actor from the recipient list, which is right for "Ana
    * updated the quest" and catastrophic here: the one member who did not get the ping would be
    * the member who raised the hold, which is attribution by absence — the exact back door the
-   * anonymity promise has to close. Null actor means everyone is notified, and it is applied to
-   * attributed holds too so the delivery pattern cannot itself distinguish the two cases.
+   * anonymity promise has to close. Attributed holds retain the stable id in the notification
+   * row, but use specialized fan-out so the recipient pattern remains identical and a later
+   * rename/deletion can rewrite it.
    */
-  private async notifyTable(campaignId: number, title: string, body: string): Promise<void> {
+  private async notifyTable(
+    campaignId: number,
+    title: string,
+    body: string,
+    actor: AttributedSafetyActor | null,
+  ): Promise<void> {
     try {
-      await this.notifications.notifyCampaign(campaignId, null, {
+      const event = {
         type: 'safety_hold',
         title,
         body,
         entityType: null,
         entityId: null,
-        actorName: '',
-      });
+        actorName: actor?.name ?? '',
+      } as const;
+      if (actor) {
+        await this.notifications.notifyCampaignIncludingActor(campaignId, actor.id, event, { bypassBlockFilter: true });
+      } else {
+        await this.notifications.notifyCampaign(campaignId, null, event);
+      }
     } catch {
       /* best-effort — a notification failure must never break the stop */
     }

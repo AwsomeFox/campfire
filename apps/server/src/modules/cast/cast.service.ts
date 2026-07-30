@@ -11,7 +11,7 @@ import type {
   Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, castSessions } from '../../db/schema';
+import { campaigns, castSessions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import {
@@ -99,6 +99,11 @@ export class CastService {
     const ts = nowIso();
 
     const row = this.db.transaction((tx) => {
+      const accountId = Number(user.id);
+      const current = Number.isInteger(accountId) && accountId > 0
+        ? tx.select({ displayName: users.displayName, username: users.username }).from(users).where(eq(users.id, accountId)).limit(1).get()
+        : undefined;
+      const createdBy = current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name);
       const campaign = tx
         .select()
         .from(campaigns)
@@ -114,7 +119,8 @@ export class CastService {
         .values({
           campaignId,
           label: input.label,
-          createdBy: user.name,
+          createdBy,
+          createdByUserId: user.id,
           tokenHash: hashCastToken(token),
           tokenPrefix: castTokenPrefix(token),
           exitPinHash: hashPassword(exitPin),

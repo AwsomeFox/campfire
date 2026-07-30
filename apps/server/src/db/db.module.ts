@@ -3449,6 +3449,7 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
       label TEXT NOT NULL DEFAULT '',
       created_by TEXT NOT NULL DEFAULT '',
+      created_by_user_id TEXT,
       token_hash TEXT NOT NULL UNIQUE,
       token_prefix TEXT NOT NULL,
       exit_pin_hash TEXT NOT NULL,
@@ -4270,6 +4271,45 @@ function migrateTableSafetyHolds599(sqlite: Database.Database): void {
   `);
 }
 
+function migrateTableSafetyAttribution842(sqlite: Database.Database): void {
+  const exists = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='table_safety_holds'`)
+    .get();
+  if (!exists) return;
+  const names = new Set((sqlite.prepare(`PRAGMA table_info(table_safety_holds)`).all() as Array<{ name: string }>).map((c) => c.name));
+  if (!names.has('released_by_user_id')) sqlite.exec(`ALTER TABLE table_safety_holds ADD COLUMN released_by_user_id TEXT`);
+}
+
+function migrateImportedAttribution842(sqlite: Database.Database): void {
+  const additions = [
+    ['notes', 'author_imported'],
+    ['comments', 'author_imported'],
+    ['session_rsvps', 'user_imported'],
+    ['entity_revisions', 'author_imported'],
+    ['entity_revisions', 'replaced_by_imported'],
+  ] as const;
+  for (const [table, column] of additions) {
+    const exists = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(table);
+    if (!exists) continue;
+    const names = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+    if (!names.has(column)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
+}
+
+function migrateSessionSharesCreator842(sqlite: Database.Database): void {
+  const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_shares'").get();
+  if (!exists) return;
+  const names = new Set((sqlite.prepare('PRAGMA table_info(session_shares)').all() as Array<{ name: string }>).map((c) => c.name));
+  if (!names.has('created_by_user_id')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN created_by_user_id TEXT');
+}
+
+function migrateCastSessionsCreator842(sqlite: Database.Database): void {
+  const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cast_sessions'").get();
+  if (!exists) return;
+  const names = new Set((sqlite.prepare('PRAGMA table_info(cast_sessions)').all() as Array<{ name: string }>).map((c) => c.name));
+  if (!names.has('created_by_user_id')) sqlite.exec('ALTER TABLE cast_sessions ADD COLUMN created_by_user_id TEXT');
+}
+
 /** Fresh installs receive this via bootstrap; upgrades need the same clean taxonomy tables. */
 function migrateCampaignLibraryManagement742(sqlite: Database.Database): void {
   sqlite.exec(`
@@ -4750,6 +4790,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // why this is never renumbered: renaming a migration a database has already recorded is the
   // one edit that silently breaks run-once.
   { name: '0130_table_safety_holds_599', run: migrateTableSafetyHolds599 },
+  // 0152/0153 are centrally allocated to #842. They stay after #599 because
+  // both alter tables that #599/bootstrap owns; the full names preserve run-once.
+  { name: '0152_table_safety_attribution_842', run: migrateTableSafetyAttribution842 },
+  { name: '0153_imported_attribution_842', run: migrateImportedAttribution842 },
+  { name: '0154_session_shares_creator_842', run: migrateSessionSharesCreator842 },
+  { name: '0155_cast_sessions_creator_842', run: migrateCastSessionsCreator842 },
   // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 were held by
   // other in-flight branches when this entry was written. Several have since landed and are
   // registered in this same array (0130 → #599, 0131 → #1042, 0132 → #1047), which changes

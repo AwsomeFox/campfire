@@ -610,6 +610,9 @@ export default function PreferencesPage() {
             onChange={(e) => setDisplayName(e.target.value)}
             maxLength={120}
           />
+          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+            {t('preferences.displayNameHistoryNote')}
+          </p>
         </div>
       </div>
 

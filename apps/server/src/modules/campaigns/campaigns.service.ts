@@ -1545,6 +1545,7 @@ export class CampaignsService {
               campaignId: cloneId,
               authorUserId: n.authorUserId,
               authorName: n.authorName,
+              authorImported: n.authorImported,
               kind: n.kind,
               visibility: n.visibility,
               entityType,
@@ -1583,6 +1584,7 @@ export class CampaignsService {
               parentId,
               authorUserId: c.authorUserId,
               authorName: c.authorName,
+              authorImported: c.authorImported,
               body: c.body,
               inCharacter: c.inCharacter,
               characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
@@ -1764,11 +1766,13 @@ export class CampaignsService {
               snapshot: rev.snapshot,
               authorUserId: rev.authorUserId,
               authorName: rev.authorName,
+              authorImported: rev.authorImported,
               authorSource: revisionSource(rev.authorSource),
               authorSourceDetail: rev.authorSourceDetail,
               createdAt: rev.createdAt,
               replacedByUserId: rev.replacedByUserId,
               replacedByName: rev.replacedByName,
+              replacedByImported: rev.replacedByImported,
               replacedBySource: revisionSource(rev.replacedBySource),
               replacedBySourceDetail: rev.replacedBySourceDetail,
               replacedAt: rev.replacedAt,
@@ -2197,8 +2201,9 @@ export class CampaignsService {
       }
 
       // Scheduled sessions (issue #436): planned game nights with RSVPs. Inserted
-      // early — no cross-refs to other entity types. RSVP userIds are install-local,
-      // so reassign to the importer while preserving userName/status/note provenance.
+      // early — no cross-refs to other entity types. Source RSVP identities cannot
+      // name local accounts, so each copied reply gets a deterministic reserved proxy
+      // rather than falsely assigning attendance to the importing DM.
       for (const s of scheduledSessionRows) {
         // Issue #504: the lifecycle status round-trips too. Dropping it would import a
         // cancelled night back as a LIVE one — re-listed under Upcoming, re-armed for
@@ -2240,12 +2245,13 @@ export class CampaignsService {
           })
           .returning()
           .all();
-        for (const rsvp of asArr(s.rsvps)) {
+        for (const [rsvpIndex, rsvp] of asArr(s.rsvps).entries()) {
           tx.insert(sessionRsvps)
             .values({
               scheduledSessionId: row.id,
-              userId: importerId,
+              userId: `imported-rsvp:${cid}:${row.id}:${rsvpIndex}`,
               userName: str(rsvp.userName),
+              userImported: true,
               status: str(rsvp.status, 'maybe'),
               note: str(rsvp.note),
               createdAt: ts,
@@ -2649,6 +2655,7 @@ export class CampaignsService {
             campaignId: cid,
             authorUserId: importerId, // author ids are per-install — the importer owns imported notes
             authorName: str(n.authorName),
+            authorImported: true,
             kind: str(n.kind, 'note'),
             visibility,
             recipientUserId: null,
@@ -2704,6 +2711,7 @@ export class CampaignsService {
             parentId,
             authorUserId: importerId,
             authorName: str(c.authorName).slice(0, 120),
+            authorImported: true,
             body: str(c.body, '[deleted]').slice(0, 20_000),
             inCharacter: boolOf(c.inCharacter),
             characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
@@ -2768,11 +2776,13 @@ export class CampaignsService {
             snapshot: JSON.stringify(snapshotText),
             authorUserId: str(rev.authorUserId).slice(0, 120),
             authorName: str(rev.authorName).slice(0, 120),
+            authorImported: true,
             authorSource: revisionSource(rev.authorSource),
             authorSourceDetail: str(rev.authorSourceDetail).slice(0, 200),
             createdAt: typeof rev.createdAt === 'string' ? rev.createdAt : '',
             replacedByUserId: str(rev.replacedByUserId).slice(0, 120),
             replacedByName: str(rev.replacedByName).slice(0, 120),
+            replacedByImported: true,
             replacedBySource: revisionSource(rev.replacedBySource),
             replacedBySourceDetail: str(rev.replacedBySourceDetail).slice(0, 200),
             replacedAt: typeof rev.replacedAt === 'string' ? rev.replacedAt : null,

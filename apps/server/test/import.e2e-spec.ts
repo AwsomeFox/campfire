@@ -7,7 +7,13 @@ import type { ConditionInstance } from '@campfire/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { MembersService } from '../src/modules/membership/members.service';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { characters as charactersTable } from '../src/db/schema';
+import {
+  characters as charactersTable,
+  comments,
+  entityRevisions,
+  notes,
+  sessionRsvps,
+} from '../src/db/schema';
 import { sheetConditionWriteSetFromInstances } from '../src/common/conditions';
 
 // Minimal valid 1x1 PNG — same fixture as attachments/export specs.
@@ -40,6 +46,7 @@ async function getBuffer(agent: ReturnType<typeof request.agent>, url: string) {
  */
 describe('campaign import (e2e, real cookie sessions)', () => {
   let ctx: TestAppContext;
+  let db: DrizzleDb;
   let dmAgent: ReturnType<typeof request.agent>;
   let playerAgent: ReturnType<typeof request.agent>;
   let campaignId: number;
@@ -55,6 +62,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
+    db = ctx.app.get(DB);
     const server = ctx.app.getHttpServer();
 
     dmAgent = request.agent(server);
@@ -118,6 +126,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     const scheduleRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/schedule`)
       .send({ scheduledAt: '2099-07-01T20:00:00.000Z', title: 'Heist night', notes: 'Dark moon' });
+    await dmAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'yes', note: 'GM confirms' });
     await playerAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'maybe', note: 'Checking schedule' });
     // Issue #504: cancelling retains the row, so a cancelled night now reaches the export.
     const cancelledScheduleRes = await dmAgent
@@ -251,7 +260,12 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     const importedHeist = schedules.body.find((s: { title: string }) => s.title === 'Heist night');
     expect(importedHeist).toBeDefined();
     expect(importedHeist.status).toBe('scheduled');
-    expect(importedHeist.rsvps.some((r: { status: string; note: string }) => r.status === 'maybe' && r.note === 'Checking schedule')).toBe(true);
+    expect(importedHeist.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'yes', note: 'GM confirms' }),
+        expect.objectContaining({ status: 'maybe', note: 'Checking schedule' }),
+      ]),
+    );
 
     // Issue #504: the cancelled lifecycle state round-trips. Importing it back as a LIVE
     // night would resurrect a called-off game into Upcoming, the reminder sweep and the
@@ -303,6 +317,31 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       authorName: 'import-player',
     });
     expect(reply!.parentId).toBe(spoken!.id);
+
+    // #842: copied attribution is deliberately marked as import-local provenance,
+    // rather than inferred later from a name that may collide with a real account.
+    const [noteAttribution, commentAttribution, rsvpAttribution, revisionAttribution] = await Promise.all([
+      db.select({ imported: notes.authorImported }).from(notes).where(eq(notes.campaignId, imported.id)),
+      db.select({ imported: comments.authorImported }).from(comments).where(eq(comments.campaignId, imported.id)),
+      db
+        .select({ imported: sessionRsvps.userImported, userId: sessionRsvps.userId })
+        .from(sessionRsvps)
+        .where(eq(sessionRsvps.scheduledSessionId, importedHeist.id)),
+      db
+        .select({ authorImported: entityRevisions.authorImported, replacedByImported: entityRevisions.replacedByImported })
+        .from(entityRevisions)
+        .where(eq(entityRevisions.campaignId, imported.id)),
+    ]);
+    expect(noteAttribution).not.toHaveLength(0);
+    expect(commentAttribution).not.toHaveLength(0);
+    expect(rsvpAttribution).toEqual([
+      { imported: true, userId: `imported-rsvp:${imported.id}:${importedHeist.id}:0` },
+      { imported: true, userId: `imported-rsvp:${imported.id}:${importedHeist.id}:1` },
+    ]);
+    expect(revisionAttribution).not.toHaveLength(0);
+    expect(noteAttribution.every((row) => row.imported)).toBe(true);
+    expect(commentAttribution.every((row) => row.imported)).toBe(true);
+    expect(revisionAttribution.every((row) => row.authorImported && row.replacedByImported)).toBe(true);
 
     // The source campaign is untouched — import never mutates it.
     const sourceLocs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/locations`);

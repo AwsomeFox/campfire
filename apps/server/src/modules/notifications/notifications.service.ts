@@ -223,8 +223,9 @@ export class NotificationsService implements OnApplicationBootstrap {
    * the #597 "a block stops a notification" rule exists to stop a sender's own content from
    * reaching someone who blocked them, not to hide the fact that access itself changed. The
    * actor is still excluded from the RECIPIENT list as normal (they already know synchronously
-   * from their own request); only the block-filter step of `dispatch` is skipped, by passing a
-   * null `actorUserId` there while still passing the real `actor` above for exclusion.
+   * from their own request). A bypassed lifecycle signal deliberately remains actor-free both
+   * in rendered and durable fields: retaining an id would let a later rename attach actor text
+   * to this unblockable access-control channel. Other bypass callers retain their actor id.
    */
   async notifyCampaign(
     campaignId: number,
@@ -239,10 +240,46 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((m) => m.userId).filter((id) => actorId === null || id !== actorId);
-      const dispatchActorId = opts?.bypassBlockFilter ? null : (actor?.id ?? null);
-      await this.dispatch(recipients, campaignId, event, dispatchActorId);
+      const actorFreeLifecycle = opts?.bypassBlockFilter === true && event.type === 'campaign_trashed';
+      await this.dispatch(
+        recipients,
+        campaignId,
+        event,
+        actorFreeLifecycle ? null : (actor?.id ?? null),
+        opts?.bypassBlockFilter ? null : (actor?.id ?? null),
+      );
     } catch (err) {
       this.logger.warn(`notifyCampaign failed for campaign ${campaignId}: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Notify every campaign member, including an attributed actor. This is deliberately
+   * narrow: table-safety signals must never reveal an actor by their missing bell item,
+   * but attributed signals still need the durable id so later account privacy changes can
+   * rewrite all retained copies. `bypassBlockFilter` preserves the existing critical-table
+   * broadcast rule without turning the persisted actor id into the block-filter input.
+   */
+  async notifyCampaignIncludingActor(
+    campaignId: number,
+    actorUserId: string,
+    event: NotificationEvent,
+    opts?: { bypassBlockFilter?: boolean },
+  ): Promise<void> {
+    try {
+      const members = await this.db
+        .select({ userId: campaignMembers.userId })
+        .from(campaignMembers)
+        .where(eq(campaignMembers.campaignId, campaignId));
+      await this.dispatch(
+        members.map((member) => member.userId),
+        campaignId,
+        event,
+        actorUserId,
+        opts?.bypassBlockFilter ? null : actorUserId,
+      );
+    } catch (err) {
+      this.logger.warn(`notifyCampaignIncludingActor failed for campaign ${campaignId}: ${String(err)}`);
     }
   }
 
@@ -257,6 +294,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     actorUserId: string | null,
+    blockActorUserId: string | null = actorUserId,
   ): Promise<void> {
     if (recipients.length === 0) return;
     const category = notificationCategory(event.type);
@@ -287,7 +325,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     // same number of round trips. The only difference is which ids come back.
     const suppressed = await suppressedRecipients(this.db, recipients.map(String), {
       campaignId,
-      actorUserId,
+      actorUserId: blockActorUserId,
       entityType: event.entityType ?? null,
       entityId: event.entityId ?? null,
     });
@@ -724,9 +762,16 @@ export class NotificationsService implements OnApplicationBootstrap {
    *
    * A sender-side `mute_sender` is deliberately NOT applied here: a mute means "stop
    * pinging me", not "erase what you already sent me".
+   * Safety holds are likewise exempt: they are always-on table-wide security signals.
+   * Applying an actor block at read time would contradict their dispatch policy and make
+   * attributed and anonymous holds observably different.
    */
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
-    return or(isNull(notifications.actorUserId), notInArray(notifications.actorUserId, blockedActorIds))!;
+    return or(
+      isNull(notifications.actorUserId),
+      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
+      notInArray(notifications.actorUserId, blockedActorIds),
+    )!;
   }
 
   /**

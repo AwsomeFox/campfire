@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, combatants, encounters } from '../../src/db/schema';
+import { campaigns, combatants, encounterEvents, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -81,10 +81,23 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
     dataDir = makeTempDataDir(); const { orm, service } = build(); const { encounterId, first, second } = seed(orm);
     const preview = await service.previewTokenBatch(encounterId, { placements: [{ combatantId: first.id, x: 50, y: 50 }, { combatantId: second.id, x: 60, y: 50 }], mapAspect: 1 }, dm, 'dm');
     const applied = await service.applyTokenBatch(encounterId, { previewToken: preview.previewToken, idempotencyKey: 'apply' }, dm, 'dm');
+    expect(orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'token_batch',
+          actor: 'DM',
+          actorId: null,
+          performedByJson: JSON.stringify({ userId: 'dev:dm', role: 'dm', kind: 'human' }),
+        }),
+      ]),
+    );
     orm.update(combatants).set({ tokenX: 51 }).where(eq(combatants.id, first.id)).run();
     await expect(service.undoTokenBatch(encounterId, { undoToken: applied.undoToken, idempotencyKey: 'undo' }, dm, 'dm')).rejects.toThrow('changed after this batch');
     orm.update(combatants).set({ tokenX: 50 }).where(eq(combatants.id, first.id)).run();
     expect(await service.undoTokenBatch(encounterId, { undoToken: applied.undoToken, idempotencyKey: 'undo' }, dm, 'dm')).toEqual({ ok: true });
+    const tokenBatchEvents = orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all().filter((event) => event.type === 'token_batch');
+    expect(tokenBatchEvents).toHaveLength(2);
+    expect(tokenBatchEvents.every((event) => event.performedByJson === JSON.stringify({ userId: 'dev:dm', role: 'dm', kind: 'human' }))).toBe(true);
     expect(await service.undoTokenBatch(encounterId, { undoToken: applied.undoToken, idempotencyKey: 'undo' }, dm, 'dm')).toEqual({ ok: true, idempotent: true });
     expect(position(orm, first.id)).toEqual({ x: 10, y: 10 }); expect(position(orm, second.id)).toEqual({ x: 20, y: 10 });
   });

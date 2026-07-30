@@ -276,7 +276,7 @@ export class MeController {
     if (user.id.startsWith('dev:')) {
       throw new UnauthorizedException('Preferences are not available for dev-auth users');
     }
-    return this.usersService.updatePreferences(Number(user.id), body);
+    return this.usersService.updatePreferences(Number(user.id), body, user);
   }
 
   /**
@@ -286,6 +286,7 @@ export class MeController {
    *  - cascades sessions, personal access tokens, campaign memberships and open
    *    password-reset requests;
    *  - de-links (never deletes) owned character sheets — ownerUserId cleared;
+   *  - keeps shared history but replaces its public attribution with `Deleted user`;
    *  - refuses (409) if you are the last enabled server admin, or the sole dm of
    *    any campaign — hand off admin / dm (or delete the campaign) first, so the
    *    server is never left admin-less and no campaign is orphaned dm-less.
@@ -299,7 +300,7 @@ export class MeController {
     summary: 'Delete your own account',
     description:
       'Self-service account deletion. Cascades sessions, API tokens, campaign memberships and password-reset requests; ' +
-      'de-links (does not delete) owned character sheets; leaves authored notes attributed. ' +
+      'de-links (does not delete) owned character sheets; keeps authored history with public attribution changed to `Deleted user`. ' +
       'Refuses (409) if you are the last enabled admin or the sole dm of a campaign.',
   })
   @ApiResponse({ status: 204, description: 'Account deleted; session cleared.' })
@@ -308,7 +309,7 @@ export class MeController {
     if (user.id.startsWith('dev:')) {
       throw new UnauthorizedException('Account deletion is not available for dev-auth users');
     }
-    await this.usersService.remove(Number(user.id));
+    await this.usersService.remove(Number(user.id), user);
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   }
 }

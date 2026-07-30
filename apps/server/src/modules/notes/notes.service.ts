@@ -119,6 +119,18 @@ export class NotesService {
     private readonly moderation: ModerationService,
   ) {}
 
+  /** Resolve a stale in-flight request's public attribution without changing its audit identity. */
+  private async currentAttributionUser(user: RequestUser): Promise<RequestUser> {
+    const id = Number(user.id);
+    if (!Number.isInteger(id) || id <= 0) return user;
+    const [current] = await this.db
+      .select({ displayName: users.displayName, username: users.username })
+      .from(users)
+      .where(eq(users.id, id))
+      .limit(1);
+    return { ...user, name: current ? (current.displayName || current.username) : 'Deleted user' };
+  }
+
   /**
    * note_reply fan-out for a newly created SHARED note attached to an entity:
    * notify the other members who already wrote a shared note on that same
@@ -647,12 +659,22 @@ export class NotesService {
       await assertMayInteract(this.db, user, campaignId, role, 'share, whisper, or send notes to other members');
     }
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
-    const [row] = await this.db
-      .insert(notes)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const accountId = Number(user.id);
+      const current = Number.isInteger(accountId) && accountId > 0
+        ? tx
+            .select({ displayName: users.displayName, username: users.username })
+            .from(users)
+            .where(eq(users.id, accountId))
+            .limit(1)
+            .get()
+        : undefined;
+      return tx
+        .insert(notes)
+        .values({
         campaignId,
         authorUserId: user.id,
-        authorName: user.name,
+        authorName: current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name),
         kind: 'note',
         visibility,
         entityType: input.entityType ?? null,
@@ -663,8 +685,10 @@ export class NotesService {
         resolvedNote: '',
         createdAt: ts,
         updatedAt: ts,
-      })
-      .returning();
+        })
+        .returning()
+        .get();
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -676,19 +700,21 @@ export class NotesService {
     });
     // Initial prose tip so the first overwrite keeps real authorship (#813).
     if (row.body !== '') {
+      const revisionAuthor = await this.currentAttributionUser(user);
       await this.revisions.commitProseVersion({
         entityType: 'note',
         entityId: row.id,
         campaignId,
         priorProse: '',
         nextProse: row.body,
-        user,
+        user: revisionAuthor,
       });
     }
-    await this.notifyThreadAuthors(row, user);
-    await this.notifyDmsOfSharedNote(row, user);
-    await this.notifyPartyOfSharedNote(row, user);
-    await this.notifyWhisperRecipient(row, user);
+    const notificationActor = await this.currentAttributionUser(user);
+    await this.notifyThreadAuthors(row, notificationActor);
+    await this.notifyDmsOfSharedNote(row, notificationActor);
+    await this.notifyPartyOfSharedNote(row, notificationActor);
+    await this.notifyWhisperRecipient(row, notificationActor);
     return this.toDomainWithEntityName(row);
   }
 
@@ -900,12 +926,22 @@ export class NotesService {
     // or the DM's own inbox becomes the one channel a silenced member can still use.
     await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(notes)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const accountId = Number(user.id);
+      const current = Number.isInteger(accountId) && accountId > 0
+        ? tx
+            .select({ displayName: users.displayName, username: users.username })
+            .from(users)
+            .where(eq(users.id, accountId))
+            .limit(1)
+            .get()
+        : undefined;
+      return tx
+        .insert(notes)
+        .values({
         campaignId,
         authorUserId: user.id,
-        authorName: user.name,
+        authorName: current ? (current.displayName || current.username) : (Number.isInteger(accountId) && accountId > 0 ? 'Deleted user' : user.name),
         kind: 'inbox',
         visibility: 'dm_shared',
         entityType: null,
@@ -915,8 +951,10 @@ export class NotesService {
         resolvedNote: '',
         createdAt: ts,
         updatedAt: ts,
-      })
-      .returning();
+        })
+        .returning()
+        .get();
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -928,7 +966,9 @@ export class NotesService {
     });
     // Out-of-band: inbox create must not wait on DM fan-out latency (issue #832).
     // Errors are swallowed inside notifyDmsOfInboxSubmission.
-    void this.notifyDmsOfInboxSubmission(row, user);
+    void this.currentAttributionUser(user)
+      .then((notificationActor) => this.notifyDmsOfInboxSubmission(row, notificationActor))
+      .catch(() => undefined);
     return toDomain(row);
   }
 

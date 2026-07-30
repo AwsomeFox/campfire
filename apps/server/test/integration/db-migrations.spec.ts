@@ -995,10 +995,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0130 creates table_safety_holds identically on a fresh DB and an upgraded one (#599)', () => {
+  it('0152 adds #842 safety attribution identically on a fresh DB and an upgraded one', () => {
     // Same drift guard as 0121: bootstrap.sql and the migration must produce the SAME table, or
     // an upgraded install ends up with a subtly different safety-hold row than a fresh one.
     expect(MIGRATION_NAMES).toContain('0130_table_safety_holds_599');
+    expect(MIGRATION_NAMES).toContain('0152_table_safety_attribution_842');
 
     const expected = [
       'campaign_id',
@@ -1009,6 +1010,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       'activation_count',
       'released_at',
       'released_by',
+      'released_by_user_id',
       'recovery',
       'facilitator_note',
       'updated_at',
@@ -1022,12 +1024,30 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       try {
         freshCols = columnNames(fresh.sqlite, 'table_safety_holds');
         expect([...freshCols].sort()).toEqual(expected);
-        // The column that must NOT exist. An anonymous hold keeps its promise by the identity
-        // never reaching storage, so there is nothing here for a later projection to forget to
-        // redact or for a DM reading the audit log to join against.
         expect(freshCols).not.toContain('activated_by_user_id');
+        expect(freshCols).toContain('released_by_user_id');
       } finally {
         fresh.sqlite.close();
+      }
+
+      // A partially repaired legacy install can have recorded #599 but no longer
+      // have its table. #842 must skip its ALTER in that state; bootstrap then
+      // recreates the current table shape instead of aborting startup.
+      const missingTable = new Database(dbFilePath(dataDir));
+      try {
+        missingTable.exec('DROP TABLE table_safety_holds');
+        missingTable.prepare('DELETE FROM __migrations WHERE name = ?').run('0152_table_safety_attribution_842');
+      } finally {
+        missingTable.close();
+      }
+      const recreated = openDatabase(dataDir);
+      try {
+        expect([...columnNames(recreated.sqlite, 'table_safety_holds')].sort()).toEqual(expected);
+        expect(
+          recreated.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0152_table_safety_attribution_842'),
+        ).toEqual({ name: '0152_table_safety_attribution_842' });
+      } finally {
+        recreated.sqlite.close();
       }
 
       writeOldSchemaDb(upgradedDir);
@@ -1044,6 +1064,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           )
           .run();
         expect(countRows(upgraded.sqlite, 'table_safety_holds')).toBe(1);
+        expect(
+          upgraded.sqlite
+            .prepare('SELECT released_by_user_id FROM table_safety_holds WHERE campaign_id = 1')
+            .get(),
+        ).toEqual({ released_by_user_id: null });
       } finally {
         upgraded.sqlite.close();
       }
@@ -1063,6 +1088,148 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     } finally {
       fs.rmSync(upgradedDir, { recursive: true, force: true });
     }
+  });
+
+  it('0153 adds explicit imported-attribution markers with privacy-safe legacy defaults (#842)', () => {
+    expect(MIGRATION_NAMES).toContain('0153_imported_attribution_842');
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    fresh.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec(`
+        ALTER TABLE notes DROP COLUMN author_imported;
+        ALTER TABLE comments DROP COLUMN author_imported;
+        ALTER TABLE session_rsvps DROP COLUMN user_imported;
+        ALTER TABLE entity_revisions DROP COLUMN author_imported;
+        ALTER TABLE entity_revisions DROP COLUMN replaced_by_imported;
+      `);
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0153_imported_attribution_842');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'notes')).toContain('author_imported');
+      expect(columnNames(upgraded.sqlite, 'comments')).toContain('author_imported');
+      expect(columnNames(upgraded.sqlite, 'session_rsvps')).toContain('user_imported');
+      expect(columnNames(upgraded.sqlite, 'entity_revisions')).toEqual(
+        expect.arrayContaining(['author_imported', 'replaced_by_imported']),
+      );
+      for (const [table, column] of [
+        ['notes', 'author_imported'],
+        ['comments', 'author_imported'],
+        ['session_rsvps', 'user_imported'],
+        ['entity_revisions', 'author_imported'],
+        ['entity_revisions', 'replaced_by_imported'],
+      ]) {
+        const info = (upgraded.sqlite.pragma(`table_info(${table})`) as Array<{ name: string; dflt_value: string | null }>)
+          .find((entry) => entry.name === column);
+        expect(info?.dflt_value).toBe('0');
+      }
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('0154 adds session-share creator IDs on upgrade and skips a missing legacy table (#842)', () => {
+    expect(MIGRATION_NAMES).toContain('0154_session_shares_creator_842');
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'session_shares')).toContain('created_by_user_id');
+    } finally {
+      fresh.sqlite.close();
+    }
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE session_shares DROP COLUMN created_by_user_id');
+      legacy.pragma('foreign_keys = OFF'); // the fixture needs only the retained creator copy, not its parents
+      legacy
+        .prepare(
+          `INSERT INTO session_shares
+             (session_id, campaign_id, label, created_by, token_hash, token_prefix, expires_at, access_count, first_accessed_at, last_accessed_at, created_at, updated_at)
+           VALUES (1, 1, 'legacy share', 'Legacy creator', 'legacy-share-hash', 'cf_share_leg', NULL, 0, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0154_session_shares_creator_842');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'session_shares')).toContain('created_by_user_id');
+      const info = (upgraded.sqlite.pragma('table_info(session_shares)') as Array<{ name: string; notnull: number }>)
+        .find((entry) => entry.name === 'created_by_user_id');
+      expect(info).toMatchObject({ notnull: 0 });
+      expect(
+        upgraded.sqlite.prepare(`SELECT created_by, created_by_user_id FROM session_shares WHERE token_hash = 'legacy-share-hash'`).get(),
+      ).toEqual({ created_by: 'Legacy creator', created_by_user_id: null });
+    } finally {
+      upgraded.sqlite.close();
+    }
+
+    const missing = new Database(dbFilePath(dataDir));
+    try {
+      missing.exec('DROP TABLE session_shares');
+      missing.prepare('DELETE FROM __migrations WHERE name = ?').run('0154_session_shares_creator_842');
+    } finally {
+      missing.close();
+    }
+    expect(() => openDatabase(dataDir).sqlite.close()).not.toThrow();
+  });
+
+  it('0155 adds cast-session creator IDs on upgrade and skips a missing legacy table (#842)', () => {
+    expect(MIGRATION_NAMES).toContain('0155_cast_sessions_creator_842');
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'cast_sessions')).toContain('created_by_user_id');
+    } finally {
+      fresh.sqlite.close();
+    }
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE cast_sessions DROP COLUMN created_by_user_id');
+      legacy.pragma('foreign_keys = OFF'); // the fixture needs only the retained creator copy, not its parent
+      legacy
+        .prepare(
+          `INSERT INTO cast_sessions
+             (campaign_id, label, created_by, token_hash, token_prefix, exit_pin_hash, expires_at, access_count, first_accessed_at, last_accessed_at, created_at, updated_at)
+           VALUES (1, 'legacy cast', 'Legacy creator', 'legacy-cast-hash', 'cf_cast_leg', 'legacy-pin-hash', '2027-01-01T00:00:00.000Z', 0, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0155_cast_sessions_creator_842');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'cast_sessions')).toContain('created_by_user_id');
+      const info = (upgraded.sqlite.pragma('table_info(cast_sessions)') as Array<{ name: string; notnull: number }>)
+        .find((entry) => entry.name === 'created_by_user_id');
+      expect(info).toMatchObject({ notnull: 0 });
+      expect(
+        upgraded.sqlite.prepare(`SELECT created_by, created_by_user_id FROM cast_sessions WHERE token_hash = 'legacy-cast-hash'`).get(),
+      ).toEqual({ created_by: 'Legacy creator', created_by_user_id: null });
+    } finally {
+      upgraded.sqlite.close();
+    }
+
+    const missing = new Database(dbFilePath(dataDir));
+    try {
+      missing.exec('DROP TABLE cast_sessions');
+      missing.prepare('DELETE FROM __migrations WHERE name = ?').run('0155_cast_sessions_creator_842');
+    } finally {
+      missing.close();
+    }
+    expect(() => openDatabase(dataDir).sqlite.close()).not.toThrow();
   });
 
   it('0133 backfills ai_driver_control_state.phase on a legacy table (#1043)', () => {

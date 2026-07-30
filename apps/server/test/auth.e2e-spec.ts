@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { hashSessionToken } from '../src/common/crypto';
 import { DB, DB_HOLDER, DbHolder, type DrizzleDb } from '../src/db/db.module';
-import { users, userSessions } from '../src/db/schema';
+import { auditLog, users, userSessions } from '../src/db/schema';
 import {
   SESSION_ABSOLUTE_MAX_AGE_MS,
   SESSION_COOKIE_NAME,
@@ -843,6 +843,15 @@ describe('self-delete account (e2e, issue #128)', () => {
     // Player self-deletes.
     const delRes = await playerAgent.delete('/api/v1/me');
     expect(delRes.status).toBe(204);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const deleteAudit = db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.entityId, playerId))
+      .all()
+      .find((row) => row.action === 'user.delete');
+    expect(deleteAudit).toMatchObject({ actor: String(playerId), detail: `user:${playerId}` });
 
     // Account is gone (login fails, and the admin roster no longer lists them).
     const relogin = await request(server).post('/api/v1/auth/login').send({ username: 'sd-player', password: 'player-password-1' });
