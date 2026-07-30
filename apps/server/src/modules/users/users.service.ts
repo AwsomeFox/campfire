@@ -34,6 +34,7 @@ import {
   checkRequests,
   aiDmTranscriptEvents,
   proposals,
+  tableSafetyHolds,
   diceRolls,
   notifications,
   notificationDigestQueue,
@@ -179,7 +180,7 @@ export class UsersService {
    * This is deliberately a synchronous transaction helper: callers get all labels changed
    * or none of them.
    */
-  synchronizeRetainedAttributionTx(
+  private synchronizeRetainedAttributionTx(
     tx: SyncDb,
     userId: number,
     previousLabel: string,
@@ -209,6 +210,8 @@ export class UsersService {
     tx.update(checkRequests).set({ requestedByName: nextLabel }).where(eq(checkRequests.requestedByUserId, stableUserId)).run();
     tx.update(aiDmTranscriptEvents).set({ actorName: nextLabel }).where(eq(aiDmTranscriptEvents.actorUserId, stableUserId)).run();
     tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
+    tx.update(tableSafetyHolds).set({ activatedByName: nextLabel }).where(eq(tableSafetyHolds.activatedByUserId, stableUserId)).run();
+    tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
 
     // Moderation snapshots deliberately hash their copied author label. This is an
     // authorized privacy rewrite, so re-stamp its metadata digest with the unchanged
@@ -216,12 +219,8 @@ export class UsersService {
     // pre-redaction anchor and must never be replaced with a placeholder hash.
     const evidenceRows = tx.select().from(moderationEvidence).where(eq(moderationEvidence.authorUserId, stableUserId)).all();
     for (const row of evidenceRows) {
-      // On deletion, notification evidence copies bell title/body verbatim. Remove
-      // those rendered copies rather than attempting an unsafe substring replacement.
-      const content =
-        pseudonymizeRenderedCopy && row.targetType === 'notification' && row.redactedAt === null
-          ? 'This notification has updated attribution.'
-          : row.content;
+      // Evidence content is tamper-evident incident material, not mutable attribution.
+      const content = row.content;
       const payload: ModerationEvidencePayload = {
         campaignId: row.campaignId,
         targetType: row.targetType,
@@ -265,6 +264,10 @@ export class UsersService {
         .where(eq(notificationDigestQueue.actorUserId, stableUserId))
         .run();
     }
+  }
+
+  synchronizeRosterAttributionTx(tx: SyncDb, userId: number, previousLabel: string, nextLabel: string): void {
+    this.synchronizeRetainedAttributionTx(tx, userId, previousLabel, nextLabel);
   }
 
   /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */

@@ -2511,10 +2511,8 @@ export const campaignExportRequests = sqliteTable(
 // on a race, so "two participants tapped at once" resolves to one held table instead of a
 // conflict either of them has to retry.
 //
-// Note the column that is ABSENT: there is no activated_by_user_id. An anonymous activation
-// keeps its promise by never handing the identity to this layer at all, so no projection,
-// export, or audit join can reconstruct it. `activatedByName` is populated only when the
-// participant explicitly chose attribution.
+// Anonymous activations store neither an id nor a label. Attributed holds retain internal ids
+// solely so later account privacy changes can rewrite copied labels; no API exposes them.
 export const tableSafetyHolds = sqliteTable('table_safety_holds', {
   campaignId: integer('campaign_id').primaryKey(),
   /** True while play is frozen. The single field every gate reads. */
@@ -2523,12 +2521,14 @@ export const tableSafetyHolds = sqliteTable('table_safety_holds', {
   activatedAt: text('activated_at'),
   /** Display name, ONLY for an explicitly attributed hold. NULL means anonymous *or* no hold. */
   activatedByName: text('activated_by_name'),
+  activatedByUserId: text('activated_by_user_id'),
   anonymous: integer('anonymous', { mode: 'boolean' }).notNull().default(true),
   /** Lifetime activation count for this campaign — a count is not attributable. */
   activationCount: integer('activation_count').notNull().default(0),
   releasedAt: text('released_at'),
   /** The facilitator who released it. Always recorded: releasing is an accountable act. */
   releasedBy: text('released_by'),
+  releasedByUserId: text('released_by_user_id'),
   /** A SafetyHoldRecovery value: resume | rewind | veil | scene_change | end. */
   recovery: text('recovery'),
   facilitatorNote: text('facilitator_note'),

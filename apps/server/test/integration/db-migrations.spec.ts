@@ -999,16 +999,19 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     // Same drift guard as 0121: bootstrap.sql and the migration must produce the SAME table, or
     // an upgraded install ends up with a subtly different safety-hold row than a fresh one.
     expect(MIGRATION_NAMES).toContain('0130_table_safety_holds_599');
+    expect(MIGRATION_NAMES).toContain('0130_table_safety_attribution_842');
 
     const expected = [
       'campaign_id',
       'active',
       'activated_at',
       'activated_by_name',
+      'activated_by_user_id',
       'anonymous',
       'activation_count',
       'released_at',
       'released_by',
+      'released_by_user_id',
       'recovery',
       'facilitator_note',
       'updated_at',
@@ -1022,10 +1025,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       try {
         freshCols = columnNames(fresh.sqlite, 'table_safety_holds');
         expect([...freshCols].sort()).toEqual(expected);
-        // The column that must NOT exist. An anonymous hold keeps its promise by the identity
-        // never reaching storage, so there is nothing here for a later projection to forget to
-        // redact or for a DM reading the audit log to join against.
-        expect(freshCols).not.toContain('activated_by_user_id');
+        expect(freshCols).toContain('activated_by_user_id');
+        expect(freshCols).toContain('released_by_user_id');
       } finally {
         fresh.sqlite.close();
       }
@@ -1044,6 +1045,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           )
           .run();
         expect(countRows(upgraded.sqlite, 'table_safety_holds')).toBe(1);
+        expect(
+          upgraded.sqlite
+            .prepare('SELECT activated_by_user_id, released_by_user_id FROM table_safety_holds WHERE campaign_id = 1')
+            .get(),
+        ).toEqual({ activated_by_user_id: null, released_by_user_id: null });
       } finally {
         upgraded.sqlite.close();
       }

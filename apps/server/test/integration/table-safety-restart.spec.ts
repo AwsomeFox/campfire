@@ -176,7 +176,7 @@ describe('table safety hold survives a restart (#599, real SQLite)', () => {
     // Both resolve. There is no compare-and-set to lose and no state machine to reject, which
     // is the entire point: pausing twice is harmless, and any guarantee that could make a pause
     // fail is worth less than the pause.
-    const [a, b] = await Promise.all([safety.activate(campaignId, null), safety.activate(campaignId, 'Ana')]);
+    const [a, b] = await Promise.all([safety.activate(campaignId, null), safety.activate(campaignId, null)]);
     expect(a.active).toBe(true);
     expect(b.active).toBe(true);
     expect(safety.getHold(campaignId).activationCount).toBe(1);

@@ -13,16 +13,6 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
 type AttributedSafetyActor = { id: string; name: string };
-type SafetyActor = AttributedSafetyActor | string | null;
-
-function safetyActorName(actor: SafetyActor): string | null {
-  if (actor === null) return null;
-  return typeof actor === 'string' ? actor : actor.name;
-}
-
-function isAttributedSafetyActor(actor: SafetyActor): actor is AttributedSafetyActor {
-  return actor !== null && typeof actor !== 'string';
-}
 
 /**
  * The table safety hold — an X-Card with teeth (issue #599).
@@ -197,8 +187,8 @@ export class TableSafetyService {
    * Anonymous activations receive null. Attributed HTTP calls retain a stable id only for their
    * notification row, while legacy direct callers may still provide just a display name.
    */
-  async activate(campaignId: number, actor: SafetyActor): Promise<TableSafetyHold> {
-    const actorName = safetyActorName(actor);
+  async activate(campaignId: number, actor: AttributedSafetyActor | null): Promise<TableSafetyHold> {
+    const actorName = actor?.name ?? null;
     const anonymous = actorName === null;
     const ts = nowIso();
     const existing = this.readRow(campaignId);
@@ -215,10 +205,12 @@ export class TableSafetyService {
           active: true,
           activatedAt: ts,
           activatedByName: actorName,
+          activatedByUserId: actor?.id ?? null,
           anonymous,
           activationCount: 1,
           releasedAt: null,
           releasedBy: null,
+          releasedByUserId: null,
           recovery: null,
           facilitatorNote: null,
           updatedAt: ts,
@@ -229,12 +221,14 @@ export class TableSafetyService {
             active: true,
             activatedAt: ts,
             activatedByName: actorName,
+            activatedByUserId: actor?.id ?? null,
             anonymous,
             activationCount: sql`${tableSafetyHolds.activationCount} + 1`,
             // The previous hold's resolution is cleared: `recovery` describes how the CURRENT
             // hold ended, and a live hold has not ended.
             releasedAt: null,
             releasedBy: null,
+            releasedByUserId: null,
             recovery: null,
             facilitatorNote: null,
             updatedAt: ts,
@@ -280,10 +274,12 @@ export class TableSafetyService {
         active: false,
         activatedAt: null,
         activatedByName: null,
+        activatedByUserId: null,
         anonymous: true,
         activationCount: 0,
         releasedAt: ts,
         releasedBy: facilitatorName,
+        releasedByUserId: facilitatorUserId ?? null,
         recovery,
         facilitatorNote: note,
         updatedAt: ts,
@@ -296,8 +292,10 @@ export class TableSafetyService {
           // An attributed hold was attributed for the duration of the stop so the table could
           // talk to them; it is not a permanent record of who needed the table to stop.
           activatedByName: null,
+          activatedByUserId: null,
           releasedAt: ts,
           releasedBy: facilitatorName,
+          releasedByUserId: facilitatorUserId ?? null,
           recovery,
           facilitatorNote: note,
           updatedAt: ts,
@@ -314,10 +312,10 @@ export class TableSafetyService {
 
   private async recordActivation(
     campaignId: number,
-    actor: SafetyActor,
+    actor: AttributedSafetyActor | null,
     anonymous: boolean,
   ): Promise<void> {
-    const actorName = safetyActorName(actor);
+    const actorName = actor?.name ?? null;
     this.emitHoldEvent(campaignId, true);
     await this.audit
       .log({
@@ -344,7 +342,7 @@ export class TableSafetyService {
       anonymous
         ? 'Someone at the table used the safety hold. Play is paused until a facilitator resolves it.'
         : `${actorName} used the safety hold. Play is paused until a facilitator resolves it.`,
-      isAttributedSafetyActor(actor) ? actor : null,
+      actor,
     );
   }
 

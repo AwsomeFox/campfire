@@ -195,7 +195,7 @@ export class RosterImportService {
             (row.oidcSub !== undefined && nextOidcSub !== existing.oidcSub);
           if (changed) {
             if (nextDisplay !== existing.displayName) {
-              this.usersService.synchronizeRetainedAttributionTx(
+              this.usersService.synchronizeRosterAttributionTx(
                 tx,
                 userId,
                 existing.displayName || existing.username,

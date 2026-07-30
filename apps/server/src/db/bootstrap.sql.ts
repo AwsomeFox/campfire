@@ -1990,10 +1990,12 @@ CREATE TABLE IF NOT EXISTS table_safety_holds (
   active INTEGER NOT NULL DEFAULT 0,
   activated_at TEXT,
   activated_by_name TEXT,
+  activated_by_user_id TEXT,
   anonymous INTEGER NOT NULL DEFAULT 1,
   activation_count INTEGER NOT NULL DEFAULT 0,
   released_at TEXT,
   released_by TEXT,
+  released_by_user_id TEXT,
   recovery TEXT,
   facilitator_note TEXT,
   updated_at TEXT NOT NULL

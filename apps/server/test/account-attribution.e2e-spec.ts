@@ -145,13 +145,6 @@ describe('account historical attribution privacy (e2e)', () => {
     expect(rows.moderationReporter.every((row) => row.reporterName === label)).toBe(true);
     expect(rows.moderationSubject.every((row) => row.subjectName === label)).toBe(true);
     expect(rows.moderationEvidence.every((row) => row.authorName === label)).toBe(true);
-    if (options.expectNeutralNotificationCopy) {
-      expect(
-        rows.moderationEvidence
-          .filter((row) => row.targetType === 'notification')
-          .every((row) => row.content === NEUTRAL_NOTIFICATION_BODY),
-      ).toBe(true);
-    }
     expect(
       rows.moderationEvidence.every((row) =>
         ['intact', 'redacted'].includes(

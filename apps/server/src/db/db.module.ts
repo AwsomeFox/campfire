@@ -4270,6 +4270,12 @@ function migrateTableSafetyHolds599(sqlite: Database.Database): void {
   `);
 }
 
+function migrateTableSafetyAttribution842(sqlite: Database.Database): void {
+  const names = new Set((sqlite.prepare(`PRAGMA table_info(table_safety_holds)`).all() as Array<{ name: string }>).map((c) => c.name));
+  if (!names.has('activated_by_user_id')) sqlite.exec(`ALTER TABLE table_safety_holds ADD COLUMN activated_by_user_id TEXT`);
+  if (!names.has('released_by_user_id')) sqlite.exec(`ALTER TABLE table_safety_holds ADD COLUMN released_by_user_id TEXT`);
+}
+
 /** Fresh installs receive this via bootstrap; upgrades need the same clean taxonomy tables. */
 function migrateCampaignLibraryManagement742(sqlite: Database.Database): void {
   sqlite.exec(`
@@ -4750,6 +4756,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // why this is never renumbered: renaming a migration a database has already recorded is the
   // one edit that silently breaks run-once.
   { name: '0130_table_safety_holds_599', run: migrateTableSafetyHolds599 },
+  { name: '0130_table_safety_attribution_842', run: migrateTableSafetyAttribution842 },
   // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 were held by
   // other in-flight branches when this entry was written. Several have since landed and are
   // registered in this same array (0130 → #599, 0131 → #1042, 0132 → #1047), which changes
