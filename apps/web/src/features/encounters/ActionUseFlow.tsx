@@ -250,7 +250,7 @@ export function ActionUsePanel({
                 data-testid="action-use-retry"
                 disabled={commit.isPending}
                 onClick={() => {
-                  commit.mutate(preview.chainId);
+                  commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
                 }}
               >
                 {commit.isPending ? 'Retrying…' : 'Retry'}
