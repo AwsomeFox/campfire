@@ -277,8 +277,29 @@ export class CampaignLibraryService {
         else if (request.operation === 'set_status') {
           const field = target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status';
           tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${request.status}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
-        } else if (request.operation === 'move_inventory_owner') tx.run(sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
-        else tx.run(sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        } else if (request.operation === 'move_inventory_owner') {
+          // Issue #1326 review (Codex/Devin): this bulk move has no equip fields of its
+          // own (LibraryBulkRequest carries only ownerType/characterId here), so — same
+          // rule as InventoryService.update's single-item PATCH — a bulk owner change
+          // ALWAYS auto-unequips. Left unguarded, this bypassed the single-item PATCH's
+          // fix entirely: a bulk move to another character silently armed them with the
+          // item's equippedAction (or could 409 a legitimate future equip via a stale
+          // duplicate-slot row), and a bulk move to the party stash could leave
+          // equipped=1 on a party-owned row, which `update()` treats as invalid.
+          tx.run(sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        } else {
+          // Issue #1326 review (Codex/Devin): mirrors InventoryService.remove() — an
+          // inventory item archived through the bulk tool must also clear its equip
+          // state, or a later bulk `restore` can resurrect a stale slot claim against
+          // a replacement item equipped into that same (character, slot) pair while the
+          // original sat archived. Only inventory_item carries equip state, so every
+          // other entity type in this shared branch (quest/npc/location/faction/
+          // timeline_event/attachment) is unaffected.
+          const clearEquipOnArchive = request.operation === 'archive' && target.entityType === 'inventory_item';
+          tx.run(
+            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
+          );
+        }
       }
       if (locationPromotion && locationCurrentTargets[0]) {
         tx.update(campaigns).set({ currentLocationId: locationCurrentTargets[0].entityId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();

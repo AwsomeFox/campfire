@@ -604,6 +604,8 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
   let encounterId: number;
   let mapAttachmentId: number;
   let battleMapAttachmentId: number;
+  let equippedCharacterId: number;
+  let equippedItemId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -665,6 +667,22 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     });
 
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Healing potion', qty: 3 });
+
+    // Issue #1326 review: a character-owned EQUIPPED item (with a granted action) must
+    // round-trip through clone with its equip state and remapped character intact.
+    const equippedChar = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Loadout Hero' });
+    equippedCharacterId = equippedChar.body.id;
+    const equippedItem = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Heirloom Blade', ownerType: 'character', characterId: equippedCharacterId });
+    equippedItemId = equippedItem.body.id;
+    const equipRes = await dmAgent.patch(`/api/v1/inventory/${equippedItemId}`).send({
+      equipped: true,
+      equipSlot: 'main-hand',
+      equippedAction: { name: 'Heirloom Slash', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', notes: '' },
+    });
+    expect(equipRes.status).toBe(200);
+
     const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
     await dmAgent
       .patch(`/api/v1/campaigns/${campaignId}/treasury`)
@@ -732,6 +750,19 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     const treasury = await dmAgent.get(`/api/v1/campaigns/${cloneId}/treasury`);
     expect(treasury.body.gp).toBe(120);
     expect(treasury.body.sp).toBe(45);
+
+    // Issue #1326 review: equip state + granted action survive clone, remapped to the
+    // cloned character (never the source characterId).
+    const clonedChars = await dmAgent.get(`/api/v1/campaigns/${cloneId}/characters`);
+    const clonedHero = clonedChars.body.find((c: { name: string }) => c.name === 'Loadout Hero');
+    expect(clonedHero).toBeDefined();
+    const clonedBlade = inventory.body.find((i: { name: string }) => i.name === 'Heirloom Blade');
+    expect(clonedBlade).toBeDefined();
+    expect(clonedBlade.characterId).toBe(clonedHero.id);
+    expect(clonedBlade.characterId).not.toBe(equippedCharacterId);
+    expect(clonedBlade.equipped).toBe(true);
+    expect(clonedBlade.equipSlot).toBe('main-hand');
+    expect(clonedBlade.equippedAction).toMatchObject({ name: 'Heirloom Slash', damage: '1d8+3 slashing' });
 
     const encDetail = await dmAgent.get(`/api/v1/encounters/${clonedEncs.body[0].id}`);
     expect(encDetail.body.mapAttachmentId).not.toBeNull();

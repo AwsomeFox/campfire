@@ -20,6 +20,7 @@ import {
   CompendiumRef,
   CompendiumSnapshot,
   normalizeOffsetIsoDateTime,
+  CharacterAction,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1426,6 +1427,12 @@ export class CampaignsService {
           const ownerType = item.ownerType === 'character' ? 'character' : 'party';
           const mappedChar = item.characterId != null ? (charMap.get(item.characterId) ?? null) : null;
           const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+          // Issue #1326 review (Codex/Devin): a character-owned item's equip state
+          // carries over 1:1 to its cloned character (slot conflicts can't arise — every
+          // clone maps at most one source character to one destination character, so
+          // relative slot assignments stay unique). An item that falls back to the party
+          // stash (its character wasn't cloned/mapped) lands unequipped, same invariant
+          // `InventoryService.update` enforces: a party item can never be equipped.
           tx.insert(inventoryItems)
             .values({
               campaignId: cloneId,
@@ -1439,6 +1446,9 @@ export class CampaignsService {
               compendiumRef: item.compendiumRef,
               compendiumSnapshot: item.compendiumSnapshot,
               compendiumState: item.compendiumState,
+              equipped: resolvedOwner === 'character' && item.equipped,
+              equipSlot: resolvedOwner === 'character' ? item.equipSlot : null,
+              equippedAction: item.equippedAction,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -2441,6 +2451,14 @@ export class CampaignsService {
         const charSrc = intOrNull(item.characterId);
         const mappedChar = charSrc != null ? (charMap.get(charSrc) ?? null) : null;
         const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+        // Issue #1326 review (Codex/Devin): preserve equip state from the imported JSON
+        // (untrusted external input — validated, not trusted). A party-fallback item
+        // (its character wasn't imported/mapped) always lands unequipped, same as clone.
+        // `equippedAction` is re-validated against CharacterAction rather than trusted
+        // verbatim — a malformed or foreign-shaped import drops the field rather than
+        // storing garbage the resolver would later fail to parse.
+        const importedEquipSlot = typeof item.equipSlot === 'string' ? item.equipSlot.slice(0, 60) : null;
+        const importedActionParse = CharacterAction.safeParse(item.equippedAction);
         tx.insert(inventoryItems)
           .values({
             campaignId: cid,
@@ -2457,6 +2475,9 @@ export class CampaignsService {
             // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
             // and surface a detached link rather than pretending it can be refreshed.
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
+            equipped: resolvedOwner === 'character' && item.equipped === true,
+            equipSlot: resolvedOwner === 'character' ? importedEquipSlot : null,
+            equippedAction: importedActionParse.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
           })

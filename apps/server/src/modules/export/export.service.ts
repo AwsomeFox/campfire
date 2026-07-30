@@ -274,7 +274,7 @@ export class ExportService {
       this.timeline.listEvents(campaignId, role),
       this.timeline.getCalendar(campaignId),
       this.sessionZero.get(campaignId),
-      this.inventory.listForCampaign(campaignId),
+      this.inventory.listForCampaign(campaignId, user, role),
       this.inventory.getTreasury(campaignId),
       // Issue #813: immutable prose versions (author + replacer provenance), including tips.
       this.revisions.listForCampaign(campaignId),

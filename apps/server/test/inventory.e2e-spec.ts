@@ -833,6 +833,43 @@ describe('inventory & treasury (e2e)', () => {
       expect(getRes.body.qty).toBe(2);
     });
 
+    it('a qty-only idempotency retry spanning the #1326 upgrade still replays rather than 409ing (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Pre-upgrade potion', qty: 5 });
+      const id = created.body.id as number;
+      const key = 'pre-upgrade-qty-retry';
+
+      // Simulate a row persisted by the PRE-#1326 binary: its qtyFingerprint never
+      // had the equip keys at all (they didn't exist yet), and its stored response
+      // carries no equip fields either.
+      const { DB } = await import('../src/db/db.module');
+      const { inventoryQtyIdempotency } = await import('../src/db/schema');
+      const db = ctx.app.get(DB);
+      const preUpgradeResponse = { ...created.body, qty: 4 };
+      const legacyFingerprint = 'delta:-1|{"name":null,"notes":null,"iconSlug":null,"ownerType":null,"characterId":null}';
+      db.insert(inventoryQtyIdempotency)
+        .values({
+          key,
+          itemId: id,
+          userId: 'dev:dm-1',
+          fingerprint: legacyFingerprint,
+          responseJson: JSON.stringify(preUpgradeResponse),
+          createdAt: new Date().toISOString(),
+        })
+        .run();
+
+      // The identical qty-only request, retried on the now-upgraded binary, must
+      // replay the pre-upgrade response — not 409 IDEMPOTENCY_KEY_REUSE just because
+      // the fingerprint format grew new (unused-here) equip fields.
+      const retry = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: -1, idempotencyKey: key });
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(preUpgradeResponse);
+    });
+
     it('trashing an equipped item clears its equip state, so restoring it never resurrects a slot conflict (review fix)', async () => {
       const server = ctx.app.getHttpServer();
 
@@ -873,6 +910,58 @@ describe('inventory & treasury (e2e)', () => {
       const replacementCheck = await request(server).get(`/api/v1/inventory/${replacement.body.id}`).set(player);
       expect(replacementCheck.body.equipped).toBe(true);
       expect(replacementCheck.body.equipSlot).toBe('review-trash-restore-slot');
+    });
+
+    it('redacts equippedAction from a non-owner, non-dm read on the SERIALISED payload — not just the type (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Secret Blade', ownerType: 'character', characterId: ownCharacterId });
+      const grantedAction = { name: 'Hidden Strike', kind: 'melee', toHit: '+9', damage: '3d6+9 necrotic', notes: 'A distinctive telltale phrase.' };
+      const equipRes = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-redaction-slot', equippedAction: grantedAction });
+      expect(equipRes.status).toBe(200);
+      expect(equipRes.body.equippedAction).toMatchObject(grantedAction);
+
+      // The DM sees the full action — both via GET and the campaign list.
+      const dmGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(dm);
+      expect(dmGet.body.equippedAction).toMatchObject(grantedAction);
+      const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+      expect(dmList.body.find((i: { id: number }) => i.id === created.body.id).equippedAction).toMatchObject(grantedAction);
+
+      // The owning player sees it too.
+      const ownerGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(player);
+      expect(ownerGet.body.equippedAction).toMatchObject(grantedAction);
+
+      // A DIFFERENT player gets equippedAction: null — assert on the raw response TEXT
+      // (the serialised payload a TypeScript `Omit` could still leak at runtime), not
+      // merely the parsed field, per the review's explicit ask.
+      const otherGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(otherPlayer);
+      expect(otherGet.status).toBe(200);
+      expect(otherGet.body.equippedAction).toBeNull();
+      expect(otherGet.text).not.toContain('Hidden Strike');
+      expect(otherGet.text).not.toContain('A distinctive telltale phrase');
+
+      const otherList = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(otherPlayer);
+      expect(otherList.status).toBe(200);
+      expect(otherList.body.find((i: { id: number }) => i.id === created.body.id).equippedAction).toBeNull();
+      expect(otherList.text).not.toContain('Hidden Strike');
+      expect(otherList.text).not.toContain('A distinctive telltale phrase');
+
+      // A viewer (not even a player) also gets it redacted.
+      const viewerGet = await request(server).get(`/api/v1/inventory/${created.body.id}`).set(viewer);
+      expect(viewerGet.body.equippedAction).toBeNull();
+      expect(viewerGet.text).not.toContain('Hidden Strike');
+
+      // Non-secret fields (name/qty/equipped/equipSlot) remain visible to everyone —
+      // only equippedAction carries the sheet-action secrecy precedent.
+      expect(otherGet.body.name).toBe('Secret Blade');
+      expect(otherGet.body.equipped).toBe(true);
+      expect(otherGet.body.equipSlot).toBe('review-redaction-slot');
     });
   });
 

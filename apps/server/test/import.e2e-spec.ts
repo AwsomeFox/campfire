@@ -605,7 +605,15 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Vesper', className: 'Rogue', level: 4 });
     characterId = charRes.body.id;
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Guild Signet', qty: 1, ownerType: 'party' });
-    await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
+    const daggers = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
+    // Issue #1326 review: an equipped item + its granted action must survive export/import.
+    await dmAgent.patch(`/api/v1/inventory/${daggers.body.id}`).send({
+      equipped: true,
+      equipSlot: 'off-hand',
+      equippedAction: { name: 'Dagger Throw', kind: 'ranged', toHit: '+6', damage: '1d4+3 piercing', notes: '' },
+    });
     // Issue #582: absolute { set } now requires expectedUpdatedAt (CAS). Fetch the
     // current row version first so this setup write is accepted.
     const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
@@ -697,6 +705,10 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     expect(partyItem.ownerType).toBe('party');
     expect(charItem.ownerType).toBe('character');
     expect(charItem.characterId).toBe(vesper.id);
+    // Issue #1326 review: equip state + granted action carried through import.
+    expect(charItem.equipped).toBe(true);
+    expect(charItem.equipSlot).toBe('off-hand');
+    expect(charItem.equippedAction).toMatchObject({ name: 'Dagger Throw', damage: '1d4+3 piercing' });
     const treasury = await dmAgent.get(`/api/v1/campaigns/${imported.id}/treasury`);
     expect(treasury.body.gp).toBe(150);
     expect(treasury.body.sp).toBe(40);

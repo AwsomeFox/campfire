@@ -1709,8 +1709,8 @@ export class McpToolsService {
         'client-side by ownerType ("party"|"character") and characterId.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.inventory.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.inventory.listForCampaign(campaignId as number, user, role);
       },
     );
 
@@ -1721,8 +1721,8 @@ export class McpToolsService {
       { itemId: Id.describe('Inventory item id — from list_inventory') },
       async ({ itemId }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.inventory.getOrThrow(itemId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.inventory.getOrThrow(itemId as number, user, role);
       },
     );
 

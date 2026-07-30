@@ -32,6 +32,17 @@ export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
  * fields so key reuse with a different payload 409s (qty, move, name, notes, icon,
  * equip — issue #1326 review: a combined "spend a charge and equip this" retry must
  * not silently drop a changed equip instruction just because qty/name/etc. match).
+ *
+ * Issue #1326 review (Devin): the three equip keys are appended ONLY when this
+ * request actually touches equip. A request that never touches equip therefore
+ * computes the EXACT SAME JSON shape a pre-#1326 binary would have stored (same key
+ * order, same fields) — so an in-flight qty retry spanning this upgrade (started
+ * before, retried after) still matches its persisted fingerprint and replays, rather
+ * than 409ing IDEMPOTENCY_KEY_REUSE just because the fingerprint format grew new
+ * fields. A request that DOES touch equip still detects a changed replay: appending
+ * a new key where none existed (or changing an existing one) both fail the equality
+ * check, which is exactly the reuse-with-a-different-payload case this fingerprint
+ * exists to catch.
  */
 function qtyFingerprint(input: InventoryItemUpdateInput): string {
   const qtyPart =
@@ -40,16 +51,19 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
       : `set:${input.qty}@${input.expectedUpdatedAt ?? ''}`;
   // Deterministic JSON with explicit nulls for omitted fields — undefined must
   // not collapse into "absent key" vs "present null" differences across retries.
-  const restPart = JSON.stringify({
+  const rest: Record<string, unknown> = {
     name: input.name ?? null,
     notes: input.notes ?? null,
     iconSlug: input.iconSlug ?? null,
     ownerType: input.ownerType ?? null,
     characterId: input.characterId ?? null,
-    equipped: input.equipped ?? null,
-    equipSlot: input.equipSlot ?? null,
-    equippedAction: input.equippedAction ?? null,
-  });
+  };
+  if (input.equipped !== undefined || input.equipSlot !== undefined || input.equippedAction !== undefined) {
+    rest.equipped = input.equipped ?? null;
+    rest.equipSlot = input.equipSlot ?? null;
+    rest.equippedAction = input.equippedAction ?? null;
+  }
+  const restPart = JSON.stringify(rest);
   return `${qtyPart}|${restPart}`;
 }
 
@@ -115,12 +129,12 @@ export class InventoryService {
 
   // ---------- items ----------
 
-  async listForCampaign(campaignId: number): Promise<InventoryItem[]> {
+  async listForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<InventoryItem[]> {
     const rows = await this.db
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return this.withCompendiumStates(rows);
+    return this.redactEquippedActions(await this.withCompendiumStates(rows), user, role);
   }
 
   /**
@@ -140,13 +154,13 @@ export class InventoryService {
     return row?.value ?? 0;
   }
 
-  async listTrashForCampaign(campaignId: number): Promise<InventoryItem[]> {
+  async listTrashForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<InventoryItem[]> {
     const rows = await this.db
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), isNotNull(inventoryItems.deletedAt)))
       .orderBy(desc(inventoryItems.deletedAt));
-    return rows.map(toDomain);
+    return this.redactEquippedActions(rows.map(toDomain), user, role);
   }
 
   async getRowOrThrow(id: number, opts?: { includeDeleted?: boolean }) {
@@ -157,8 +171,44 @@ export class InventoryService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<InventoryItem> {
-    return this.withCompendiumState(await this.getRowOrThrow(id));
+  async getOrThrow(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const item = await this.withCompendiumState(await this.getRowOrThrow(id));
+    const [redacted] = await this.redactEquippedActions([item], user, role);
+    return redacted;
+  }
+
+  /**
+   * Issue #1326 review (Codex P1): `equippedAction` carries the same `CharacterAction`
+   * shape as `Character.actions`, which `CharactersService.listForCampaign` treats as
+   * PRIVATE mechanical state — a non-DM only ever sees their OWN character's sheet
+   * actions, never another player's (see that method's doc comment). Inventory rows
+   * are otherwise visible campaign-wide (name/qty/notes carry no such secrecy — any
+   * member can already see the party's and other characters' loot), so this redacts
+   * ONLY the one field that inherits the sheet-action precedent: a character-owned
+   * item's `equippedAction` is nulled out for any reader who is neither the DM nor
+   * that character's owning player. Party-stash items are never redacted — `equipped`
+   * can never be true there, and the shared stash has never been private.
+   */
+  private async redactEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
+    if (role === 'dm') return items;
+    const characterIds = [
+      ...new Set(
+        items
+          .filter((item) => item.ownerType === 'character' && item.characterId != null && item.equippedAction != null)
+          .map((item) => item.characterId as number),
+      ),
+    ];
+    if (characterIds.length === 0) return items;
+    const owners = await this.db
+      .select({ id: characters.id, ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(inArray(characters.id, characterIds));
+    const ownerById = new Map(owners.map((owner) => [owner.id, owner.ownerUserId]));
+    return items.map((item) => {
+      if (item.ownerType !== 'character' || item.characterId == null || item.equippedAction == null) return item;
+      if (ownerById.get(item.characterId) === user.id) return item;
+      return { ...item, equippedAction: null };
+    });
   }
 
   /** Compute volatile linked_updated without mutating snapshots or player-owned fields. */
