@@ -3669,6 +3669,100 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     }
   });
 
+  it('replays a same-key death save that commits during retry preflight after combatant removal', async () => {
+    const server = ctx.app.getHttpServer();
+    const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save late replay' });
+    expect(replayCampaign.status).toBe(201);
+    const replayCampaignId = replayCampaign.body.id as number;
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${replayCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Late Replay Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' })
+      ).status,
+    ).toBe(201);
+    const replayEncounter = await request(server)
+      .post(`/api/v1/campaigns/${replayCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Late replay', hidden: false });
+    expect(replayEncounter.status).toBe(201);
+    const replayEncounterId = replayEncounter.body.id as number;
+    const replayCombatantId = replayEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    let releaseOriginal!: () => void;
+    const originalGate = new Promise<void>((resolve) => {
+      releaseOriginal = resolve;
+    });
+    let originalAtBarrier!: () => void;
+    const originalBarrier = new Promise<void>((resolve) => {
+      originalAtBarrier = resolve;
+    });
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let retryAtBarrier!: () => void;
+    const retryBarrier = new Promise<void>((resolve) => {
+      retryAtBarrier = resolve;
+    });
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      if (adapterLookups === 2) {
+        originalAtBarrier();
+        await originalGate;
+      }
+      if (adapterLookups === 3) {
+        retryAtBarrier();
+        await retryGate;
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-late-replay' };
+    try {
+      const originalRequest = request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body)
+        .then((response) => response);
+      await originalBarrier;
+
+      const retryRequest = request(server)
+        .post(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}/death-save`)
+        .set(player)
+        .send(body)
+        .then((response) => response);
+      await retryBarrier;
+
+      releaseOriginal();
+      const original = await originalRequest;
+      expect(original.status).toBe(201);
+      expect((await request(server).delete(`/api/v1/encounters/${replayEncounterId}/combatants/${replayCombatantId}`).set(dm)).status).toBe(200);
+
+      releaseRetry();
+      const replay = await retryRequest;
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(original.body);
+      expect(adapterLookups).toBeGreaterThanOrEqual(3);
+      expect(rollSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
   it('replays a committed REST death save after encounter trashing without allowing a fresh key', async () => {
     const server = ctx.app.getHttpServer();
     const replayCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save trash replay' });

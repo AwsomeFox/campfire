@@ -3210,125 +3210,139 @@ export class EncountersService {
     // removed or the campaign became read-only. The controller/MCP tool has already
     // checked current campaign membership and role; this lookup performs no domain
     // write and is keyed to that authorized actor, encounter, and target.
-    let earlyReplay: { combatant: Combatant; roll: DiceRoll } | null = null;
-    this.db.transaction((tx) => {
-      const prior = findPriorEncounterOp(tx, deathSaveClaim, Date.now());
-      earlyReplay = prior ? replayResponse(prior.response) : null;
-    });
+    const replayCommittedDeathSave = (): { combatant: Combatant; roll: DiceRoll } | null => {
+      let replay: { combatant: Combatant; roll: DiceRoll } | null = null;
+      this.db.transaction((tx) => {
+        const prior = findPriorEncounterOp(tx, deathSaveClaim, Date.now());
+        replay = prior ? replayResponse(prior.response) : null;
+      });
+      return replay;
+    };
+    const earlyReplay = replayCommittedDeathSave();
     if (earlyReplay) return earlyReplay;
 
-    // Fresh death saves retain the normal archive protection. Recheck inside the
-    // write transaction below as well, so an archive racing this request cannot
-    // admit a new result after the preflight succeeds.
-    await this.assertCampaignWritableForFreshDeathSave(encounter.campaignId);
-    const adapter = await this.adapterForCampaign(encounter.campaignId);
-    if (!hasDeathSavesForAdapter(adapter)) {
-      throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
-    }
-    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
-
-    // This pre-read authorizes the actor. The mutable-encounter guard itself lives below
-    // the keyed replay lookup, so a lost-response retry can recover its committed result
-    // even if another DM ended the encounter before it arrived.
-    if (role !== 'dm') {
-      if (combatant.characterId === null) throw new ForbiddenException('Only dm may modify this combatant');
-      const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
-      if (!character || character.ownerUserId !== user.id) {
-        throw new ForbiddenException('Only dm or the owning player may roll this death save');
+    try {
+      // Fresh death saves retain the normal archive protection. Recheck inside the
+      // write transaction below as well, so an archive racing this request cannot
+      // admit a new result after the preflight succeeds.
+      await this.assertCampaignWritableForFreshDeathSave(encounter.campaignId);
+      const adapter = await this.adapterForCampaign(encounter.campaignId);
+      if (!hasDeathSavesForAdapter(adapter)) {
+        throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
       }
-    }
+      const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
-    let roll: DiceRoll | null = null;
-    let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
-    const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
-    const updated = await this.updateCombatant(
-      encounterId,
-      combatantId,
-      deathSavePatch,
-      user,
-      role,
-      {
-        operation: 'combatant.death_save_roll',
-        // The d20 is server generated inside the transaction. Bind the key to the action
-        // target, not that random face, so the same intent replays before any new RNG work.
-        operationFingerprint,
-        beforeWriteInTransaction: (tx, fresh) => {
-          this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
-          this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
-          // A concurrent first roll cannot leave a second request applying a face to a
-          // no-longer-dying combatant. This code is deliberately after the prior-claim
-          // lookup, so a lost-response retry returns its stored outcome instead.
-          if (
-            fresh.encounterId !== encounterId ||
-            fresh.kind !== 'character' ||
-            fresh.hpCurrent !== 0 ||
-            fresh.deathState !== 'dying'
-          ) {
-            throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
-          }
-          const result = this.rollDeathSaveD20();
-          result.label = `${fresh.name} · death save`;
-          roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
-          // `updateCombatant` applies this server-only face after the hook returns.
-          deathSavePatch.deathSaveRoll = result.total;
-        },
-        afterWriteInTransaction: (tx, committed, fresh, freshEncounter) => {
-          // This evidence is part of the authoritative action: commit it with the
-          // combatant outcome, dice row, audit entry, and idempotency replay response,
-          // or roll all five back. A retry then cannot replay an outcome whose combat
-          // log is permanently missing (or duplicated).
-          this.audit.logInTx(tx, {
-            actor: auditActor(user),
-            actorRole: role,
-            action: 'encounter.combatant.death_save_roll',
-            entityType: 'combatant',
-            entityId: combatantId,
-            campaignId: encounter.campaignId,
-            detail: `${committed.name}: d20 ${roll!.total}`,
-          });
-          if (committed.deathState === 'dead' && fresh.deathState !== 'dead') {
-            const actor =
-              freshEncounter.currentCombatantId === null || freshEncounter.currentCombatantId === combatantId
-                ? null
-                : tx
-                    .select({ id: combatants.id, name: combatants.name })
-                    .from(combatants)
-                    .where(and(eq(combatants.id, freshEncounter.currentCombatantId), eq(combatants.encounterId, encounterId)))
-                    .limit(1)
-                    .all()[0] ?? null;
-            this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'death', {
-              actor: actor?.name ?? null,
-              target: committed.name,
-              actorId: actor?.id ?? null,
-              targetId: combatantId,
-              detail: 'died',
+      // This pre-read authorizes the actor. The mutable-encounter guard itself lives below
+      // the keyed replay lookup, so a lost-response retry can recover its committed result
+      // even if another DM ended the encounter before it arrived.
+      if (role !== 'dm') {
+        if (combatant.characterId === null) throw new ForbiddenException('Only dm may modify this combatant');
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may roll this death save');
+        }
+      }
+
+      let roll: DiceRoll | null = null;
+      let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
+      const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
+      const updated = await this.updateCombatant(
+        encounterId,
+        combatantId,
+        deathSavePatch,
+        user,
+        role,
+        {
+          operation: 'combatant.death_save_roll',
+          // The d20 is server generated inside the transaction. Bind the key to the action
+          // target, not that random face, so the same intent replays before any new RNG work.
+          operationFingerprint,
+          beforeWriteInTransaction: (tx, fresh) => {
+            this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
+            this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
+            // A concurrent first roll cannot leave a second request applying a face to a
+            // no-longer-dying combatant. This code is deliberately after the prior-claim
+            // lookup, so a lost-response retry returns its stored outcome instead.
+            if (
+              fresh.encounterId !== encounterId ||
+              fresh.kind !== 'character' ||
+              fresh.hpCurrent !== 0 ||
+              fresh.deathState !== 'dying'
+            ) {
+              throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
+            }
+            const result = this.rollDeathSaveD20();
+            result.label = `${fresh.name} · death save`;
+            roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
+            // `updateCombatant` applies this server-only face after the hook returns.
+            deathSavePatch.deathSaveRoll = result.total;
+          },
+          afterWriteInTransaction: (tx, committed, fresh, freshEncounter) => {
+            // This evidence is part of the authoritative action: commit it with the
+            // combatant outcome, dice row, audit entry, and idempotency replay response,
+            // or roll all five back. A retry then cannot replay an outcome whose combat
+            // log is permanently missing (or duplicated).
+            this.audit.logInTx(tx, {
+              actor: auditActor(user),
+              actorRole: role,
+              action: 'encounter.combatant.death_save_roll',
+              entityType: 'combatant',
+              entityId: combatantId,
+              campaignId: encounter.campaignId,
+              detail: `${committed.name}: d20 ${roll!.total}`,
             });
-          }
-          this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'roll', {
-            target: committed.name,
-            targetId: combatantId,
-            detail: deathSaveRollEventDetail(
-              roll!.total,
-              committed.deathSaveSuccesses,
-              committed.deathSaveFailures,
-              fresh.deathState,
-              committed.deathState,
-            ),
-          });
+            if (committed.deathState === 'dead' && fresh.deathState !== 'dead') {
+              const actor =
+                freshEncounter.currentCombatantId === null || freshEncounter.currentCombatantId === combatantId
+                  ? null
+                  : tx
+                      .select({ id: combatants.id, name: combatants.name })
+                      .from(combatants)
+                      .where(and(eq(combatants.id, freshEncounter.currentCombatantId), eq(combatants.encounterId, encounterId)))
+                      .limit(1)
+                      .all()[0] ?? null;
+              this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'death', {
+                actor: actor?.name ?? null,
+                target: committed.name,
+                actorId: actor?.id ?? null,
+                targetId: combatantId,
+                detail: 'died',
+              });
+            }
+            this.appendEventInTransaction(tx, encounterId, freshEncounter.round, 'roll', {
+              target: committed.name,
+              targetId: combatantId,
+              detail: deathSaveRollEventDetail(
+                roll!.total,
+                committed.deathSaveSuccesses,
+                committed.deathSaveFailures,
+                fresh.deathState,
+                committed.deathState,
+              ),
+            });
+          },
+          deathSaveEventsInTransaction: true,
+          operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
+          replayCombatant: (response) => {
+            replayed = replayResponse(response);
+            return replayed?.combatant ?? null;
+          },
         },
-        deathSaveEventsInTransaction: true,
-        operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
-        replayCombatant: (response) => {
-          replayed = replayResponse(response);
-          return replayed?.combatant ?? null;
-        },
-      },
-    );
-    if (replayed) return replayed;
-    if (roll === null) throw new Error('Death-save dice roll was not persisted');
-    const persistedRoll = roll as DiceRoll;
+      );
+      if (replayed) return replayed;
+      if (roll === null) throw new Error('Death-save dice roll was not persisted');
+      const persistedRoll = roll as DiceRoll;
 
-    return { combatant: updated, roll: persistedRoll };
+      return { combatant: updated, roll: persistedRoll };
+    } catch (err) {
+      // The original same-key request can commit after our early replay lookup but
+      // before a mutable-row preflight (for example, before another DM removes the
+      // combatant). Recheck the stored outcome before surfacing that later 404/409 so
+      // an ambiguous retry still recovers the committed authoritative result.
+      const lateReplay = replayCommittedDeathSave();
+      if (lateReplay) return lateReplay;
+      throw err;
+    }
   }
 
   /** Kept as a seam for deterministic death-save endpoint regressions. */
