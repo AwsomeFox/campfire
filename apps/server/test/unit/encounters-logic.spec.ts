@@ -2,7 +2,11 @@ import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schem
 import {
   CombatantTurnState,
   Dnd5eAdapter,
+  hasDeathSavesForAdapter,
+  hpModelForAdapter,
+  listRuleSystemAdapters,
   MAX_PENDING_CONCENTRATION_CHECKS,
+  NEUTRAL_HP_MODEL,
   Pf2eAdapter,
 } from '@campfire/schema';
 import {
@@ -652,6 +656,89 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(applyCombatantHp(charState(), { hpSet: 999 }).hpCurrent).toBe(20);
       expect(applyCombatantHp(charState(), { hpSet: 0 }).deathState).toBe('dying');
     });
+  });
+
+  describe('adapter HP/death model (issue #1503)', () => {
+    it('defaults to the 5e model when no adapter model is passed (pre-#1503 behaviour)', () => {
+      // No hpModel argument -> DND5E_HP_MODEL -> a 5e character reduced to 0 begins dying.
+      const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 });
+      expect(r.deathState).toBe('dying');
+    });
+
+    it('a system without 5e death saves does NOT begin dying at 0 HP', () => {
+      // A Starforged / Open Legend / OSR character reduced to 0 is simply "down".
+      const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('taking damage while already at 0 accrues NO failure without death saves', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0 }), { hpDelta: -3 }, NEUTRAL_HP_MODEL);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('massive-damage instant death does not apply without death saves', () => {
+      // 45 damage to a 20/20 character is instant death under 5e; without 5e death saves the
+      // character just drops to 0 ("down") — the table's rules, not 5e's.
+      const r = applyCombatantHp(charState({ hpCurrent: 20, hpMax: 20 }), { hpDelta: -45 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+    });
+
+    it('explicit death-save counter patches are ignored without death saves', () => {
+      // A client/MCP patch trying to write death-save state to a non-5e combatant is a no-op.
+      const r = applyCombatantHp(
+        charState({ hpCurrent: 0 }),
+        { deathSaveFailures: 3, deathSaveSuccesses: 2 },
+        NEUTRAL_HP_MODEL,
+      );
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+      expect(r.deathSaveSuccesses).toBe(0);
+    });
+
+    it('a rolled death save has no effect without death saves', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0 }), { deathSaveRoll: 1 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('temp HP still absorbs damage first in a system without death saves', () => {
+      // Temp-HP-absorbs-first is a universal damage rule, NOT a 5e death rule, so it is NOT
+      // gated on the adapter's death model.
+      const r = applyCombatantHp(charState({ hpTemp: 5 }), { hpDelta: -8 }, NEUTRAL_HP_MODEL);
+      expect(r.hpTemp).toBe(0);
+      expect(r.hpCurrent).toBe(17);
+    });
+
+    it('concentration checks still fire for a non-5e concentrating character', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: -8 }, NEUTRAL_HP_MODEL);
+      expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
+    });
+
+    // The server-side parity check the issue asked for: for EVERY registered adapter, a
+    // character reduced to 0 HP is "dying" only when the adapter declares 5e death saves, and
+    // never accumulates death-save state otherwise. This is the test that proves the death model
+    // the adapter declares is the one applyCombatantHp honours server-side.
+    const adaptersForHpParity = listRuleSystemAdapters();
+    it.each(adaptersForHpParity.map((a) => a.id))(
+      'adapter %s at 0 HP: dying only when the adapter declares death saves',
+      (id) => {
+        const adapter = adaptersForHpParity.find((a) => a.id === id)!;
+        const model = hpModelForAdapter(adapter);
+        const expected = hasDeathSavesForAdapter(adapter) ? 'dying' : 'none';
+        const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, model);
+        expect(r.deathState).toBe(expected);
+        expect(r.deathSaveSuccesses).toBe(0);
+        expect(r.deathSaveFailures).toBe(0);
+        // The resolution-layer flag agrees with the UI capability for every shipped adapter.
+        expect(model.deathSaves).toBe(hasDeathSavesForAdapter(adapter));
+      },
+    );
   });
 });
 

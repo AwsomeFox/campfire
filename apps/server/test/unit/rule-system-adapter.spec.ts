@@ -1,6 +1,7 @@
 import {
   Dnd5eAdapter,
   DND5E_ADAPTER_ID,
+  DND5E_HP_MODEL,
   ruleSystemAdapter,
   listRuleSystemAdapters,
   hasDeathSavesForAdapter,
@@ -17,6 +18,12 @@ import {
   StarfinderAdapter,
   Archmage13aAdapter,
   OsrAdapter,
+  checkProficiencyBonusForAdapter,
+  criticalDamageRuleForAdapter,
+  hasDeathSavesForAdapter,
+  hpModelForAdapter,
+  listRuleSystemAdapters,
+  NEUTRAL_HP_MODEL,
   xpProgressForCharacter,
   xpProgressionFromThresholds,
   xpProgressionSupported,
@@ -361,5 +368,52 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
   it('hasDeathSavesForAdapter defaults to true when adapter is null or undefined', () => {
     expect(hasDeathSavesForAdapter(null)).toBe(true);
     expect(hasDeathSavesForAdapter(undefined)).toBe(true);
+  });
+});
+
+/**
+ * Issue #1503 — the adapter owns the HP/death, proficiency, and crit/fumble models the server's
+ * resolution layer applies. Sections 2 (proficiency, #1599) and 3 (crit/fumble, #1598/#1053)
+ * landed before this issue; this block is the parity test the issue asked for, asserting each
+ * registered adapter's death/proficiency/crit model is the one the server honours rather than
+ * hardcoded 5e math.
+ */
+describe('RuleSystemAdapter — adapter-owned death/proficiency/crit model (issue #1503)', () => {
+  it('only D&D 5e carries 5e death saves + massive damage; every other system is neutral', () => {
+    for (const adapter of listRuleSystemAdapters()) {
+      const model = hpModelForAdapter(adapter);
+      const fiveSaves = hasDeathSavesForAdapter(adapter);
+      // The resolution-layer death flag agrees with the UI capability for every shipped adapter,
+      // so the server never computes a death save a system does not track.
+      expect(model.deathSaves).toBe(fiveSaves);
+      expect(model.massiveDamageInstantDeath).toBe(fiveSaves);
+      if (adapter.id === DND5E_ADAPTER_ID) {
+        expect(model).toEqual(DND5E_HP_MODEL);
+      } else {
+        expect(model).toEqual(NEUTRAL_HP_MODEL);
+      }
+    }
+  });
+
+  it('proficiency is adapter-owned: PF2e gets level + rank, unaudited systems add nothing', () => {
+    // 5e: its own level-based curve (level 1 -> +2), declared explicitly.
+    expect(checkProficiencyBonusForAdapter(Dnd5eAdapter, 1)).toBe(2);
+    // PF2e: level + a trained-floor rank bonus — non-zero (not the old silent 0), and it GROWS
+    // with level (the level term), so a PF2e save no longer silently loses proficiency.
+    expect(checkProficiencyBonusForAdapter(Pf2eAdapter, 1)).toBeGreaterThan(0);
+    expect(checkProficiencyBonusForAdapter(Pf2eAdapter, 5) - checkProficiencyBonusForAdapter(Pf2eAdapter, 1)).toBe(4);
+    // OSR / Open Legend / 13th Age have no proficiency term in this slot -> 0, never 5e's curve.
+    expect(checkProficiencyBonusForAdapter(OsrAdapter, 1)).toBe(0);
+    expect(checkProficiencyBonusForAdapter(OpenLegendAdapter, 1)).toBe(0);
+    expect(checkProficiencyBonusForAdapter(Archmage13aAdapter, 1)).toBe(0);
+  });
+
+  it('crit/fumble reach the adapter, not a hardcoded 20/1', () => {
+    // Crit DAMAGE follows the adapter (#1053): 5e doubles the dice, PF2e doubles the total.
+    expect(criticalDamageRuleForAdapter(Dnd5eAdapter)).toBe('double-dice');
+    expect(criticalDamageRuleForAdapter(Pf2eAdapter)).toBe('double-total');
+    // Crit/FUMBLE CLASSIFICATION follows the adapter (#1598): PF2e reports its own degrees of
+    // success (a function on the adapter) rather than the resolver's hardcoded nat-20/nat-1.
+    expect(typeof Pf2eAdapter.degreeOfSuccess).toBe('function');
   });
 });

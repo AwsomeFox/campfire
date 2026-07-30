@@ -32,6 +32,7 @@ import {
   ConditionInstance,
   criticalDamageRuleForAdapter,
   expandStatblockActions,
+  hpModelForAdapter,
   isResolvableSpec,
   normalizeStats,
   pickOutcomeBranch,
@@ -1791,11 +1792,17 @@ export class ActionResolverService {
           deathSaveSuccesses: fresh.deathSaveSuccesses,
           deathSaveFailures: fresh.deathSaveFailures,
         };
-        const result = applyCombatantHp(state, {
-          hpDelta: net !== 0 ? net : undefined,
-          // Temp HP doesn't stack — take the higher of current and the grant.
-          hpTemp: t.tempHp > 0 ? Math.max(fresh.hpTemp, t.tempHp) : undefined,
-        });
+        const result = applyCombatantHp(
+          state,
+          {
+            hpDelta: net !== 0 ? net : undefined,
+            // Temp HP doesn't stack — take the higher of current and the grant.
+            hpTemp: t.tempHp > 0 ? Math.max(fresh.hpTemp, t.tempHp) : undefined,
+          },
+          // #1503 — route the HP/death model through the adapter so a system without 5e death
+          // saves never has them written to its combatants.
+          hpModelForAdapter(adapter),
+        );
         const isConcentratingForDamage =
           concentratingCombatantIds.has(fresh.id) &&
           !(fresh.id === actor.id && resolution.startsConcentration);

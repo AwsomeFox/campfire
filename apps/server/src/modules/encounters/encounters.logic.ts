@@ -1,5 +1,6 @@
 import {
   Dnd5eAdapter,
+  DND5E_HP_MODEL,
   LEGENDARY_ACTION_SLOT,
   LEGENDARY_ACTIONS_PER_ROUND,
   LAIR_INITIATIVE_COUNT,
@@ -28,6 +29,7 @@ import type {
   EncounterTurnPhase,
   EncounterWarning,
   HpBand,
+  HpModel,
   PendingConcentrationCheck,
   RuleSystemAdapter,
   TurnPrompt,
@@ -853,17 +855,32 @@ export function enqueueConcentrationCheck(
  *                        (deathState none, saves cleared); 10–19 = one success; 2–9 = one
  *                        failure. The roll is applied to a dying/stable character only.
  *
+ * The 5e-specific death rules (massive damage, the death-save tracker) apply ONLY when the
+ * rule-system adapter's `hpModel` says the system has them (issue #1503): a character in a
+ * system without 5e death saves (Starforged, Open Legend, OSR, PF2e, …) drops to 0 HP and is
+ * simply "down" — `deathState` stays `none`, counters stay 0 — exactly the monster path, never
+ * accumulating death-save state a system without them does not have. Callers pass the model via
+ * {@link hpModelForAdapter}; the default ({@link DND5E_HP_MODEL}) preserves this function's
+ * pre-#1503 behaviour byte-identically for existing callers and unit tests.
+ *
  * Returns only the mutated fields; hpMax/kind are inputs, not outputs.
  */
-export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatch): CombatantHpResult {
+export function applyCombatantHp(
+  state: CombatantHpState,
+  patch: CombatantHpPatch,
+  hpModel: HpModel = DND5E_HP_MODEL,
+): CombatantHpResult {
   const isCharacter = state.kind === 'character';
   let { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail } = state;
   const { hpMax } = state;
 
-  // 1. explicit sets (DM overrides / recording a rolled death save).
+  // 1. explicit sets (DM overrides / recording a rolled death save). Death-save counter sets
+  //    are a no-op for a system without 5e death saves, so a client/MCP patch can't write them.
   if (patch.hpTemp !== undefined) hpTemp = Math.max(0, patch.hpTemp);
-  if (patch.deathSaveSuccesses !== undefined) succ = clamp(patch.deathSaveSuccesses, 0, 3);
-  if (patch.deathSaveFailures !== undefined) fail = clamp(patch.deathSaveFailures, 0, 3);
+  if (hpModel.deathSaves) {
+    if (patch.deathSaveSuccesses !== undefined) succ = clamp(patch.deathSaveSuccesses, 0, 3);
+    if (patch.deathSaveFailures !== undefined) fail = clamp(patch.deathSaveFailures, 0, 3);
+  }
 
   // 2. HP change.
   let instantDeath = false;
@@ -880,7 +897,9 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
         damagedWhileDown = hpCurrent === 0;
         const overflow = dmg - hpCurrent; // damage remaining after dropping to 0.
         hpCurrent = Math.max(0, hpCurrent - dmg);
-        if (isCharacter && hpCurrent === 0 && overflow >= hpMax) instantDeath = true;
+        // 5e massive-damage instant death (issue #1503): gated on the adapter's hpModel so a
+        // system without it drops to 0 HP ("down") instead of dying on a single big hit.
+        if (hpModel.massiveDamageInstantDeath && isCharacter && hpCurrent === 0 && overflow >= hpMax) instantDeath = true;
       }
     } else {
       hpCurrent = Math.min(hpMax, hpCurrent + patch.hpDelta);
@@ -893,6 +912,21 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   // 3. death-state recompute.
   if (!isCharacter) {
     // Monsters never track death saves — 0 HP is simply "down" (isDown / hpBand).
+    const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+    return {
+      hpCurrent,
+      hpTemp,
+      deathState: 'none',
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
+      concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
+    };
+  }
+  if (!hpModel.deathSaves) {
+    // A character in a system WITHOUT 5e death saves (issue #1503): 0 HP is simply "down" — no
+    // dying/stable/dead tracking, no death-save counters, no instant death — mirroring the
+    // monster path above so a Starforged/Open Legend/OSR/PF2e character at 0 HP never accumulates
+    // 5e death-save state. (Massive damage was already gated off above, so instantDeath is false.)
     const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
