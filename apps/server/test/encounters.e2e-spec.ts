@@ -1101,6 +1101,17 @@ describe('encounters (e2e)', () => {
       const nameOnlyRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: nameOnlyRemoval.body.undoToken });
       expect(nameOnlyRestore.body).toMatchObject({ hpCurrent: 7, hpMax: 20 });
 
+      // A maximum-only sheet reduction can leave its current HP unchanged while
+      // an encounter-local override is higher. Undo must clamp that local value
+      // to the newer sheet maximum even though there is no new sheet current HP
+      // to pull.
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpCurrent: 4, hpMax: 8 })).status).toBe(200);
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm).send({ hpSet: 12, hpMax: 14 })).status).toBe(200);
+      const loweredMaxRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpMax: 6 })).status).toBe(200);
+      const loweredMaxRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: loweredMaxRemoval.body.undoToken });
+      expect(loweredMaxRestore.body).toMatchObject({ hpCurrent: 6, hpMax: 6 });
+
       // A combat-only timed condition is absent from the sheet at removal. Adding a
       // different sheet condition during the recovery window must not replace that
       // timed instance with the sheet's metadata-free copy (or drop it entirely).

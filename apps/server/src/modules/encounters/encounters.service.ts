@@ -4517,6 +4517,7 @@ export class EncountersService {
             let pulledSheetState = false;
             if (sheet.hpMax !== sheetStateAtRemoval.hpMax) {
               snapshot.hpMax = sheet.hpMax;
+              snapshot.hpCurrent = Math.max(0, Math.min(snapshot.hpCurrent, snapshot.hpMax));
               pulledSheetState = true;
             }
             if (sheet.hpCurrent !== sheetStateAtRemoval.hpCurrent) {
