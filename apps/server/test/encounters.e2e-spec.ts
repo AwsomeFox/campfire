@@ -687,10 +687,18 @@ describe('encounters (e2e)', () => {
       const idempotencyKey = '7f5ccac1-fb3d-4ca5-a237-0385d22e0001';
       const res = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
       expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({ undoToken: idempotencyKey, encounterId, combatantId: ruleMonsterId });
+      expect(res.body).toMatchObject({ encounterId, combatantId: ruleMonsterId });
+      expect(res.body.undoToken).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(res.body.undoToken).not.toBe(idempotencyKey);
       const replay = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ruleMonsterId}`).set(dm).send({ idempotencyKey });
       expect(replay.status).toBe(200);
       expect(replay.body).toEqual(res.body);
+
+      const otherEncounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Independent removal key' });
+      const otherCombatant = await request(server).post(`/api/v1/encounters/${otherEncounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Independent key target', hpMax: 2 });
+      const independent = await request(server).delete(`/api/v1/encounters/${otherEncounter.body.id}/combatants/${otherCombatant.body.id}`).set(dm).send({ idempotencyKey });
+      expect(independent.status).toBe(200);
+      expect(independent.body.undoToken).not.toBe(res.body.undoToken);
 
       const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
       expect(getRes.body.combatants.some((c: { id: number }) => c.id === ruleMonsterId)).toBe(false);
@@ -929,6 +937,21 @@ describe('encounters (e2e)', () => {
       const restoredNpc = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: removedNpc.body.undoToken });
       expect(restoredNpc.status).toBe(201);
       expect(restoredNpc.body.npcId).toBeNull();
+    });
+
+    it('undo preserves encounter-local linked-combatant fields and only pulls a changed sheet', async () => {
+      const server = ctx.app.getHttpServer();
+      const character = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Undo local override', hpCurrent: 8, hpMax: 8 });
+      const added = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'character', characterId: character.body.id });
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm).send({ hpMax: 14, hpSet: 11 })).status).toBe(200);
+      const unchangedSheetRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      const unchangedSheetRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: unchangedSheetRemoval.body.undoToken });
+      expect(unchangedSheetRestore.body).toMatchObject({ hpCurrent: 11, hpMax: 14 });
+
+      const changedRemoval = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm);
+      expect((await request(server).patch(`/api/v1/characters/${character.body.id}`).set(dm).send({ hpCurrent: 4 })).status).toBe(200);
+      const changedRestore = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/undo-remove`).set(dm).send({ undoToken: changedRemoval.body.undoToken });
+      expect(changedRestore.body).toMatchObject({ hpCurrent: 4, hpMax: 14 });
     });
 
     it('combatant routes 404 when encounterId doesn\'t own the combatant (cross-parent-id pin)', async () => {

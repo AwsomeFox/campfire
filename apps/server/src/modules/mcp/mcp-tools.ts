@@ -4375,7 +4375,7 @@ export class McpToolsService {
       server,
       user,
       'remove_combatant',
-      'DM only: remove a combatant from an encounter. Returns { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply a UUID idempotencyKey and reuse it after a lost response to replay that receipt.',
+      'DM only: remove a combatant from an encounter. Returns a server-issued { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply a UUID idempotencyKey and reuse it after a lost response to replay that receipt.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantRemoveRequest.shape },
       async ({ encounterId, combatantId, idempotencyKey }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

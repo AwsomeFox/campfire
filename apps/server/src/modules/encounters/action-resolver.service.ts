@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
   ActionApplyPolicy,
   ActionApplyRequest,
@@ -1790,6 +1790,12 @@ export class ActionResolverService {
           createdAt: nowIso(),
         })
         .run();
+      if (committedEncounter.status === 'running') {
+        tx.update(encounters)
+          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .where(eq(encounters.id, encounter.id))
+          .run();
+      }
 
       return undefined;
     });
@@ -2036,6 +2042,12 @@ export class ActionResolverService {
             tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
           }
         }
+      }
+      if (encounter.status === 'running') {
+        tx.update(encounters)
+          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .where(eq(encounters.id, encounterId))
+          .run();
       }
     });
 

@@ -102,7 +102,7 @@ test.describe('combatant lifecycle (issue #1469)', () => {
   });
 
   test('Starfinder keeps its adapter-derived death state', () => {
-    const source = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const source = readFileSync(resolve(__dirname, '../../src/features/encounters/optimisticHp.ts'), 'utf8');
     expect(source).toContain('hpCurrent: sfResult.hpCurrent');
     expect(source).toContain('deathState: sfResult.deathState');
     expect(source).not.toContain('}, sfResult.hpCurrent);');
@@ -128,15 +128,17 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     expect(source).toContain('setPendingCombatantIds(new Set());');
     expect(source).toContain('setPendingCombatantUndo(null);');
     expect(source).toContain('trashedEncounterIdsRef.current.has(requestEncounterId)');
-    expect(source).toContain('overflow > 0');
     expect(source).toContain('dismissCompetingRecoveryUndos();');
-    expect(source).toContain('trashedEncounterIdsRef.current.add(eid);');
+    expect(source).toContain('trashedEncounterIdsRef.current.add(encounterId);');
     expect(source).toContain("snapshot?.name ?? 'Combatant'");
     expect(source).toContain('const combatantRemovalKeys = useRef(new Map<string, string>());');
     expect(source).toContain('const idempotencyKey = combatantRemovalKeys.current.get(removalKey) ?? newOperationId();');
     expect(source).toContain('.delete<CombatantRemoveResult>');
     expect(source).toContain('{ json: { idempotencyKey } }');
     expect(source).toContain('error instanceof ApiError && error.status < 500');
+    expect(source).toContain('mutationFn: ({ encounterId }: { encounterId: number; updatedAt?: string })');
+    expect(source).toContain('if (encounterId === activeEncounterIdRef.current)');
+    expect(source).toContain('const sourceEncounterId = pendingTrashUndo?.encounterId;');
     expect(source).toContain('!isCurrentCombatantUndoEncounter(eid, activeEncounterIdRef.current) || trashedEncounterIdsRef.current.has(eid)');
     expect(source).toContain('if (onBeginTokenBatchUndo?.() === false) return;');
     expect(source).toContain('dismissTokenUndoNonce={dismissTokenUndoNonce}');

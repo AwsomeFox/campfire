@@ -558,7 +558,7 @@ export class EncountersController {
   }
 
   @Delete(':id/combatants/:cid')
-  @ApiOperation({ summary: 'Remove a combatant', description: 'dm role required. Returns a one-use undoToken valid for 30 seconds; reuse an optional UUID idempotencyKey after a lost response.' })
+  @ApiOperation({ summary: 'Remove a combatant', description: 'dm role required. Returns a server-issued, one-use undoToken valid for 30 seconds; reuse an optional UUID idempotencyKey after a lost response.' })
   @ApiResponse({ status: 200, description: 'Removal receipt: undoToken, encounterId, and combatantId.' })
   async removeCombatant(@Param('id', ParseIntPipe) id: number, @Param('cid', ParseIntPipe) cid: number, @Body() body: CombatantRemoveRequestDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);

@@ -1289,6 +1289,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
   turn_version INTEGER NOT NULL DEFAULT 0,
+  combatant_state_version INTEGER NOT NULL DEFAULT 0,
   escalation_die INTEGER NOT NULL DEFAULT 0,
   escalation_die_held INTEGER NOT NULL DEFAULT 0,
   escalation_die_override INTEGER,

@@ -1079,7 +1079,7 @@ export default function RunSessionPage() {
   /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
   const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
+  const [pendingTrashUndo, setPendingTrashUndo] = useState<{ encounterId: number } | null>(null);
   const trashedEncounterIdsRef = useRef(new Set<number>());
   const trashedEncounterRevisionsRef = useRef(new Map<number, string>());
   // Keep one key for a remove intent until a definite response. If its success
@@ -1735,15 +1735,17 @@ export default function RunSessionPage() {
   });
 
   const deleteEncounterMut = useMutation({
-    mutationFn: () => api.delete(`${API}/encounters/${eid}`),
+    mutationFn: ({ encounterId }: { encounterId: number; updatedAt?: string }) => api.delete(`${API}/encounters/${encounterId}`),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSuccess: () => {
-      setConfirmDelete(false);
-      trashedEncounterIdsRef.current.add(eid);
-      if (encounter?.updatedAt) trashedEncounterRevisionsRef.current.set(eid, encounter.updatedAt);
-      dismissCompetingRecoveryUndos();
-      setPendingTrashUndo(true);
+    onSuccess: (_result, { encounterId, updatedAt }) => {
+      trashedEncounterIdsRef.current.add(encounterId);
+      if (updatedAt) trashedEncounterRevisionsRef.current.set(encounterId, updatedAt);
+      if (encounterId === activeEncounterIdRef.current) {
+        setConfirmDelete(false);
+        dismissCompetingRecoveryUndos();
+        setPendingTrashUndo({ encounterId });
+      }
     },
   });
 
@@ -2129,13 +2131,15 @@ export default function RunSessionPage() {
       },
     );
   };
-  const deleteEncounter = () => deleteEncounterMut.mutate();
+  const deleteEncounter = () => deleteEncounterMut.mutate({ encounterId: eid, updatedAt: encounter?.updatedAt });
   async function undoTrashEncounter() {
-    await api.post(`${API}/encounters/${eid}/restore`);
-    trashedEncounterIdsRef.current.delete(eid);
-    trashedEncounterRevisionsRef.current.delete(eid);
-    setPendingTrashUndo(false);
-    await invalidateEncounter(queryClient, eid);
+    const sourceEncounterId = pendingTrashUndo?.encounterId;
+    if (sourceEncounterId == null) return;
+    await api.post(`${API}/encounters/${sourceEncounterId}/restore`);
+    trashedEncounterIdsRef.current.delete(sourceEncounterId);
+    trashedEncounterRevisionsRef.current.delete(sourceEncounterId);
+    setPendingTrashUndo(null);
+    await invalidateEncounter(queryClient, sourceEncounterId);
   }
   const reopenChoicesComplete =
     hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);

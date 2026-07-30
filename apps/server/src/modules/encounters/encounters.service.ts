@@ -3177,9 +3177,11 @@ export class EncountersService {
       const rows = await this.listCombatantRows(encounterId);
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
       const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
-      if (turnIndex !== encounterRow.turnIndex) {
-        await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
-      }
+      await this.db.update(encounters).set({
+        turnIndex,
+        combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+        ...(turnIndex !== encounterRow.turnIndex ? { updatedAt: nowIso() } : {}),
+      }).where(eq(encounters.id, encounterId));
     }
 
     await this.audit.log({
@@ -3882,12 +3884,12 @@ export class EncountersService {
         }
         const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
         row = updated;
-        // A removal undo may only rewind an untouched turn snapshot. Any live combatant
-        // mutation (including action damage and condition changes) is later state that must
-        // prevent restoring an earlier pointer/round over its committed effects.
+        // A removal undo may only rewind an untouched turn snapshot. Keep this
+        // ABA guard separate from turnVersion: ordinary HP/token/condition writes
+        // must not invalidate a player's already-previewed action.
         if (freshEncounter.status === 'running') {
           tx.update(encounters)
-            .set({ turnVersion: sql`${encounters.turnVersion} + 1`, updatedAt: nowIso() })
+            .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
             .where(eq(encounters.id, encounterId))
             .run();
         }
@@ -4166,9 +4168,10 @@ export class EncountersService {
   }
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {
-    // A caller-minted UUID doubles as the opaque undo token. Persisting only this one value
-    // lets a retry recover the exact removal receipt after a response is lost.
-    const undoToken = idempotencyKey ?? randomUUID();
+    // Retry keys identify a request; the server still mints the separate, opaque
+    // capability used to undo it.
+    const undoToken = randomUUID();
+    let receiptUndoToken = undoToken;
     const now = nowIso();
     // UI offers Undo for seven seconds; retain the opaque server token longer so a
     // click at the end of that window survives ordinary network latency.
@@ -4181,9 +4184,12 @@ export class EncountersService {
       // roster view; an earlier device must never overwrite a newer turn transition.
       const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
-      const prior = tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.token, undoToken), eq(combatantRemovalUndos.encounterId, encounterId))).get();
+      const prior = idempotencyKey
+        ? tx.select().from(combatantRemovalUndos).where(and(eq(combatantRemovalUndos.requestKey, idempotencyKey), eq(combatantRemovalUndos.encounterId, encounterId))).get()
+        : undefined;
       if (prior) {
         if (prior.combatantId !== combatantId) throw new ConflictException('Idempotency key was reused for a different combatant removal');
+        receiptUndoToken = prior.token as typeof undoToken;
         replayed = true;
         emittedEncounter = freshEncounter;
         return;
@@ -4225,6 +4231,7 @@ export class EncountersService {
       // Persist a scalar expected version with the undo snapshot. The database
       // update below still uses an expression for the actual increment.
       const afterTurnVersion = freshEncounter.turnVersion + (runningAdapter && freshEncounter.currentCombatantId === combatantId ? 1 : 0);
+      const afterCombatantStateVersion = freshEncounter.combatantStateVersion + (runningAdapter ? 1 : 0);
       let turnVersionUpdate: { turnVersion?: SQL } = {};
       let escalation: ReturnType<EncountersService['nextEscalationState']> | null = null;
       if (runningAdapter) {
@@ -4258,6 +4265,7 @@ export class EncountersService {
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
+        ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
         updatedAt: now,
       }).where(eq(encounters.id, encounterId)).run();
       const escalationEventId = wrappedToNextRound && escalation?.logDetail
@@ -4265,6 +4273,7 @@ export class EncountersService {
         : null;
       tx.insert(combatantRemovalUndos).values({
         token: undoToken,
+        requestKey: idempotencyKey ?? null,
         encounterId,
         combatantId,
         snapshotJson: toJsonText(snapshot),
@@ -4276,7 +4285,7 @@ export class EncountersService {
           escalationDieHistory: freshEncounter.escalationDieHistory,
           lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
         }),
-        afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, escalationEventId }),
+        afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, combatantStateVersion: afterCombatantStateVersion, escalationEventId }),
         expiresAt,
         createdAt: now,
       }).run();
@@ -4285,7 +4294,7 @@ export class EncountersService {
     });
 
     if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
-    return { undoToken, encounterId, combatantId };
+    return { undoToken: receiptUndoToken, encounterId, combatantId };
   }
 
   async undoRemoveCombatant(encounterId: number, undoToken: string, user: RequestUser, role: Role): Promise<Combatant> {
@@ -4330,8 +4339,11 @@ export class EncountersService {
         }
         if (snapshot.characterId != null) {
           const sheet = tx.select().from(characters).where(eq(characters.id, snapshot.characterId)).get();
-          if (sheet) Object.assign(snapshot, {
-            hpCurrent: Math.max(0, Math.min(sheet.hpCurrent, sheet.hpMax)), hpMax: sheet.hpMax,
+          // Combatants intentionally permit encounter-local overrides (notably hpMax
+          // and timed condition metadata). Pull sheet state only when the sheet was
+          // edited during the removal window; otherwise restore the exact snapshot.
+          if (sheet && sheet.updatedAt !== snapshot.sheetSyncedUpdatedAt) Object.assign(snapshot, {
+            hpCurrent: Math.max(0, Math.min(sheet.hpCurrent, snapshot.hpMax)),
             hpTemp: sheet.hpTemp, spCurrent: sheet.spCurrent, spMax: sheet.spMax,
             rpCurrent: sheet.rpCurrent, rpMax: sheet.rpMax, deathState: sheet.deathState,
             deathSaveSuccesses: sheet.deathSaveSuccesses, deathSaveFailures: sheet.deathSaveFailures,
@@ -4343,9 +4355,9 @@ export class EncountersService {
         restoredNpcId = snapshot.npcId;
         tx.insert(combatants).values(snapshot).run();
         const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
-        const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
+        const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null });
         const runningAdapter = current.status === 'running' ? adapter : null;
-        if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && after.turnVersion === current.turnVersion) {
+        if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
           const restoredRoster = runningAdapter
             ? tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain)
             : null;
@@ -4360,13 +4372,14 @@ export class EncountersService {
             escalationDieHistory: before.escalationDieHistory,
             lairResumeCombatantId: before.lairResumeCombatantId,
             ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
+            ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nowIso(),
           }).where(eq(encounters.id, encounterId)).run();
           if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
         } else if (runningAdapter) {
           const restoredRoster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain);
           const turnIndex = turnIndexFor(this.sortCombatantsWithAdapter(restoredRoster, 'running', runningAdapter), current.currentCombatantId);
-          tx.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
+          tx.update(encounters).set({ turnIndex, combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`, updatedAt: nowIso() }).where(eq(encounters.id, encounterId)).run();
         }
         tx.update(combatantRemovalUndos).set({ consumedAt: nowIso() }).where(eq(combatantRemovalUndos.token, undoToken)).run();
         this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.restore', entityType: 'combatant', entityId: snapshot.id, campaignId: current.campaignId, detail: snapshot.name });
@@ -5655,6 +5668,12 @@ export class EncountersService {
         .returning()
         .all();
       row = updated;
+      if (encounterRow.status === 'running') {
+        tx.update(encounters)
+          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .where(eq(encounters.id, encounterId))
+          .run();
+      }
     });
 
     for (const l of logs) {
@@ -6484,6 +6503,9 @@ export class EncountersService {
         if (distance(p, { x: other.tokenX, y: other.tokenY }) < radius(liveById.get(p.combatantId)!) + radius(other) - .001) throw new ConflictException('A token moved into this batch placement; refresh preview');
       }
       for (const p of plan) tx.update(combatants).set({ tokenX: clampPercent(p.x), tokenY: clampPercent(p.y) }).where(eq(combatants.id, p.combatantId)).run();
+      if (encounter.status === 'running') {
+        tx.update(encounters).set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` }).where(eq(encounters.id, encounterId)).run();
+      }
       tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${plan.length} token placements`, createdAt: nowIso() }).run();
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.apply', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${plan.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status: 'applied', applyKey: input.idempotencyKey, afterJson: toJsonText(plan), resultJson: toJsonText(result), appliedAt: nowIso() }).where(and(eq(encounterTokenBatches.id, batch.id), eq(encounterTokenBatches.status, 'previewed'))).run();
@@ -6540,6 +6562,9 @@ export class EncountersService {
         if (!selected.has(other.id) && other.tokenX != null && other.tokenY != null && distance({ x: p.tokenX, y: p.tokenY }, { x: other.tokenX, y: other.tokenY }) < radius(byId.get(p.id)!.tokenSize) + radius(other.tokenSize) - .001) throw new ConflictException('A token moved into this batch\'s prior position; cannot undo');
       }
       for (const p of before) tx.update(combatants).set({ tokenX:p.tokenX, tokenY:p.tokenY }).where(eq(combatants.id,p.id)).run();
+      if (encounter.status === 'running') {
+        tx.update(encounters).set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` }).where(eq(encounters.id, encounterId)).run();
+      }
       tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, createdAt: nowIso() }).run();
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run();

@@ -1477,6 +1477,9 @@ export const encounters = sqliteTable('encounters', {
   // Internal monotonic token for a logical turn. Unlike round/index it also changes
   // when a DM undoes back to the same combatant, invalidating banked player previews.
   turnVersion: integer('turn_version').notNull().default(0),
+  // Internal ABA guard for removal undo. Unlike turnVersion, ordinary combatant
+  // state changes advance this counter without invalidating player action previews.
+  combatantStateVersion: integer('combatant_state_version').notNull().default(0),
   escalationDie: integer('escalation_die').notNull().default(0),
   escalationDieHeld: integer('escalation_die_held', { mode: 'boolean' }).notNull().default(false),
   escalationDieOverride: integer('escalation_die_override'),
@@ -2059,6 +2062,7 @@ export const combatants = sqliteTable('combatants', {
 /** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */
 export const combatantRemovalUndos = sqliteTable('combatant_removal_undos', {
   token: text('token').primaryKey(),
+  requestKey: text('request_key'),
   encounterId: integer('encounter_id').notNull(),
   combatantId: integer('combatant_id').notNull(),
   snapshotJson: text('snapshot_json').notNull(),
