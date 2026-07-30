@@ -16,14 +16,13 @@ import {
   mapPercentToLayerPx,
   resolveGridCalibration,
   type GridCalibration,
-  type GridCalibrationPx,
   type MapPercent,
   type Rect,
 } from './mapRenderedBounds';
 import {
-  axialToLayerPxFrac,
+  fromGridFrame,
   hexDistance,
-  hexSizeFromCellPx,
+  hexVerticesGridFrac,
   mapPercentToAxial,
   tokenFootprintHexes,
 } from './hexGeometry';
@@ -177,29 +176,6 @@ function squareFootprintVertices(tx: number, ty: number, half: number): Point[] 
   ];
 }
 
-function hexVerticesGridFrac(
-  center: Point,
-  size: number,
-  orientation: HexOrientation,
-): Point[] {
-  const start = orientation === 'pointy' ? -Math.PI / 2 : 0;
-  const verts: Point[] = [];
-  for (let i = 0; i < 6; i++) {
-    const angle = start + (Math.PI / 3) * i;
-    verts.push({ x: center.x + size * Math.cos(angle), y: center.y + size * Math.sin(angle) });
-  }
-  return verts;
-}
-
-function fromGridFrame(p: Point, calPx: GridCalibrationPx): Point {
-  const cos = Math.cos(calPx.rotationRad);
-  const sin = Math.sin(calPx.rotationRad);
-  return {
-    x: p.x * cos - p.y * sin + calPx.originXpx,
-    y: p.x * sin + p.y * cos + calPx.originYpx,
-  };
-}
-
 function tokenInCircleSquare(
   ox: number,
   oy: number,
@@ -258,12 +234,10 @@ function tokenInHexPolygon(
 ): boolean {
   const orientation = ctx.hexOrientation ?? 'pointy';
   const calPx = calibrationToPx(cal, mapRect.width);
-  const size = hexSizeFromCellPx(cellPx, orientation);
   const footprint = tokenFootprintHexes(tokenPos, tokenSize, cal, mapRect, orientation);
   for (const cell of footprint) {
-    const centerGrid = axialToLayerPxFrac(cell, cellPx, orientation);
-    const hexVertsGrid = hexVerticesGridFrac(centerGrid, size, orientation);
-    const hexVerts = hexVertsGrid.map((v) => fromGridFrame(v, calPx));
+    const hexVertsGrid = hexVerticesGridFrac(cell, cellPx, orientation);
+    const hexVerts = hexVertsGrid.map(([gx, gy]) => fromGridFrame({ x: gx, y: gy }, calPx));
     if (convexPolygonsIntersect(hexVerts, aoeVerts)) return true;
   }
   return false;
