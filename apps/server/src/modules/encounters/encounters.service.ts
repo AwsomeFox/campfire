@@ -4068,8 +4068,24 @@ export class EncountersService {
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
     const escalation = this.nextEscalationState(adapter, encounterRow, 1, 'start');
+    // Fresh-prep encounters (including campaign clones) deliberately have no
+    // historical allegiance. Capture the linked NPC's current disposition exactly
+    // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
+    const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+    const npcDispositionById = new Map(
+      npcIds.length === 0
+        ? []
+        : (await this.db.select({ id: npcs.id, disposition: npcs.disposition }).from(npcs).where(inArray(npcs.id, npcIds)))
+            .map((npc) => [npc.id, npc.disposition] as const),
+    );
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
+      for (const [npcId, disposition] of npcDispositionById) {
+        tx.update(combatants)
+          .set({ npcDispositionSnapshot: disposition })
+          .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
+          .run();
+      }
       tx.update(encounters)
         .set({
           status: 'running',

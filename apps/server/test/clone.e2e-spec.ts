@@ -353,6 +353,23 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(hero.kind).toBe('character');
       expect(hero.characterId).toBe(clonedHero.id);
 
+      // A clone starts as fresh prep, then captures its own NPC allegiance when
+      // play begins. Later world edits must not rewrite the completed fight's XP.
+      expect((await dmAgent.patch(`/api/v1/npcs/${clonedNpcs.body[0].id}`).send({ disposition: 'hostile' })).status).toBe(200);
+      expect((await dmAgent.post(`/api/v1/encounters/${encDetail.body.id}/roll-initiative`)).status).toBe(201);
+      const cloneStart = await dmAgent.post(`/api/v1/encounters/${encDetail.body.id}/start`);
+      expect(cloneStart.status).toBe(201);
+      expect(cloneStart.body.combatants.find((c: { name: string }) => c.name === 'Bartender').npcDispositionSnapshot).toBe('hostile');
+      const difficultyAtStart = await dmAgent.get(`/api/v1/encounters/${encDetail.body.id}/difficulty`);
+      expect(difficultyAtStart.status).toBe(200);
+      expect((await dmAgent.patch(`/api/v1/npcs/${clonedNpcs.body[0].id}`).send({ disposition: 'friendly' })).status).toBe(200);
+      expect((await dmAgent.post(`/api/v1/encounters/${encDetail.body.id}/end`)).status).toBe(201);
+      const difficultyAfterNpcMutation = await dmAgent.get(`/api/v1/encounters/${encDetail.body.id}/difficulty`);
+      expect(difficultyAfterNpcMutation.body).toMatchObject({
+        monsterCount: difficultyAtStart.body.monsterCount,
+        totalMonsterXp: difficultyAtStart.body.totalMonsterXp,
+      });
+
       // Notes: shared note copied with its entity link remapped to the cloned
       // quest; the player's private note (invisible to the dm) is not carried over.
       const clonedNotes = await dmAgent.get(`/api/v1/campaigns/${clone.id}/notes`);
