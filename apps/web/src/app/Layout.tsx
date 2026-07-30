@@ -109,6 +109,14 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       backdropStyle={{ zIndex: 52 }}
       onBackdropClick={() => !saving && onClose()}
       ariaBusy={saving}
+      actions={
+        !done ? (
+          <>
+            <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
+            <button type="submit" form="change-password-form" className="btn btn-primary" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</button>
+          </>
+        ) : undefined
+      }
     >
       {done ? (
         <div className="space-y-3">
@@ -116,7 +124,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
           <Btn className="w-full" onClick={onClose}>{t('nav.done')}</Btn>
         </div>
       ) : (
-        <form className="space-y-3" onSubmit={onSubmit}>
+        <form id="change-password-form" className="space-y-3" onSubmit={onSubmit}>
           <div className="field">
             <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
             <PasswordInput
@@ -151,10 +159,6 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
             />
           </div>
           {error && <p className="text-sm text-rose-400">{error}</p>}
-          <div className="dialog-actions">
-            <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
-            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</button>
-          </div>
         </form>
       )}
     </Dialog>
