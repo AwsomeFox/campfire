@@ -399,10 +399,13 @@ export class ActionResolverService {
 
   /** A player may act only with their owned character while it holds the live combat turn. */
   private assertPlayerActiveTurn(encounter: typeof encounters.$inferSelect, actor: typeof combatants.$inferSelect, role: Role): void {
-    if (role === 'dm') return;
-    if (encounter.status !== 'running' || encounter.turnPhase !== 'combatant' || encounter.currentCombatantId !== actor.id) {
+    if (!this.isPlayerActiveTurn(encounter, actor, role)) {
       throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
     }
+  }
+
+  private isPlayerActiveTurn(encounter: typeof encounters.$inferSelect, actor: typeof combatants.$inferSelect, role: Role): boolean {
+    return role === 'dm' || (encounter.status === 'running' && encounter.turnPhase === 'combatant' && encounter.currentCombatantId === actor.id);
   }
 
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
@@ -1326,7 +1329,10 @@ export class ActionResolverService {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
       }
-      this.assertPlayerActiveTurn(encounter, actor, role);
+      if (!this.isPlayerActiveTurn(encounter, actor, role)) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'not_active_turn');
+        throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+      }
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
       if (!canApply) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'policy_forbids');
@@ -1427,8 +1433,17 @@ export class ActionResolverService {
       // resource mutation so a stale player action is atomically rejected.
       const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
       if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
-      if (role !== 'dm' && turnRound !== liveEncounter.round) throw new ForbiddenException('Action preview is from a previous turn.');
-      this.assertPlayerActiveTurn(liveEncounter, actor, role);
+      if (role !== 'dm' && turnRound !== liveEncounter.round) {
+        // Defer this durable, best-effort write until after the transaction rolls back.
+        // Writing it on the same handle while the transaction is open would make the
+        // audit row part of the rollback instead of recording the rejected attempt.
+        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, 'stale_preview_round'));
+        throw new ForbiddenException('Action preview is from a previous turn.');
+      }
+      if (!this.isPlayerActiveTurn(liveEncounter, actor, role)) {
+        queueMicrotask(() => this.auditRejectedApply(encounter, chainId, user, role, 'not_active_turn'));
+        throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+      }
       committedEncounter = liveEncounter;
 
       // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,

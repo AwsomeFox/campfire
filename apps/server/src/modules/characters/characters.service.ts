@@ -233,8 +233,20 @@ export class CharactersService {
     this.events.emit({ type: 'character.updated', campaignId, characterId, userId });
   }
 
-  async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
-    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+  /**
+   * List only sheets the caller may read in full. Character sheets include private
+   * mechanical state (actions, resources, and slots), so non-DMs receive their own
+   * sheets only; UI filtering is not an authorization boundary.
+   */
+  async listForCampaign(campaignId: number, user: RequestUser, role: Role): Promise<Character[]> {
+    const rows = await this.db
+      .select()
+      .from(characters)
+      .where(
+        role === 'dm'
+          ? and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt))
+          : and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, user.id), notDeleted(characters.deletedAt)),
+      );
     return redactSecrets(rows.map(toDomain), role);
   }
 
@@ -271,8 +283,11 @@ export class CharactersService {
     return row;
   }
 
-  async getOrThrow(id: number, role: Role): Promise<Character> {
+  async getOrThrow(id: number, user: RequestUser, role: Role): Promise<Character> {
     const row = await this.getRowOrThrow(id);
+    if (role !== 'dm' && row.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only view your own character sheet.');
+    }
     return redactSecret(toDomain(row), role);
   }
 

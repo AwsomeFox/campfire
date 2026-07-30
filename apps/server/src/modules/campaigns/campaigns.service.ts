@@ -3529,7 +3529,7 @@ export class CampaignsService {
     return outcome;
   }
 
-  async summary(id: number, role: Role): Promise<CampaignSummary> {
+  async summary(id: number, user: RequestUser, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
     // Issue #602: `inventoryCount` and `commentCount` are plain integers, and the
@@ -3558,7 +3558,7 @@ export class CampaignsService {
         this.quests.listForCampaignWithObjectives(id, role),
         this.npcs.listForCampaign(id, role),
         this.locations.listForCampaign(id, role),
-        this.characters.listForCampaign(id, role),
+        this.characters.listForCampaign(id, user, role),
         this.sessions.listForCampaign(id, role),
         this.encounters.digestForCampaign(id, role),
         // Newer systems (issue #257): each applies its own role redaction (timeline strips

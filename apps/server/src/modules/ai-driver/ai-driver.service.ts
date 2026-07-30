@@ -3413,7 +3413,7 @@ export class AiDriverService {
     if (opts.characterId !== undefined) {
       let character: Character | null = null;
       try {
-        character = await this.characters.getOrThrow(opts.characterId, 'player');
+        character = await this.characters.getOrThrow(opts.characterId, triggeredBy, opts.callerRole ?? 'player');
       } catch {
         character = null;
       }
@@ -6823,6 +6823,10 @@ export class AiDriverService {
       harvestRetrievals(ledger, 'get_party', undefined, party ? visibleUntrustedPromptData(party) : undefined);
     }
 
+    // This stable roster is distinct from the player-scoped narrative context above:
+    // it is delivered only to the trusted AI DM seat, whose principal is DM-authorized.
+    // Keep that privilege explicit rather than relaxing the public character read path.
+    const seatPrincipal = this.seatPrincipal(campaignId);
     const members = await this.members.listForCampaign(campaignId);
     const playerLines: string[] = [];
     for (const member of members) {
@@ -6832,11 +6836,11 @@ export class AiDriverService {
       }
       if (member.characterId) {
         try {
-          const character = await this.characters.getOrThrow(member.characterId, 'player');
+          const character = await this.characters.getOrThrow(member.characterId, seatPrincipal, 'dm');
           playerLines.push(`- **${character.name}** (played by ${member.displayName ?? member.username}) — Level ${character.level ?? '?'} ${character.className ?? ''}, HP ${character.hpCurrent ?? '?'}/${character.hpMax ?? '?'}`);
           continue;
         } catch {
-          // Character not found, fall through
+          // Character not found, fall through.
         }
       }
       playerLines.push(`- **${member.displayName ?? member.username}** (no character assigned)`);

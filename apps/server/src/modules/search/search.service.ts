@@ -203,7 +203,7 @@ export class SearchService {
       this.npcs.listForCampaign(campaignId, role),
       this.factions.listForCampaign(campaignId, role),
       this.locations.listForCampaign(campaignId, role),
-      this.characters.listForCampaign(campaignId, role),
+      this.characters.listForCampaign(campaignId, user, role),
       this.notes.listAllForCampaign(campaignId, user, role, {}),
       this.timeline.listEvents(campaignId, role),
       this.inventory.listForCampaign(campaignId),
@@ -388,6 +388,7 @@ export class SearchService {
       OR (campaign_search_fts.entity_type = 'character' AND EXISTS (
         SELECT 1 FROM characters ch
         WHERE ch.id = campaign_search_fts.entity_id AND ch.campaign_id = campaign_search_fts.campaign_id AND ch.deleted_at IS NULL
+          ${role === 'dm' ? sql`` : sql`AND ch.owner_user_id = ${user.id}`}
       ))
       OR (campaign_search_fts.entity_type = 'session' AND EXISTS (
         SELECT 1 FROM sessions s
@@ -555,6 +556,7 @@ export class SearchService {
         eq(characters.campaignId, campaignId),
         inArray(characters.id, characterIds),
         notDeleted(characters.deletedAt),
+        role === 'dm' ? undefined : eq(characters.ownerUserId, user.id),
       ));
       for (const ch of rows) {
         addHit({ type: 'character', id: ch.id, title: ch.name, fields: [
@@ -880,14 +882,14 @@ export class SearchService {
    * never include a hidden NPC or unexplored location. Sessions are titled
    * `Session N` when they have no explicit title.
    */
-  async mentions(campaignId: number, role: Role): Promise<MentionTarget[]> {
+  async mentions(campaignId: number, user: RequestUser, role: Role): Promise<MentionTarget[]> {
     const isDm = role === 'dm';
     const [quests, npcs, factions, locations, characters, sessions, timelineEvents, arcs] = await Promise.all([
       this.quests.listForCampaign(campaignId, role),
       this.npcs.listForCampaign(campaignId, role),
       this.factions.listForCampaign(campaignId, role),
       this.locations.listForCampaign(campaignId, role),
-      this.characters.listForCampaign(campaignId, role),
+      this.characters.listForCampaign(campaignId, user, role),
       this.sessions.listForCampaign(campaignId, role),
       // Role-filtered: a hidden timeline event is dropped for non-DM.
       this.timeline.listEvents(campaignId, role),

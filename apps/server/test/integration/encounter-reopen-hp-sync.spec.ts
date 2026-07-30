@@ -148,7 +148,7 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     expect(pulled.hpCurrent).toBe(30);
 
     await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
-    const sheet = await ctx.charactersService.getOrThrow(ctx.characterId, 'dm');
+    const sheet = await ctx.charactersService.getOrThrow(ctx.characterId, dmUser, 'dm');
     expect(sheet.hpCurrent).toBe(30);
 
     const reopenAudits = await ctx.orm.select().from(auditLog).where(eq(auditLog.action, 'encounter.reopen'));
@@ -167,7 +167,7 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     expect(running.combatants.find((c) => c.id === ctx.combatantId)!.hpCurrent).toBe(4);
 
     await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
-    const sheet = await ctx.charactersService.getOrThrow(ctx.characterId, 'dm');
+    const sheet = await ctx.charactersService.getOrThrow(ctx.characterId, dmUser, 'dm');
     expect(sheet.hpCurrent).toBe(4);
   });
 
@@ -191,7 +191,7 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
       .returning()
       .all();
     ctx.orm.update(campaigns).set({ activeEncounterId: fightB.id }).where(eq(campaigns.id, ctx.campaignId)).run();
-    const sheetNow = await ctx.charactersService.getOrThrow(ctx.characterId, 'dm');
+    const sheetNow = await ctx.charactersService.getOrThrow(ctx.characterId, dmUser, 'dm');
     const [bCombatant] = ctx.orm
       .insert(combatants)
       .values({
@@ -221,7 +221,7 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
       hpResync: [{ combatantId: ctx.combatantId, direction: 'pull_sheet' }],
     });
     await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
-    const finalSheet = await ctx.charactersService.getOrThrow(ctx.characterId, 'dm');
+    const finalSheet = await ctx.charactersService.getOrThrow(ctx.characterId, dmUser, 'dm');
     expect(finalSheet.hpCurrent).toBe(30);
   });
 });

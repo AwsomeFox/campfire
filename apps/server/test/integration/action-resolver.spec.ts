@@ -678,8 +678,8 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [] }), bob, 'player')).toThrow(/own character/i);
   });
 
-  it('a player may resolve or apply only on their active turn, while the DM may override', () => {
-    const { orm, service, encounterId, actor, drake } = seed();
+  it('a player may resolve or apply only on their active turn, while the DM may override', async () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
     const request = ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false });
 
     // A direct resolve after the turn advances is refused even though Alice still owns the actor.
@@ -691,6 +691,14 @@ describe('action resolver (real SQLite, service layer)', () => {
     const preview = service.resolve(encounterId, request, alice, 'player');
     orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
     expect(() => service.apply(encounterId, { chainId: preview.chainId }, alice, 'player')).toThrow(/active turn/i);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rejected = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')))
+      .all();
+    expect(rejected.some((row) => JSON.parse(row.detail).reason === 'not_active_turn' && JSON.parse(row.detail).chainId === preview.chainId)).toBe(true);
 
     // DM override remains available for the same stale resolution.
     expect(service.apply(encounterId, { chainId: preview.chainId }, dmUser, 'dm').undoToken).toBeDefined();
@@ -746,8 +754,8 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)).toEqual({ '3': { max: 2, used: 0 } });
   });
 
-  it('rechecks a player preview round inside the apply transaction before writing consequences or resources', () => {
-    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+  it('rechecks a player preview round inside the apply transaction before writing consequences or resources', async () => {
+    const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
     const preview = service.resolve(
       encounterId,
       ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: false }),
@@ -771,6 +779,13 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
     expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}').used?.action ?? 0).toBe(0);
     expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)).toEqual({ '3': { max: 2, used: 0 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rejected = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')))
+      .all();
+    expect(rejected.some((row) => JSON.parse(row.detail).reason === 'stale_preview_round' && JSON.parse(row.detail).chainId === preview.chainId)).toBe(true);
   });
 
   it('the DM resolves a monster action against a player via an inline spec', () => {

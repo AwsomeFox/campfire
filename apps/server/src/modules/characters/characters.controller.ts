@@ -21,11 +21,11 @@ export class CampaignCharactersController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List characters in a campaign', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiOperation({ summary: 'List characters in a campaign', description: 'DMs receive party sheets; other members receive only sheets they own. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Characters in the campaign.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.characters.listForCampaign(campaignId, role);
+    return this.characters.listForCampaign(campaignId, user, role);
   }
 
   @Post()
@@ -137,12 +137,12 @@ export class CharactersController {
   ) {}
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a character', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiOperation({ summary: 'Get a character', description: 'DMs may read any party sheet; other members may read only sheets they own. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Character.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
-    return this.characters.getOrThrow(id, role);
+    return this.characters.getOrThrow(id, user, role);
   }
 
   @Patch(':id')

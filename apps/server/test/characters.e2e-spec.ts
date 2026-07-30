@@ -474,7 +474,7 @@ describe('characters (e2e)', () => {
 
   // Issue #59: characters carry a DM-only dmSecret (a secret curse, hidden true
   // identity…) with the same strip-for-non-DM redaction as quests/NPCs/locations.
-  it('dmSecret visible to dm but absent for the owning player and viewer', async () => {
+  it('dmSecret is visible to the DM, redacted for the owner, and denied to a non-owner', async () => {
     const server = ctx.app.getHttpServer();
 
     const createRes = await request(server)
@@ -494,8 +494,7 @@ describe('characters (e2e)', () => {
     expect(ownerGet.body.dmSecret).toBeFalsy();
 
     const viewerGet = await request(server).get(`/api/v1/characters/${secretCharId}`).set(viewer);
-    expect(viewerGet.status).toBe(200);
-    expect(viewerGet.body.dmSecret).toBeFalsy();
+    expect(viewerGet.status).toBe(403);
 
     // list endpoint too
     const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(nonOwner);
@@ -503,6 +502,38 @@ describe('characters (e2e)', () => {
     for (const c of playerList.body) {
       expect(c.dmSecret).toBeFalsy();
     }
+  });
+
+  it('returns full character sheets only to their owner or the DM', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(nonOwner)
+      .send({ name: 'Other Player Sheet', spellSlots: { '1': { max: 2, used: 0 } } });
+    expect(otherRes.status).toBe(201);
+    const otherId = otherRes.body.id;
+
+    const ownerList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(owner);
+    expect(ownerList.status).toBe(200);
+    expect(ownerList.body.some((character: { id: number }) => character.id === characterId)).toBe(true);
+    expect(ownerList.body.some((character: { id: number }) => character.id === otherId)).toBe(false);
+
+    const otherList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(nonOwner);
+    expect(otherList.status).toBe(200);
+    expect(otherList.body.some((character: { id: number }) => character.id === otherId)).toBe(true);
+    expect(otherList.body.some((character: { id: number }) => character.id === characterId)).toBe(false);
+
+    expect((await request(server).get(`/api/v1/characters/${characterId}`).set(nonOwner)).status).toBe(403);
+    expect((await request(server).get(`/api/v1/characters/${otherId}`).set(nonOwner)).status).toBe(200);
+
+    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(dm);
+    expect(dmList.body.map((character: { id: number }) => character.id)).toEqual(expect.arrayContaining([characterId, otherId]));
+    expect((await request(server).get(`/api/v1/characters/${otherId}`).set(dm)).status).toBe(200);
+
+    const ownerSummary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(owner);
+    expect(ownerSummary.body.characters.some((character: { id: number }) => character.id === otherId)).toBe(false);
+    const otherMentions = await request(server).get(`/api/v1/campaigns/${campaignId}/mentions`).set(nonOwner);
+    expect(otherMentions.body.some((target: { type: string; id: number }) => target.type === 'character' && target.id === characterId)).toBe(false);
   });
 
   it('owning player cannot write dmSecret (silently ignored), dm can', async () => {

@@ -169,7 +169,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     ).rejects.toThrow(BadRequestException);
 
     // The failed spend left the stored value untouched — no partial write.
-    const after = await charactersService.getOrThrow(c.id, 'player');
+    const after = await charactersService.getOrThrow(c.id, user, 'player');
     expect(after.resources['inspiration'].used).toBe(1);
   });
 
@@ -198,7 +198,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(3);
 
     // Every spend was paid for: three succeeded, so three are gone. A lost update would show 1 or 2.
-    const after = await charactersService.getOrThrow(c.id, 'player');
+    const after = await charactersService.getOrThrow(c.id, user, 'player');
     expect(after.resources['heroPoints'].used).toBe(3);
 
     // And the pool is now genuinely empty, so a fourth spend errors rather than going negative.

@@ -817,7 +817,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        return this.campaigns.summary(campaignId as number, role);
+        return this.campaigns.summary(campaignId as number, user, role);
       },
     );
 
@@ -984,23 +984,23 @@ export class McpToolsService {
     this.tool(
       server,
       'get_character',
-      'Get a character sheet by id. Ids come from get_party or get_campaign_summary.',
+      'Get a character sheet by id. DMs may read any party sheet; other members may read only sheets they own. Ids come from get_party or get_campaign_summary.',
       { characterId: Id.describe('Character id') },
       async ({ characterId }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireMember(user, row.campaignId);
-        return this.characters.getOrThrow(characterId as number, role);
+        return this.characters.getOrThrow(characterId as number, user, role);
       },
     );
 
     this.tool(
       server,
       'get_party',
-      'List all characters (the party) in a campaign.',
+      'List visible character sheets: the DM receives the party, while other members receive only sheets they own.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        return this.characters.listForCampaign(campaignId as number, role);
+        return this.characters.listForCampaign(campaignId as number, user, role);
       },
     );
 
@@ -5273,17 +5273,17 @@ export class McpToolsService {
       },
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
-        return this.campaigns.summary(campaignId, role);
+        return this.campaigns.summary(campaignId, user, role);
       },
     );
 
     perCampaign(
       'campaign-party',
       'party',
-      { title: 'Party', description: 'Every character (the party) in a campaign — the resource form of get_party.' },
+      { title: 'Party', description: 'Character sheets visible to the caller — the resource form of get_party.' },
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
-        return this.characters.listForCampaign(campaignId, role);
+        return this.characters.listForCampaign(campaignId, user, role);
       },
     );
 

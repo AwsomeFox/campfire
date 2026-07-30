@@ -32,6 +32,8 @@ import { EncountersService } from '../encounters/encounters.service';
 import { EncounterMapService, type EncounterMapView } from '../encounters/encounter-map.service';
 
 const CAST_VIEWER_ROLE: Role = 'viewer';
+// A cast link is an anonymous player-safe projection, never a party-sheet credential.
+const CAST_VIEWER_USER: RequestUser = { id: 'cast:viewer', name: 'Cast viewer', serverRole: 'user' };
 const UNIFORM_NOT_FOUND = 'Cast session not found or expired';
 const DUMMY_CAST_TOKEN = `cf_cast_${'0'.repeat(48)}`;
 
@@ -219,7 +221,7 @@ export class CastService {
 
   async summary(token: string): Promise<CampaignSummary> {
     const cast = this.resolveActive(token);
-    return this.campaignsService.summary(cast.campaignId, CAST_VIEWER_ROLE);
+    return this.campaignsService.summary(cast.campaignId, CAST_VIEWER_USER, CAST_VIEWER_ROLE);
   }
 
   async runningEncounters(token: string): Promise<Encounter[]> {
