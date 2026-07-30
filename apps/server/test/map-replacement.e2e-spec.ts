@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { locations, encounters, combatants } from '../src/db/schema';
+import { attachments, campaigns, campaignInvites, combatants, encounters, locations } from '../src/db/schema';
 import { eq } from 'drizzle-orm';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
@@ -119,6 +119,135 @@ describe('map replacement lifecycle (issue #870)', () => {
       const cleared = await db.select().from(locations).where(eq(locations.id, loc.id)).limit(1);
       expect(cleared[0]?.mapX).toBeNull();
       expect(cleared[0]?.mapY).toBeNull();
+    });
+
+    it('rejects mapAlignment-only patches to an archived campaign', async () => {
+      const server = ctx.app.getHttpServer();
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ status: 'paused' })
+        .expect(200);
+
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ mapAlignment: 'reset' });
+      expect(res.status).toBe(403);
+      expect(res.body.message).toContain('mapAlignment');
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ status: 'active' })
+        .expect(200);
+    });
+
+    it('re-reveals the same map attachment when it is hidden', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const mapA = await uploadMap(server, 'reveal.png');
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ mapAttachmentId: mapA })
+        .expect(200);
+
+      await request(server)
+        .post(`/api/v1/attachments/${mapA}/hide`)
+        .set(dm)
+        .expect(201);
+
+      const hidden = await db
+        .select({ hidden: attachments.hidden })
+        .from(attachments)
+        .where(eq(attachments.id, mapA))
+        .limit(1);
+      expect(hidden[0]?.hidden).toBe(true);
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ mapAttachmentId: mapA })
+        .expect(200);
+
+      const revealed = await db
+        .select({ hidden: attachments.hidden })
+        .from(attachments)
+        .where(eq(attachments.id, mapA))
+        .limit(1);
+      expect(revealed[0]?.hidden).toBe(false);
+    });
+
+    it('archives with revokeInvites and resets location pins in one request', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const mapA = await uploadMap(server, 'archive-a.png');
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ mapAttachmentId: mapA })
+        .expect(200);
+
+      const [loc] = await db
+        .insert(locations)
+        .values({
+          campaignId,
+          name: 'Archive Pin',
+          kind: 'point',
+          status: 'unexplored',
+          mapX: 15,
+          mapY: 25,
+          body: '',
+          dmSecret: '',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .returning();
+
+      await db.insert(campaignInvites).values({
+        campaignId,
+        code: 'ARCHIVE-870',
+        role: 'player',
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const mapB = await uploadMap(server, 'archive-b.png');
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}?revokeInvites=true`)
+        .set(dm)
+        .send({ status: 'paused', mapAttachmentId: mapB, mapAlignment: 'reset' });
+      expect(res.status).toBe(200);
+
+      const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
+      expect(campaign?.status).toBe('paused');
+      expect(campaign?.publicInvitesEnabled).toBe(false);
+      expect(campaign?.mapAttachmentId).toBe(mapB);
+
+      const inviteRows = await db.select().from(campaignInvites).where(eq(campaignInvites.campaignId, campaignId));
+      expect(inviteRows.length).toBe(0);
+
+      const pin = await db.select().from(locations).where(eq(locations.id, loc.id)).limit(1);
+      expect(pin[0]?.mapX).toBeNull();
+      expect(pin[0]?.mapY).toBeNull();
+
+      const revealed = await db
+        .select({ hidden: attachments.hidden })
+        .from(attachments)
+        .where(eq(attachments.id, mapB))
+        .limit(1);
+      expect(revealed[0]?.hidden).toBe(false);
+
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ status: 'active' })
+        .expect(200);
     });
   });
 

@@ -621,7 +621,7 @@ export class CampaignsService {
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
     if (existing.status !== 'active') {
-      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && k !== 'mapAlignment' && input[k as keyof CampaignUpdateInput] !== undefined);
+      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
       if (extraKeys.length > 0) {
         throw new ForbiddenException(
           `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
@@ -665,12 +665,30 @@ export class CampaignsService {
           .where(eq(campaigns.id, id))
           .limit(1)
           .get();
+        if (campaignInput.mapAttachmentId != null) {
+          tx.update(attachments)
+            .set({ hidden: false, updatedAt: ts })
+            .where(
+              and(
+                eq(attachments.id, campaignInput.mapAttachmentId),
+                eq(attachments.campaignId, id),
+                eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+              ),
+            )
+            .run();
+        }
         const row = tx
           .update(campaigns)
           .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
+        if (shouldResetPins) {
+          tx.update(locations)
+            .set({ mapX: null, mapY: null, updatedAt: ts })
+            .where(eq(locations.campaignId, id))
+            .run();
+        }
         const deleted = tx
           .delete(campaignInvites)
           .where(eq(campaignInvites.campaignId, id))
@@ -717,8 +735,9 @@ export class CampaignsService {
 
     // Issue #870: replacing/removing the world map can optionally reset every location
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
+    let updatedRow: typeof campaigns.$inferSelect | undefined;
     if (shouldResetPins) {
-      const row = this.db.transaction((tx) => {
+      updatedRow = this.db.transaction((tx) => {
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -744,35 +763,32 @@ export class CampaignsService {
           .run();
         return row;
       });
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: 'dm',
-        action: 'campaign.update',
-        entityType: 'campaign',
-        entityId: id,
-        campaignId: id,
-      });
-      return toDomain(row);
     }
 
-    if (mapAttachmentIdChanging && campaignInput.mapAttachmentId != null) {
-      await this.db
-        .update(attachments)
-        .set({ hidden: false, updatedAt: ts })
-        .where(
-          and(
-            eq(attachments.id, campaignInput.mapAttachmentId),
-            eq(attachments.campaignId, id),
-            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
-          ),
-        );
+    if (updatedRow === undefined) {
+      // Reveal the chosen map whenever a non-null id is supplied; attachments default
+      // to DM-only (issue #97), and re-selecting the same hidden map must still make
+      // it visible to players again (#870 review).
+      if (campaignInput.mapAttachmentId != null) {
+        await this.db
+          .update(attachments)
+          .set({ hidden: false, updatedAt: ts })
+          .where(
+            and(
+              eq(attachments.id, campaignInput.mapAttachmentId),
+              eq(attachments.campaignId, id),
+              eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+            ),
+          );
+      }
+
+      [updatedRow] = await this.db
+        .update(campaigns)
+        .set({ ...campaignInput, updatedAt: ts })
+        .where(eq(campaigns.id, id))
+        .returning();
     }
 
-    const [row] = await this.db
-      .update(campaigns)
-      .set({ ...campaignInput, updatedAt: ts })
-      .where(eq(campaigns.id, id))
-      .returning();
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -786,9 +802,9 @@ export class CampaignsService {
     if (archiving) {
       await this.invites.suspendForCampaign(id, user, 'archive');
       const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
-      return toDomain(fresh ?? row);
+      return toDomain(fresh ?? updatedRow);
     }
-    return toDomain(row);
+    return toDomain(updatedRow);
   }
 
   /**

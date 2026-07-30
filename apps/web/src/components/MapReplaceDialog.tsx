@@ -1,9 +1,10 @@
 import { useState } from 'react';
+import type { MapAlignment } from '@campfire/schema';
 import { Dialog, Btn } from './ui';
 
 export type MapReplaceMode = 'replace' | 'remove';
 
-export type MapReplaceAlignment = 'preserve' | 'reset';
+export type MapReplaceAlignment = MapAlignment;
 
 export type MapReplaceCounts = {
   /** World-map pins or encounter tokens, depending on caller. */

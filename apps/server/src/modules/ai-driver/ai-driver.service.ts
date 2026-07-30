@@ -1404,6 +1404,7 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'encounterId',
   'expectedUpdatedAt',
   'mapAttachmentId',
+  'mapAlignment',
   'gridSize',
   'gridScale',
   'gridUnit',
