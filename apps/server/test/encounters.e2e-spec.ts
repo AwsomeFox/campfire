@@ -4406,6 +4406,9 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const neutralNpcId = (
       await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Neutral bystander', disposition: 'neutral' })
     ).body.id;
+    const mixedHostileNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Mixed hostile bandit', disposition: 'hostile' })
+    ).body.id;
     const npcOnly = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'NPC-only fight', hidden: false });
     const addNpc = await request(server)
       .post(`/api/v1/encounters/${npcOnly.body.id}/combatants`)
@@ -4446,7 +4449,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const addMixedNpc = await request(server)
       .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
       .set(dm)
-      .send({ kind: 'npc', npcId: hostileNpcId, ruleEntryId: cr10EntryId });
+      .send({ kind: 'npc', npcId: mixedHostileNpcId, ruleEntryId: cr10EntryId });
     const addMixedFriendlyNpc = await request(server)
       .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
       .set(dm)
