@@ -7207,7 +7207,7 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       
       // Verify turn-start triggered
       let state = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-      let targetState = state.body.combatants.find((c: any) => c.id === targetId);
+      const targetState = state.body.combatants.find((c: any) => c.id === targetId);
       expect(targetState.hpCurrent).toBe(18); // 20 - 2
       
       // 2. Verify removing lair pointer does not wrap round
