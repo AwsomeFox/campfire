@@ -263,13 +263,48 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       })
       .returning()
       .all();
+    const [otherBoss] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Inactive legendary', initiative: 5, hpCurrent: 8, hpMax: 8, sortOrder: 2, ruleEntryId: entry.id, deathState: 'dead', turnState: JSON.stringify({ used: { legendary: 3 } }) })
+      .returning()
+      .all();
     orm.update(combatants).set({ ruleEntryId: entry.id, turnState: JSON.stringify({ used: { legendary: 3 } }) }).where(eq(combatants.id, c1)).run();
 
     await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
-    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+    const removal = await service.removeCombatant(encounterId, c2, dmUser, 'dm');
 
     const [newRoundBoss] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
     expect(JSON.parse(newRoundBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
+    const [newRoundOtherBoss] = orm.select().from(combatants).where(eq(combatants.id, otherBoss.id)).limit(1).all();
+    expect(JSON.parse(newRoundOtherBoss.turnState ?? '{}').used.legendary ?? 0).toBe(0);
+
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    const [rewoundOtherBoss] = orm.select().from(combatants).where(eq(combatants.id, otherBoss.id)).limit(1).all();
+    expect(JSON.parse(rewoundOtherBoss.turnState ?? '{}').used.legendary).toBe(3);
+  });
+
+  it('removing a lair resume target chooses the next eligible combatant', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const [downed] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Downed fallback', initiative: 5, hpCurrent: 0, hpMax: 8, sortOrder: 2, deathState: 'dead' })
+      .returning()
+      .all();
+    const [eligible] = orm.insert(combatants)
+      .values({ encounterId, kind: 'monster', name: 'Eligible fallback', initiative: 1, hpCurrent: 8, hpMax: 8, sortOrder: 3 })
+      .returning()
+      .all();
+    orm.update(encounters)
+      .set({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: c2 })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await service.removeCombatant(encounterId, c2, dmUser, 'dm');
+
+    const [afterRemoval] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    expect(afterRemoval).toMatchObject({ turnPhase: 'lair', currentCombatantId: null, lairResumeCombatantId: eligible.id });
+    expect(afterRemoval.lairResumeCombatantId).not.toBe(downed.id);
+    expect(afterRemoval.lairResumeCombatantId).not.toBe(c1);
   });
 
   it('undoing an active removal restores the combatant phase after entering a lair slot', async () => {

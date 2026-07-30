@@ -25,6 +25,7 @@ import type { RequestUser } from '../../common/user.types';
 import {
   actionEconomySlotMax,
   advanceEncounterTurn,
+  advanceTurn,
   applyCombatantHp,
   buildEncounterRoster,
   cascadeConcentrationLoss,
@@ -4292,8 +4293,12 @@ export class EncountersService {
         : freshEncounter.lairResumeCombatantId;
       let startingAfterRemoval: Combatant | null = null;
       let startedCombatantSnapshot: Pick<typeof combatants.$inferSelect, 'id' | 'turnState' | 'conditions' | 'conditionInstances'> | null = null;
+      const roundLegendarySnapshots: Array<Pick<typeof combatants.$inferSelect, 'id' | 'turnState'>> = [];
       const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
-      if (runningAdapter && freshEncounter.currentCombatantId === combatantId) {
+      const replacingLairResume = runningAdapter
+        && freshEncounter.turnPhase === 'lair'
+        && freshEncounter.lairResumeCombatantId === combatantId;
+      if (runningAdapter && (freshEncounter.currentCombatantId === combatantId || replacingLairResume)) {
         const sorted = this.sortCombatantsWithAdapter(roster.map(combatantToDomain), 'running', runningAdapter);
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
         if (ruleEntryIds.length > 0) {
@@ -4307,24 +4312,31 @@ export class EncountersService {
         const advanceRoster = sorted.map((combatant) => combatant.id === combatantId
           ? { ...combatant, hpCurrent: 0, deathState: combatant.kind === 'character' ? 'dead' : combatant.deathState }
           : combatant);
-        const advanced = advanceEncounterTurn(advanceRoster, combatantId, freshEncounter.round, turnPhase, encounterHasLairSlotFromStatblocks(statblocks), lairResumeCombatantId);
-        newCurrentId = advanced.currentCombatantId;
-        wrappedToNextRound = advanced.roundWrapped;
-        turnPhase = advanced.phase;
-        lairResumeCombatantId = advanced.lairResumeCombatantId;
-        startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
-          ? advanceRoster.find((combatant) => combatant.id === advanced.currentCombatantId) ?? null
-          : null;
-        if (startingAfterRemoval) {
-          const startingRow = roster.find((row) => row.id === startingAfterRemoval!.id);
-          if (startingRow) {
-            startedCombatantSnapshot = {
-              id: startingRow.id,
-              turnState: startingRow.turnState,
-              conditions: startingRow.conditions,
-              conditionInstances: startingRow.conditionInstances,
-            };
+        if (freshEncounter.currentCombatantId === combatantId) {
+          const advanced = advanceEncounterTurn(advanceRoster, combatantId, freshEncounter.round, turnPhase, encounterHasLairSlotFromStatblocks(statblocks), lairResumeCombatantId);
+          newCurrentId = advanced.currentCombatantId;
+          wrappedToNextRound = advanced.roundWrapped;
+          turnPhase = advanced.phase;
+          lairResumeCombatantId = advanced.lairResumeCombatantId;
+          startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
+            ? advanceRoster.find((combatant) => combatant.id === advanced.currentCombatantId) ?? null
+            : null;
+          if (startingAfterRemoval) {
+            const startingRow = roster.find((row) => row.id === startingAfterRemoval!.id);
+            if (startingRow) {
+              startedCombatantSnapshot = {
+                id: startingRow.id,
+                turnState: startingRow.turnState,
+                conditions: startingRow.conditions,
+                conditionInstances: startingRow.conditionInstances,
+              };
+            }
           }
+        } else {
+          // A lair slot resumes after the actor it points to. If that actor is
+          // removed, select its successor through advanceTurn so dead/downed rows
+          // are skipped rather than using the lair helper's legacy raw fallback.
+          lairResumeCombatantId = advanceTurn(advanceRoster, combatantId, freshEncounter.round).currentCombatantId;
         }
       }
       let afterEncounter = {
@@ -4392,6 +4404,7 @@ export class EncountersService {
           const domain = combatantToDomain(row);
           const reset = resetLegendaryUsage(domain.turnState);
           if (reset !== domain.turnState) {
+            roundLegendarySnapshots.push({ id: row.id, turnState: row.turnState });
             tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
           }
         }
@@ -4412,7 +4425,7 @@ export class EncountersService {
         actorId,
         encounterId,
         combatantId,
-        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot }),
+        snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot, roundLegendarySnapshots }),
         beforeEncounterJson: toJsonText({
           currentCombatantId: freshEncounter.currentCombatantId,
           turnIndex: freshEncounter.turnIndex,
@@ -4455,9 +4468,10 @@ export class EncountersService {
             conditions: string; conditionInstances: string | null;
           } | null;
           startedCombatantSnapshot?: Pick<typeof combatants.$inferSelect, 'id' | 'turnState' | 'conditions' | 'conditionInstances'> | null;
+          roundLegendarySnapshots?: Array<Pick<typeof combatants.$inferSelect, 'id' | 'turnState'>>;
         }) | null>(undo.snapshotJson, null);
         if (!storedSnapshot) throw new NotFoundException('Combatant removal undo is unavailable.');
-        const { sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot, ...snapshot } = storedSnapshot;
+        const { sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot, roundLegendarySnapshots = [], ...snapshot } = storedSnapshot;
         // A committed undo may have lost its response. Replaying the restored row is safe;
         // never turn the client-visible Retry into a permanent 404 after success.
         if (undo.consumedAt != null) {
@@ -4542,6 +4556,9 @@ export class EncountersService {
               conditionInstances: startedCombatantSnapshot.conditionInstances,
             }).where(eq(combatants.id, startedCombatantSnapshot.id)).run();
           }
+          for (const legendarySnapshot of roundLegendarySnapshots) {
+            tx.update(combatants).set({ turnState: legendarySnapshot.turnState }).where(eq(combatants.id, legendarySnapshot.id)).run();
+          }
           tx.update(encounters).set({
             currentCombatantId: before.currentCombatantId,
             turnIndex: restoredTurnIndex,
@@ -4573,7 +4590,7 @@ export class EncountersService {
         // Snapshot is the receipt's response body after its first successful undo.
         // Retaining it lets later retries replay even if another removal intervenes.
         tx.update(combatantRemovalUndos).set({
-          snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot }),
+          snapshotJson: toJsonText({ ...snapshot, sheetUpdatedAtAtRemoval, sheetStateAtRemoval, startedCombatantSnapshot, roundLegendarySnapshots }),
           consumedAt: nowIso(),
         }).where(eq(combatantRemovalUndos.token, undoToken)).run();
         this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.combatant.restore', entityType: 'combatant', entityId: snapshot.id, campaignId: current.campaignId, detail: snapshot.name });
