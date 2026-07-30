@@ -964,6 +964,41 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
 }
 
 /**
+ * Idempotent schema safety guard: ensures every soft-deletable entity table carries
+ * `deleted_at`. Guarantees that even if a database recorded migration 0090/0031
+ * prior to a table being created or upgraded, booting the server automatically
+ * backfills missing `deleted_at` columns on any existing table.
+ */
+function ensureSoftDeleteColumns(sqlite: Database.Database): void {
+  const tables = [
+    'campaigns',
+    'quests',
+    'npcs',
+    'locations',
+    'sessions',
+    'notes',
+    'characters',
+    'timeline_events',
+    'factions',
+    'story_arcs',
+    'story_beats',
+    'encounters',
+    'comments',
+    'inventory_items',
+  ];
+  for (const table of tables) {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) continue;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'deleted_at')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+    }
+  }
+}
+
+/**
  * Migration for DBs created before comment tombstoning (issue #503): the comments
  * table gained `deleted_at` (nullable ISO timestamp — a tombstoned root keeps its
  * row so replies survive) and `deleted_by` (the actor who tombstoned it, same
@@ -4930,11 +4965,8 @@ export function openDatabase(dataDir: string): {
   recordAppVersion(sqlite);
 
   sqlite.exec(BOOTSTRAP_SQL);
-  // BOOTSTRAP_SQL runs AFTER the migrations so a just-rebuilt table (e.g. users) is
-  // recreated in its modern shape via CREATE TABLE IF NOT EXISTS only when missing,
-  // and keeps idx_users_oidc_sub in sync. This is also how index-only migrations
-  // reach existing DBs: e.g. #74's idx_audit_campaign_id_desc / idx_audit_created_at
-  // are picked up on the next boot with no bespoke ALTER migration needed.
+  // Ensure soft-delete deleted_at columns exist on all entity tables even if migrations were already recorded
+  ensureSoftDeleteColumns(sqlite);
   const ftsAvailable = setupRuleEntriesFts(sqlite);
   const campaignSearchFtsSetup = setupCampaignSearchFts(sqlite);
   const campaignSearchFtsAvailable = campaignSearchFtsSetup.available;

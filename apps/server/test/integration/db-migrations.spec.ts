@@ -2275,4 +2275,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       upgraded.sqlite.close();
     }
   });
+
+  it('ensureSoftDeleteColumns backfills missing deleted_at columns on boot even if __migrations recorded all migrations', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    sqlite.close();
+
+    // Simulate an existing database where all migrations are recorded, but a table is missing deleted_at
+    const manual = new Database(dbFilePath(dataDir));
+    try {
+      manual.exec('ALTER TABLE encounters DROP COLUMN deleted_at');
+      expect(columnNames(manual, 'encounters')).not.toContain('deleted_at');
+    } finally {
+      manual.close();
+    }
+
+    // openDatabase must run ensureSoftDeleteColumns and add back deleted_at
+    const booted = openDatabase(dataDir);
+    try {
+      expect(columnNames(booted.sqlite, 'encounters')).toContain('deleted_at');
+    } finally {
+      booted.sqlite.close();
+    }
+  });
 });
