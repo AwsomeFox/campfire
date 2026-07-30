@@ -42,7 +42,7 @@ export class CampaignNpcsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
       const validated = NpcCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'npc', null, 'create', validated, user, role);
       res.status(202);
@@ -87,7 +87,7 @@ export class NpcsController {
   ) {
     const row = await this.npcs.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const validated = NpcUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'npc', id, 'update', validated, user, role);
       res.status(202);
@@ -116,7 +116,7 @@ export class NpcsController {
   ) {
     const row = await this.npcs.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const proposal = await this.proposals.create(row.campaignId, 'npc', id, 'delete', {}, user, role);
       res.status(202);
       return { proposal };

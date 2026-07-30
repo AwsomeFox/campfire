@@ -54,7 +54,7 @@ export class CampaignCharactersController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
       const validated = CharacterCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'character', null, 'create', validated, user, role);
       res.status(202);
@@ -181,7 +181,7 @@ export class CharactersController {
     // by the DM, so the caller's `expectedUpdatedAt` would be stale-by-design.
     const { expectedUpdatedAt, ...fields } = body;
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const validated = CharacterUpdate.parse(fields);
       const proposal = await this.proposals.create(row.campaignId, 'character', id, 'update', validated, user, role);
       res.status(202);
@@ -210,7 +210,7 @@ export class CharactersController {
   ) {
     const row = await this.characters.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const proposal = await this.proposals.create(row.campaignId, 'character', id, 'delete', {}, user, role);
       res.status(202);
       return { proposal };

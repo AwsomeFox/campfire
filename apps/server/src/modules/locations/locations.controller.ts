@@ -43,7 +43,7 @@ export class CampaignLocationsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
       const validated = LocationCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'location', null, 'create', validated, user, role);
       res.status(202);
@@ -91,7 +91,7 @@ export class LocationsController {
   ) {
     const row = await this.locations.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const validated = LocationUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'location', id, 'update', validated, user, role);
       res.status(202);
@@ -120,7 +120,7 @@ export class LocationsController {
   ) {
     const row = await this.locations.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const proposal = await this.proposals.create(row.campaignId, 'location', id, 'delete', {}, user, role);
       res.status(202);
       return { proposal };

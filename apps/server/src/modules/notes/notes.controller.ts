@@ -85,7 +85,7 @@ export class CampaignNotesController {
     @Body() body: NoteCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.notes.create(campaignId, body, user, role);
   }
 
@@ -106,7 +106,7 @@ export class CampaignNotesController {
   ) {
     // The capability gate itself lives in NotesService.createInbox so the MCP tool
     // passes through it too (issue #597).
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.notes.createInbox(campaignId, body, user, role);
   }
 
@@ -166,7 +166,7 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Updated note.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: NoteUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     // Split off the optimistic-concurrency guard (#157) from the entity fields.
     const { expectedUpdatedAt, ...fields } = body;
     return this.notes.update(id, fields, user, role, { expectedUpdatedAt });
@@ -177,7 +177,7 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.notes.remove(id, user, role);
   }
 
@@ -186,7 +186,7 @@ export class NotesController {
   @ApiResponse({ status: 201, description: 'Restored note.' })
   async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id, true);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.notes.restore(id, user, role);
   }
 

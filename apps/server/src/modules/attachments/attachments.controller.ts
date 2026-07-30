@@ -269,7 +269,7 @@ export class AttachmentsController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.attachmentsService.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.attachmentsService.updateMetadata(id, body, user, role);
   }
 

@@ -11,7 +11,8 @@ import type { RequestUser } from './user.types';
  * THE BUG THIS CLOSES
  * -------------------
  * Viewer was documented as read-only, but `POST /campaigns/:id/notes` and
- * `POST /campaigns/:id/comments` gated on `requireMember(..., { write: true })`, and
+ * `POST /campaigns/:id/comments` gated on `requireMemberOnWritableCampaign` (the renamed
+ * successor to the old `requireMember(..., { write: true })` option, issue #1480), and
  * that option asserts the CAMPAIGN is writable (not archived) — it says nothing about
  * the CALLER's authority. So a viewer could comment on any thread they could see and
  * whisper any member of the table, and a whisper's body excerpt landed in the target's

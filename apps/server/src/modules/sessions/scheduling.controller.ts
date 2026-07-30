@@ -221,7 +221,9 @@ export class ScheduleController {
     @CurrentUser() user: RequestUser,
   ): Promise<ScheduledSessionWithRsvps> {
     const row = await this.scheduling.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    // Member-level write: the archive read-only gate applies (issue #1480) — a
+    // paused/completed campaign refuses new RSVPs, like its other mutations.
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.scheduling.setRsvp(id, body, user, role);
   }
 }

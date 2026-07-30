@@ -250,7 +250,7 @@ export class CampaignHomebrewController {
   @Post()
   @ApiOperation({ summary: 'Create campaign homebrew', description: 'DM creates directly; non-DM (or proposed=true) submits a rule_entry create proposal for review.' })
   async create(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewRuleEntryDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', null, 'create', body as unknown as Record<string, unknown>, user, role);
     return this.rules.createCampaignHomebrew(campaignId, body, user);
   }
@@ -271,7 +271,7 @@ export class CampaignHomebrewController {
   archive(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.archiveCampaignHomebrew(campaignId, id, user); }
   @Patch(':id')
   @ApiOperation({ summary: 'Update campaign homebrew', description: 'DM updates directly; non-DM (or proposed=true) submits a rule_entry update proposal for review.' })
-  async update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) { const role = await this.access.requireMember(user, campaignId, { write: true }); if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', id, 'update', body as Record<string, unknown>, user, role); return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
+  async update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) { const role = await this.access.requireMemberOnWritableCampaign(user, campaignId); if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', id, 'update', body as Record<string, unknown>, user, role); return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
   @Get(':id')
   @ApiOperation({ summary: 'Get campaign homebrew', description: 'Requires campaign membership. Returns one private homebrew entry by id.' })
   get(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.getCampaignHomebrew(campaignId, id, user); }

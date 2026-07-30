@@ -8,12 +8,6 @@ import { RoleResolver } from './role-resolver.service';
 
 export type CampaignAccessOpts = {
   /**
-   * Member-level WRITE endpoints (notes, inbox, dice rolls, …) opt in so archived
-   * (paused/completed) campaigns reject them. Trashed campaigns are rejected for
-   * every non-exempt path regardless of this flag (issue #867).
-   */
-  write?: boolean;
-  /**
    * Role-gated READS and campaign-management writes that must still work on an
    * archived campaign (un-archive PATCH, soft-delete, invite list for archive
    * confirmations). Does NOT exempt trashed campaigns — use `allowTrashed`.
@@ -48,10 +42,19 @@ export type CampaignPermission = Extract<GuestDmGrantScope, 'membership_admin' |
  *    un-archive — field-restricted in CampaignsService.update — and DELETE
  *    /campaigns/:id so a dead campaign can still be removed).
  *
- *  - requireMember() does NOT assert writability by default (it gates plain
- *    reads for every list/get). Member-level writes — notes, inbox items,
- *    `?proposed=true` proposal submissions, attachment deletes, dice rolls —
- *    opt in with `{ write: true }`.
+ *  - requireMember() is the plain membership READ gate: it asserts NEITHER a
+ *    minimum role NOR that the campaign is writable. Use it for plain reads
+ *    (every list/get), and for the few member writes that are personal
+ *    read-state rather than shared campaign content — notably the catch-up
+ *    read cursor (POST /campaigns/:id/catch-up/mark), which is exempt from the
+ *    archive gate so a member can clear the dashboard banner on a
+ *    paused/completed campaign. Shared member-level WRITES — notes, inbox
+ *    items, RSVP, proposal withdraw/revise, `?proposed=true` proposal
+ *    submissions, attachment deletes, dice rolls — use
+ *    requireMemberOnWritableCampaign(), which adds the archive gate. (Issue
+ *    #1480: the old `requireMember(..., { write: true })` option was removed —
+ *    its name read as a caller-authority check even though it only asserted
+ *    the CAMPAIGN was writable and returned a `viewer` role unchanged.)
  *
  * TRASH BOUNDARY (issue #867): `deletedAt` is part of the same authoritative
  * lifecycle gate. A trashed campaign rejects normal reads/writes/streams/
@@ -133,16 +136,47 @@ export class CampaignAccessService {
   }
 
   /**
-   * 403 if the user is not a member of this campaign at all. Pass
-   * `{ write: true }` on member-level WRITE endpoints so archived
-   * (paused/completed) campaigns reject them. Trashed campaigns are rejected
-   * unless `{ allowTrashed: true }` (issue #867).
+   * Membership READ gate: 403 if the user is not a member of this campaign at
+   * all. This asserts NEITHER a minimum role NOR that the campaign is writable
+   * — use it only for plain reads (every list/get). For member-level WRITES use
+   * requireMemberOnWritableCampaign(); for role-gated writes use requireRole().
+   * Trashed campaigns are rejected unless `{ allowTrashed: true }` (issue #867).
    */
   async requireMember(user: RequestUser, campaignId: number, opts?: CampaignAccessOpts): Promise<Role> {
     const role = await this.roleResolver.effectiveRole(user, campaignId);
     await this.assertLifecycleAccess(campaignId, role, opts);
     if (!role) throw new ForbiddenException('Not a member of this campaign');
-    if (opts?.write) await this.assertWritable(campaignId);
+    return role;
+  }
+
+  /**
+   * Member-level WRITE gate (issue #1480): plain membership PLUS the campaign
+   * must be writable (not paused/completed/trashed). Use this for member-level
+   * mutations — notes, inbox, RSVP, proposal withdraw/revise, dice rolls,
+   * `?proposed=true` submissions, attachment deletes — where the gate is
+   * membership + campaign-writable, NOT a specific role. For role-gated writes
+   * use requireRole() (it asserts writable by default).
+   *
+   * The archive gate here is unconditional, so `opts` is narrowed to
+   * `Pick<CampaignAccessOpts, 'allowTrashed'>` — unlike requireRole() /
+   * requireCampaignPermission(), this gate has NO `allowArchived` escape and a
+   * caller passing one would be silently ignored (a latent contract trap).
+   * A member write that must work on an archived campaign is NOT a shared
+   * mutation (e.g. the catch-up read cursor, which is personal read-state) and
+   * belongs on requireMember() instead, with a documented exemption.
+   *
+   * This is the renamed, intent-revealing successor to the old
+   * `requireMember(..., { write: true })` option, whose name read as a
+   * caller-authority check even though it only asserted the CAMPAIGN was
+   * writable and returned a `viewer` role unchanged.
+   */
+  async requireMemberOnWritableCampaign(
+    user: RequestUser,
+    campaignId: number,
+    opts?: Pick<CampaignAccessOpts, 'allowTrashed'>,
+  ): Promise<Role> {
+    const role = await this.requireMember(user, campaignId, opts);
+    await this.assertWritable(campaignId);
     return role;
   }
 

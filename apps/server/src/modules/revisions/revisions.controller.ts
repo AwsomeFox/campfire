@@ -61,7 +61,9 @@ export class RevisionsController {
   ): Promise<{ campaignId: number; role: Role; authorUserId: string }> {
     const note = await this.revisions.loadNoteAccess(entityId);
     if (!note) throw new NotFoundException(`note ${entityId} not found`);
-    const role = await this.access.requireMember(user, note.campaignId, opts.write ? { write: true } : undefined);
+    const role = opts.write
+      ? await this.access.requireMemberOnWritableCampaign(user, note.campaignId)
+      : await this.access.requireMember(user, note.campaignId);
     // A note the caller can't see 404s (not 403), exactly like GET /notes/:id — its very
     // existence stays hidden. This is the redaction guard: a DM never reaches a private
     // note's history through this generic endpoint.

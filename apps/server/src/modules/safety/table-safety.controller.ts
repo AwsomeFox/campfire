@@ -23,13 +23,15 @@ class TableSafetyHoldReleaseDto extends createZodDto(TableSafetyHoldRelease) {}
  *
  * WHY THE ROLE CHECKS ARE WHAT THEY ARE
  *
- *  - Activation uses `requireMember`, the WEAKEST check in this codebase, with no `{ write: true }`.
- *    Not `requireRole('player')`: a viewer sitting at the table — a guest, a partner watching over
- *    someone's shoulder on their own login — is a person in the room, and the mechanism is
- *    worthless if it only protects people with a character sheet. Not `{ write: true }` either,
- *    because that asserts campaign writability and would make an archived-but-still-being-read
- *    campaign un-stoppable. Every gate that consults the hold is a play-advancement gate, so a
- *    hold on a campaign nobody is advancing is inert anyway.
+ *  - Activation uses `requireMember`, the WEAKEST check in this codebase (a plain
+ *    membership read-gate, no writable assertion). Not `requireRole('player')`: a viewer
+ *    sitting at the table — a guest, a partner watching over someone's shoulder on their
+ *    own login — is a person in the room, and the mechanism is worthless if it only
+ *    protects people with a character sheet. Not `requireMemberOnWritableCampaign` either
+ *    (issue #1480): that asserts campaign writability and would make an
+ *    archived-but-still-being-read campaign un-stoppable. Every gate that consults the
+ *    hold is a play-advancement gate, so a hold on a campaign nobody is advancing is
+ *    inert anyway.
  *
  *  - Release uses `requireRole('dm')`. This is the asymmetry the whole design rests on: because
  *    a hold can only be lifted by a facilitator, letting anyone raise one is safe.
