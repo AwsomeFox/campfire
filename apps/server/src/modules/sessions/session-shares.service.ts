@@ -125,6 +125,7 @@ export class SessionSharesService {
           campaignId: session.campaignId,
           label: input.label,
           createdBy: user.name,
+          createdByUserId: user.id,
           tokenHash: hashShareToken(token),
           tokenPrefix: shareTokenPrefix(token),
           expiresAt,

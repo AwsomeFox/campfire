@@ -36,6 +36,7 @@ import {
   diceRolls,
   notifications,
   notificationDigestQueue,
+  sessionShares,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
@@ -205,6 +206,7 @@ export class UsersService {
     tx.update(proposals).set({ proposer: nextLabel }).where(eq(proposals.proposerUserId, stableUserId)).run();
     tx.update(tableSafetyHolds).set({ activatedByName: nextLabel }).where(eq(tableSafetyHolds.activatedByUserId, stableUserId)).run();
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
+    tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
 
     // Moderation evidence is an integrity-protected incident snapshot. Every public
     // attribution field it carries is covered by its stored hashes, so account

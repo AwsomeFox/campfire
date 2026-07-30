@@ -1453,9 +1453,10 @@ export class SchedulingService {
       const update: {
         status?: SessionRsvp['status'];
         userName: string;
+        userImported: false;
         updatedAt: string;
         note?: string;
-      } = { userName: user.name, updatedAt: ts };
+      } = { userName: user.name, userImported: false, updatedAt: ts };
       if (input.status !== undefined) {
         update.status = input.status;
       }
@@ -1471,6 +1472,7 @@ export class SchedulingService {
         scheduledSessionId: scheduleId,
         userId: user.id,
         userName: user.name,
+        userImported: false,
         status: nextStatus,
         note: persistedNote,
         createdAt: ts,

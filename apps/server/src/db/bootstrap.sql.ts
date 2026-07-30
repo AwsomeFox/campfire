@@ -474,6 +474,7 @@ CREATE TABLE IF NOT EXISTS session_shares (
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   label TEXT NOT NULL DEFAULT '',
   created_by TEXT NOT NULL DEFAULT '',
+  created_by_user_id TEXT,
   token_hash TEXT NOT NULL UNIQUE,
   token_prefix TEXT NOT NULL,
   expires_at TEXT,
