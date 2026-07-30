@@ -1326,9 +1326,21 @@ export class ActionResolverService {
         const actor = this.combatantRowOrThrow(encounterId, existingChain.actorCombatantId);
         const isDm = role === 'dm';
         if (!isDm) {
+          if (role === 'viewer') {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'viewer_cannot_apply');
+            throw new ForbiddenException('Viewers may not apply actions.');
+          }
           if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
             throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
+          }
+          if (!this.isPlayerActiveTurn(encounter, actor, role)) {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'not_active_turn');
+            throw new ForbiddenException('Players may only resolve or apply actions on their active turn.');
+          }
+          if (!this.policyFor(encounter.campaignId, actor, user, role).canApply) {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'declaration_only_policy');
+            throw new ForbiddenException('Under this campaign policy, players may only declare actions for DM confirmation.');
           }
         }
         const undoToken = ActionUndoToken.parse({
