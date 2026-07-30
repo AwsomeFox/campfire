@@ -24,6 +24,19 @@ test.describe('glossary term help (#518) — DM', () => {
   test('sidebar help opens by keyboard, is announced, fits the viewport, and deep-links', async ({ page }) => {
     await page.goto(dashboardUrl());
 
+    // Issue #591 — RouteChangeFocus moves keyboard focus once per initial navigation,
+    // asynchronously (two animation frames after mount, via focusMainDestination in
+    // routeFocus.ts). It prefers the page's h1, but on a hard `page.goto` the campaign
+    // name/h1 can still be loading when that window closes, so it falls back to the
+    // `<main>` landmark instead — either way, this is the ONE-TIME settle for this
+    // navigation. The sidebar's term-help trigger sits outside `<main>`, so
+    // `shouldPreserveFocusInsideMain` does not protect it: focusing the trigger before
+    // that settle fires just gets clobbered a moment later when the effect runs.
+    // Nothing on the Dashboard route autofocuses anything else, so waiting for focus
+    // to leave the initial `document.body` awaits that real settle instead of racing
+    // it — regardless of whether it lands on the h1 or the `<main>` fallback.
+    await page.waitForFunction(() => document.activeElement !== document.body);
+
     const trigger = page.getByTestId('term-help-trigger-compendium');
     await expect(trigger).toBeVisible();
     // Not hover-only: it is a button with a real accessible name, and it does
