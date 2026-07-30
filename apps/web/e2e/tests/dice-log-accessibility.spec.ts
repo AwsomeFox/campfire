@@ -63,7 +63,7 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
 
       // Poll refetch must not re-announce the same roll id.
       await viewerPage.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
-      expect((await announcements(viewerPage)).filter((message) => message.includes(String(body.total)))).toHaveLength(1);
+      await expect.poll(async () => (await announcements(viewerPage)).filter((message) => message.includes(String(body.total))).length).toBe(1);
     } finally {
       await dmContext.close();
     }
@@ -90,7 +90,6 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
     const totalLine = afterRoll.find((message) => /Rolled|rolled/i.test(message)) ?? '';
     expect(totalLine.length).toBeGreaterThan(0);
     await page.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
-    const afterPoll = await announcements(page);
-    expect(afterPoll.filter((message) => message === totalLine)).toHaveLength(1);
+    await expect.poll(async () => (await announcements(page)).filter((message) => message === totalLine).length).toBe(1);
   });
 });

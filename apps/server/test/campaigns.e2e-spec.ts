@@ -860,11 +860,9 @@ describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () =>
     // Trashed items are sorted by deletedAt desc (most recently deleted first).
     const t0 = Date.parse(trash.body[0].deletedAt);
     const t1 = Date.parse(trash.body[1].deletedAt);
-    expect(t0).toBeGreaterThanOrEqual(t1);
-    if (t0 > t1) {
-      expect(trash.body[0]).toMatchObject({ type: 'character', id: characterId, name: 'Doomed Hero' });
-      expect(trash.body[1]).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });
-    }
+    expect(t0).toBeGreaterThan(t1);
+    expect(trash.body[0]).toMatchObject({ type: 'character', id: characterId, name: 'Doomed Hero' });
+    expect(trash.body[1]).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });
 
     const session = trash.body.find((t: { type: string }) => t.type === 'session');
     expect(session).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });
