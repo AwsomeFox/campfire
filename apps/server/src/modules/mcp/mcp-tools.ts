@@ -158,6 +158,7 @@ import { CoDmService } from '../ai-dm/co-dm.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SessionZeroConsentService } from '../session-zero/session-zero-consent.service';
+import { SafetyCharterValidator } from '../session-zero/safety-charter-validator';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { TimelineService } from '../timeline/timeline.service';
@@ -453,10 +454,10 @@ export class McpToolsService {
     // route uses, never a second implementation. Appended near-last for the same
     // positional-constructor-test reason as sessionZeroConsent above.
     private readonly inboxSweep: InboxSweepService,
-    // Issue #1645 review: MCP /mcp is one shared route, so route decorators cannot
     // apply the strict AI bucket to a single tool. Use the same throttler storage here.
     @InjectThrottlerStorage()
     private readonly throttlerStorage: ThrottlerStorage,
+    private readonly safetyCharterValidator: SafetyCharterValidator,
   ) {}
 
   /**
@@ -680,10 +681,23 @@ export class McpToolsService {
       const startedAt = Date.now();
       try {
         const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
+        const campaignId = campaignIdFromToolArgs(validated);
         patchRequestContext({
           tool: name,
-          campaignId: campaignIdFromToolArgs(validated),
+          campaignId,
         });
+
+        if (mutating && campaignId) {
+          // Extract text from all string arguments
+          const textValues = Object.values(validated).filter(v => typeof v === 'string').join('\\n');
+          if (textValues) {
+            const safetyResult = await this.safetyCharterValidator.validateContent(campaignId, textValues);
+            if (safetyResult.violates) {
+              throw new ForbiddenException(`Content violates session-zero safety charter: ${safetyResult.reason}`);
+            }
+          }
+        }
+
         const data = await handler(validated);
         logMcpTool(name, validated, startedAt, 'ok');
         return ok(data);
