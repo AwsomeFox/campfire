@@ -434,8 +434,27 @@ class ImportJobCancelledError extends Error {}
  * Ties within a bucket are broken by the caller's secondary ORDER BY
  * (FTS bm25 rank, or name in the LIKE fallback).
  */
+const DIACRITIC_REPLACEMENT_PAIRS: Array<[string, string]> = [
+  ['É', 'e'], ['È', 'e'], ['Ê', 'e'], ['Ë', 'e'], ['é', 'e'], ['è', 'e'], ['ê', 'e'], ['ë', 'e'],
+  ['Á', 'a'], ['À', 'a'], ['Â', 'a'], ['Ä', 'a'], ['Ã', 'a'], ['Å', 'a'], ['á', 'a'], ['à', 'a'], ['â', 'a'], ['ä', 'a'], ['ã', 'a'], ['å', 'a'],
+  ['Í', 'i'], ['Ì', 'i'], ['Î', 'i'], ['Ï', 'i'], ['í', 'i'], ['ì', 'i'], ['î', 'i'], ['ï', 'i'],
+  ['Ó', 'o'], ['Ò', 'o'], ['Ô', 'o'], ['Ö', 'o'], ['Õ', 'o'], ['Ø', 'o'], ['ó', 'o'], ['ò', 'o'], ['ô', 'o'], ['ö', 'o'], ['õ', 'o'], ['ø', 'o'],
+  ['Ú', 'u'], ['Ù', 'u'], ['Û', 'u'], ['Ü', 'u'], ['ú', 'u'], ['ù', 'u'], ['û', 'u'], ['ü', 'u'],
+  ['Ý', 'y'], ['Ÿ', 'y'], ['ý', 'y'], ['ÿ', 'y'],
+  ['Ñ', 'n'], ['ñ', 'n'],
+  ['Ç', 'c'], ['ç', 'c'], ['Ć', 'c'], ['ć', 'c'], ['Č', 'c'], ['č', 'c'],
+  ['Š', 's'], ['š', 's'], ['Ś', 's'], ['ś', 's'],
+  ['Ž', 'z'], ['ž', 'z'], ['Ź', 'z'], ['ź', 'z'], ['Ż', 'z'], ['ż', 'z'],
+  ['Ł', 'l'], ['ł', 'l'],
+  ['Æ', 'ae'], ['æ', 'ae'], ['Œ', 'oe'], ['œ', 'oe'],
+];
+
 function foldSqlCol(col: any) {
-  return sql`lower(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(${col}, 'É', 'e'), 'È', 'e'), 'Ê', 'e'), 'Ë', 'e'), 'é', 'e'), 'è', 'e'), 'ê', 'e'), 'ë', 'e'), 'Á', 'a'), 'À', 'a'), 'Â', 'a'), 'Ä', 'a'), 'á', 'a'), 'à', 'a'), 'â', 'a'), 'ä', 'a'), 'Ó', 'o'), 'Ò', 'o'), 'Ô', 'o'), 'Ö', 'o'), 'ó', 'o'), 'ò', 'o'), 'ô', 'o'), 'ö', 'o'), 'Ú', 'u'), 'Ù', 'u'), 'Û', 'u'), 'Ü', 'u'), 'ú', 'u'), 'ù', 'u'), 'û', 'u'), 'ü', 'u'), 'Ñ', 'n'), 'ñ', 'n'), 'Ç', 'c'), 'ç', 'c'), 'Æ', 'ae'), 'æ', 'ae'), 'Œ', 'oe'), 'œ', 'oe'))`;
+  let expr = sql`lower(${col})`;
+  for (const [from, to] of DIACRITIC_REPLACEMENT_PAIRS) {
+    expr = sql`replace(${expr}, ${from}, ${to})`;
+  }
+  return expr;
 }
 
 /**

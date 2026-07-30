@@ -56,6 +56,13 @@ describe('foldForSearch (issue #624)', () => {
     expect(foldedIncludes(withEmoji, foldForSearch('🐉'))).toBe(true);
   });
 
+  it('preserves standalone ASCII punctuation diacritic characters like caret or backtick (issue #1493)', () => {
+    expect(foldForSearch('^')).toBe('^');
+    expect(foldForSearch('`')).toBe('`');
+    expect(foldedIncludes('note with ^ caret', foldForSearch('^'))).toBe(true);
+    expect(foldedIncludes('note with ` backtick', foldForSearch('`'))).toBe(true);
+  });
+
   it('does not mutate identity of already-folded ASCII', () => {
     expect(foldForSearch('hello world')).toBe('hello world');
   });

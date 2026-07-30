@@ -33,6 +33,7 @@ export function clampRuleSearchLimit(limit?: number): number {
  */
 export function nameMatchBucket(q: string, name: string): number {
   const rawNeedle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  if (!rawNeedle) return 3;
   const rawName = name.toLowerCase();
   if (rawName === rawNeedle) return 0;
   if (rawName.startsWith(rawNeedle)) return 1;

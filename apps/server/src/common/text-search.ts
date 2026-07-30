@@ -26,13 +26,15 @@ export const SEARCH_FOLD_LOCALE = 'en-US';
 export function foldForSearch(input: string): string {
   return input
     .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
+    .replace(/\p{M}/gu, '')
     .normalize('NFKC')
     .toLocaleLowerCase(SEARCH_FOLD_LOCALE)
     // İ → "i" + COMBINING DOT ABOVE under en-US; plain "i" for ASCII parity.
     .replace(/\u0069\u0307/g, 'i')
-    // Unicode full case folding maps ß → ss.
-    .replace(/ß/g, 'ss');
+    // Unicode full case folding maps ß → ss, æ → ae, œ → oe.
+    .replace(/ß/g, 'ss')
+    .replace(/æ/g, 'ae')
+    .replace(/œ/g, 'oe');
 }
 
 /** True when `haystack` contains `foldedNeedle` (needle must already be folded). */
