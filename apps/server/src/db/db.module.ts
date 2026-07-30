@@ -27,7 +27,7 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 
 /** Module-scoped logger for the free functions (openDatabase et al.) that run outside a Nest provider. */
 const dbLog = new Logger('Database');
-const RULE_ENTRIES_FTS_REPAIR_META_KEY = 'rule_entries_fts_repair_v2';
+export const RULE_ENTRIES_FTS_REPAIR_META_KEY = 'rule_entries_fts_repair_v2';
 
 /**
  * APP_VERSION (from common/build-metadata, issue #432) is recorded alongside the
