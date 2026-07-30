@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
@@ -688,7 +688,12 @@ export class CampaignsService {
           const reset = tx
             .update(locations)
             .set({ mapX: null, mapY: null, updatedAt: ts })
-            .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
+            .where(
+              and(
+                eq(locations.campaignId, id),
+                or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
+              ),
+            )
             .run();
           pinsCleared = (reset as unknown as { changes?: number }).changes ?? 0;
         }
@@ -766,7 +771,12 @@ export class CampaignsService {
         const reset = tx
           .update(locations)
           .set({ mapX: null, mapY: null, updatedAt: ts })
-          .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
+          .where(
+            and(
+              eq(locations.campaignId, id),
+              or(isNotNull(locations.mapX), isNotNull(locations.mapY)),
+            ),
+          )
           .run();
         return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0 };
       });

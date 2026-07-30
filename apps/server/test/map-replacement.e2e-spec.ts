@@ -110,7 +110,7 @@ describe('map replacement lifecycle (issue #870)', () => {
         .returning();
 
       const prePinned = (await db.select().from(locations).where(eq(locations.campaignId, campaignId))).filter(
-        (l) => l.mapX != null,
+        (l) => l.mapX != null || l.mapY != null,
       ).length;
 
       const mapB = await uploadMap(server, 'd.png');
@@ -231,7 +231,7 @@ describe('map replacement lifecycle (issue #870)', () => {
       });
 
       const prePinned = (await db.select().from(locations).where(eq(locations.campaignId, campaignId))).filter(
-        (l) => l.mapX != null,
+        (l) => l.mapX != null || l.mapY != null,
       ).length;
 
       const mapB = await uploadMap(server, 'archive-b.png');

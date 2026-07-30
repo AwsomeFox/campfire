@@ -311,6 +311,15 @@ export function RegionMap({
     defaultAlignment: MapReplaceAlignment;
   } | null>(null);
 
+  // Revoke the blob preview URL when the dialog closes or the component unmounts,
+  // so navigating away while the dialog is open does not leak the staged image.
+  useEffect(() => {
+    const previewUrl = mapDialog?.previewUrl;
+    if (previewUrl?.startsWith('blob:')) {
+      return () => URL.revokeObjectURL(previewUrl);
+    }
+  }, [mapDialog?.previewUrl]);
+
   /**
    * Responsive world map (issue #604). This card renders at ~360–640 CSS px, but it
    * used to load the FULL original — a multi-MB campaign map — on every dashboard
@@ -593,9 +602,6 @@ export function RegionMap({
           busy={busy}
           onChoice={async (alignment) => {
             const mode = mapDialog.mode;
-            if (mapDialog.previewUrl?.startsWith('blob:')) {
-              URL.revokeObjectURL(mapDialog.previewUrl);
-            }
             setMapDialog(null);
             if (mode === 'remove') {
               await handleMapRemove(alignment);
@@ -604,9 +610,6 @@ export function RegionMap({
             }
           }}
           onCancel={() => {
-            if (mapDialog.previewUrl?.startsWith('blob:')) {
-              URL.revokeObjectURL(mapDialog.previewUrl);
-            }
             setMapDialog(null);
           }}
         />

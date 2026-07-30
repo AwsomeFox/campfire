@@ -3774,6 +3774,16 @@ export function BattleMap({
     pendingFile?: File;
     defaultAlignment: MapReplaceAlignment;
   } | null>(null);
+
+  // Revoke the blob preview URL when the dialog closes or the component unmounts,
+  // so navigating away while the dialog is open does not leak the staged image.
+  useEffect(() => {
+    const previewUrl = mapDialog?.previewUrl;
+    if (previewUrl?.startsWith('blob:')) {
+      return () => URL.revokeObjectURL(previewUrl);
+    }
+  }, [mapDialog?.previewUrl]);
+
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [tool, setTool] = useState<MapTool>('move');
@@ -4949,9 +4959,6 @@ export function BattleMap({
           busy={uploading || busy}
           onChoice={async (alignment) => {
             const mode = mapDialog.mode;
-            if (mapDialog.previewUrl?.startsWith('blob:')) {
-              URL.revokeObjectURL(mapDialog.previewUrl);
-            }
             setMapDialog(null);
             if (mode === 'remove') {
               onSetMap(null, alignment);
@@ -4960,9 +4967,6 @@ export function BattleMap({
             }
           }}
           onCancel={() => {
-            if (mapDialog.previewUrl?.startsWith('blob:')) {
-              URL.revokeObjectURL(mapDialog.previewUrl);
-            }
             setMapDialog(null);
           }}
         />
