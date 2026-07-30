@@ -4,6 +4,7 @@ import {
   guardDriverLivePlayArgs,
   formatDriverLootCombatLogDetail,
   noteDriverEconomyGrant,
+  releaseDriverEconomyGrant,
   syncAftermathGrantWindow,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
   DRIVER_INVENTORY_GRANT_MAX_QTY,
@@ -302,12 +303,15 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     });
   });
 
-  it('#1495: two queued grants approved back-to-back cannot both pass against the same stale total (guardDriverLivePlayArgs + noteDriverEconomyGrant compose like resolveToolConfirmation)', () => {
-    // Regression for the Codex :6364 finding: eleven queued qty:100 grants each individually
-    // legal, all approved, would total 1,100 against a 1,000-item cap if the guard were only
-    // consulted once at QUEUE time. This test drives the same two-call sequence
-    // resolveToolConfirmation now performs — guard, then note — for EVERY approval, proving the
-    // second grant sees the first one's already-recorded total.
+  it('#1495: two grants QUEUED in sequence (guard + reserve, one call at a time) cannot both pass against the same stale total', () => {
+    // Regression for the Codex :6364 finding: eleven qty:100 grants, each individually legal,
+    // would total 1,100 against a 1,000-item cap if nothing accumulated between them. Per the
+    // #1495 round-3 redesign, guard-then-reserve now happens at QUEUE time (see
+    // executeToolCalls), not at approval — reserving one call at a time inside the single-flight
+    // turn loop is what makes concurrently-approved confirmations race-free later (approval only
+    // verifies the reservation's window is still current; it never re-runs this check). This
+    // test drives that queue-time sequence directly: guard, then reserve, for two grants back to
+    // back, proving the second sees the first one's already-recorded total.
     const session = {
       driverGeneratedMapIds: [] as number[],
       generateMapCallsThisTurn: 0,
@@ -315,15 +319,14 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     };
     const grantArgs = { name: 'Potion of Healing', qty: 100 };
 
-    // First approval: exactly fills the remaining budget.
+    // First grant queued: exactly fills the remaining budget.
     const first = guardDriverLivePlayArgs('add_inventory_item', grantArgs, session);
     expect(first.ok).toBe(true);
     noteDriverEconomyGrant(session, 'add_inventory_item', grantArgs);
     expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(DRIVER_INVENTORY_SESSION_GRANT_CAP);
 
-    // Second approval of the SAME queued qty:100 grant, rechecked against the now-updated
-    // total: this is what closes the "eleven queued grants" bypass — no early return skips this
-    // assertion, and the outcome does not depend on any random roll.
+    // A second, identical grant queued right after: rejected against the now-updated total — no
+    // early return skips this assertion, and the outcome does not depend on any random roll.
     const second = guardDriverLivePlayArgs('add_inventory_item', grantArgs, session);
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.code).toBe('forbidden_inventory_session_cap');
@@ -349,6 +352,37 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     const session: { aftermathGrantWindow: ReturnType<typeof grantWindow> | null } = { aftermathGrantWindow: null };
     noteDriverEconomyGrant(session, 'adjust_treasury', { delta: { gp: 25 } });
     expect(session.aftermathGrantWindow).toBeNull();
+  });
+
+  describe('releaseDriverEconomyGrant (#1495 — undoing a queue-time reservation on reject/execution failure)', () => {
+    it('releases a reservation when the current window still matches the one it was reserved against', () => {
+      const session = { aftermathGrantWindow: grantWindow({ encounterId: 5, endedAt: '2026-02-01T00:00:00.000Z', inventoryQtyGranted: 80 }) };
+      releaseDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 30 }, { encounterId: 5, endedAt: '2026-02-01T00:00:00.000Z' });
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(50);
+    });
+
+    it('is a no-op when the window has since moved on to a different encounter (nothing live to credit back into)', () => {
+      // The window was superseded by a LATER fight between reservation and release — releasing
+      // into the CURRENT (different) window would incorrectly credit an unrelated fight's budget.
+      const session = { aftermathGrantWindow: grantWindow({ encounterId: 11, endedAt: '2026-02-02T00:00:00.000Z', inventoryQtyGranted: 40 }) };
+      releaseDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 30 }, { encounterId: 5, endedAt: '2026-02-01T00:00:00.000Z' });
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(40);
+    });
+
+    it('is a no-op when nothing was reserved (reservedWindow is undefined)', () => {
+      const session = { aftermathGrantWindow: grantWindow({ inventoryQtyGranted: 40 }) };
+      releaseDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 30 }, undefined);
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(40);
+    });
+
+    it('never releases a window below zero, even if called more than once for the same reservation', () => {
+      const session = { aftermathGrantWindow: grantWindow({ encounterId: 5, endedAt: '2026-02-01T00:00:00.000Z', inventoryQtyGranted: 10 }) };
+      const window = { encounterId: 5, endedAt: '2026-02-01T00:00:00.000Z' };
+      releaseDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 30 }, window);
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(0);
+      releaseDriverEconomyGrant(session, 'add_inventory_item', { name: 'Potion', qty: 30 }, window);
+      expect(session.aftermathGrantWindow.inventoryQtyGranted).toBe(0);
+    });
   });
 
   it('formatDriverLootCombatLogDetail summarizes treasury and inventory grants for the combat log', () => {

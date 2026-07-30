@@ -73,6 +73,26 @@ export interface AiDmPendingToolConfirmation {
    * owner even when an earlier confirmation performed the false-to-true transition.
    */
   retainedActionChain?: { encounterId: number; chainId: string };
+  /**
+   * The economy-grant budget window this confirmation RESERVED its amount against at queue time
+   * (#1495) — only set (as a KEY, present-or-absent) for
+   * `adjust_treasury`/`add_inventory_item`/`update_inventory_item`. The reservation (not just a
+   * check) happens synchronously at queue time specifically so two concurrently-approved
+   * confirmations have nothing left to race over: the accounting decision was already made when
+   * this was queued, one call at a time, inside the single-flight turn loop — never at approval,
+   * where two HTTP requests can run genuinely concurrently. Approval verifies the CURRENT window
+   * still matches this one and rejects the confirmation as stale rather than silently re-keying
+   * it to a later fight's budget if it does not.
+   *
+   * `null` is a DISTINCT, meaningful value from the key being absent: `null` means "this IS an
+   * economy tool, and no window was tracked yet when it was queued" (the campaign had never had
+   * an encounter end). That must still be checked at approval — if a window has opened SINCE
+   * (the campaign's first-ever encounter ended while this sat pending), the confirmation is
+   * equally stale and must not be quietly matched against a window that did not exist when it
+   * was reserved. The key being absent entirely means "not an economy tool" — no window concept
+   * applies at all, and approval falls back to a plain guard re-check instead.
+   */
+  aftermathGrantWindow?: { encounterId: number; endedAt: string } | null;
 }
 
 /** Tool-name prefixes the driver seat may never call — every hard delete, even proposed. */

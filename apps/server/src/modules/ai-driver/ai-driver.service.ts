@@ -1593,6 +1593,45 @@ export function syncAftermathGrantWindow(
  * every caller runs first and which is what actually opens the window this function accumulates
  * into.
  */
+/**
+ * The economy amount a tool call would grant, as {treasury, inventoryQty} deltas — the same
+ * computation `noteDriverEconomyGrant` (reserve) and `releaseDriverEconomyGrant` (release) both
+ * need, kept in ONE place so a reservation and its release can never silently disagree about how
+ * much was actually reserved (#1495).
+ */
+function driverEconomyGrantAmount(toolName: string, args: Record<string, unknown>): { treasury: number; inventoryQty: number } {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return { treasury: 0, inventoryQty: 0 };
+    const rec = delta as Record<string, unknown>;
+    const total = TREASURY_DENOMS.reduce((sum, d) => {
+      const v = rec[d];
+      return typeof v === 'number' && v > 0 ? sum + v : sum;
+    }, 0);
+    return { treasury: Math.max(0, total), inventoryQty: 0 };
+  }
+  if (toolName === 'add_inventory_item') {
+    const qty = typeof args.qty === 'number' && args.qty > 0 ? args.qty : 1;
+    return { treasury: 0, inventoryQty: qty };
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
+    return { treasury: 0, inventoryQty: Math.max(0, qtyDelta) };
+  }
+  return { treasury: 0, inventoryQty: 0 };
+}
+
+/**
+ * RESERVE a tool call's economy amount against the CURRENT window's cumulative caps (#1495):
+ * {@link DRIVER_TREASURY_SESSION_GRANT_CAP} and {@link DRIVER_INVENTORY_SESSION_GRANT_CAP}.
+ *
+ * Called at two points, both synchronous (no `await` between the guard's cap check and this
+ * call): immediately after a successful AUTO execution, and immediately when a `confirm`-policy
+ * economy tool is QUEUED (not when it is later approved — see
+ * {@link AiDmPendingToolConfirmation.aftermathGrantWindow} for why the reservation moved to
+ * queue time). A no-op with no tracked window: the grant/reservation still "happened", but with
+ * nothing to attribute it to.
+ */
 export function noteDriverEconomyGrant(
   session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
   toolName: string,
@@ -1600,26 +1639,33 @@ export function noteDriverEconomyGrant(
 ): void {
   const window = session.aftermathGrantWindow;
   if (!window) return;
-  if (toolName === 'adjust_treasury') {
-    const delta = args.delta;
-    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return;
-    const rec = delta as Record<string, unknown>;
-    const total = TREASURY_DENOMS.reduce((sum, d) => {
-      const v = rec[d];
-      return typeof v === 'number' && v > 0 ? sum + v : sum;
-    }, 0);
-    if (total > 0) window.treasuryGranted += total;
-    return;
-  }
-  if (toolName === 'add_inventory_item') {
-    const qty = typeof args.qty === 'number' && args.qty > 0 ? args.qty : 1;
-    window.inventoryQtyGranted += qty;
-    return;
-  }
-  if (toolName === 'update_inventory_item') {
-    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
-    if (qtyDelta > 0) window.inventoryQtyGranted += qtyDelta;
-  }
+  const { treasury, inventoryQty } = driverEconomyGrantAmount(toolName, args);
+  window.treasuryGranted += treasury;
+  window.inventoryQtyGranted += inventoryQty;
+}
+
+/**
+ * RELEASE a previously-reserved economy amount (#1495) — the DM rejected the confirmation, or
+ * approved execution itself failed, so the grant never actually happened and must not keep
+ * consuming budget. `reservedWindow` is the identity the amount was reserved against (captured
+ * on the pending confirmation at queue time); the release is applied only if
+ * `session.aftermathGrantWindow` STILL matches it. If a later fight's window has since replaced
+ * it, there is nothing live left to credit back into — the old window's counters no longer
+ * exist in session state, which is harmless: nothing will ever check that superseded window's
+ * budget again either.
+ */
+export function releaseDriverEconomyGrant(
+  session: Pick<AiDmSessionState, 'aftermathGrantWindow'>,
+  toolName: string,
+  args: Record<string, unknown>,
+  reservedWindow: { encounterId: number; endedAt: string } | null | undefined,
+): void {
+  if (!reservedWindow) return;
+  const window = session.aftermathGrantWindow;
+  if (!window || window.encounterId !== reservedWindow.encounterId || window.endedAt !== reservedWindow.endedAt) return;
+  const { treasury, inventoryQty } = driverEconomyGrantAmount(toolName, args);
+  window.treasuryGranted = Math.max(0, window.treasuryGranted - treasury);
+  window.inventoryQtyGranted = Math.max(0, window.inventoryQtyGranted - inventoryQty);
 }
 
 /**
@@ -5691,6 +5737,29 @@ export class AiDriverService {
             retainedActionChain = { encounterId: argEncounterId, chainId: argChainId };
           }
         }
+        // #1495 — RESERVE an economy tool's amount against the CURRENT window right now,
+        // synchronously, and snapshot which window it was reserved against (`null` if no window
+        // is tracked yet — a DISTINCT, meaningful value from "not an economy tool", see
+        // AiDmPendingToolConfirmation.aftermathGrantWindow). This (not a check at approval time)
+        // is what makes concurrently-approved confirmations race-free: queuing happens ONE CALL
+        // AT A TIME inside this turn's synchronous loop, so there is nothing to race here,
+        // whereas `resolveToolConfirmation` is reached from separate HTTP requests that
+        // genuinely can run concurrently. `resolveToolConfirmation` verifies the window it was
+        // reserved against still matches the CURRENT one before executing — including the case
+        // where NO window existed at queue time but one has opened since — and releases the
+        // reservation if the DM rejects it or execution fails.
+        //
+        // Skipped for a call that was ALREADY queued (`confirmationAlreadyQueued`,
+        // e.g. a provider resending an identical call id): `queueToolConfirmation` returns the
+        // existing record unchanged in that case, so reserving again here would double-count an
+        // amount that was already reserved the first time this exact call was seen.
+        let reservedAftermathGrantWindow: { encounterId: number; endedAt: string } | null | undefined;
+        if (DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name) && !confirmationAlreadyQueued) {
+          reservedAftermathGrantWindow = session.aftermathGrantWindow
+            ? { encounterId: session.aftermathGrantWindow.encounterId, endedAt: session.aftermathGrantWindow.endedAt }
+            : null;
+          noteDriverEconomyGrant(session, call.name, args);
+        }
         const pending = this.queueToolConfirmation(
           session,
           call,
@@ -5700,6 +5769,7 @@ export class AiDriverService {
           actor,
           triggeredBy.id,
           retainedActionChain,
+          reservedAftermathGrantWindow,
         );
         const pendingText = JSON.stringify({
           status: 'pending_dm_confirmation',
@@ -6034,6 +6104,11 @@ export class AiDriverService {
     actor: string,
     triggeredBy: string,
     retainedActionChain?: { encounterId: number; chainId: string },
+    // #1495 — `undefined` (the default) means "not an economy tool, no window concept applies".
+    // An explicit `null` means "this IS an economy tool, reserved when no window was tracked
+    // yet" — a real, checkable value, not the same as the argument being omitted. Checked via
+    // `!== undefined` below rather than truthiness so `null` is still written onto `pending`.
+    aftermathGrantWindow?: { encounterId: number; endedAt: string } | null,
   ): AiDmPendingToolConfirmation {
     session.pendingToolConfirmations = session.pendingToolConfirmations ?? {};
     const key = pendingConfirmationKey(call.name, call.id);
@@ -6052,6 +6127,9 @@ export class AiDriverService {
       triggeredBy,
       turnNumber: session.turnCount,
       ...(retainedActionChain ? { retainedActionChain } : {}),
+      // #1495 — the window identity this confirmation's amount was RESERVED against at queue
+      // time (see the call site in executeToolCalls). Verified, not re-derived, at approval.
+      ...(aftermathGrantWindow !== undefined ? { aftermathGrantWindow } : {}),
     };
     session.pendingToolConfirmations[key] = pending;
     // Insert the incoming owner BEFORE cap eviction. If it continues a chain owned by the
@@ -6427,6 +6505,10 @@ export class AiDriverService {
 
     if (action === 'reject') {
       this.releaseRetainedActionChain(session, pending);
+      // #1495 — the DM rejected it: the grant never happens, so release whatever this
+      // confirmation reserved at queue time (a no-op if the window has since moved on).
+      releaseDriverEconomyGrant(session, pending.tool, pending.args, pending.aftermathGrantWindow);
+      this.persistControlState(session);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -6457,54 +6539,118 @@ export class AiDriverService {
         ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
         : pending.args;
 
-    // #1495 — re-run the execution-time guard IMMEDIATELY BEFORE dispatch, against CURRENT
-    // session state, not the state at queue time. The guard already ran once when this call was
-    // first queued, but an approval can land arbitrarily later — after OTHER queued
-    // confirmations already spent part of the same economy-grant budget, which the queue-time
-    // check could not have known about (it would otherwise let every queued call pass against
-    // the same stale total, e.g. eleven queued `qty: 100` inventory grants all approved and
-    // executing 1,100 items despite a 1,000-item cap). Re-sync the budget's window identity
-    // first (a later fight may have ended since this was queued) so the guard checks the right
-    // window's running total.
-    const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
-    syncAftermathGrantWindow(session, latestEndedEncounter);
-    const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
-    if (!recheck.ok) {
-      this.releaseRetainedActionChain(session, pending);
-      await this.audit.log({
-        actor: pending.actor,
-        actorRole: 'dm',
-        action: 'ai-dm.driver.blocked',
-        entityType: 'ai-dm',
-        campaignId,
-        detail:
-          `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
-          `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
-      });
-      this.stream.emit({
-        type: 'tool-confirmation',
-        campaignId,
-        action: 'rejected',
-        confirmationId,
-        tool: pending.tool,
-      });
-      // Persist the (possibly freshly re-keyed) budget window even on a blocked recheck — the
-      // window identity itself may have changed since this call was queued, and that must not be
-      // lost if the process restarts before the next unrelated persistControlState call.
-      this.persistControlState(session);
-      return { confirmation: null, result: { isError: true, text: recheck.message } };
+    let executionArgs = baseArgs;
+    // #1495 — an economy tool's amount was RESERVED against a specific window at QUEUE time
+    // (see executeToolCalls), not merely checked. That is what makes this race-free: two
+    // concurrent HTTP approvals of two DIFFERENT confirmations have nothing left to race over
+    // here, because the accounting decision already happened, one call at a time, back when
+    // each was queued inside the single-flight turn loop. Approval only has to verify the
+    // reservation is still good — it must NOT check-then-account again here, because doing the
+    // accounting a second time (after an `await`) is exactly the gap two concurrent APPROVALS of
+    // the SAME kind of grant could race through.
+    if ('aftermathGrantWindow' in pending) {
+      // This IS an economy tool that was reserved at queue time — `pending.aftermathGrantWindow`
+      // is either the window identity it was reserved against, or `null` if no window was
+      // tracked yet at that moment. Both are checkable, comparable values (see the field comment
+      // on AiDmPendingToolConfirmation): a `null` reservation is stale too if a window has since
+      // opened — the campaign's first-ever encounter ending while this sat pending is exactly as
+      // much "a different window now" as a second fight replacing the first.
+      const reserved = pending.aftermathGrantWindow ?? null;
+      const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+      const stillCurrentWindow = reserved === null
+        ? latestEndedEncounter === null
+        : !!latestEndedEncounter
+          && latestEndedEncounter.encounterId === reserved.encounterId
+          && latestEndedEncounter.endedAt === reserved.endedAt;
+      if (!stillCurrentWindow) {
+        // A LATER fight ended while this sat pending (or one ended for the first time). Reject
+        // it rather than silently letting it execute against that fresh budget — a grant
+        // requested against one window's remaining allowance must not spend another's instead.
+        releaseDriverEconomyGrant(session, pending.tool, baseArgs, reserved);
+        this.releaseRetainedActionChain(session, pending);
+        this.persistControlState(session);
+        await this.audit.log({
+          actor: pending.actor,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.blocked',
+          entityType: 'ai-dm',
+          campaignId,
+          detail:
+            `blocked confirmed ${pending.tool}: stale aftermath window (reserved against ` +
+            `${reserved ? `encounter=${reserved.encounterId} endedAt=${reserved.endedAt}` : 'no window'}) ` +
+            `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
+        });
+        this.stream.emit({
+          type: 'tool-confirmation',
+          campaignId,
+          action: 'rejected',
+          confirmationId,
+          tool: pending.tool,
+        });
+        return {
+          confirmation: null,
+          result: {
+            isError: true,
+            text: `${pending.tool} was requested against a fight whose aftermath window has since closed. Ask the AI to make the grant again.`,
+          },
+        };
+      }
+      // Reservation still valid for the current window: no guard re-check needed (and running
+      // the cumulative-cap check again here would double-count an amount already reserved).
+    } else {
+      // No reservation concept applies at all — this is not an economy tool (every confirm-
+      // policy tool is mutating by construction, see resolveDriverToolPolicy). Fall back to a
+      // plain guard re-check against current session state (harmless: it has no cumulative cap
+      // to double-count).
+      const { latestEndedEncounter } = await this.resolveSessionProfile(campaignId);
+      syncAftermathGrantWindow(session, latestEndedEncounter);
+      const recheck = guardDriverLivePlayArgs(pending.tool, baseArgs, session);
+      if (!recheck.ok) {
+        this.releaseRetainedActionChain(session, pending);
+        this.persistControlState(session);
+        await this.audit.log({
+          actor: pending.actor,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.blocked',
+          entityType: 'ai-dm',
+          campaignId,
+          detail:
+            `blocked confirmed ${pending.tool} at approval-time recheck: ${recheck.code} ` +
+            `confirmation=${confirmationId} approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}`,
+        });
+        this.stream.emit({
+          type: 'tool-confirmation',
+          campaignId,
+          action: 'rejected',
+          confirmationId,
+          tool: pending.tool,
+        });
+        return { confirmation: null, result: { isError: true, text: recheck.message } };
+      }
+      executionArgs = recheck.args;
     }
-    const executionArgs = recheck.args;
+
     const res = await seatToolset.call(pending.tool, executionArgs);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
-    if (res.isError) this.releaseRetainedActionChain(session, pending);
+    if (res.isError) {
+      this.releaseRetainedActionChain(session, pending);
+      // #1495 — execution failed after all: the grant never happened, so release whatever was
+      // reserved for it at queue time (a no-op if nothing was reserved, or if the window has
+      // since moved on and there is nothing live left to credit back into).
+      releaseDriverEconomyGrant(session, pending.tool, executionArgs, pending.aftermathGrantWindow);
+      this.persistControlState(session);
+    }
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
-      // #1495 — a DM-approved confirmation still counts against the economy-grant budget; see
-      // the auto-execute call site in executeToolCalls for the same accounting. Uses the
-      // GUARDED args (post-recheck), matching what actually executed.
-      noteDriverEconomyGrant(session, pending.tool, executionArgs);
+      // #1495 — only NOTE (add to) the running total here when this confirmation was never
+      // reserved at queue time at all (`'aftermathGrantWindow' in pending` is false — a
+      // non-economy tool has no such key; contrast an economy tool reserved against `null`,
+      // which already went through the reservation/verification path above and must not be
+      // counted a second time here).
+      if (!('aftermathGrantWindow' in pending)) {
+        noteDriverEconomyGrant(session, pending.tool, executionArgs);
+      }
       // Persist the updated running total immediately — a restart before the next unrelated
       // persistControlState call must not silently forget a grant that already committed.
       this.persistControlState(session);
