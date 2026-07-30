@@ -445,19 +445,92 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       const { orm, service } = build();
       const { encounterId, c1, c2 } = seed(orm);
 
+      function conditionRounds(row: { conditionInstances: string | null }, id: string): number | undefined {
+        return JSON.parse(row.conditionInstances ?? '[]').find((c: any) => c.id === id)?.roundsRemaining;
+      }
+      function effectRounds(row: { activeEffects: string | null }, id: string): number | undefined {
+        return JSON.parse(row.activeEffects ?? '[]').find((e: any) => e.id === id)?.roundsRemaining;
+      }
+
+      const c1Condition = {
+        id: 'c1-cond',
+        name: 'C1 Cond',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+      };
+      const c1Effect = {
+        id: 'c1-eff',
+        name: 'C1 Eff',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      const c2Condition = {
+        id: 'c2-cond',
+        name: 'C2 Cond',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+      };
+      const c2Effect = {
+        id: 'c2-eff',
+        name: 'C2 Eff',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([c1Condition]),
+          conditions: JSON.stringify(['C1 Cond']),
+          activeEffects: JSON.stringify([c1Effect]),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([c2Condition]),
+          conditions: JSON.stringify(['C2 Cond']),
+          activeEffects: JSON.stringify([c2Effect]),
+        })
+        .where(eq(combatants.id, c2))
+        .run();
+
       await service.nextTurn(encounterId, {}, dmUser, 'dm');
       expect(currentId(orm, encounterId)).toBe(c2);
+      const [c1rowAfterFirst] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterFirst, 'c1-cond')).toBe(1);
+      expect(effectRounds(c1rowAfterFirst, 'c1-eff')).toBe(1);
+
       await service.nextTurn(encounterId, {}, dmUser, 'dm');
       expect(currentId(orm, encounterId)).toBe(c1);
       expect(currentRound(orm, encounterId)).toBe(2);
+      const [c2rowAfterSecond] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterSecond, 'c2-cond')).toBe(1);
+      expect(effectRounds(c2rowAfterSecond, 'c2-eff')).toBe(1);
 
       const first = await service.undoTurn(encounterId, dmUser, 'dm');
       expect(first.currentCombatantId).toBe(c2);
       expect(first.round).toBe(1);
+      const [c2rowAfterFirstUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterFirstUndo, 'c2-cond')).toBe(2);
+      expect(effectRounds(c2rowAfterFirstUndo, 'c2-eff')).toBe(2);
+      const [c1rowAfterFirstUndo] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterFirstUndo, 'c1-cond')).toBe(1);
+      expect(effectRounds(c1rowAfterFirstUndo, 'c1-eff')).toBe(1);
 
       const second = await service.undoTurn(encounterId, dmUser, 'dm');
       expect(second.currentCombatantId).toBe(c1);
       expect(second.round).toBe(1);
+      const [c1rowAfterSecondUndo] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(conditionRounds(c1rowAfterSecondUndo, 'c1-cond')).toBe(2);
+      expect(effectRounds(c1rowAfterSecondUndo, 'c1-eff')).toBe(2);
+      const [c2rowAfterSecondUndo] = orm.select().from(combatants).where(eq(combatants.id, c2)).limit(1).all();
+      expect(conditionRounds(c2rowAfterSecondUndo, 'c2-cond')).toBe(2);
+      expect(effectRounds(c2rowAfterSecondUndo, 'c2-eff')).toBe(2);
     });
 
     it('preserves conditions and effects added during the turn while restoring ticked state (issue #1445)', async () => {
@@ -533,6 +606,110 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(effects).toHaveLength(2);
       expect(effects.find((e: any) => e.id === 'added-effect')).toMatchObject(addedEffect);
       expect(effects.find((e: any) => e.id === 'c2-effect')).toMatchObject(preEffect);
+    });
+
+    it('does not revert post-advance edits or resurrect removed conditions/effects (issue #1445)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const condA = {
+        id: 'cond-a',
+        name: 'Cond A',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: false,
+      };
+      const condB = {
+        id: 'cond-b',
+        name: 'Cond B',
+        roundsRemaining: 2,
+        timing: 'end-of-turn',
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: false,
+      };
+      const effX = {
+        id: 'eff-x',
+        name: 'Eff X',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+        saveAbility: null,
+        saveDc: null,
+        notes: '',
+      };
+      const effY = {
+        id: 'eff-y',
+        name: 'Eff Y',
+        kind: 'other',
+        timing: 'none',
+        roundsRemaining: 2,
+        saveAbility: null,
+        saveDc: null,
+        notes: '',
+      };
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify([condA, condB]),
+          conditions: JSON.stringify(['Cond A', 'Cond B']),
+          activeEffects: JSON.stringify([effX, effY]),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.nextTurn(encounterId, {}, dmUser, 'dm');
+
+      const [c1rowAfter] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const afterConds = JSON.parse(c1rowAfter.conditionInstances ?? '[]');
+      const afterEffs = JSON.parse(c1rowAfter.activeEffects ?? '[]');
+
+      // Edit cond-a's stacks/notes but leave its post-tick roundsRemaining at 1.
+      const editedCondA = afterConds.find((c: any) => c.id === 'cond-a');
+      editedCondA.stacks = 3;
+      editedCondA.notes = 'kept edit';
+      // Remove cond-b after the tick.
+      const remainingConds = [editedCondA];
+
+      // Edit eff-x's roundsRemaining to a custom value; remove eff-y.
+      const editedEffX = afterEffs.find((e: any) => e.id === 'eff-x');
+      editedEffX.roundsRemaining = 5;
+      const remainingEffs = [editedEffX];
+
+      orm
+        .update(combatants)
+        .set({
+          conditionInstances: JSON.stringify(remainingConds),
+          conditions: JSON.stringify(['Cond A']),
+          activeEffects: JSON.stringify(remainingEffs),
+        })
+        .where(eq(combatants.id, c1))
+        .run();
+
+      await service.undoTurn(encounterId, dmUser, 'dm');
+
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const restoredConds = JSON.parse(c1row.conditionInstances ?? '[]');
+      const restoredEffs = JSON.parse(c1row.activeEffects ?? '[]');
+
+      const a = restoredConds.find((c: any) => c.id === 'cond-a');
+      expect(a).toBeDefined();
+      expect(a.roundsRemaining).toBe(2);
+      expect(a.stacks).toBe(3);
+      expect(a.notes).toBe('kept edit');
+
+      expect(restoredConds.find((c: any) => c.id === 'cond-b')).toBeUndefined();
+
+      const x = restoredEffs.find((e: any) => e.id === 'eff-x');
+      expect(x).toBeDefined();
+      expect(x.roundsRemaining).toBe(5);
+
+      expect(restoredEffs.find((e: any) => e.id === 'eff-y')).toBeUndefined();
     });
   });
 
