@@ -393,6 +393,7 @@ export class AiMapService {
         body.encounterId,
         {
           mapAttachmentId: attachment.id,
+          mapAlignment: body.mapAlignment,
           gridSize: preview.gridConfig.gridSize,
           gridScale: preview.gridConfig.gridScale,
           gridUnit: preview.gridConfig.gridUnit,

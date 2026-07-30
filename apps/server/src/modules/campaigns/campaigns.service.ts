@@ -638,7 +638,7 @@ export class CampaignsService {
     // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
     // Fog-protected encounter maps cannot be the region background: players load
     // RegionMap via /attachments/:id/file, which must stay a full-source URL.
-    if (mapAttachmentIdChanging && campaignInput.mapAttachmentId != null) {
+    if (campaignInput.mapAttachmentId != null) {
       const fogRows = await this.db
         .select({ fog: encounters.fog })
         .from(encounters)
@@ -686,7 +686,7 @@ export class CampaignsService {
         if (shouldResetPins) {
           tx.update(locations)
             .set({ mapX: null, mapY: null, updatedAt: ts })
-            .where(eq(locations.campaignId, id))
+            .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
             .run();
         }
         const deleted = tx
@@ -759,7 +759,7 @@ export class CampaignsService {
         if (!row) throw new NotFoundException(`Campaign ${id} not found`);
         tx.update(locations)
           .set({ mapX: null, mapY: null, updatedAt: ts })
-          .where(eq(locations.campaignId, id))
+          .where(and(eq(locations.campaignId, id), isNotNull(locations.mapX), notDeleted(locations.deletedAt)))
           .run();
         return row;
       });

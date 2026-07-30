@@ -1558,6 +1558,18 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
+    if (args.mapAlignment === 'reset') {
+      const id = Number(args.mapAttachmentId);
+      const allowed = session.driverGeneratedMapIds ?? [];
+      if (!Number.isFinite(id) || !allowed.includes(id)) {
+        return {
+          ok: false,
+          code: 'forbidden_map_reset',
+          message:
+            'The driver may only reset encounter overlays when attaching a map it generated this session.',
+        };
+      }
+    }
     if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
       const id = Number(args.mapAttachmentId);
       const allowed = session.driverGeneratedMapIds ?? [];

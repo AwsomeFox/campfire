@@ -9090,6 +9090,7 @@ export const GenerateMapParams = z.object({
   theme: MapTheme.optional(),
   gridScale: z.number().positive().max(1000).optional(),
   gridUnit: z.string().min(1).max(12).optional(),
+  mapAlignment: MapAlignment.optional(),
 });
 export type GenerateMapParams = z.infer<typeof GenerateMapParams>;
 
@@ -9417,6 +9418,7 @@ export const AttachGeneratedMapRequest = z.object({
   previewId: z.string().min(1),
   encounterId: Id.optional(),
   filename: z.string().max(160).optional(),
+  mapAlignment: MapAlignment.optional(),
 });
 export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
 
