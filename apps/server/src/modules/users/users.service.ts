@@ -170,7 +170,9 @@ export class UsersService {
   }
 
   /**
-   * Synchronize mutable public display copies selected by their durable user-id columns.
+   * Synchronize mutable public display copies selected by durable user ids and their
+   * current copied label, so import-local proxy ownership does not overwrite source
+   * provenance.
    *
    * Historical rows retain those ids for authorization, block-listing, and provenance;
    * their copied public labels must instead follow a rename or become neutral before
@@ -191,10 +193,13 @@ export class UsersService {
     if (previousLabel === nextLabel && !force) return;
     const stableUserId = String(userId);
 
-    tx.update(notes).set({ authorName: nextLabel }).where(eq(notes.authorUserId, stableUserId)).run();
-    tx.update(comments).set({ authorName: nextLabel }).where(eq(comments.authorUserId, stableUserId)).run();
-    tx.update(entityRevisions).set({ authorName: nextLabel }).where(eq(entityRevisions.authorUserId, stableUserId)).run();
-    tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(eq(entityRevisions.replacedByUserId, stableUserId)).run();
+    // Campaign imports assign their install-local proxy ownership to the importer
+    // while preserving the source label as historical provenance. A matching prior
+    // label distinguishes actual account attribution from those imported proxies.
+    tx.update(notes).set({ authorName: nextLabel }).where(and(eq(notes.authorUserId, stableUserId), eq(notes.authorName, previousLabel))).run();
+    tx.update(comments).set({ authorName: nextLabel }).where(and(eq(comments.authorUserId, stableUserId), eq(comments.authorName, previousLabel))).run();
+    tx.update(entityRevisions).set({ authorName: nextLabel }).where(and(eq(entityRevisions.authorUserId, stableUserId), eq(entityRevisions.authorName, previousLabel))).run();
+    tx.update(entityRevisions).set({ replacedByName: nextLabel }).where(and(eq(entityRevisions.replacedByUserId, stableUserId), eq(entityRevisions.replacedByName, previousLabel))).run();
     tx.update(sessionZeroAcknowledgments).set({ userName: nextLabel }).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).run();
     tx.update(sessionZeroBoundarySubmissions)
       .set({ submitterName: nextLabel })
@@ -202,7 +207,7 @@ export class UsersService {
       .run();
     tx.update(sessionZeroGuardianConsents).set({ userName: nextLabel }).where(eq(sessionZeroGuardianConsents.userId, stableUserId)).run();
     tx.update(participantSupportPreferences).set({ ownerName: nextLabel }).where(eq(participantSupportPreferences.ownerUserId, stableUserId)).run();
-    tx.update(sessionRsvps).set({ userName: nextLabel }).where(eq(sessionRsvps.userId, stableUserId)).run();
+    tx.update(sessionRsvps).set({ userName: nextLabel }).where(and(eq(sessionRsvps.userId, stableUserId), eq(sessionRsvps.userName, previousLabel))).run();
     tx.update(diceRolls).set({ rollerName: nextLabel }).where(eq(diceRolls.rollerUserId, stableUserId)).run();
     tx.update(moderationReports).set({ reporterName: nextLabel }).where(eq(moderationReports.reporterUserId, stableUserId)).run();
     tx.update(moderationReports).set({ subjectName: nextLabel }).where(eq(moderationReports.subjectUserId, stableUserId)).run();

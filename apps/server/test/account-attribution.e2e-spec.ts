@@ -23,6 +23,7 @@ import {
   sessionZeroCharterVersions,
   sessionZeroGuardianConsents,
   sessionRsvps,
+  scheduledSessions,
 } from '../src/db/schema';
 import { moderationEvidenceHash, moderationEvidenceMetadataHash, verifyModerationEvidence } from '../src/modules/moderation/moderation-evidence';
 
@@ -30,6 +31,7 @@ const OLD_LABEL = 'Old Handle';
 const RENAMED_LABEL = 'New Handle';
 const ROSTER_LABEL = 'Roster Handle';
 const DELETED_LABEL = 'Deleted user';
+const IMPORTED_AUTHOR = 'Imported source author';
 const NEUTRAL_NOTIFICATION_TITLE = 'Campaign activity';
 const NEUTRAL_NOTIFICATION_BODY = 'This notification has updated attribution.';
 
@@ -52,23 +54,29 @@ describe('account historical attribution privacy (e2e)', () => {
   let noteId: number;
   let characterId: number;
   let redactedEvidenceContentHash: string;
+  let importedNoteId: number;
+  let importedCommentId: number;
+  let importedRevisionId: number;
+  let importedRsvpId: number;
 
   function retainedRows(db: DrizzleDb) {
     const stableUserId = String(memberId);
     return {
-      notes: db.select().from(notes).where(eq(notes.authorUserId, stableUserId)).all(),
-      comments: db.select().from(comments).where(eq(comments.authorUserId, stableUserId)).all(),
+      notes: db.select().from(notes).where(eq(notes.authorUserId, stableUserId)).all().filter((row) => row.id !== importedNoteId),
+      comments: db.select().from(comments).where(eq(comments.authorUserId, stableUserId)).all().filter((row) => row.id !== importedCommentId),
       revisionAuthors: db
         .select()
         .from(entityRevisions)
         .where(eq(entityRevisions.authorUserId, stableUserId))
-        .all(),
+        .all()
+        .filter((row) => row.id !== importedRevisionId),
       revisionReplacers: db
         .select()
         .from(entityRevisions)
         .where(eq(entityRevisions.replacedByUserId, stableUserId))
-        .all(),
-      rsvps: db.select().from(sessionRsvps).where(eq(sessionRsvps.userId, stableUserId)).all(),
+        .all()
+        .filter((row) => row.id !== importedRevisionId),
+      rsvps: db.select().from(sessionRsvps).where(eq(sessionRsvps.userId, stableUserId)).all().filter((row) => row.id !== importedRsvpId),
       acknowledgments: db.select().from(sessionZeroAcknowledgments).where(eq(sessionZeroAcknowledgments.userId, stableUserId)).all(),
       boundaries: db
         .select()
@@ -186,6 +194,18 @@ describe('account historical attribution privacy (e2e)', () => {
     }
   }
 
+  function expectImportedProvenance(db: DrizzleDb) {
+    const importedNote = db.select().from(notes).where(eq(notes.id, importedNoteId)).get();
+    const importedComment = db.select().from(comments).where(eq(comments.id, importedCommentId)).get();
+    const importedRevision = db.select().from(entityRevisions).where(eq(entityRevisions.id, importedRevisionId)).get();
+    const importedRsvp = db.select().from(sessionRsvps).where(eq(sessionRsvps.id, importedRsvpId)).get();
+    expect(importedNote?.authorName).toBe(IMPORTED_AUTHOR);
+    expect(importedComment?.authorName).toBe(IMPORTED_AUTHOR);
+    expect(importedRevision?.authorName).toBe(IMPORTED_AUTHOR);
+    expect(importedRevision?.replacedByName).toBe(IMPORTED_AUTHOR);
+    expect(importedRsvp?.userName).toBe(IMPORTED_AUTHOR);
+  }
+
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
     const server = ctx.app.getHttpServer();
@@ -300,6 +320,15 @@ describe('account historical attribution privacy (e2e)', () => {
     db.insert(proposals).values({ campaignId, entityType: 'note', entityId: null, action: 'create', payload: '{}', proposer: OLD_LABEL, proposerUserId: String(memberId), proposerToken: null, status: 'pending', resolvedBy: '', note: '', createdAt: ts, updatedAt: ts }).run();
     db.insert(notifications).values({ userId: adminId, campaignId, type: 'note_created', title: `${OLD_LABEL} left Old Handlex intact`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'note', entityId: noteId, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), readAt: null, createdAt: ts }).run();
     db.insert(notificationDigestQueue).values({ userId: adminId, campaignId, type: 'schedule_rsvp', title: `${OLD_LABEL} at Old Handlex`, body: `${OLD_LABEL} said ${OLD_LABEL}`, entityType: 'scheduled_session', entityId: schedule.body.id, commentId: null, data: null, actorName: OLD_LABEL, actorUserId: String(memberId), reason: 'digest', createdAt: ts }).run();
+
+    // Imports retain source labels but use the importer as their install-local
+    // owner. These proxy ids must not make later account relabeling overwrite
+    // source provenance.
+    importedNoteId = db.insert(notes).values({ campaignId, authorUserId: String(memberId), authorName: IMPORTED_AUTHOR, kind: 'note', visibility: 'party_shared', entityType: 'campaign', entityId: campaignId, body: 'Imported note', resolved: false, resolvedNote: '', deletedAt: null, quarantinedAt: null, quarantinedBy: null, createdAt: ts, updatedAt: ts }).returning().get().id;
+    importedCommentId = db.insert(comments).values({ campaignId, entityType: 'session', entityId: session.body.id, parentId: null, authorUserId: String(memberId), authorName: IMPORTED_AUTHOR, body: 'Imported comment', inCharacter: false, characterId: null, characterName: null, characterAvatarUrl: null, deletedAt: null, deletedBy: null, editedAt: null, editedBy: null, quarantinedAt: null, quarantinedBy: null, createdAt: ts, updatedAt: ts }).returning().get().id;
+    importedRevisionId = db.insert(entityRevisions).values({ campaignId, entityType: 'note', entityId: importedNoteId, snapshot: JSON.stringify({ body: 'Imported note' }), authorUserId: String(memberId), authorName: IMPORTED_AUTHOR, authorSource: 'human', authorSourceDetail: '', createdAt: ts, replacedByUserId: String(memberId), replacedByName: IMPORTED_AUTHOR, replacedBySource: 'human', replacedBySourceDetail: '', replacedAt: ts, restoredFromRevisionId: null, authorshipKnown: true }).returning().get().id;
+    const importedScheduleId = db.insert(scheduledSessions).values({ campaignId, scheduledAt: '2099-07-01T19:30:00.000Z', durationMinutes: 240, title: 'Imported schedule', location: '', notes: '', status: 'scheduled', cancelledAt: null, cancelledBy: null, cancellationReason: '', sessionId: null, seriesId: null, occurrenceIndex: 0, timezone: '', localStart: '', venueId: null, roomId: null, assignedDmUserId: '', capacity: 0, eventId: '', seasonId: '', icsUid: '', icsSequence: 0, originalScheduledAt: null, createdAt: ts, updatedAt: ts }).returning().get().id;
+    importedRsvpId = db.insert(sessionRsvps).values({ scheduledSessionId: importedScheduleId, userId: String(memberId), userName: IMPORTED_AUTHOR, status: 'yes', note: 'Imported RSVP', createdAt: ts, updatedAt: ts }).returning().get().id;
   });
 
   afterAll(async () => {
@@ -313,6 +342,7 @@ describe('account historical attribution privacy (e2e)', () => {
 
     const db = ctx.app.get<DrizzleDb>(DB);
     expectRetainedAttribution(db, RENAMED_LABEL);
+    expectImportedProvenance(db);
     const safetyNotification = db
       .select()
       .from(notifications)
@@ -339,7 +369,9 @@ describe('account historical attribution privacy (e2e)', () => {
     });
     expect(committed.status).toBe(201);
     expect(committed.body.updated).toBe(1);
-    expectRetainedAttribution(ctx.app.get<DrizzleDb>(DB), ROSTER_LABEL);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    expectRetainedAttribution(db, ROSTER_LABEL);
+    expectImportedProvenance(db);
   });
 
   it('pseudonymizes every retained public label on deletion without rewriting audit identity', async () => {
@@ -351,6 +383,7 @@ describe('account historical attribution privacy (e2e)', () => {
       expectSupportPreferences: false,
       expectNeutralNotificationCopy: true,
     });
+    expectImportedProvenance(db);
     const rsvpAudit = db
       .select()
       .from(auditLog)
