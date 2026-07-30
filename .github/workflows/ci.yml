@@ -332,7 +332,12 @@ jobs:
   e2e-web:
     name: e2e-web (${{ matrix.shard }}/4)
     needs: build
-    timeout-minutes: 10
+    # Browser-system setup can be delayed by an apt mirror. Keep that failure
+    # separate from the fixed test budget below so it cannot cancel a shard
+    # before Playwright selects a spec.
+    # 30 minutes reserves eight minutes for checkout, cache, artifact, and
+    # typecheck overhead in addition to the explicit 12 + 10 minute caps.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -372,8 +377,11 @@ jobs:
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       # Always run install so the OS deps (--with-deps) are present; on a browser
       # cache hit the Chromium binary download itself is skipped.
-      - run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and system dependencies
+        timeout-minutes: 12
+        run: npx playwright install --with-deps chromium
       - name: Run Playwright tests (shard ${{ matrix.shard }}/4)
+        timeout-minutes: 10
         working-directory: apps/web
         run: |
           if [ "${{ matrix.shard }}" = "1" ]; then npx playwright test --config playwright.first-run.config.ts; fi
@@ -404,7 +412,11 @@ jobs:
   pwa-web:
     name: pwa-web
     needs: build
-    timeout-minutes: 10
+    # Match e2e-web: apt-backed browser setup has its own explicit timeout and
+    # cannot spend the runtime PWA suite's test budget.
+    # 30 minutes reserves eight minutes for checkout, cache, artifact, and
+    # typecheck overhead in addition to the explicit 12 + 10 minute caps.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -435,11 +447,14 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
-      - run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and system dependencies
+        timeout-minutes: 12
+        run: npx playwright install --with-deps chromium
       # The service worker only exists against the REAL built SPA served by the
       # REAL server on one origin, so this reuses the primary project's seeded
       # webServer (apps/web/e2e/server.mjs) and runs just the PWA spec.
       - name: Run PWA install + offline suite
+        timeout-minutes: 10
         run: npm run test:pwa:e2e -w apps/web
       - name: Upload Playwright report
         if: always()
