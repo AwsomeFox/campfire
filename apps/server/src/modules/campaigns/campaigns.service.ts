@@ -1427,12 +1427,17 @@ export class CampaignsService {
           const ownerType = item.ownerType === 'character' ? 'character' : 'party';
           const mappedChar = item.characterId != null ? (charMap.get(item.characterId) ?? null) : null;
           const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
-          // Issue #1326 review (Codex/Devin): a character-owned item's equip state
-          // carries over 1:1 to its cloned character (slot conflicts can't arise — every
-          // clone maps at most one source character to one destination character, so
-          // relative slot assignments stay unique). An item that falls back to the party
-          // stash (its character wasn't cloned/mapped) lands unequipped, same invariant
-          // `InventoryService.update` enforces: a party item can never be equipped.
+          // Issue #1326 review (Codex/Devin/coordinator): a character-owned item's FULL
+          // equip triple carries over 1:1 to its cloned character (slot conflicts can't
+          // arise — every clone maps at most one source character to one destination
+          // character, so relative slot assignments stay unique). An item that falls back
+          // to the party stash (its character wasn't cloned/mapped) lands unequipped AND
+          // clears its equippedAction too — not just equipped/equipSlot. A half-clear
+          // (unequipped but still carrying a granted action) is a state normal play can
+          // never produce: the item would silently arm whoever equips it in the new
+          // campaign with an attack nobody there authored. Landing the fallback item fully
+          // clean means claiming and equipping it in the new campaign is a deliberate act
+          // that grants only what the NEW campaign's players/DM choose to attach.
           tx.insert(inventoryItems)
             .values({
               campaignId: cloneId,
@@ -1448,7 +1453,7 @@ export class CampaignsService {
               compendiumState: item.compendiumState,
               equipped: resolvedOwner === 'character' && item.equipped,
               equipSlot: resolvedOwner === 'character' ? item.equipSlot : null,
-              equippedAction: item.equippedAction,
+              equippedAction: resolvedOwner === 'character' ? item.equippedAction : null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -2467,8 +2472,16 @@ export class CampaignsService {
         const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
         // `equippedAction` is re-validated against CharacterAction rather than trusted
         // verbatim — a malformed or foreign-shaped import drops the field rather than
-        // storing garbage the resolver would later fail to parse.
-        const importedActionParse = CharacterAction.safeParse(item.equippedAction);
+        // storing garbage the resolver would later fail to parse. It is ALSO dropped
+        // whenever the item falls back to the party stash (issue #1326 review,
+        // coordinator): a party item can never be equipped, so keeping a granted action
+        // around for an item nobody can currently equip is a half-clear — the item would
+        // silently arm whoever later claims and equips it with an attack nobody in THIS
+        // campaign chose. This is conditioned on `resolvedOwner`, not `grantEquip`: a
+        // character-owned item that merely lost a slot-conflict race still keeps its
+        // action (normal play — unequip the winner, equip this one instead), exactly like
+        // a single-item PATCH slot conflict.
+        const importedActionParse = resolvedOwner === 'character' ? CharacterAction.safeParse(item.equippedAction) : null;
         const wantsEquip = resolvedOwner === 'character' && item.equipped === true;
         const trimmedSlot = typeof item.equipSlot === 'string' ? item.equipSlot.trim().slice(0, 60) : '';
         const claimKey = wantsEquip && mappedChar != null ? `${mappedChar}:${trimmedSlot.toLowerCase()}` : null;
@@ -2494,7 +2507,7 @@ export class CampaignsService {
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             equipped: grantEquip,
             equipSlot: grantEquip ? trimmedSlot : null,
-            equippedAction: importedActionParse.success ? JSON.stringify(importedActionParse.data) : null,
+            equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
           })

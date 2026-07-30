@@ -791,6 +791,43 @@ describe('campaign import — equip-invariant enforcement (issue #1326 review)',
     const importEntry = audit.body.find((e: { action: string }) => e.action === 'campaign.import');
     expect(importEntry.detail).toContain('auto-unequipped 2 inventory items with an invalid or conflicting equip slot');
   });
+
+  // Issue #1326 review (coordinator): when an equipped item's character has no mapping
+  // (a dangling characterId — the referenced character isn't in the import document, or
+  // failed its own validation), the item falls back to the party stash. equipped/
+  // equipSlot/equippedAction must ALL clear together — never a half-clear (unequipped but
+  // still carrying a granted action), which would silently arm whoever claims the item
+  // next in the new campaign with an attack nobody there chose.
+  it('a dangling characterId falls back to the party stash fully unarmed: equipped, equipSlot, AND equippedAction all clear together', async () => {
+    const doc = {
+      campaign: { name: 'Dangling Owner Import', ruleSystem: '', dmControlsProgression: false, dmControlsTurns: false, requireDmTurnConfirmation: false, publicRecapSharingEnabled: true, catalogPrivacy: 'private', aiExternalContentPolicy: 'blocked', narrationLanguage: 'en', status: 'active' },
+      // No characters array at all — characterId 9999 below has no mapping.
+      inventory: [
+        {
+          id: 5010,
+          ownerType: 'character',
+          characterId: 9999,
+          name: 'Orphaned Axe',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'main-hand',
+          equippedAction: { name: 'Phantom Cleave', kind: 'melee', toHit: '+9', damage: '9d9+9 force', notes: '' },
+        },
+      ],
+    };
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+
+    const inv = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/inventory`);
+    const axe = inv.body.find((i: { name: string }) => i.name === 'Orphaned Axe');
+    expect(axe).toBeDefined();
+    expect(axe.ownerType).toBe('party');
+    expect(axe.characterId).toBeNull();
+    expect(axe.equipped).toBe(false);
+    expect(axe.equipSlot).toBeNull();
+    expect(axe.equippedAction).toBeNull();
+  });
 });
 
 /**

@@ -783,4 +783,42 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     expect(clonedRevisions.body.length).toBe(sourceRevisions.body.length);
     expect(clonedRevisions.body[0].snapshot.body).toBe(sourceRevisions.body[0].snapshot.body);
   });
+
+  // Issue #1326 review (coordinator): when an equipped item's character does NOT survive
+  // the copy (here: the character was trashed before cloning, so it's excluded from
+  // characterRows and the item's characterId has no entry in charMap), equipped/equipSlot/
+  // equippedAction must ALL clear together — never a half-clear (unequipped but still
+  // carrying a granted action), which is a state normal play can never reach and would
+  // silently arm whoever claims the fallen-back item next with an attack nobody in the new
+  // campaign chose.
+  it('full clone lands a party-fallback item (its character was trashed) fully unarmed: equipped, equipSlot, AND equippedAction all clear together', async () => {
+    const doomedChar = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Doomed Hero' });
+    const doomedItem = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .send({ name: 'Cursed Axe', ownerType: 'character', characterId: doomedChar.body.id });
+    const equipRes = await dmAgent.patch(`/api/v1/inventory/${doomedItem.body.id}`).send({
+      equipped: true,
+      equipSlot: 'main-hand',
+      equippedAction: { name: 'Cursed Cleave', kind: 'melee', toHit: '+6', damage: '2d6+4 necrotic', notes: '' },
+    });
+    expect(equipRes.status).toBe(200);
+
+    // The character is trashed BEFORE cloning — clone's characterRows query excludes
+    // soft-deleted characters, so this item's characterId has no mapping.
+    const del = await dmAgent.delete(`/api/v1/characters/${doomedChar.body.id}`);
+    expect(del.status).toBe(200);
+
+    const res = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Fallback Copy' });
+    expect(res.status).toBe(201);
+    const cloneId = res.body.id;
+
+    const inventory = await dmAgent.get(`/api/v1/campaigns/${cloneId}/inventory`);
+    const axe = inventory.body.find((i: { name: string }) => i.name === 'Cursed Axe');
+    expect(axe).toBeDefined();
+    expect(axe.ownerType).toBe('party');
+    expect(axe.characterId).toBeNull();
+    expect(axe.equipped).toBe(false);
+    expect(axe.equipSlot).toBeNull();
+    expect(axe.equippedAction).toBeNull();
+  });
 });
