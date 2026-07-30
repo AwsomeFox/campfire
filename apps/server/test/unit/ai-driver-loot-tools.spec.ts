@@ -32,13 +32,24 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(isDriverToolAllowed({ name: 'delete_inventory_item', mutating: true, proposalCapable: true })).toBe(false);
   });
 
-  it('guardDriverLivePlayArgs blocks negative/zero qtyDelta, absolute qty, and owner moves on update_inventory_item', () => {
+  // Issue #1326 review (coordinator): converted from a denylist (reject qty/ownerType/
+  // characterId/non-positive qtyDelta, allow everything else through) to an ALLOWLIST —
+  // the denylist shape is exactly how this PR's own equipped/equipSlot/equippedAction
+  // fields slipped through unnoticed until review. See #1792 for converting the
+  // remaining driver guards the same way.
+  it('guardDriverLivePlayArgs enforces an ALLOWLIST on update_inventory_item — only itemId/qtyDelta/idempotencyKey are permitted', () => {
     const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
 
     // positive qtyDelta is allowed (grant only)
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 2 }, session)).toEqual({
       ok: true,
       args: { itemId: 1, qtyDelta: 2 },
+    });
+
+    // itemId + qtyDelta + idempotencyKey together are allowed
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 2, idempotencyKey: 'abc' }, session)).toEqual({
+      ok: true,
+      args: { itemId: 1, qtyDelta: 2, idempotencyKey: 'abc' },
     });
 
     // negative qtyDelta is blocked
@@ -55,34 +66,70 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
     });
 
-    // absolute qty (any value) is blocked — use qtyDelta instead
-    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qty: 0 }, session)).toEqual({
+    // no qtyDelta at all is blocked — the previous denylist let a qtyDelta-less call
+    // (e.g. a bare metadata edit) fall through to allow; the allowlist requires it.
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may not set an absolute qty on update_inventory_item; use a positive qtyDelta to grant.',
+      message: 'The driver must provide a positive qtyDelta to update_inventory_item; no other field is permitted.',
     });
+
+    // absolute qty (any value) is blocked — use qtyDelta instead
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qty: 5 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may not set an absolute qty on update_inventory_item; use a positive qtyDelta to grant.',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: qty.',
     });
 
     // owner moves are blocked
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, ownerType: 'character' }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may not move inventory items between owners (ownerType/characterId are not allowed).',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: ownerType.',
     });
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, characterId: 42 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may not move inventory items between owners (ownerType/characterId are not allowed).',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: characterId.',
     });
 
-    // safe metadata-only update is allowed
+    // Metadata edits (name/notes) are refused too — grant-only means grant-only, not
+    // "anything except quantity and owner".
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, name: 'Longsword +1', notes: 'magic' }, session)).toEqual({
-      ok: true,
-      args: { itemId: 1, name: 'Longsword +1', notes: 'magic' },
+      ok: false,
+      code: 'forbidden_inventory_field',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: name, notes.',
+    });
+
+    // Issue #1326 review (Codex/Devin) — the exact exposure this PR introduced: equipping
+    // gear and attaching a brand-new attack are both refused, with no dedicated denial
+    // branch required for either.
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, equipped: true, equipSlot: 'main-hand' }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_field',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: equipped, equipSlot.',
+    });
+    expect(
+      guardDriverLivePlayArgs(
+        'update_inventory_item',
+        { itemId: 1, qtyDelta: 1, equippedAction: { name: 'New Attack', kind: 'melee', toHit: '+5', damage: '1d8', notes: '' } },
+        session,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_field',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: equippedAction.',
+    });
+
+    // Fail-closed proof: an entirely unknown field the schema has never had is refused
+    // too — the allowlist rejects by omission from the allowed set, not by name, so a
+    // future schema widening cannot slip through unnoticed the way equip did here.
+    expect(
+      guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qtyDelta: 1, someBrandNewFieldNobodyHasAddedYet: true }, session),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_inventory_field',
+      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: someBrandNewFieldNobodyHasAddedYet.',
     });
   });
 
