@@ -48,6 +48,7 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       await expect(log).toHaveAttribute('aria-live', 'off');
       await watchAnnouncements(viewerPage);
 
+      await dmPage.goto(`/c/${campaignId}`);
       const rolled = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/roll`, {
         headers: { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' },
         data: { expr: '1d1+5', label: 'Stealth check' },
