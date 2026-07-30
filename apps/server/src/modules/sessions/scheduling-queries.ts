@@ -160,9 +160,25 @@ export function scheduleOverlapsSql(startIso: string, endIso: string): SQL {
   )`;
 }
 
-/** True once scheduledAt + durationMinutes has passed. */
+/**
+ * True once scheduledAt + durationMinutes has passed.
+ *
+ * Defence in depth (issue #1521): if `scheduledAt` is a value SQLite's
+ * `julianday()` cannot parse, `scheduleEndJulianSql()` is NULL, so the raw
+ * `<=` comparison is NULL — neither true nor false. Such a row (which can only
+ * reach the DB by bypassing the import boundary now — a direct edit or a
+ * hand-corrupted row) would then satisfy NEITHER `scheduleNotEndedSql()`
+ * (Upcoming) NOR this predicate, and because `schedulePastSql()` is
+ * `(scheduleEndedSql() OR NOT scheduleLiveSql())`, a live one would fall out of
+ * Past too — vanishing from every list. Treating an unclassifiable end instant
+ * as ended makes the projections TOTAL: the row lands in Past, where an
+ * operator can see and fix it, instead of nowhere. For parseable input
+ * `scheduleEndJulianSql()` is never NULL, so the `IS NULL` arm is dead and the
+ * strict `>`/`<=` complement with `scheduleNotEndedSql()` — and therefore the
+ * live/past complement property — is preserved exactly.
+ */
 export function scheduleEndedSql(nowIso: string): SQL {
-  return sql`${scheduleEndJulianSql()} <= julianday(${nowIso})`;
+  return sql`(${scheduleEndJulianSql()} IS NULL OR ${scheduleEndJulianSql()} <= julianday(${nowIso}))`;
 }
 
 /** In progress: started (scheduledAt <= now) but not ended. */

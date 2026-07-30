@@ -19,6 +19,7 @@ import {
   NarrationLanguage,
   CompendiumRef,
   CompendiumSnapshot,
+  normalizeOffsetIsoDateTime,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1996,6 +1997,48 @@ export class CampaignsService {
     const importerId = String(user.id);
     const ts = nowIso();
 
+    // Issue #1521: validate + normalize every schedule row's `scheduledAt` at the
+    // import boundary — the one path that could write a value SQLite's `julianday()`
+    // cannot parse. The Upcoming/Past projections compare `scheduledAt` with
+    // `julianday()`, which returns NULL for an unparseable value; a NULL comparison
+    // is neither true nor false, so a row carrying a malformed timestamp (an empty
+    // string, a truncated value, a locale-formatted date) satisfied NEITHER
+    // `scheduleNotEnded` (Upcoming) NOR `scheduleEnded` (Past) and vanished from
+    // every list a DM uses — silent data loss worse than a rejected import. Every
+    // other write path normalizes via `new Date(iso).toISOString()` (see
+    // SchedulingService.normalizeScheduledAt); import wrote the raw value verbatim.
+    // The gate deliberately requires an OFFSET-BEARING ISO-8601 date-time (a
+    // trailing `Z` or ±HH:MM), not merely `Date.parse()`-able, because `Date.parse`
+    // silently accepts locale forms ("05/01/2030 7:00 PM", "May 1, 2030", date-only)
+    // and reads a ZONE-LESS value in the SERVER's local timezone — so the same
+    // archive would import to different UTC instants on hosts with different TZ
+    // settings, silently moving the scheduled time. It also validates the actual
+    // calendar components, because V8's `Date` silently rolls impossible/overflow
+    // dates (Feb 30, April 31, hour 24) to a different day, which would import an
+    // untrusted archive to a CHANGED scheduled date. The strict validator lives in
+    // @campfire/schema (normalizeOffsetIsoDateTime) per the shared-shapes
+    // invariant; it returns canonical ISO UTC, or null for anything that is not a
+    // valid offset-bearing ISO-8601 date-time. The stored invariant is "ISO UTC
+    // (normalized on write)", and exports round-trip the exact canonical `...Z`
+    // form `toISOString()` produces, so a real archive always validates. Anything
+    // else rejects the import with a 400 that names the offending row, so the
+    // operator is told exactly what to fix. Runs BEFORE staging so a bad archive
+    // fails fast with zero bytes written, like the compendium preflight.
+    for (let i = 0; i < scheduledSessionRows.length; i++) {
+      const s = scheduledSessionRows[i];
+      const raw = s.scheduledAt;
+      const normalized = typeof raw === 'string' ? normalizeOffsetIsoDateTime(raw) : null;
+      if (normalized === null) {
+        const label = str(s.title) || 'untitled';
+        throw new BadRequestException(
+          `Cannot import scheduled session #${i + 1} (${label}): scheduledAt ${
+            typeof raw === 'string' ? `"${raw}"` : `(${typeof raw})`
+          } is not a valid offset-bearing ISO-8601 date-time (e.g. 2030-05-01T19:00:00.000Z). Fix the value in the export and re-import.`,
+        );
+      }
+      s.scheduledAt = normalized;
+    }
+
     // Issue #725: STAGE every attachment's bytes BEFORE any DB row is committed,
     // so a mid-import failure (anywhere — preflight, the DB transaction, or the
     // final publish) never leaves a partial import behind. The old order (commit
@@ -2173,7 +2216,13 @@ export class CampaignsService {
           .insert(scheduledSessions)
           .values({
             campaignId: cid,
-            scheduledAt: typeof s.scheduledAt === 'string' ? s.scheduledAt : ts,
+            // Issue #1521: validated + normalized to canonical ISO UTC in the
+            // boundary pre-pass above, so `julianday(scheduledAt)` always parses
+            // and the row can never vanish from both Upcoming and Past. Read
+            // directly — no `ts` fallback — because that pre-pass rejected any
+            // row whose scheduledAt was not a usable timestamp. The cast is
+            // sound: the pre-pass stored a `string` for every row that reaches here.
+            scheduledAt: s.scheduledAt as string,
             durationMinutes: intOr(s.durationMinutes, 240),
             title: str(s.title),
             location: str(s.location),
