@@ -60,7 +60,7 @@ export class SupportPreferencesController {
     @Body() body: ParticipantSupportPreferenceUpsertDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.supports.upsert(campaignId, body, user, role);
   }
 
@@ -68,7 +68,7 @@ export class SupportPreferencesController {
   @HttpCode(204)
   @ApiOperation({ summary: 'Delete your own support preference' })
   async remove(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<void> {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     await this.supports.removeOwn(campaignId, user, role);
   }
 }

@@ -77,7 +77,7 @@ export class CampaignQuestsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
       const validated = QuestCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'quest', null, 'create', validated, user, role);
       res.status(202);
@@ -125,7 +125,7 @@ export class QuestsController {
   ) {
     const row = await this.quests.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const validated = QuestUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'quest', id, 'update', validated, user, role);
       res.status(202);
@@ -155,7 +155,7 @@ export class QuestsController {
   ) {
     const row = await this.quests.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const proposal = await this.proposals.create(row.campaignId, 'quest', id, 'delete', {}, user, role);
       res.status(202);
       return { proposal };

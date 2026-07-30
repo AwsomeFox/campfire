@@ -85,6 +85,11 @@ export class MembersController {
     @Param('grantId', ParseIntPipe) grantId: number,
     @CurrentUser() user: RequestUser,
   ) {
+    // DELIBERATE archive exemption (issue #1480): handing back a guest/co-DM
+    // grant is the grantee surrendering their own temporary authority — a
+    // governance unwind, not campaign content. It must work on an archived
+    // campaign so a temporary seat can always be released, so this stays the
+    // plain membership gate (requireMember, no writable assertion).
     await this.access.requireMember(user, campaignId);
     return this.members.handBackGuestDmGrant(campaignId, grantId, user);
   }
@@ -139,8 +144,10 @@ export class MembersController {
     @CurrentUser() user: RequestUser,
   ) {
     // Resolve the target seat first so we can tell self-leave from a dm removing
-    // someone else. A member leaving needs only membership (and may leave an
-    // archived campaign — requireMember doesn't assert writability); a dm
+    // someone else. A member leaving needs only membership and is a DELIBERATE
+    // archive exemption (issue #1480): leaving is the member exercising their
+    // own data rights, not campaign content, so it must work on an archived
+    // campaign — requireMember (no writable assertion) is intentional here. A dm
     // removing ANOTHER member keeps the dm gate exactly as before.
     const target = await this.members.getRowOrThrow(campaignId, memberId);
     const selfLeave = String(target.userId) === user.id;

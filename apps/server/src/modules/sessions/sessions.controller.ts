@@ -70,7 +70,7 @@ export class CampaignSessionsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
       const validated = SessionCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'session', null, 'create', validated, user, role);
       res.status(202);
@@ -118,7 +118,7 @@ export class SessionsController {
   ) {
     const row = await this.sessions.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const validated = SessionUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'session', id, 'update', validated, user, role);
       res.status(202);
@@ -147,7 +147,7 @@ export class SessionsController {
   ) {
     const row = await this.sessions.getRowOrThrow(id);
     if (requireWriteMode(user, proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
       const proposal = await this.proposals.create(row.campaignId, 'session', id, 'delete', {}, user, role);
       res.status(202);
       return { proposal };

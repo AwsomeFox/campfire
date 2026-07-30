@@ -102,8 +102,11 @@ export class ProposalsController {
   @ApiResponse({ status: 201, description: 'Withdrawn proposal.' })
   async withdraw(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
-    // Any member may reach this; withdraw() enforces that the caller is the proposer.
-    const role = await this.access.requireMember(user, row.campaignId);
+    // Any member may reach this; withdraw() enforces that the caller is the
+    // proposer. This is a member-level write, so the archive read-only gate
+    // applies too (issue #1480): a paused/completed campaign refuses proposal
+    // edits just as it refuses the entity writes they would produce.
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.proposals.withdraw(id, user, role);
   }
 
@@ -116,8 +119,11 @@ export class ProposalsController {
   @ApiResponse({ status: 200, description: 'Revised proposal.' })
   async revise(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalReviseDto, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
-    // Any member may reach this; revise() enforces that the caller is the proposer.
-    const role = await this.access.requireMember(user, row.campaignId);
+    // Any member may reach this; revise() enforces that the caller is the
+    // proposer. This is a member-level write, so the archive read-only gate
+    // applies too (issue #1480): a paused/completed campaign refuses proposal
+    // edits just as it refuses the entity writes they would produce.
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     return this.proposals.revise(id, body, user, role);
   }
 }

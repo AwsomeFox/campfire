@@ -1275,13 +1275,13 @@ export class McpToolsService {
     // (issue #158) and the AI-driver live-play allow-list sees mutating:true.
     this.writeTool(server, user, 'create_campaign_homebrew', 'Create campaign homebrew, or submit it for DM review with propose=true.', { campaignId: CampaignIdArg, entry: HomebrewRuleEntryInput, propose: ProposeArg }, async ({ campaignId, entry, propose }) => {
       const mustPropose = requireWriteMode(user, propose);
-      const role = await this.access.requireMember(user, campaignId as number, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
       if (mustPropose || role !== 'dm') return this.proposalRecords.create(campaignId as number, 'rule_entry', null, 'create', entry as Record<string, unknown>, user, role);
       return this.rules.createCampaignHomebrew(campaignId as number, entry, user);
     });
     this.writeTool(server, user, 'update_campaign_homebrew', 'Update campaign homebrew, or submit an edit for DM review with propose=true.', { campaignId: CampaignIdArg, entryId: Id, patch: HomebrewRuleEntryUpdate, propose: ProposeArg }, async ({ campaignId, entryId, patch, propose }) => {
       const mustPropose = requireWriteMode(user, propose);
-      const role = await this.access.requireMember(user, campaignId as number, { write: true });
+      const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
       if (mustPropose || role !== 'dm') return this.proposalRecords.create(campaignId as number, 'rule_entry', entryId as number, 'update', patch as Record<string, unknown>, user, role);
       return this.rules.updateCampaignHomebrew(campaignId as number, entryId as number, patch as Record<string, unknown>, user);
     });
@@ -1906,7 +1906,7 @@ export class McpToolsService {
         const type = SharedEditorRevisionType.parse(entityType);
         if (type === 'comment') {
           const row = await this.comments.getRowOrThrow(entityId as number);
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           return this.comments.restoreRevision(entityId as number, revisionId as number, user, role);
         }
         const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
@@ -1924,7 +1924,7 @@ export class McpToolsService {
         'aiUseConsent is false, the result confirms metadata without echoing the private support text.',
       { campaignId: CampaignIdArg, ...ParticipantSupportPreferenceUpsert.shape },
       async ({ campaignId, ...fields }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         const validated = ParticipantSupportPreferenceUpsert.parse(fields);
         const saved = await this.supportPreferences.upsert(campaignId as number, validated, user, role);
         return saved.aiUseConsent
@@ -1940,7 +1940,7 @@ export class McpToolsService {
       'Delete the authenticated participant\'s own support preference. This cannot delete another participant\'s row.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         await this.supportPreferences.removeOwn(campaignId as number, user, role);
         return { ok: true, campaignId };
       },
@@ -1997,7 +1997,7 @@ export class McpToolsService {
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, campaignId as number, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
           const proposal = await this.proposalRecords.create(campaignId as number, 'quest', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -2018,7 +2018,7 @@ export class McpToolsService {
         const row = await this.quests.getRowOrThrow(questId as number);
         const validated = QuestUpdate.parse(fields);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -2037,7 +2037,7 @@ export class McpToolsService {
       async ({ questId, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'delete', {}, user, role);
           return { proposal };
         }
@@ -2069,7 +2069,7 @@ export class McpToolsService {
       async ({ questId, status, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const validated = QuestUpdate.parse({ status });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
@@ -2345,7 +2345,7 @@ export class McpToolsService {
           }
           const validated = NpcUpdate.parse(fields);
           if (requireWriteMode(user, propose)) {
-            const role = await this.access.requireMember(user, row.campaignId, { write: true });
+            const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
             const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -2360,7 +2360,7 @@ export class McpToolsService {
         const existingByName = await this.npcs.findRowByName(campaignId as number, validated.name);
         if (existingByName) {
           if (requireWriteMode(user, propose)) {
-            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const role = await this.access.requireMemberOnWritableCampaign(user, existingByName.campaignId);
             const proposal = await this.proposalRecords.create(existingByName.campaignId, 'npc', existingByName.id, 'update', validated, user, role);
             return { proposal };
           }
@@ -2368,7 +2368,7 @@ export class McpToolsService {
           return this.npcs.update(existingByName.id, validated, user, role);
         }
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, campaignId as number, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -2386,7 +2386,7 @@ export class McpToolsService {
       async ({ npcId, propose }) => {
         const row = await this.npcs.getRowOrThrow(npcId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'delete', {}, user, role);
           return { proposal };
         }
@@ -2531,7 +2531,7 @@ export class McpToolsService {
           }
           const validated = LocationUpdate.parse(fields);
           if (requireWriteMode(user, propose)) {
-            const role = await this.access.requireMember(user, row.campaignId, { write: true });
+            const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
             const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -2546,7 +2546,7 @@ export class McpToolsService {
         const existingByName = await this.locations.findRowByName(campaignId as number, validated.name);
         if (existingByName) {
           if (requireWriteMode(user, propose)) {
-            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const role = await this.access.requireMemberOnWritableCampaign(user, existingByName.campaignId);
             const proposal = await this.proposalRecords.create(existingByName.campaignId, 'location', existingByName.id, 'update', validated, user, role);
             return { proposal };
           }
@@ -2554,7 +2554,7 @@ export class McpToolsService {
           return this.locations.update(existingByName.id, validated, user, role);
         }
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, campaignId as number, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -2572,7 +2572,7 @@ export class McpToolsService {
       async ({ locationId, propose }) => {
         const row = await this.locations.getRowOrThrow(locationId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'delete', {}, user, role);
           return { proposal };
         }
@@ -2633,7 +2633,7 @@ export class McpToolsService {
         // guard (#160). We pass number through only when the caller was explicit; otherwise
         // SessionsService.create assigns it atomically at write time (or the proposal apply
         // path does, at approval time).
-        const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
+        const memberRole = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         const validated = SessionCreate.parse({
           ...(number !== undefined ? { number } : {}),
           ...(title !== undefined ? { title } : {}),
@@ -2674,7 +2674,7 @@ export class McpToolsService {
           ...(dmSecret !== undefined ? { dmSecret } : {}),
         });
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -2693,7 +2693,7 @@ export class McpToolsService {
       async ({ sessionId, propose }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'delete', {}, user, role);
           return { proposal };
         }
@@ -2852,7 +2852,7 @@ export class McpToolsService {
           }
           const validated = CharacterUpdate.parse(fields);
           if (requireWriteMode(user, propose)) {
-            const role = await this.access.requireMember(user, row.campaignId, { write: true });
+            const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
             const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -2863,7 +2863,7 @@ export class McpToolsService {
         }
         const validated = CharacterCreate.parse(fields); // name required on create
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, campaignId as number, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
           const proposal = await this.proposalRecords.create(campaignId as number, 'character', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -2882,7 +2882,7 @@ export class McpToolsService {
       async ({ characterId, propose }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         if (requireWriteMode(user, propose)) {
-          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
           const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'delete', {}, user, role);
           return { proposal };
         }
@@ -3244,7 +3244,7 @@ export class McpToolsService {
           .describe('Required when visibility is "whisper": the member userId (from list_members) the whisper targets'),
       },
       async ({ campaignId, body, visibility, entityType, entityId, recipientUserId }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.notes.create(
           campaignId as number,
           {
@@ -3277,7 +3277,7 @@ export class McpToolsService {
         entityId: Id.optional().describe('Optionally anchor the whisper to an entity id'),
       },
       async ({ campaignId, recipientUserId, body, entityType, entityId }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.notes.create(
           campaignId as number,
           {
@@ -3313,7 +3313,7 @@ export class McpToolsService {
       },
       async ({ noteId, body, visibility, recipientUserId, expectedUpdatedAt }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.notes.update(
           noteId as number,
           {
@@ -3336,7 +3336,7 @@ export class McpToolsService {
       { noteId: Id.describe('Note id') },
       async ({ noteId }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         await this.notes.remove(noteId as number, user, role);
         return { ok: true, noteId };
       },
@@ -3350,7 +3350,7 @@ export class McpToolsService {
       { noteId: Id.describe('Note id') },
       async ({ noteId }) => {
         const row = await this.notes.getRowOrThrow(noteId as number, true);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.notes.restore(noteId as number, user, role);
       },
     );
@@ -3363,7 +3363,7 @@ export class McpToolsService {
         'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
       { campaignId: CampaignIdArg, body: z.string().min(1).max(20_000).describe('Message body') },
       async ({ campaignId, body }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.notes.createInbox(campaignId as number, { authorName: user.name, body: body as string }, user, role);
       },
     );
@@ -3516,7 +3516,8 @@ export class McpToolsService {
       { proposalId: Id.describe('Proposal id') },
       async ({ proposalId }) => {
         const row = await this.proposals.getRowOrThrow(proposalId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        // Member-level write: the archive read-only gate applies (issue #1480).
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.proposals.withdraw(proposalId as number, user, role);
       },
     );
@@ -3530,7 +3531,8 @@ export class McpToolsService {
       { proposalId: Id.describe('Proposal id'), ...ProposalRevise.shape },
       async ({ proposalId, payload }) => {
         const row = await this.proposals.getRowOrThrow(proposalId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        // Member-level write: the archive read-only gate applies (issue #1480).
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.proposals.revise(proposalId as number, { payload: payload as Record<string, unknown> }, user, role);
       },
     );
@@ -3816,7 +3818,7 @@ export class McpToolsService {
         dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
       },
       async ({ campaignId, expr, label, dc }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.encounters.rollDiceForCampaign(
           campaignId as number,
           { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
@@ -3841,7 +3843,7 @@ export class McpToolsService {
         dc: ActionRollRequest.shape.dc,
       },
       async ({ campaignId, score, attribute, label, dc }) => {
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.encounters.rollActionDiceForCampaign(
           campaignId as number,
           {
@@ -4977,7 +4979,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg, ...CommentCreate.shape },
       async ({ campaignId, ...fields }) => {
         const validated = CommentCreate.parse(fields);
-        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.comments.create(campaignId as number, validated, user, role);
       },
     );
@@ -4991,7 +4993,7 @@ export class McpToolsService {
       async ({ commentId, expectedUpdatedAt, ...fields }) => {
         const row = await this.comments.getRowOrThrow(commentId as number);
         const validated = CommentUpdate.parse(fields);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.comments.update(commentId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
@@ -5006,7 +5008,7 @@ export class McpToolsService {
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
         const row = await this.comments.getRowOrThrow(commentId as number, true);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         await this.comments.remove(commentId as number, user, role);
         return { ok: true, commentId };
       },
@@ -5022,7 +5024,7 @@ export class McpToolsService {
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
         const row = await this.comments.getRowOrThrow(commentId as number, true);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.comments.restore(commentId as number, user, role);
       },
     );
@@ -5128,7 +5130,8 @@ export class McpToolsService {
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
         const validated = RsvpSet.parse(fields);
-        const role = await this.access.requireMember(user, row.campaignId);
+        // Member-level write: the archive read-only gate applies (issue #1480).
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
         return this.scheduling.setRsvp(scheduleId as number, validated, user, role);
       },
     );

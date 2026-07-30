@@ -100,7 +100,7 @@ export class SessionZeroConsentController {
     @Body() body: SessionZeroAcknowledgmentInputDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId, { write: true });
+    await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.consent.acknowledge(campaignId, body, user);
   }
 
@@ -154,7 +154,7 @@ export class SessionZeroConsentController {
     @Body() body: SessionZeroBoundarySubmissionCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId, { write: true });
+    await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.consent.createBoundarySubmission(campaignId, body, user);
   }
 
@@ -172,7 +172,7 @@ export class SessionZeroConsentController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId, { write: true });
+    await this.access.requireMemberOnWritableCampaign(user, campaignId);
     await this.consent.deleteBoundarySubmission(campaignId, id, user);
   }
 
@@ -208,7 +208,7 @@ export class SessionZeroConsentController {
     @Body() body: SessionZeroGuardianConsentRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.consent.requestGuardianConsent(
       campaignId,
       body,

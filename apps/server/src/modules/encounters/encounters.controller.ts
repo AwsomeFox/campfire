@@ -175,7 +175,7 @@ export class CampaignRollController {
     @CurrentUser() user: RequestUser,
   ) {
     // write: rolls are audited activity — an archived (read-only) campaign takes no new rolls.
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.encounters.rollDiceForCampaign(campaignId, body, user, role);
   }
 
@@ -195,7 +195,7 @@ export class CampaignRollController {
     @Body() body: ActionRollRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.encounters.rollActionDiceForCampaign(campaignId, body, user, role);
   }
 
@@ -213,7 +213,7 @@ export class CampaignRollController {
     @Body() body: ManualRollRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.encounters.logPhysicalRollForCampaign(campaignId, body, user, role);
   }
 }
@@ -435,7 +435,7 @@ export class EncountersController {
     // instead of the 404 issue #869 requires. The "any DM or player" role floor is
     // enforced inside pingMap itself, AFTER the hidden check, so hidden stays 404 for
     // everyone non-DM while a merely-visible encounter now correctly 403s a viewer.
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
     this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
     return { ok: true };
   }

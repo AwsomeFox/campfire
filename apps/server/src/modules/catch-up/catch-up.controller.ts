@@ -48,7 +48,9 @@ export class CatchUpController {
     @Body() body: CatchUpMarkDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId);
+    // Bumping the catch-up cursor is a member-level write, so the archive
+    // read-only gate applies alongside membership (issue #1480).
+    await this.access.requireMemberOnWritableCampaign(user, campaignId);
     const userId = numericUserId(user.id);
     if (userId === null) {
       throw new BadRequestException('Catch-up cursor requires a real user account.');
