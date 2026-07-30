@@ -1130,6 +1130,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Retry Nyx · death save')).toHaveLength(1);
   });
 
+  it('rejects legacy deathSaveRoll MCP input with migration guidance before any mutation', async () => {
+    const character = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'MCP Legacy Nyx', hpCurrent: 8, hpMax: 8 });
+    expect(character.status).toBe(201);
+    const encounter = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Legacy Death Save' });
+    expect(encounter.status).toBe(201);
+    const combatantId = (encounter.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (combatant) => combatant.characterId === character.body.id,
+    )?.id;
+    expect(combatantId).toBeDefined();
+    expect((await dmAgent.patch(`/api/v1/encounters/${encounter.body.id}/combatants/${combatantId}`).send({ hpSet: 0 })).status).toBe(200);
+    const beforeCombatant = (await dmAgent.get(`/api/v1/encounters/${encounter.body.id}`)).body.combatants.find(
+      (combatant: { id: number }) => combatant.id === combatantId,
+    );
+    const beforeRolls = (await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`)).body.length;
+
+    const client = await mcpClient(dmToken);
+    const legacy = await client.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.body.id, combatantId: combatantId!, deathSaveRoll: 20 },
+    });
+
+    expect(legacy.isError).toBe(true);
+    const error = parseResult(legacy) as { error: { status: number; code: string; message: string; errors?: Array<{ field: string; message: string }> } };
+    expect(error.error).toMatchObject({ status: 400, code: 'validation_failed' });
+    expect(error.error.message).toContain('use roll_death_save instead');
+    expect(error.error.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: 'deathSaveRoll', message: expect.stringContaining('roll_death_save') })]),
+    );
+    const afterCombatant = (await dmAgent.get(`/api/v1/encounters/${encounter.body.id}`)).body.combatants.find(
+      (combatant: { id: number }) => combatant.id === combatantId,
+    );
+    expect(afterCombatant).toMatchObject(beforeCombatant);
+    expect((await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`)).body).toHaveLength(beforeRolls);
+  });
+
   it('end_turn and set_turn_state (delay/readied) via MCP (issue #487)', async () => {
     const dmClient = await mcpClient(dmToken);
 

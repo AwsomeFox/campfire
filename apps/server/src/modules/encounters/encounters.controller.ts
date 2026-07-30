@@ -531,12 +531,13 @@ export class EncountersController {
     // encounter long enough to establish current membership. Fresh writes are rejected
     // by the transaction-local mutable check in the service.
     const row = await this.encounters.getRowOrThrow(id, true);
+    await this.access.requireMember(user, row.campaignId, { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }))) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
     // A same-key retry only replays an already-committed response. Let the service
     // distinguish that safe read from a fresh write after membership is established.
     const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
-    if (!isVisibleTo({ hidden: row.hidden }, role)) {
-      throw new NotFoundException(`Encounter ${id} not found`);
-    }
     return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
   }
 

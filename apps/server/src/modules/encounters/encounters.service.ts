@@ -3283,9 +3283,9 @@ export class EncountersService {
               fresh.encounterId !== encounterId ||
               fresh.kind !== 'character' ||
               fresh.hpCurrent !== 0 ||
-              fresh.deathState === 'dead'
+              fresh.deathState !== 'dying'
             ) {
-              throw new BadRequestException('Only a living character at 0 HP can roll a death save');
+              throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
             }
             const result = this.rollDeathSaveD20();
             result.label = `${fresh.name} · death save`;

@@ -34,7 +34,9 @@ test('an ambiguous death-save outcome reconciles before allowing another roll', 
   expect(runSessionSource).toContain('isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}');
 });
 
-test('terminal death-save states retain pips without exposing an invalid roll action', () => {
-  expect(runSessionSource).toContain("canRoll={combatant.deathState !== 'dead'}");
+test('only a dying 0-HP character can roll while terminal-state pips remain visible', () => {
+  expect(runSessionSource).toContain("canRoll={combatant.deathState === 'dying'}");
+  expect(runSessionSource).toContain("combatant.deathState === 'stable'");
+  expect(runSessionSource).toContain("combatant.deathState === 'dead'");
   expect(runSessionSource).toContain('{canEditPermission && canRoll && (');
 });

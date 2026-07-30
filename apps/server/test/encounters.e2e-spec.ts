@@ -3137,20 +3137,50 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     await setDying();
     const beforeRolls = await deathSaveRolls();
     expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
-    const playerAttempt = await request(server)
+    const viewerAttempt = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
-      .set(player)
-      .send({ idempotencyKey: 'hidden-death-save-player' });
+      .set(viewer)
+      .send({ idempotencyKey: 'hidden-death-save-viewer' });
     const dmAttempt = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
       .set(dm)
       .send({ idempotencyKey: 'hidden-death-save-dm' });
-    expect(playerAttempt.status).toBe(404);
+    expect(viewerAttempt.status).toBe(404);
     expect(dmAttempt.status).toBe(403);
     expect(
       (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
     ).toHaveLength(beforeRolls.length);
     expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+  });
+
+  it('rejects a stabilized character before rolling or persisting evidence', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+          .set(dm)
+          .send({ deathSaveSuccesses: 3 })
+      ).status,
+    ).toBe(200);
+    const beforeRolls = await deathSaveRolls();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'stable-death-save' });
+
+      expect(rejected.status).toBe(400);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect(await deathSaveRolls()).toHaveLength(beforeRolls.length);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'stable', deathSaveSuccesses: 3, deathSaveFailures: 0 });
+    } finally {
+      rollSpy.mockRestore();
+      await setConscious();
+    }
   });
 
   it('rolls back the death-save outcome when the matching dice entry cannot persist', async () => {
@@ -3555,6 +3585,89 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       expect(afterEvents).toHaveLength(beforeEvents);
       expect(sheetAfterEnd).not.toBeNull();
       expect((await request(server).get(`/api/v1/characters/${raceCharacterId}`).set(dm)).body).toMatchObject(sheetAfterEnd!);
+    } finally {
+      adapterSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
+
+  it('rejects a fresh death save when character ownership changes after preflight but before its keyed transaction', async () => {
+    const server = ctx.app.getHttpServer();
+    const raceCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Death save owner race' });
+    expect(raceCampaign.status).toBe(201);
+    const raceCampaignId = raceCampaign.body.id as number;
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Ownership Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    expect(character.status).toBe(201);
+    const raceCharacterId = character.body.id as number;
+    const raceEncounter = await request(server)
+      .post(`/api/v1/campaigns/${raceCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ownership race', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceEncounterId = raceEncounter.body.id as number;
+    const raceCombatantId = raceEncounter.body.combatants[0].id as number;
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}`)
+          .set(dm)
+          .send({ hpSet: 0 })
+      ).status,
+    ).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeDice = (await db.select().from(diceRolls).where(eq(diceRolls.campaignId, raceCampaignId))).length;
+    const beforeAudits = (
+      await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+    ).filter((audit) => audit.campaignId === raceCampaignId).length;
+    const beforeEvents = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+    ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll ')).length;
+    const service = ctx.app.get(EncountersService);
+    const realAdapterForCampaign = (service as any).adapterForCampaign.bind(service);
+    let adapterLookups = 0;
+    const adapterSpy = jest.spyOn(service as any, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      adapterLookups += 1;
+      // Lookup one is death-save preflight; lookup two is updateCombatant after its
+      // outer read but before the keyed transaction's fresh ownership recheck.
+      if (adapterLookups === 2) {
+        const reassign = await request(server)
+          .patch(`/api/v1/characters/${raceCharacterId}`)
+          .set(dm)
+          .send({ ownerUserId: 'dev:p-2' });
+        expect(reassign.status).toBe(200);
+        expect(reassign.body.ownerUserId).toBe('dev:p-2');
+      }
+      return realAdapterForCampaign(args[0] as number);
+    });
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20');
+    try {
+      const rejected = await request(server)
+        .post(`/api/v1/encounters/${raceEncounterId}/combatants/${raceCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-ownership-race' });
+
+      expect(rejected.status).toBe(403);
+      expect(adapterLookups).toBeGreaterThanOrEqual(2);
+      expect(rollSpy).not.toHaveBeenCalled();
+      expect((await db.select().from(diceRolls).where(eq(diceRolls.campaignId, raceCampaignId))).length).toBe(beforeDice);
+      const afterAudits = (
+        await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))
+      ).filter((audit) => audit.campaignId === raceCampaignId).length;
+      expect(afterAudits).toBe(beforeAudits);
+      const afterEvents = (
+        await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, raceEncounterId))
+      ).filter((event) => event.targetId === raceCombatantId && event.detail.startsWith('death save d20 roll '));
+      expect(afterEvents).toHaveLength(beforeEvents);
+      expect((await db.select().from(combatantsTable).where(eq(combatantsTable.id, raceCombatantId)).limit(1))[0]).toMatchObject({
+        hpCurrent: 0,
+        deathState: 'dying',
+        deathSaveSuccesses: 0,
+        deathSaveFailures: 0,
+      });
     } finally {
       adapterSpy.mockRestore();
       rollSpy.mockRestore();
