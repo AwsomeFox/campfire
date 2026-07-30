@@ -1503,6 +1503,9 @@ export class CampaignsService {
                 kind: c.kind,
                 characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
+                // Clones reset encounters to fresh prep, so they must derive NPC
+                // allegiance from the cloned NPC rather than retain played history.
+                npcDispositionSnapshot: null,
                 name: c.name,
                 initiative: null,
                 initMod: c.initMod,
@@ -2514,12 +2517,13 @@ export class CampaignsService {
       const encounterMap = new Map<number, number>();
       for (const e of encounterRows) {
         const encounterSrcId = intOrNull(e.id);
+        const encounterStatus = str(e.status, 'preparing');
         const [row] = tx
           .insert(encounters)
           .values({
             campaignId: cid,
             name: str(e.name, 'Encounter'),
-            status: str(e.status, 'preparing'),
+            status: encounterStatus,
             round: intOr(e.round, 0),
             turnIndex: intOr(e.turnIndex, 0),
             currentCombatantId: null, // remapped below once combatants have fresh ids
@@ -2572,6 +2576,7 @@ export class CampaignsService {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
           const npcSrc = intOrNull(c.npcId);
+          const mappedNpcId = npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null;
           const compendiumResolved = resolveImportedCombatantRuleEntryId(c, compendiumResolution);
           if (compendiumResolved.detached) compendiumDetachedCount += 1;
           const [cRow] = tx
@@ -2580,7 +2585,16 @@ export class CampaignsService {
               encounterId: row.id,
               kind: str(c.kind, 'monster'),
               characterId: charSrc != null ? (charMap.get(charSrc) ?? null) : null,
-              npcId: npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null,
+              npcId: mappedNpcId,
+              // A fresh encounter cannot retain allegiance for an NPC that import
+              // could not restore: preparation ignores that snapshot, and /start
+              // cannot refresh an unlinked combatant.
+              npcDispositionSnapshot:
+                encounterStatus === 'preparing' && npcSrc != null && mappedNpcId === null
+                  ? null
+                  : typeof c.npcDispositionSnapshot === 'string'
+                    ? c.npcDispositionSnapshot
+                    : null,
               name: str(c.name, 'Combatant'),
               initiative: intOrNull(c.initiative),
               initMod: intOr(c.initMod, 0),

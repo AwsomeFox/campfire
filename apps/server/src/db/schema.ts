@@ -1993,6 +1993,7 @@ export const combatants = sqliteTable('combatants', {
   kind: text('kind').notNull(), // 'character' | 'monster' | 'npc'
   characterId: integer('character_id'), // set when kind='character' — links back to characters.id
   npcId: integer('npc_id'), // set when kind='npc' — links back to npcs.id (identity). Added by migration on older DBs.
+  npcDispositionSnapshot: text('npc_disposition_snapshot'), // encounter-time NPC disposition; nullable for legacy rows
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
   initMod: integer('init_mod').notNull().default(0),

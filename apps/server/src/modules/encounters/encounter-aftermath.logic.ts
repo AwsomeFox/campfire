@@ -107,6 +107,7 @@ export function suggestedXpFromDifficulty(
   supported: boolean;
   suggestedPartyTotal: number | null;
   suggestedPerCharacter: number | null;
+  undistributedXp: number | null;
   difficultyLabel: string;
   warnings: string[];
 } {
@@ -116,6 +117,7 @@ export function suggestedXpFromDifficulty(
       supported: false,
       suggestedPartyTotal: null,
       suggestedPerCharacter: null,
+      undistributedXp: null,
       difficultyLabel: difficulty.label,
       warnings,
     };
@@ -124,17 +126,34 @@ export function suggestedXpFromDifficulty(
     if (characterCombatantCount === 0) warnings.push('No player characters were in this fight — adjust XP manually.');
     return {
       supported: difficulty.status === 'ok',
-      suggestedPartyTotal: difficulty.status === 'ok' ? difficulty.adjustedXp : null,
+      suggestedPartyTotal: null,
       suggestedPerCharacter: null,
+      undistributedXp: null,
       difficultyLabel: difficulty.label,
       warnings,
     };
   }
-  const perCharacter = Math.max(1, Math.round(difficulty.adjustedXp / characterCombatantCount));
+  // The encounter multiplier measures action-economy difficulty; 5e awards the
+  // pre-multiplier monster XP total. Floor the split so the hand-off never awards
+  // more XP than the encounter contains.
+  const perCharacter = Math.floor(difficulty.totalMonsterXp / characterCombatantCount);
+  const undistributedXp = difficulty.totalMonsterXp - perCharacter * characterCombatantCount;
+  if (perCharacter === 0) {
+    warnings.push('XP total is too small to split evenly across the party — award manually.');
+    return {
+      supported: true,
+      suggestedPartyTotal: difficulty.totalMonsterXp,
+      suggestedPerCharacter: null,
+      undistributedXp: null,
+      difficultyLabel: difficulty.label,
+      warnings,
+    };
+  }
   return {
     supported: true,
-    suggestedPartyTotal: difficulty.adjustedXp,
+    suggestedPartyTotal: difficulty.totalMonsterXp,
     suggestedPerCharacter: perCharacter,
+    undistributedXp,
     difficultyLabel: difficulty.label,
     warnings,
   };

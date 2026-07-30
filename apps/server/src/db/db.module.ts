@@ -2542,6 +2542,13 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
   }
 }
 
+function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'npc_disposition_snapshot')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_disposition_snapshot TEXT');
+}
+
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
 function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
   const hasCampaignsTable = sqlite
@@ -4699,6 +4706,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // safely acquire this later ALTER in place.
   { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
   { name: '0146_action_pending_turn_version_1316', run: migrateActionPendingTurnVersion1316 },
+  // 0146 is now owned by #1316; this never-shipped combatant snapshot follows it.
+  { name: '0147_combatants_npc_disposition_snapshot_1454', run: migrateCombatantsTableForNpcDispositionSnapshot },
 ];
 
 /**

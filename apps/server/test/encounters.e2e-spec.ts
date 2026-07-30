@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
@@ -8,6 +8,7 @@ import {
   rulePacks,
   ruleEntries,
   combatants as combatantsTable,
+  npcs,
   encounterEvents as encounterEventsTable,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
@@ -2773,7 +2774,12 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
 
   it('a hidden NPC combatant hides its identity (npcId + name) from non-DMs (#374)', async () => {
     const server = ctx.app.getHttpServer();
-    const npcId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'The Traitor', hidden: true })).body.id;
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'The Traitor', hidden: true, disposition: 'hostile' })
+    ).body.id;
     const combatantId = (
       await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants`)
@@ -2782,16 +2788,22 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     ).body.id;
     // The DM still sees the real identity link + name.
     const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-    const dmC = (dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((c) => c.id === combatantId)!;
+    const dmC = (
+      dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>
+    ).find((c) => c.id === combatantId)!;
     expect(dmC.npcId).toBe(npcId);
     expect(dmC.name).toBe('The Traitor');
+    expect(dmC.npcDispositionSnapshot).toBe('hostile');
     // A non-DM sees the token in initiative but NOT who it is: identity link severed, name masked.
     for (const headers of [player, viewer]) {
       const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
-      const c = (res.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((x) => x.id === combatantId)!;
+      const c = (
+        res.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>
+      ).find((x) => x.id === combatantId)!;
       expect(c).toBeTruthy();
       expect(c.npcId).toBeNull();
       expect(c.name).not.toBe('The Traitor');
+      expect(c.npcDispositionSnapshot).toBeNull();
       expect(JSON.stringify(c)).not.toMatch(/Traitor/);
     }
   });
@@ -4381,6 +4393,144 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.band).toBe('deadly');
     expect(diff.body.status).toBe('ok');
     expect(diff.body.label).toBe('Deadly');
+  });
+
+  it('includes NPC combatants with statblocks in difficulty and XP estimates (issue #1454)', async () => {
+    const server = ctx.app.getHttpServer();
+    const hostileNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Hostile bandit', disposition: 'hostile' })
+    ).body.id;
+    const friendlyNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Friendly guide', disposition: 'friendly' })
+    ).body.id;
+    const neutralNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Neutral bystander', disposition: 'neutral' })
+    ).body.id;
+    const mixedHostileNpcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Mixed hostile bandit', disposition: 'hostile' })
+    ).body.id;
+    const npcOnly = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'NPC-only fight', hidden: false });
+    const addNpc = await request(server)
+      .post(`/api/v1/encounters/${npcOnly.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: hostileNpcId, ruleEntryId: cr10EntryId });
+    expect(addNpc.status).toBe(201);
+
+    const npcDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(npcDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    // Before play begins, a preparation estimate follows the NPC's current
+    // disposition rather than the snapshot captured when it was added.
+    expect((await request(server).patch(`/api/v1/npcs/${hostileNpcId}`).set(dm).send({ disposition: 'friendly' })).status).toBe(200);
+    const prepDifficultyAfterDispositionChange = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(prepDifficultyAfterDispositionChange.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+
+    const friendlyAndNeutral = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Allied NPCs', hidden: false });
+    const addFriendly = await request(server)
+      .post(`/api/v1/encounters/${friendlyAndNeutral.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: friendlyNpcId, ruleEntryId: cr10EntryId });
+    const addNeutral = await request(server)
+      .post(`/api/v1/encounters/${friendlyAndNeutral.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: neutralNpcId, ruleEntryId: cr10EntryId });
+    expect(addFriendly.status).toBe(201);
+    expect(addNeutral.status).toBe(201);
+    const alliedDifficulty = await request(server).get(`/api/v1/encounters/${friendlyAndNeutral.body.id}/difficulty`).set(dm);
+    expect(alliedDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+
+    const mixed = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Mixed fight', hidden: false });
+    const addMonster = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    const addMixedNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: mixedHostileNpcId, ruleEntryId: cr10EntryId });
+    const addMixedFriendlyNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: friendlyNpcId, ruleEntryId: cr10EntryId });
+    const addMixedNeutralNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: neutralNpcId, ruleEntryId: cr10EntryId });
+    expect(addMonster.status).toBe(201);
+    expect(addMixedNpc.status).toBe(201);
+    expect(addMixedFriendlyNpc.status).toBe(201);
+    expect(addMixedNeutralNpc.status).toBe(201);
+
+    const mixedDifficulty = await request(server).get(`/api/v1/encounters/${mixed.body.id}/difficulty`).set(dm);
+    expect(mixedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 2, totalMonsterXp: 11800, adjustedXp: 17700 });
+
+    const unresolvedPrep = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Unresolved NPC prep', hidden: false });
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${unresolvedPrep.body.id}/combatants`)
+          .set(dm)
+          .send({ kind: 'npc', npcId: mixedHostileNpcId, ruleEntryId: cr10EntryId })
+      ).status,
+    ).toBe(201);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended' }).where(eq(encountersTable.id, npcOnly.body.id));
+    const endedDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(endedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    await db.update(npcs).set({ deletedAt: new Date().toISOString() }).where(inArray(npcs.id, [hostileNpcId, mixedHostileNpcId]));
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
+    const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
+    expect(imported.status).toBe(201);
+    const importedEncounters = await request(server).get(`/api/v1/campaigns/${imported.body.id}/encounters`).set(dm);
+    const importedNpcOnly = importedEncounters.body.find((encounter: { name: string }) => encounter.name === 'NPC-only fight');
+    const importedNpcOnlyDetail = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}`).set(dm);
+    const importedNpcCombatant = importedNpcOnlyDetail.body.combatants.find((combatant: { kind: string }) => combatant.kind === 'npc');
+    expect(importedNpcCombatant.npcId).toBeNull();
+    const importedDifficulty = await request(server).get(`/api/v1/encounters/${importedNpcOnly.id}/difficulty`).set(dm);
+    expect(importedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+    const importedUnresolvedPrep = importedEncounters.body.find((encounter: { name: string }) => encounter.name === 'Unresolved NPC prep');
+    const importedUnresolvedPrepDetail = await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}`).set(dm);
+    const importedUnresolvedPrepCombatant = importedUnresolvedPrepDetail.body.combatants.find((combatant: { kind: string }) => combatant.kind === 'npc');
+    expect(importedUnresolvedPrepCombatant).toMatchObject({ npcId: null, npcDispositionSnapshot: null });
+    expect((await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}/difficulty`).set(dm)).body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+    expect((await request(server).post(`/api/v1/encounters/${importedUnresolvedPrep.id}/roll-initiative`).set(dm).send({})).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${importedUnresolvedPrep.id}/start`).set(dm).send({})).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${importedUnresolvedPrep.id}/difficulty`).set(dm)).body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+    await db.update(combatantsTable).set({ npcDispositionSnapshot: null }).where(eq(combatantsTable.encounterId, npcOnly.body.id));
+    const legacyDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+  });
+
+  it('withholds hidden hostile NPCs from non-DM difficulty aggregates (issue #1454)', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenNpcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Hidden antagonist', hidden: true, disposition: 'hostile' })
+    ).body.id;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Visible fight with hidden antagonist', hidden: false });
+    await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: hiddenNpcId, ruleEntryId: cr10EntryId });
+
+    const dmDifficulty = await request(server).get(`/api/v1/encounters/${encounter.body.id}/difficulty`).set(dm);
+    expect(dmDifficulty.body).toMatchObject({ monsterCount: 1, totalMonsterXp: 5900 });
+
+    for (const headers of [player, viewer]) {
+      const nonDmDifficulty = await request(server).get(`/api/v1/encounters/${encounter.body.id}/difficulty`).set(headers);
+      expect(nonDmDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+    }
   });
 
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,

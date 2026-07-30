@@ -278,6 +278,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     kind: row.kind as Combatant['kind'],
     characterId: row.characterId,
     npcId: row.npcId,
+    npcDispositionSnapshot: row.npcDispositionSnapshot,
     name: row.name,
     initiative: row.initiative,
     initMod: row.initMod,
@@ -1333,7 +1334,10 @@ export class EncountersService {
       list = sortCombatants(combatantRows.map(combatantToDomain), status);
     }
     if (viewerRole !== undefined && viewerRole !== 'dm') {
-      list = list.map(redactMonsterHp);
+      // The disposition snapshot preserves encounter-time enemy allegiance for
+      // server-side difficulty/XP calculation. It is DM-only: campaign-authored
+      // values may reveal a hidden NPC's allegiance to players.
+      list = list.map((c) => ({ ...redactMonsterHp(c), npcDispositionSnapshot: null }));
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
       // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
@@ -1913,11 +1917,37 @@ export class EncountersService {
     }
     const partyLevels = characterIds.map((id) => levelById.get(id) ?? 1);
 
-    // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
-    // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
+    // Enemy CRs: monsters plus NPCs whose captured/current campaign disposition is
+    // hostile. A non-DM must not learn a hidden NPC's allegiance or statblock through
+    // this aggregate, so hidden (and unlinked) NPC combatants fail closed for that view.
+    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
+    const npcIds = npcCombatants.map((c) => c.npcId as number);
+    const hostileNpcIds = new Set<number>();
+    const hiddenNpcIds = new Set<number>();
+    if (npcIds.length > 0) {
+      const npcRows = await this.db
+        .select({ id: npcs.id, disposition: npcs.disposition, hidden: npcs.hidden })
+        .from(npcs)
+        .where(and(inArray(npcs.id, npcIds), eq(npcs.campaignId, encounterRow.campaignId)));
+      for (const npc of npcRows) {
+        if (npc.disposition.trim().toLowerCase() === 'hostile') hostileNpcIds.add(npc.id);
+        if (npc.hidden) hiddenNpcIds.add(npc.id);
+      }
+    }
+    const dmView = viewerRole === undefined || viewerRole === 'dm';
+    const enemyCombatants = combatantRows.filter((c) => {
+      if (c.kind === 'monster') return true;
+      if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
+      // Preparation is still authored world state: show the NPC's live
+      // disposition until start() captures historical allegiance for play.
+      const disposition = encounterRow.status === 'preparing'
+        ? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '')
+        : c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+      return disposition.trim().toLowerCase() === 'hostile';
+    });
+    // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
     // rather than being dropped, so missing data can surface as unknown (issue #429).
-    const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
-    const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
+    const ruleEntryIds = enemyCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
     if (ruleEntryIds.length > 0) {
       const entryRows = await this.db
@@ -1930,7 +1960,7 @@ export class EncountersService {
         crById.set(r.id, parseCr(adapter.mapStatblock(data).challengeRating));
       }
     }
-    const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
+    const monsterCrs = enemyCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
     return estimateEncounterDifficultyForRuleSystem(ruleSystem, {
       partyLevels,
@@ -1985,6 +2015,7 @@ export class EncountersService {
         supported: xp.supported,
         suggestedPartyTotal: xp.suggestedPartyTotal,
         suggestedPerCharacter: xp.suggestedPerCharacter,
+        undistributedXp: xp.undistributedXp,
         difficultyLabel: xp.difficultyLabel,
         warnings: xp.warnings,
       },
@@ -2755,6 +2786,7 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let npcDispositionSnapshot: string | null = null;
     let spCurrent = 0;
     let spMax = 0;
     let rpCurrent = 0;
@@ -2798,6 +2830,7 @@ export class EncountersService {
         });
       }
       npcId = npc.id;
+      npcDispositionSnapshot = npc.disposition;
       name = name ?? npc.name;
     }
 
@@ -2976,6 +3009,7 @@ export class EncountersService {
             kind: input.kind,
             characterId,
             npcId,
+            npcDispositionSnapshot,
             name: n,
             initiative: null,
             initMod,
@@ -4038,8 +4072,28 @@ export class EncountersService {
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
     const escalation = this.nextEscalationState(adapter, encounterRow, 1, 'start');
+    // Fresh-prep encounters (including campaign clones) deliberately have no
+    // historical allegiance. Capture the linked NPC's current disposition exactly
+    // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
+    const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
+      const npcDispositionById = new Map(
+        npcIds.length === 0
+          ? []
+          : tx
+              .select({ id: npcs.id, disposition: npcs.disposition })
+              .from(npcs)
+              .where(inArray(npcs.id, npcIds))
+              .all()
+              .map((npc) => [npc.id, npc.disposition] as const),
+      );
+      for (const [npcId, disposition] of npcDispositionById) {
+        tx.update(combatants)
+          .set({ npcDispositionSnapshot: disposition })
+          .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
+          .run();
+      }
       tx.update(encounters)
         .set({
           status: 'running',

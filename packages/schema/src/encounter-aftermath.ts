@@ -22,10 +22,12 @@ export type EncounterAftermathOutcome = z.infer<typeof EncounterAftermathOutcome
 /** Adapter-aware XP suggestion derived from the encounter difficulty estimate. */
 export const EncounterAftermathXp = z.object({
   supported: z.boolean(),
-  /** Total adjusted monster XP when the ruleset could score the fight. */
+  /** Raw monster XP awarded when the ruleset could score the fight. */
   suggestedPartyTotal: z.number().int().nonnegative().nullable(),
-  /** Even split across character combatants in the fight (rounded). */
+  /** Even split across character combatants in the fight (rounded down). */
   suggestedPerCharacter: z.number().int().nonnegative().nullable(),
+  /** XP left after an even per-character split; null when no split is available. */
+  undistributedXp: z.number().int().nonnegative().nullable(),
   difficultyLabel: z.string(),
   warnings: z.array(z.string()),
 });

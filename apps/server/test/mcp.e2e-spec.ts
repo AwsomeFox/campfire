@@ -3107,6 +3107,33 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(body).toHaveProperty('band');
     });
 
+    it('get_encounter_difficulty withholds hidden hostile NPCs from a viewer aggregate (issue #1454)', async () => {
+      const hiddenNpc = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .send({ name: 'MCP hidden antagonist', hidden: true, disposition: 'hostile' });
+      expect(hiddenNpc.status).toBe(201);
+      const encounter = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP visible fight', hidden: false });
+      expect(encounter.status).toBe(201);
+      const combatant = await dmAgent
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .send({ kind: 'npc', npcId: hiddenNpc.body.id, hpMax: 10 });
+      expect(combatant.status).toBe(201);
+
+      const dmClient = await mcpClient(dmToken);
+      const dmDifficulty = parseResult(
+        await dmClient.callTool({ name: 'get_encounter_difficulty', arguments: { encounterId: encounter.body.id } }),
+      ) as { monsterCount: number };
+      expect(dmDifficulty.monsterCount).toBe(1);
+
+      const viewerClient = await mcpClient(viewerToken);
+      const viewerDifficulty = parseResult(
+        await viewerClient.callTool({ name: 'get_encounter_difficulty', arguments: { encounterId: encounter.body.id } }),
+      ) as { monsterCount: number };
+      expect(viewerDifficulty.monsterCount).toBe(0);
+    });
+
     it('get_inventory_item returns one party item by id', async () => {
       const client = await mcpClient(dmToken);
       const item = parseResult(
