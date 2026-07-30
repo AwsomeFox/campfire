@@ -1,10 +1,12 @@
 /**
  * ConfirmDestructiveDialog — structured, accessible type-to-confirm dialog for
- * irreversible actions (issue #775).
+ * irreversible actions (issue #775). Composes the shared `Dialog` primitive
+ * (issue #1783; previously hand-rolled its own portal/backdrop markup — see
+ * git history for the prior implementation).
  *
- * Built on `useDialog` (focus trap, restore, Escape) and `Announcer` for
- * assertive error announcements. Portals to `document.body` with an inert
- * background like ConfirmDialog (issue #791).
+ * Built on `Dialog` (which wraps `useDialog` for focus trap, restore, Escape)
+ * and `Announcer` for assertive error announcements. Portals to
+ * `document.body` with an inert background like ConfirmDialog (issue #791).
  *
  * Accessibility contract:
  *  - role="alertdialog" + aria-modal + aria-labelledby + aria-describedby
@@ -16,11 +18,9 @@
  *  - Escape closes (unless busy); backdrop click closes (unless busy)
  */
 import { useEffect, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { useDialog } from './useDialog';
 import { useAnnounce } from './Announcer';
 import { resolveBusyConfirmLabel } from './confirmDialogLabel';
-import { Btn } from './ui';
+import { Btn, Dialog } from './ui';
 
 export interface ConfirmDestructiveDialogProps {
   /** The heading shown at the top of the dialog. */
@@ -101,17 +101,6 @@ export function ConfirmDestructiveDialog({
   const resolvedHintMismatch =
     hintMismatch ?? `You must type "${confirmValue}" to enable the button.`;
 
-  const dialogRef = useDialog<HTMLDivElement>({
-    onClose: onCancel,
-    disabled: busy,
-    autoFocus: false,
-    inertBackground: true,
-  });
-
-  useEffect(() => {
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, []);
-
   useEffect(() => {
     if (error) announce(error, { assertive: true });
   }, [error, announce]);
@@ -123,33 +112,26 @@ export function ConfirmDestructiveDialog({
 
   const inputDescribedBy = [hintId, error ? errorId : null].filter(Boolean).join(' ');
 
-  return createPortal(
-    <div
-      className="dialog-backdrop"
-      data-overlay="dialog"
-      data-testid="confirm-destructive-backdrop"
-      onClick={() => !busy && onCancel()}
-    >
-      <div
-        ref={dialogRef}
-        className="dialog"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descId}
-        aria-busy={busy || undefined}
-        onClick={(e) => e.stopPropagation()}
-        data-testid="confirm-destructive-dialog"
-      >
-        <h2 className="dialog-title" id={titleId}>
-          {title}
-        </h2>
-
-        <div className="dialog-body" id={descId}>
-          {consequence}
-          {extraBody}
-        </div>
-
+  return (
+    <Dialog
+      title={title}
+      titleId={titleId}
+      titleAs="h2"
+      role="alertdialog"
+      descId={descId}
+      bodyId={descId}
+      ariaBusy={busy}
+      // Escape-to-close and backdrop-click-to-close are both suppressed while
+      // busy — Dialog disables its Escape handler whenever onBackdropClick is
+      // undefined, the same pattern SchedulePanel uses for its save-in-flight gate.
+      onBackdropClick={busy ? undefined : onCancel}
+      initialFocusRef={inputRef}
+      backdropTestId="confirm-destructive-backdrop"
+      dialogTestId="confirm-destructive-dialog"
+      afterBody={
+        // A caller-owned <form> outside `.dialog-body` (which nocturne.css dims
+        // to 0.85 opacity) — the type-to-confirm input must stay full-strength,
+        // and the dialog-actions live inside the form for Enter-to-submit.
         <form onSubmit={handleSubmit} className="flex flex-col gap-2" style={{ marginTop: 8 }}>
           <label htmlFor={`${uid}-input`} style={{ fontSize: 12.5 }}>
             {resolvedInputLabel}
@@ -210,8 +192,10 @@ export function ConfirmDestructiveDialog({
             </Btn>
           </div>
         </form>
-      </div>
-    </div>,
-    document.body,
+      }
+    >
+      {consequence}
+      {extraBody}
+    </Dialog>
   );
 }
