@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
  * out of the player-facing lines.
  */
 import { useMemo, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   ActionApplyPolicy,
   ActionResolveResult,
@@ -15,7 +15,8 @@ import type {
   ActionUndoToken,
   Combatant,
 } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
+import { invalidateEncounter } from '../../lib/query';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 
@@ -72,9 +73,12 @@ export function ActionUsePanel({
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>('targets');
   const [targetIds, setTargetIds] = useState<number[]>([]);
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
+  const [commitSubmitted, setCommitSubmitted] = useState(false);
+  const [isUnconfirmed, setIsUnconfirmed] = useState(false);
 
   const candidates = useMemo(
     () => legalTargets(combatants, actorCombatantId, spec.targets.allow),
@@ -109,13 +113,34 @@ export function ActionUsePanel({
         applied: true,
         undoToken: r.undoToken,
       })),
-    onMutate: () => onError(null),
+    onMutate: () => {
+      setCommitSubmitted(true);
+      setIsUnconfirmed(false);
+      onError(null);
+    },
     onSuccess: (res) => {
       if (res.undoToken) onApplied(res.undoToken, res.policy);
       announce(`${actionName} applied.`);
       onDismiss();
     },
-    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.applyAction' })),
+    onError: (err) => {
+      const is4xx = err instanceof ApiError && err.status >= 400 && err.status < 500;
+      if (is4xx) {
+        setCommitSubmitted(false);
+        setIsUnconfirmed(false);
+        onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.applyAction' }));
+      } else {
+        // Issue #1474: Ambiguous network or server error — lock the button, surface unconfirmed outcome,
+        // and refresh the encounter state rather than permitting duplicate retry dispatches.
+        setIsUnconfirmed(true);
+        void invalidateEncounter(queryClient, encounterId);
+        onError(
+          t('encounters.errors.applyUnconfirmed', {
+            defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
+          }),
+        );
+      }
+    },
   });
 
   function toggleTarget(id: number) {
@@ -206,17 +231,36 @@ export function ActionUsePanel({
               Declared — waiting for the DM to apply.
             </p>
           )}
+          {isUnconfirmed && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0, color: 'var(--color-warning, #d97706)' }} data-testid="action-use-unconfirmed-text">
+              {t('encounters.errors.applyUnconfirmed', {
+                defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
+              })}
+            </p>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" className="btn btn-ghost" onClick={() => { setStep('targets'); setPreview(null); }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                setStep('targets');
+                setPreview(null);
+                setCommitSubmitted(false);
+                setIsUnconfirmed(false);
+              }}
+            >
               Back
             </button>
             {(preview.canApply || (isDm && !preview.applied)) && (
               <Btn
                 data-testid="action-use-apply"
-                disabled={applyDisabled || commit.isPending || preview.applied}
-                onClick={() => commit.mutate(preview.chainId)}
+                disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
+                onClick={() => {
+                  if (commitSubmitted || commit.isPending) return;
+                  commit.mutate(preview.chainId);
+                }}
               >
-                {commit.isPending ? 'Applying…' : 'Apply'}
+                {commit.isPending ? 'Applying…' : isUnconfirmed ? 'Unconfirmed' : 'Apply'}
               </Btn>
             )}
             {!preview.canApply && !isDm && (
@@ -230,3 +274,4 @@ export function ActionUsePanel({
     </div>
   );
 }
+

@@ -1312,9 +1312,37 @@ export class ActionResolverService {
 
     const pending = this.db.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, req.chainId)).get();
     if (!pending) {
-      // Unknown AND already-consumed collapse to the same outcome (issue #1451 review): a
-      // consumed resolution's row is deleted, not flagged, so there is nothing left to
-      // distinguish "never existed" from "already applied" — both are equally not appliable.
+      // Issue #1474: check if this resolution was already applied (idempotency key / double-submit guard).
+      const existingChain = this.db.select().from(actionApplyChains).where(eq(actionApplyChains.id, req.chainId)).get();
+      if (existingChain) {
+        if (existingChain.encounterId !== encounterId) {
+          this.auditRejectedApply(encounter, req.chainId, user, role, 'cross_encounter_chain');
+          throw new BadRequestException('This chain belongs to a different encounter.');
+        }
+        const actor = this.combatantRowOrThrow(encounterId, existingChain.actorCombatantId);
+        const isDm = role === 'dm';
+        if (!isDm) {
+          if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+            this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
+            throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
+          }
+        }
+        const undoToken = ActionUndoToken.parse({
+          encounterId: existingChain.encounterId,
+          actorCombatantId: existingChain.actorCombatantId,
+          actionName: existingChain.actionName,
+          chainId: existingChain.id,
+          targets: fromJsonText<ActionUndoTarget[]>(existingChain.targetsJson, []),
+          costSlot: existingChain.costSlot,
+          costCount: existingChain.costCount,
+          spellLevelSpent: existingChain.spellLevelSpent,
+          concentrationBefore: existingChain.concentrationBefore,
+          pendingConcentrationChecksBefore: fromJsonText<PendingConcentrationCheck[]>(existingChain.pendingConcentrationChecksBeforeJson, []),
+          startedConcentration: existingChain.startedConcentration,
+        });
+        return { undoToken };
+      }
+
       this.auditRejectedApply(encounter, req.chainId, user, role, 'unknown_or_consumed_chain');
       throw new BadRequestException('This resolution is unknown or has already been applied.');
     }
@@ -1428,6 +1456,24 @@ export class ActionResolverService {
       // fix also wants the row gone once consumed, not kept forever).
       const claimed = tx.delete(actionPendingResolutions).where(eq(actionPendingResolutions.id, chainId)).run();
       if (claimed.changes === 0) {
+        // Issue #1474: If a concurrent apply request claimed and completed this resolution,
+        // return the existing apply chain idempotently instead of failing or double-applying.
+        const existingChain = tx.select().from(actionApplyChains).where(eq(actionApplyChains.id, chainId)).get();
+        if (existingChain) {
+          return ActionUndoToken.parse({
+            encounterId: existingChain.encounterId,
+            actorCombatantId: existingChain.actorCombatantId,
+            actionName: existingChain.actionName,
+            chainId: existingChain.id,
+            targets: fromJsonText<ActionUndoTarget[]>(existingChain.targetsJson, []),
+            costSlot: existingChain.costSlot,
+            costCount: existingChain.costCount,
+            spellLevelSpent: existingChain.spellLevelSpent,
+            concentrationBefore: existingChain.concentrationBefore,
+            pendingConcentrationChecksBefore: fromJsonText<PendingConcentrationCheck[]>(existingChain.pendingConcentrationChecksBeforeJson, []),
+            startedConcentration: existingChain.startedConcentration,
+          });
+        }
         throw new BadRequestException('This resolution is unknown or has already been applied.');
       }
 

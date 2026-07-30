@@ -1289,18 +1289,24 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(applied.undoToken).toBeTruthy();
   });
 
-  it('#1451: replaying the same chainId at /actions/apply a second time is rejected (single-use)', () => {
-    const { service, encounterId, actor, drake } = seed();
+  it('#1474: applying the same chainId a second time is idempotent — returns stored undoToken and does not double-apply damage', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
     const preview = service.resolve(
       encounterId,
       ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
       alice,
       'player',
     );
-    service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
-    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
-      /already (been )?applied/i,
-    );
+    const res1 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    const hpAfterFirst = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
+
+    // Retry with the exact same chainId (e.g. network timeout / double-click retry)
+    const res2 = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    const hpAfterSecond = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
+
+    expect(hpAfterSecond).toBe(hpAfterFirst);
+    expect(res2.undoToken.chainId).toBe(res1.undoToken.chainId);
+    expect(res2.undoToken.targets).toEqual(res1.undoToken.targets);
   });
 
   // ---------------------------------------------------------------------------
@@ -1426,7 +1432,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
-  it('#1451 review (Kilo, TOCTOU): two "simultaneous" applies of the same chainId — exactly one succeeds and damage lands exactly once', async () => {
+  it('#1474: two "simultaneous" applies of the same chainId — both fulfill idempotently and damage lands exactly once', async () => {
     const { orm, service, encounterId, actor, drake } = seed();
     const preview = service.resolve(
       encounterId,
@@ -1440,8 +1446,8 @@ describe('action resolver (real SQLite, service layer)', () => {
     const attempt = () =>
       Promise.resolve().then(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player'));
     const results = await Promise.allSettled([attempt(), attempt()]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(0);
 
     const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
     expect(drakeRow.hpCurrent).toBe(60 - honestDamage); // damage landed exactly once, never twice
