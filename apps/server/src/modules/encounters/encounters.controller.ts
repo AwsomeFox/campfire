@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, Headers, Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -453,6 +453,7 @@ export class EncountersController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
     @Query('afterId') afterId?: string,
+    @Headers('if-none-match') ifNoneMatch?: string,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -463,7 +464,13 @@ export class EncountersController {
       }
       return this.encounters.listEvents(id, role, parsed);
     }
-    return this.encounters.listEvents(id, role);
+    const headId = await this.encounters.getEventsHeadId(id);
+    const etag = headId === null ? '"empty"' : `"${headId}"`;
+    if (ifNoneMatch === etag) {
+      throw new HttpException('Not Modified', HttpStatus.NOT_MODIFIED);
+    }
+    const result = await this.encounters.listEvents(id, role);
+    return result;
   }
 
   @Delete(':id')
