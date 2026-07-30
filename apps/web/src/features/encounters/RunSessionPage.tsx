@@ -2899,6 +2899,7 @@ export default function RunSessionPage() {
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn
+                  data-testid="encounter-header-next-turn"
                   disabled={headerBusy || riskyBlocked}
                   onClick={nextTurn}
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}

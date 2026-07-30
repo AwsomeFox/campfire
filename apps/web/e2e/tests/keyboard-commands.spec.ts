@@ -109,7 +109,7 @@ test.describe('keyboard command layer (issue #672)', () => {
     await restoreSeedEncounter(page);
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
 
-    const nextTurn = page.getByRole('button', { name: 'Next turn →' });
+    const nextTurn = page.getByTestId('encounter-header-next-turn');
     await expect(nextTurn).toBeVisible();
     await expect(nextTurn).toHaveAttribute('aria-keyshortcuts', /.+/);
   });
