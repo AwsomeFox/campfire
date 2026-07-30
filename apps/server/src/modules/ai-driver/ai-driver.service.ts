@@ -1384,9 +1384,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // (guardDriverLivePlayArgs): adjust_treasury allows positive bounded delta grants only.
   'adjust_treasury',
   'add_inventory_item',
-  // update_inventory_item: grant-only, enforced as an ALLOWLIST in guardDriverLivePlayArgs
-  // (issue #1326 review) — itemId + a positive qtyDelta (+ idempotencyKey) only; every
-  // other argument, including any field the tool's schema gains later, is refused.
+  // update_inventory_item: ALLOWLIST in guardDriverLivePlayArgs (issue #1326 review) —
+  // itemId + a positive qtyDelta (+ idempotencyKey), or metadata-only (name/notes/iconSlug);
+  // every other argument, including any future field the tool's schema gains, is refused.
   'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
@@ -1603,9 +1603,10 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
  *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
  *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}).
  *  - update_inventory_item: ALLOWLIST (issue #1326 review) — only `itemId` + a positive
- *    `qtyDelta` (+ `idempotencyKey`) are permitted; every other argument is refused,
- *    including any future field the tool's schema gains. This is the one guard branch
- *    converted from denylist to allowlist so far; see #1792 for the rest.
+ *    `qtyDelta` (+ `idempotencyKey`) or metadata-only (`name`/`notes`/`iconSlug`) are
+ *    permitted; every other argument is refused, including any future field the tool's
+ *    schema gains. This is the one guard branch converted from denylist to allowlist so far;
+ *    see #1792 for the rest.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
@@ -1799,41 +1800,45 @@ export function guardDriverLivePlayArgs(
 
   if (toolName === 'update_inventory_item') {
     // Issue #1326 review (coordinator): ALLOWLIST, not denylist. The tool's live-play
-    // latitude is grant-only — bump quantity via a positive qtyDelta, nothing else — so
-    // every argument the driver may pass is enumerated here; anything outside it is
-    // refused outright. The PREVIOUS shape denied qty/ownerType/characterId/non-positive
-    // qtyDelta and let everything else (name, notes, iconSlug — and, unnoticed until
-    // review, this PR's own equipped/equipSlot/equippedAction) pass straight through
-    // uninspected. A denylist means widening InventoryItemUpdate silently widens what an
-    // autonomous seat may do; this allowlist fails CLOSED on the next such widening
-    // instead of failing open. Repo-wide conversion of the remaining denylist guards is
-    // tracked separately (#1792) — this is the one tool this PR's own schema change
-    // touched.
-    const ALLOWED_KEYS = new Set(['itemId', 'qtyDelta', 'idempotencyKey']);
+    // latitude is grant quantity (a positive qtyDelta + idempotencyKey) OR edit harmless
+    // metadata (name/notes/iconSlug); every argument the driver may pass is enumerated
+    // here and anything outside it is refused outright. The PREVIOUS shape denied
+    // qty/ownerType/characterId/non-positive qtyDelta and let everything else (name, notes,
+    // iconSlug — and, unnoticed until review, this PR's own equipped/equipSlot/equippedAction)
+    // pass straight through uninspected. A denylist means widening InventoryItemUpdate
+    // silently widens what an autonomous seat may do; this allowlist fails CLOSED on the
+    // next such widening instead of failing open. Repo-wide conversion of the remaining
+    // denylist guards is tracked separately (#1792) — this is the one tool this PR's own
+    // schema change touched.
+    const ALLOWED_KEYS = new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']);
     const rejected = Object.keys(args).filter((key) => !ALLOWED_KEYS.has(key));
     if (rejected.length > 0) {
       return {
         ok: false,
         code: 'forbidden_inventory_field',
         message:
-          'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). ' +
+          'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. ' +
           `Rejected: ${rejected.join(', ')}.`,
       };
     }
-    if (!('qtyDelta' in args)) {
+    const hasDelta = 'qtyDelta' in args;
+    const hasMeta = 'name' in args || 'notes' in args || 'iconSlug' in args;
+    if (!hasDelta && !hasMeta) {
       return {
         ok: false,
         code: 'forbidden_inventory_field',
-        message: 'The driver must provide a positive qtyDelta to update_inventory_item; no other field is permitted.',
+        message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug) to update_inventory_item.',
       };
     }
-    const delta = args.qtyDelta;
-    if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
-      return {
-        ok: false,
-        code: 'forbidden_inventory_reduction',
-        message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
-      };
+    if (hasDelta) {
+      const delta = args.qtyDelta;
+      if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_inventory_reduction',
+          message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
+        };
+      }
     }
     return { ok: true, args: { ...args } };
   }

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
@@ -260,7 +260,7 @@ export class CampaignLibraryService {
             )
           : target.entityType === 'inventory_item'
             ? tx.get(
-                sql`select ${sql.raw(field)} as value, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+                sql`select ${sql.raw(field)} as value, owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
               )
             : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
@@ -307,20 +307,42 @@ export class CampaignLibraryService {
           // character-private action became visible campaign-wide the moment the item
           // reached the party stash, since `redactEquippedActions` never checks a party
           // item's equippedAction at all.
-          tx.run(
-            sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
-          );
+          const snapshot = snapshots.find((s) => s.entityType === target.entityType && s.entityId === target.entityId);
+          if (!snapshot) throw new InternalServerErrorException('move snapshot missing for target');
+          const before = z
+            .object({
+              ownerType: z.string(),
+              characterId: z.number().int().nullable(),
+            })
+            .parse(snapshot.value);
+          const moved = before.ownerType !== request.ownerType || before.characterId !== (request.characterId ?? null);
+          if (moved) {
+            tx.run(
+              sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
+            );
+          } else {
+            // No-op owner re-assignment: keep equip state intact, but bump updated_at so
+            // the post-operation version fence still matches for undo.
+            tx.run(sql`update inventory_items set updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+          }
         } else {
-          // Issue #1326 review (Codex/Devin): mirrors InventoryService.remove() — an
-          // inventory item archived through the bulk tool must also clear its equip
-          // state, or a later bulk `restore` can resurrect a stale slot claim against
-          // a replacement item equipped into that same (character, slot) pair while the
-          // original sat archived. Only inventory_item carries equip state, so every
-          // other entity type in this shared branch (quest/npc/location/faction/
-          // timeline_event/attachment) is unaffected.
+          // Issue #1326 review (coordinator): mirrors InventoryService.remove() — an
+          // inventory item archived through the bulk tool must clear equipped/equipSlot
+          // so a replacement can claim the slot, but equipped_action is inert while
+          // equipped is false and should round-trip (the snapshot preserves it).
           const clearEquipOnArchive = request.operation === 'archive' && target.entityType === 'inventory_item';
+          const archiveClearAction = clearEquipOnArchive
+            ? (
+                z
+                  .object({
+                    ownerType: z.string(),
+                    characterId: z.number().int().nullable().optional(),
+                  })
+                  .parse(snapshots.find((s) => s.entityType === target.entityType && s.entityId === target.entityId)?.value).ownerType !== 'character'
+            )
+            : false;
           tx.run(
-            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL, equipped_action=NULL` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
+            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
           );
         }
       }
@@ -408,13 +430,19 @@ export class CampaignLibraryService {
             if (canRestoreEquip && this.inventoryEquipSlotConflict(tx, campaignId, before.characterId!, before.equipSlot!, row.entityId)) {
               throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
             }
+            // Issue #1326 review: an unequipped-but-authored item can legitimately carry
+            // an equippedAction, so the snapshot's action should round-trip with the
+            // owner. Only party-stash destinations must remain action-free.
+            const restoreEquippedAction = before.ownerType === 'character' ? (before.equippedAction ?? null) : null;
             tx.run(
-              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${canRestoreEquip ? (before.equippedAction ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
           } else {
             const scalar = z
               .object({
                 value: z.string().nullable(),
+                ownerType: z.string().optional(),
+                characterId: z.number().int().nullable().optional(),
                 equipped: z.number().int().optional(),
                 equipSlot: z.string().nullable().optional(),
                 equippedAction: z.string().nullable().optional(),
@@ -425,23 +453,31 @@ export class CampaignLibraryService {
             if (row.entityType === 'inventory_item' && request.operation === 'restore') {
               // Undoing a RESTORE re-archives the item. Its equip state was already
               // cleared when the original archive ran (mirrors InventoryService.remove()),
-              // so there is nothing to restore here — just clear the full triple again
-              // for symmetry (CLEARED_EQUIP_STATE).
-              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              // so there is nothing to restore here — just clear equipped/equipSlot.
+              // equipped_action is inert while equipped is false, but must still be kept
+              // only on character owners; party-stash items must never carry a private
+              // character action, even in the trash.
+              const owner = z
+                .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
+                .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
+              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
+              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
             } else if (row.entityType === 'inventory_item' && request.operation === 'archive') {
               // Undoing an ARCHIVE un-deletes the item AND restores its pre-archive equip
               // triple — subject to the same slot-safety check as the move-owner undo
-              // above; equippedAction travels with equipped/equipSlot rather than being
-              // left behind (CLEARED_EQUIP_STATE's rule again).
-              const owner = z.object({ characterId: z.number().int().nullable() }).parse(
-                tx.get(sql`select character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`),
-              );
-              const canRestoreEquip = scalar.equipped === 1 && owner.characterId != null && scalar.equipSlot != null;
+              // above. equippedAction is inert while equipped is false, but must still be
+              // kept only on character owners; party-stash items must never carry a private
+              // character action.
+              const owner = z
+                .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
+                .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
+              const canRestoreEquip = scalar.equipped === 1 && owner.ownerType === 'character' && owner.characterId != null && scalar.equipSlot != null;
               if (canRestoreEquip && this.inventoryEquipSlotConflict(tx, campaignId, owner.characterId!, scalar.equipSlot!, row.entityId)) {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
+              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
               tx.run(
-                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${canRestoreEquip ? (scalar.equippedAction ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
             } else {
               tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);

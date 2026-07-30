@@ -37,7 +37,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
   // the denylist shape is exactly how this PR's own equipped/equipSlot/equippedAction
   // fields slipped through unnoticed until review. See #1792 for converting the
   // remaining driver guards the same way.
-  it('guardDriverLivePlayArgs enforces an ALLOWLIST on update_inventory_item — only itemId/qtyDelta/idempotencyKey are permitted', () => {
+  it('guardDriverLivePlayArgs enforces an ALLOWLIST on update_inventory_item — qtyDelta or metadata only', () => {
     const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
 
     // positive qtyDelta is allowed (grant only)
@@ -66,39 +66,36 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
     });
 
-    // no qtyDelta at all is blocked — the previous denylist let a qtyDelta-less call
-    // (e.g. a bare metadata edit) fall through to allow; the allowlist requires it.
+    // no qty or metadata is blocked
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver must provide a positive qtyDelta to update_inventory_item; no other field is permitted.',
+      message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug) to update_inventory_item.',
+    });
+
+    // metadata-only edits are allowed
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, name: 'Longsword +1', notes: 'magic', iconSlug: 'sword' }, session)).toEqual({
+      ok: true,
+      args: { itemId: 1, name: 'Longsword +1', notes: 'magic', iconSlug: 'sword' },
     });
 
     // absolute qty (any value) is blocked — use qtyDelta instead
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qty: 5 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: qty.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: qty.',
     });
 
     // owner moves are blocked
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, ownerType: 'character' }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: ownerType.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: ownerType.',
     });
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, characterId: 42 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: characterId.',
-    });
-
-    // Metadata edits (name/notes) are refused too — grant-only means grant-only, not
-    // "anything except quantity and owner".
-    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, name: 'Longsword +1', notes: 'magic' }, session)).toEqual({
-      ok: false,
-      code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: name, notes.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: characterId.',
     });
 
     // Issue #1326 review (Codex/Devin) — the exact exposure this PR introduced: equipping
@@ -107,7 +104,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, equipped: true, equipSlot: 'main-hand' }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: equipped, equipSlot.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: equipped, equipSlot.',
     });
     expect(
       guardDriverLivePlayArgs(
@@ -118,7 +115,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     ).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: equippedAction.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: equippedAction.',
     });
 
     // Fail-closed proof: an entirely unknown field the schema has never had is refused
@@ -129,7 +126,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     ).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity via update_inventory_item (qtyDelta + idempotencyKey). Rejected: someBrandNewFieldNobodyHasAddedYet.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: someBrandNewFieldNobodyHasAddedYet.',
     });
   });
 

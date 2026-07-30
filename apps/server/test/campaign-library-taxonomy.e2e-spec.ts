@@ -203,6 +203,37 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(afterPartyMove.equipSlot).toBeNull();
   });
 
+  it('bulk move_inventory_owner to the same owner leaves equip state intact (issue #1326 review)', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [owner] = await db.insert(characters).values({ campaignId, name: 'No-op owner', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db
+      .insert(inventoryItems)
+      .values({
+        campaignId,
+        name: 'No-op sword',
+        ownerType: 'character',
+        characterId: owner.id,
+        equipped: true,
+        equipSlot: 'main-hand',
+        equippedAction: JSON.stringify({ name: 'Slash', kind: 'melee', toHit: '+5', damage: '1d8+3', notes: '' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    const noOp = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: owner.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(noOp.status).toBe(201);
+    const afterNoOp = (await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)!;
+    expect(afterNoOp.ownerType).toBe('character');
+    expect(afterNoOp.characterId).toBe(owner.id);
+    expect(afterNoOp.equipped).toBe(true);
+    expect(afterNoOp.equipSlot).toBe('main-hand');
+    expect(afterNoOp.equippedAction).not.toBeNull();
+  });
+
   it('bulk archive clears equip state so a later bulk restore cannot resurrect a slot conflict (issue #1326 review)', async () => {
     const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
     const [character] = await db.insert(characters).values({ campaignId, name: 'Archive owner', createdAt: ts, updatedAt: ts }).returning();

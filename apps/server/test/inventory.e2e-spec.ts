@@ -977,6 +977,99 @@ describe('inventory & treasury (e2e)', () => {
       expect(otherGet.body.equipped).toBe(true);
       expect(otherGet.body.equipSlot).toBe('review-redaction-slot');
     });
+
+    it('trashing and restoring a character item preserves equippedAction while clearing equipped/equipSlot (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const grantedAction = { name: 'Trashed Strike', kind: 'melee', toHit: '+7', damage: '2d6+5', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Keepsake blade', ownerType: 'character', characterId: ownCharacterId });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'review-trash-preserve-slot', equippedAction: grantedAction });
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(player);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.equipped).toBe(false);
+      expect(deleteRes.body.equipSlot).toBeNull();
+      expect(deleteRes.body.equippedAction).toMatchObject(grantedAction);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(player);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+      expect(restoreRes.body.equippedAction).toMatchObject(grantedAction);
+    });
+
+    it('restoring a trashed item to the party stash clears equippedAction (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const tempChar = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Temp departee' });
+      expect(tempChar.status).toBe(201);
+
+      const grantedAction = { name: 'Lost Strike', kind: 'melee', toHit: '+7', damage: '2d6+5', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Departing blade', ownerType: 'character', characterId: tempChar.body.id });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'review-restore-party-slot', equippedAction: grantedAction });
+
+      await request(server).delete(`/api/v1/inventory/${original.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/characters/${tempChar.body.id}`).set(dm);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${original.body.id}/restore`).set(dm);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.ownerType).toBe('party');
+      expect(restoreRes.body.equipped).toBe(false);
+      expect(restoreRes.body.equipSlot).toBeNull();
+      expect(restoreRes.body.equippedAction).toBeNull();
+    });
+
+    it('reject patching equippedAction onto a party-stash item (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const partyItem = await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(dm).send({ name: 'Stash scroll' });
+      const action = { name: 'Stash Strike', kind: 'melee', toHit: '+5', damage: '1d8', notes: '' };
+      const patchRes = await request(server)
+        .patch(`/api/v1/inventory/${partyItem.body.id}`)
+        .set(dm)
+        .send({ equippedAction: action });
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toContain('Only character-owned items may carry an equipped action');
+    });
+
+    it('moving an item to the party stash with equippedAction: null succeeds (review fix)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const action = { name: 'Departing Strike', kind: 'melee', toHit: '+6', damage: '1d10+2', notes: '' };
+      const original = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Departing blade', ownerType: 'character', characterId: ownCharacterId });
+      await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'departing-slot', equippedAction: action });
+
+      const moveRes = await request(server)
+        .patch(`/api/v1/inventory/${original.body.id}`)
+        .set(player)
+        .send({ ownerType: 'party', characterId: null, equippedAction: null });
+      expect(moveRes.status).toBe(200);
+      expect(moveRes.body.ownerType).toBe('party');
+      expect(moveRes.body.equipped).toBe(false);
+      expect(moveRes.body.equipSlot).toBeNull();
+      expect(moveRes.body.equippedAction).toBeNull();
+    });
   });
 
   describe('treasury', () => {
