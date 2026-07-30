@@ -303,10 +303,20 @@ function packManifestHash(
   meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
   entries: ImportedEntry[],
 ): string {
+  // CONTENT-ONLY fingerprint of the pack's provenance plus every fetched entry's content
+  // hash. `meta.version` is deliberately EXCLUDED (#1518): every importer except Open5e
+  // stamps it to today's UTC date (nowIso().slice(0,10)), so folding it in would make a
+  // byte-identical re-import compute a different hash each day and never match the
+  // manifest_hash the previous install stamped — defeating the cross-day short-circuit that
+  // is this function's whole purpose (the large Datasworn / large-pack case it exists to
+  // protect). The version label is still STORED and displayed: the caller flows it to
+  // rule_packs.version and the audit `version=` fragment, and the short-circuit refreshes
+  // it as a separate column even when content matches — it is simply not part of the
+  // content-equality comparison. Real content changes are still captured through the entry
+  // hashes and the provenance fields below.
   return sha256Hex({
     slug: meta.slug,
     name: meta.name,
-    version: meta.version,
     license: meta.license,
     sourceUrl: meta.sourceUrl,
     sections: [...meta.sectionLabels].sort(),
@@ -2051,6 +2061,7 @@ export class RulesService implements OnModuleInit {
             sourceUrl: meta.sourceUrl,
             installedAt: ts,
             entryCount: entries.length,
+            manifestHash: sourceHash,
           })
           .returning()
           .all();
@@ -2176,6 +2187,67 @@ export class RulesService implements OnModuleInit {
         // Do not hoist these out of the transaction.
         const [currentPack] = tx.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).all();
         const before = currentPack ?? packRow;
+
+        // Issue #1518 short-circuit. `sourceHash` (packManifestHash) is a CONTENT-ONLY
+        // fingerprint of the pack's provenance plus every fetched entry's content hash —
+        // `meta.version` is deliberately excluded (see packManifestHash) so a same-content
+        // re-import matches even when it lands on a later UTC day than the install that
+        // stamped the tracked hash. If it is byte-identical to the manifest hash the LAST
+        // successful install/sync stamped on this pack row, every fetched entry is already
+        // installed byte-for-byte: global rule-entry content only ever changes through THIS
+        // import flow (campaign homebrew is campaign-scoped, and the only global edit path —
+        // updateEntry — touches iconSlug/updatedAt, which the content hash excludes), and
+        // that flow always re-stamps the hash. So the add/change classification below would
+        // be all-unchanged, and the only remaining work a full pass could do is REMOVE
+        // installed rows the manifest omits — which only a removeMissing pass attempts, so
+        // gate it on entryCount (the import flow maintains entryCount == global row count):
+        // if it already equals the manifest size there is nothing to remove, and
+        // manifestUnchanged guarantees no fetched entry is missing either. Under those
+        // conditions the only column a full sync would still move is the displayed `version`
+        // label (the volatile date stamp #1518 keeps OUT of the comparison), so we skip the
+        // per-entry read+sha256 classification and refresh just that one row — mirroring the
+        // full sync's version write so the pack reflects this re-import while manifestHash is
+        // left untouched (the content-only hash is unchanged). That keeps a large identical
+        // re-import from monopolising the single Node thread — including the install-job poll
+        // the admin UI renders this very import's progress through — and works identically
+        // whether the re-import lands on the same day or a later one. Atomicity/read-stability
+        // are preserved: the version refresh is a single in-transaction row update with nothing
+        // entangled to roll back, and any genuinely-changed manifest (different sourceHash)
+        // falls through to the full transactional classification below.
+        const manifestUnchanged = before.manifestHash !== '' && before.manifestHash === sourceHash;
+        const nothingToRemove = !options.removeMissing || before.entryCount === fetchedEntries.length;
+        const provenanceAlreadySet =
+          !options.rewritePackProvenance ||
+          (before.name === meta.name && before.sourceUrl === meta.sourceUrl && before.license === meta.license);
+        if (manifestUnchanged && nothingToRemove && provenanceAlreadySet) {
+          // Content identical -> skip the per-entry classification. Only the displayed
+          // `version` label moves (#1518 keeps it out of the content hash, so it may differ
+          // when the re-import lands on a later day): refresh it so the pack row reflects
+          // this re-import, leaving manifestHash untouched. A same-day re-import whose version
+          // label already matches short-circuits with no write at all.
+          const refreshed =
+            meta.version === before.version
+              ? before
+              : (tx
+                  .update(rulePacks)
+                  .set({ version: meta.version })
+                  .where(eq(rulePacks.id, packRow.id))
+                  .returning()
+                  .all()[0] ?? before);
+          return {
+            pack: refreshed,
+            before,
+            preview: {
+              added: 0,
+              changed: 0,
+              removed: 0,
+              unchanged: fetchedEntries.length,
+              sourceHash,
+              sourceVersion: meta.version,
+            } satisfies RulePackUpdatePreview,
+          };
+        }
+
         const nextName = options.rewritePackProvenance ? meta.name : before.name;
         const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : before.sourceUrl;
         const nextLicense = options.rewritePackProvenance
@@ -2262,6 +2334,7 @@ export class RulesService implements OnModuleInit {
             license: nextLicense,
             sourceUrl: nextSourceUrl,
             entryCount: nextEntryCount,
+            manifestHash: sourceHash,
           })
           .where(eq(rulePacks.id, packRow.id))
           .returning()

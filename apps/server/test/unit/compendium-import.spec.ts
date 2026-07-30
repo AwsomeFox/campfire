@@ -18,6 +18,7 @@ describe('compendium-import (unit)', () => {
     sourceUrl: 'https://example.com',
     installedAt: '2026-01-01T00:00:00.000Z',
     entryCount: 1,
+    manifestHash: 'test-manifest-hash',
   };
 
   const goblin = {

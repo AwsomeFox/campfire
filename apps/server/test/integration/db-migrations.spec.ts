@@ -62,6 +62,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('icon_slug'); // 0037 (issue #302)
       expect(columnNames(sqlite, 'rule_entries')).toContain('icon_slug'); // 0038 (issue #305)
+      expect(columnNames(sqlite, 'rule_packs')).toContain('manifest_hash'); // 0148 (issue #1518)
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
@@ -2221,6 +2222,55 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0147_combatants_npc_disposition_snapshot_1454') as { name?: string })
           ?.name,
       ).toBe('0147_combatants_npc_disposition_snapshot_1454');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+  it('adds the rule_packs manifest_hash column when upgrading a pre-#1518 DB (#1518)', () => {
+    expect(MIGRATION_NAMES).toContain('0148_rule_packs_manifest_hash_1518');
+
+    // Start from a fully-migrated DB, then rewind rule_packs to its pre-#1518 shape (no
+    // manifest_hash column, the migration un-recorded) and seed a pack — the same shape a DB
+    // last booted before #1518 would present on upgrade.
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('ALTER TABLE rule_packs DROP COLUMN manifest_hash');
+      legacy
+        .prepare('DELETE FROM __migrations WHERE name = ?')
+        .run('0148_rule_packs_manifest_hash_1518');
+      legacy
+        .prepare(
+          `INSERT INTO rule_packs
+            (slug, name, version, license, source_url, installed_at, entry_count)
+           VALUES ('legacy-srd', 'Legacy SRD', 'v1', 'CC-BY-4.0', 'https://example.invalid', '2026-01-01T00:00:00.000Z', 3)`,
+        )
+        .run();
+      expect(columnNames(legacy, 'rule_packs')).not.toContain('manifest_hash');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      // The migration re-runs and adds the column.
+      expect(columnNames(upgraded.sqlite, 'rule_packs')).toContain('manifest_hash');
+      expect(
+        (upgraded.sqlite
+          .prepare('SELECT name FROM __migrations WHERE name = ?')
+          .get('0148_rule_packs_manifest_hash_1518') as { name?: string })?.name,
+      ).toBe('0148_rule_packs_manifest_hash_1518');
+      // The seeded pack gets the '' default: no tracked manifest, so the re-import short-circuit
+      // treats it as a miss and runs the full transactional classification (re-stamping the hash
+      // on the next install/sync) — behaviour unchanged from before the column existed.
+      const row = upgraded.sqlite
+        .prepare("SELECT manifest_hash FROM rule_packs WHERE slug = 'legacy-srd'")
+        .get() as { manifest_hash: string };
+      expect(row.manifest_hash).toBe('');
     } finally {
       upgraded.sqlite.close();
     }
