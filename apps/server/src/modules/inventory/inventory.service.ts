@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import { CharacterAction, CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
@@ -62,6 +62,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
   const ref = parsedRef.success ? parsedRef.data : null;
   const snapshot = row.compendiumSnapshot ? sanitizeCompendiumSnapshot(safeJson(row.compendiumSnapshot)) : null;
+  const parsedAction = row.equippedAction ? CharacterAction.safeParse(safeJson(row.equippedAction)) : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -75,6 +76,9 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     compendiumRef: ref,
     compendiumSnapshot: snapshot,
     compendiumState: InventoryItem.shape.compendiumState.safeParse(row.compendiumState).success ? InventoryItem.shape.compendiumState.parse(row.compendiumState) : null,
+    equipped: row.equipped,
+    equipSlot: row.equipSlot ?? null,
+    equippedAction: parsedAction?.success ? parsedAction.data : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -377,6 +381,36 @@ export class InventoryService {
       }
     }
 
+    // Issue #1326: equip/unequip transition, validated against the FINAL owner (post-move).
+    // Field-level checks run here; the slot-conflict check runs inside the transaction
+    // below (against the freshly-read row) so two concurrent equips into the same slot
+    // serialize through SQLite rather than racing on a pre-transaction snapshot.
+    const equipTouched = input.equipped !== undefined || input.equipSlot !== undefined;
+    let nextEquipped = input.equipped !== undefined ? input.equipped : existing.equipped;
+    let nextEquipSlot: string | null = input.equipSlot !== undefined ? input.equipSlot : existing.equipSlot;
+    if (finalOwnerType !== 'character') {
+      // An explicit request to equip a party-stash item is rejected outright — it is
+      // never valid, whether the item was already party-owned or is moving there in
+      // this same request.
+      if (input.equipped === true) {
+        throw new BadRequestException('Only character-owned items may be equipped');
+      }
+      // Otherwise: moving an equipped item OFF its owning character (or an already
+      // party-owned item) auto-unequips it rather than leaving a dangling equip/slot
+      // state — a party item can never legitimately be equipped=true.
+      nextEquipped = false;
+      nextEquipSlot = null;
+    } else if (nextEquipped) {
+      const trimmedSlot = typeof nextEquipSlot === 'string' ? nextEquipSlot.trim() : '';
+      if (!trimmedSlot) {
+        throw new BadRequestException('equipSlot is required to equip an item');
+      }
+      nextEquipSlot = trimmedSlot;
+    } else {
+      nextEquipSlot = null;
+    }
+    const equipWillChange = equipTouched || (moved && existing.equipped);
+
     // Issue #782: quantity writes — atomic delta (preferred) or absolute CAS set.
     const hasQtyDelta = input.qtyDelta !== undefined;
     const hasQtySet = input.qty !== undefined;
@@ -448,6 +482,39 @@ export class InventoryService {
         if (moved) {
           update.ownerType = finalOwnerType;
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
+        }
+        if (input.equippedAction !== undefined) {
+          update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
+        }
+        if (equipWillChange) {
+          if (nextEquipped) {
+            // Slot conflict (issue #1326): reject a second equipped item claiming the same
+            // (character, slot) pair rather than silently displacing the incumbent. Read
+            // inside this transaction so two concurrent equips into the same slot serialize.
+            const conflict = tx
+              .select({ id: inventoryItems.id, name: inventoryItems.name })
+              .from(inventoryItems)
+              .where(
+                and(
+                  eq(inventoryItems.characterId, finalCharacterId as number),
+                  eq(inventoryItems.campaignId, existing.campaignId),
+                  eq(inventoryItems.equipped, true),
+                  isNull(inventoryItems.deletedAt),
+                  sql`lower(${inventoryItems.equipSlot}) = lower(${nextEquipSlot})`,
+                  ne(inventoryItems.id, id),
+                ),
+              )
+              .limit(1)
+              .all();
+            if (conflict.length > 0) {
+              throw new ConflictException({
+                code: 'INVENTORY_SLOT_CONFLICT',
+                message: `Slot "${nextEquipSlot}" is already occupied by "${conflict[0].name}" on this character — unequip it first.`,
+              });
+            }
+          }
+          update.equipped = nextEquipped;
+          update.equipSlot = nextEquipSlot;
         }
 
         if (hasQtyDelta) {
@@ -546,6 +613,11 @@ export class InventoryService {
     // Idempotent replay returns the first committed response without re-auditing.
     if (replayed) return committed;
 
+    // Issue #1326: record the equip transition (if any) alongside the existing qty detail
+    // rather than a separate audit action — this is still one `item.update` write.
+    const equipChanged = existing.equipped !== committed.equipped || existing.equipSlot !== committed.equipSlot;
+    const hasDetail = qtyTouch || equipChanged;
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -553,14 +625,26 @@ export class InventoryService {
       entityType: 'inventory_item',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: qtyTouch
+      detail: hasDetail
         ? JSON.stringify({
             actor: { id: user.id, name: user.name, role },
-            kind: hasQtyDelta ? 'delta' : 'set',
-            ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
-            after: committed.qty,
-            ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
-            ...(idempotencyKey ? { idempotencyKey } : {}),
+            ...(qtyTouch
+              ? {
+                  kind: hasQtyDelta ? 'delta' : 'set',
+                  ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
+                  after: committed.qty,
+                  ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
+                  ...(idempotencyKey ? { idempotencyKey } : {}),
+                }
+              : {}),
+            ...(equipChanged
+              ? {
+                  equip: {
+                    from: { equipped: existing.equipped, equipSlot: existing.equipSlot },
+                    to: { equipped: committed.equipped, equipSlot: committed.equipSlot },
+                  },
+                }
+              : {}),
           })
         : undefined,
     });

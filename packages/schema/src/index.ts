@@ -4374,6 +4374,47 @@ export interface RuleSystemAdapter {
    * the fallback adapter.
    */
   readonly restModel?: RestModel;
+  /**
+   * OPTIONAL — ADVISORY equipment-slot vocabulary for this system's inventory UI (issue
+   * #1326): 5e/PF2e-shaped systems offer main hand / off hand / armor / worn; a system
+   * with a different loadout model declares its own. This is advisory only — the server
+   * does not restrict `InventoryItem.equipSlot` to this list (a homebrew slot name always
+   * works), it only rejects two equipped items sharing the same character+slot string.
+   * Omitting it falls back to {@link NEUTRAL_EQUIPMENT_SLOTS} via
+   * {@link equipmentSlotsForAdapter}, never to 5e's slots, so a non-5e campaign's item
+   * picker doesn't suggest slots that system doesn't have.
+   */
+  readonly equipmentSlots?: readonly EquipmentSlotDef[];
+}
+
+/**
+ * One adapter-suggested equipment slot (issue #1326) — a label the inventory UI can
+ * offer when a player equips an item. Purely descriptive; see {@link RuleSystemAdapter.equipmentSlots}.
+ */
+export interface EquipmentSlotDef {
+  /** Stable key stored in `InventoryItem.equipSlot` when the UI offers this suggestion. */
+  readonly key: string;
+  readonly label: string;
+}
+
+/** Neutral fallback equipment-slot suggestion for adapters that don't declare their own. */
+export const NEUTRAL_EQUIPMENT_SLOTS: readonly EquipmentSlotDef[] = [{ key: 'equipped', label: 'Equipped' }];
+
+/** D&D 5e / PF2e-shaped equipment slots (issue #1326): weapon hands, armor, worn items. */
+export const DND5E_EQUIPMENT_SLOTS: readonly EquipmentSlotDef[] = [
+  { key: 'main-hand', label: 'Main Hand' },
+  { key: 'off-hand', label: 'Off Hand' },
+  { key: 'armor', label: 'Armor' },
+  { key: 'worn', label: 'Worn / Accessory' },
+];
+
+/**
+ * Resolve the advisory equipment-slot vocabulary for an adapter (issue #1326). Falls
+ * back to {@link NEUTRAL_EQUIPMENT_SLOTS} when the adapter hasn't declared one — never
+ * to 5e's, so an unaudited/homebrew system's UI never suggests slots it doesn't have.
+ */
+export function equipmentSlotsForAdapter(adapter: Pick<RuleSystemAdapter, 'equipmentSlots'>): readonly EquipmentSlotDef[] {
+  return adapter.equipmentSlots ?? NEUTRAL_EQUIPMENT_SLOTS;
 }
 
 /** Standard system resource pool definition (issue #422). */
@@ -4556,6 +4597,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   supportsDirectDamageRules: true,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
+  // 5e/PF2e-shaped equipment slots (issue #1326): main hand / off hand / armor / worn.
+  equipmentSlots: DND5E_EQUIPMENT_SLOTS,
   // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
   gridDistanceRule: { square: 'euclidean', hex: 'hex' },
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -10455,6 +10498,32 @@ export const InventoryItem = z.object({
   compendiumRef: CompendiumRef.nullable().default(null),
   compendiumSnapshot: CompendiumSnapshot.nullable().default(null),
   compendiumState: z.enum(['linked', 'linked_updated', 'overridden', 'detached']).nullable().default(null),
+  // ---- equip state (issue #1326) ----
+  // Only meaningful for ownerType='character' — a party-stash item cannot be worn/wielded.
+  // The server enforces that constraint (and slot-conflict rejection); this shape just
+  // carries the state. Not settable at creation — an item is always created unequipped
+  // and moves to equipped only via an explicit PATCH, keeping the transition validation
+  // (owner, slot required, slot conflict) in one place.
+  equipped: z.boolean().default(false),
+  /**
+   * Free-form slot identifier ('main-hand', 'armor', a homebrew label, …), required
+   * when equipped=true and cleared automatically on unequip. Deliberately NOT
+   * restricted to a fixed enum: what slots exist is ruleset-dependent (see
+   * `equipmentSlotsForAdapter` for the adapter-declared ADVISORY vocabulary the UI can
+   * offer), so the server only enforces "at most one equipped item per (character, slot
+   * string) pair" — a rule that holds for every rule system without guessing its slot
+   * model.
+   */
+  equipSlot: z.string().max(60).nullable().default(null),
+  /**
+   * Optional structured action this item grants while equipped (issue #1326) — the same
+   * shape as a hand-authored `Character.actions` row, so the resolver can merge it in
+   * without a second action representation. Authored directly (by a player or DM) or,
+   * in future, hydrated from compendium data; that derivation is out of scope here (the
+   * source item's `dataJson` is too thin to auto-generate an attack — see issue #1326).
+   * Inert while unequipped.
+   */
+  equippedAction: CharacterAction.nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -10473,6 +10542,9 @@ export const InventoryItemCreate = InventoryItem.omit({
   compendiumRef: true,
   compendiumSnapshot: true,
   compendiumState: true,
+  equipped: true,
+  equipSlot: true,
+  equippedAction: true,
 }).partial().required({ name: true });
 
 /** Acquire a play-safe snapshot of an installed compendium item. */
@@ -10499,6 +10571,13 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   // Client-generated per-action key (UUID). Required with qtyDelta; optional on an
   // absolute qty set so a lost-response retry can replay the committed item.
   idempotencyKey: z.string().min(1).max(128).optional(),
+  // Issue #1326: equip/unequip is a PATCH, not a create-time field (see InventoryItem
+  // comment above) — the server validates ownerType='character', requires a non-empty
+  // equipSlot when equipping, clears it on unequip, and rejects a slot already occupied
+  // by another equipped item on the same character (409 INVENTORY_SLOT_CONFLICT).
+  equipped: z.boolean().optional(),
+  equipSlot: z.string().max(60).nullable().optional(),
+  equippedAction: CharacterAction.nullable().optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).

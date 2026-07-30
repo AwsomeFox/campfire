@@ -1739,6 +1739,13 @@ export const inventoryItems = sqliteTable('inventory_items', {
   compendiumRef: text('compendium_ref'),
   compendiumSnapshot: text('compendium_snapshot'),
   compendiumState: text('compendium_state'),
+  // Equip state (issue #1326). equipped only ever true for ownerType='character';
+  // equipSlot is a free-form per-character slot key, required while equipped.
+  // equippedAction is JSON-serialized CharacterAction, surfaced by the action resolver
+  // while the item is equipped.
+  equipped: integer('equipped', { mode: 'boolean' }).notNull().default(false),
+  equipSlot: text('equip_slot'),
+  equippedAction: text('equipped_action'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   // Soft-delete tombstone (issue #551): NULL == live; ISO timestamp == trashed.

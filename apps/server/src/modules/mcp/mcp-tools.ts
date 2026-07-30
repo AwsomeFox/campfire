@@ -4813,7 +4813,10 @@ export class McpToolsService {
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
         'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
         'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +
-        'without changing the item.',
+        'without changing the item. Equip/unequip (issue #1326): equipped:true requires a character-owned item and ' +
+        'a non-empty equipSlot (400 otherwise); a slot already occupied by another equipped item on the same ' +
+        'character 409s (INVENTORY_SLOT_CONFLICT). equippedAction attaches a structured action the item grants ' +
+        'while equipped, surfaced by list_usable_actions for the item\'s character.',
       { itemId: Id.describe('Inventory item id — from list_inventory'), ...InventoryItemUpdate.shape },
       async ({ itemId, ...fields }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);

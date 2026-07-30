@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { and, eq } from 'drizzle-orm';
 import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
@@ -163,6 +163,108 @@ describe('action resolver (real SQLite, service layer)', () => {
   it('a player cannot list another player’s character actions', () => {
     const { service, encounterId, actor } = seed();
     expect(() => service.listUsableActions(encounterId, actor, bob, 'player')).toThrow(/your own character/i);
+  });
+
+  // Issue #1326 — equipped inventory items surface as usable actions, merged after the
+  // manually-authored sheet actions, and are resolvable/applyable through the SAME pipeline.
+  const dagger = {
+    name: 'Dagger',
+    kind: 'melee',
+    toHit: '+5',
+    damage: '1d4+2 piercing',
+    notes: 'A quick equipped-weapon action.',
+    spec: {
+      mode: 'attack',
+      attack: { ability: 'DEX', proficient: true },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes: { hit: { damage: [{ formula: '1d4', flat: 2, type: 'piercing' }] } },
+    },
+  };
+
+  function addInventoryItem(
+    orm: ReturnType<typeof build>['orm'],
+    opts: { campaignId: number; characterId: number; equipped: boolean; equipSlot?: string | null; equippedAction?: unknown },
+  ) {
+    const ts = new Date().toISOString();
+    const [row] = orm
+      .insert(inventoryItems)
+      .values({
+        campaignId: opts.campaignId,
+        ownerType: 'character',
+        characterId: opts.characterId,
+        name: 'Dagger',
+        qty: 1,
+        equipped: opts.equipped,
+        equipSlot: opts.equipSlot ?? null,
+        equippedAction: opts.equippedAction !== undefined ? JSON.stringify(opts.equippedAction) : null,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    return row;
+  }
+
+  it('#1326: an equipped item with an authored action appears in listUsableActions, merged after sheet actions', () => {
+    const { orm, service, campaignId, encounterId, actor, aliceChar } = seed();
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
+
+    const list = service.listUsableActions(encounterId, actor, alice, 'player');
+    // The 3 manual sheet actions (greatsword + 2 fireballs) come first, unchanged…
+    expect(list).toHaveLength(4);
+    expect(list[0].name).toBe('Greatsword');
+    // …and the equipped item's action is appended at the end, resolvable like any other.
+    const equippedAction = list[3];
+    expect(equippedAction.name).toBe('Dagger');
+    expect(equippedAction.mode).toBe('attack');
+    expect(equippedAction.resolvable).toBe(true);
+  });
+
+  it('#1326: unequipping the item removes its action from listUsableActions', () => {
+    const { orm, service, campaignId, encounterId, actor, aliceChar } = seed();
+    const item = addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
+
+    expect(service.listUsableActions(encounterId, actor, alice, 'player')).toHaveLength(4);
+
+    orm.update(inventoryItems).set({ equipped: false, equipSlot: null }).where(eq(inventoryItems.id, item.id)).run();
+
+    const afterUnequip = service.listUsableActions(encounterId, actor, alice, 'player');
+    expect(afterUnequip).toHaveLength(3);
+    expect(afterUnequip.some((a) => a.name === 'Dagger')).toBe(false);
+  });
+
+  it('#1326: an equipped item with NO authored action contributes nothing (no auto-generated attack)', () => {
+    const { orm, service, campaignId, encounterId, actor, aliceChar } = seed();
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'worn' });
+
+    expect(service.listUsableActions(encounterId, actor, alice, 'player')).toHaveLength(3);
+  });
+
+  it('#1326: an equipped item action is resolvable and applyable through the existing action pipeline (by index and by name)', () => {
+    const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
+
+    // By index (3 = after the 3 manual actions).
+    const byIndex = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 3, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    expect(byIndex.applied).toBe(true);
+    service.undo(encounterId, byIndex.undoToken!, alice, 'player');
+    orm.update(combatants).set({ turnState: JSON.stringify({}) }).where(eq(combatants.id, actor)).run();
+
+    // By name too.
+    const byName = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Dagger', targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    expect(byName.applied).toBe(true);
+    expect(byName.resolution.actionName).toBe('Dagger');
   });
 
   it('a player resolves + commits their own PC attack against a monster, atomically, then undoes it', () => {

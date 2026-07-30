@@ -432,6 +432,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(MIGRATION_NAMES).toContain('0090_trash_soft_delete_701');
       expect(MIGRATION_NAMES).toContain('0149_ensure_soft_delete_columns_701');
+      expect(MIGRATION_NAMES).toContain('0150_inventory_items_equip_1326');
+      // Fresh DBs get the equip columns straight from BOOTSTRAP_SQL (issue #1326).
+      expect(columnNames(sqlite, 'inventory_items')).toEqual(
+        expect.arrayContaining(['equipped', 'equip_slot', 'equipped_action']),
+      );
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
@@ -2272,6 +2277,63 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         .prepare("SELECT manifest_hash FROM rule_packs WHERE slug = 'legacy-srd'")
         .get() as { manifest_hash: string };
       expect(row.manifest_hash).toBe('');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('adds inventory_items equip/unequip columns when upgrading a pre-#1326 DB', () => {
+    expect(MIGRATION_NAMES).toContain('0150_inventory_items_equip_1326');
+
+    // Start from a fully-migrated DB, seed a live item, then rewind inventory_items to its
+    // pre-#1326 shape (no equipped/equip_slot/equipped_action columns, migration un-recorded)
+    // — the same shape a DB last booted before #1326 would present on upgrade.
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    const ts = new Date().toISOString();
+    seeded.sqlite.prepare(`INSERT INTO campaigns (name, created_at, updated_at) VALUES ('Upgrade Campaign', ?, ?)`).run(ts, ts);
+    const campaignId = (seeded.sqlite.prepare("SELECT id FROM campaigns WHERE name = 'Upgrade Campaign'").get() as { id: number }).id;
+    seeded.sqlite
+      .prepare(
+        `INSERT INTO inventory_items (campaign_id, owner_type, name, qty, notes, icon_slug, created_at, updated_at)
+         VALUES (?, 'party', 'Legacy Rope', 1, '', '', ?, ?)`,
+      )
+      .run(campaignId, ts, ts);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('DROP INDEX IF EXISTS idx_inventory_items_character_equipped');
+      legacy.exec('ALTER TABLE inventory_items DROP COLUMN equipped');
+      legacy.exec('ALTER TABLE inventory_items DROP COLUMN equip_slot');
+      legacy.exec('ALTER TABLE inventory_items DROP COLUMN equipped_action');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0150_inventory_items_equip_1326');
+      expect(columnNames(legacy, 'inventory_items')).not.toContain('equipped');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'inventory_items')).toEqual(
+        expect.arrayContaining(['equipped', 'equip_slot', 'equipped_action']),
+      );
+      expect(
+        (upgraded.sqlite
+          .prepare('SELECT name FROM __migrations WHERE name = ?')
+          .get('0150_inventory_items_equip_1326') as { name?: string })?.name,
+      ).toBe('0150_inventory_items_equip_1326');
+      expect(
+        (upgraded.sqlite.pragma('index_list(inventory_items)') as Array<{ name: string }>).map((i) => i.name),
+      ).toContain('idx_inventory_items_character_equipped');
+      // The pre-existing row upgrades as unequipped, never silently promoted.
+      const row = upgraded.sqlite.prepare("SELECT equipped, equip_slot FROM inventory_items WHERE name = 'Legacy Rope'").get() as {
+        equipped: number;
+        equip_slot: string | null;
+      };
+      expect(row.equipped).toBe(0);
+      expect(row.equip_slot).toBeNull();
     } finally {
       upgraded.sqlite.close();
     }

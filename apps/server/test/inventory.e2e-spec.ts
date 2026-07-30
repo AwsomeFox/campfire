@@ -622,6 +622,125 @@ describe('inventory & treasury (e2e)', () => {
     });
   });
 
+  describe('equip/unequip (issue #1326)', () => {
+    it('round-trips: equip requires a slot, unequip clears it, state persists on GET', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Longsword', ownerType: 'character', characterId: ownCharacterId });
+      expect(created.body.equipped).toBe(false);
+      expect(created.body.equipSlot).toBeNull();
+      const itemId = created.body.id;
+
+      // Equipping without a slot is rejected.
+      const noSlot = await request(server).patch(`/api/v1/inventory/${itemId}`).set(player).send({ equipped: true });
+      expect(noSlot.status).toBe(400);
+
+      const equipRes = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(equipRes.status).toBe(200);
+      expect(equipRes.body.equipped).toBe(true);
+      expect(equipRes.body.equipSlot).toBe('main-hand');
+
+      const getRes = await request(server).get(`/api/v1/inventory/${itemId}`).set(player);
+      expect(getRes.body.equipped).toBe(true);
+      expect(getRes.body.equipSlot).toBe('main-hand');
+
+      const unequipRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(player).send({ equipped: false });
+      expect(unequipRes.status).toBe(200);
+      expect(unequipRes.body.equipped).toBe(false);
+      // Unequipping clears the slot rather than leaving a stale value behind.
+      expect(unequipRes.body.equipSlot).toBeNull();
+    });
+
+    it('only the dm or the owning player may equip a character\'s item; a party-stash item cannot be equipped', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Shield', ownerType: 'character', characterId: ownCharacterId });
+      const itemId = created.body.id;
+
+      const otherEquip = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(otherPlayer)
+        .send({ equipped: true, equipSlot: 'off-hand' });
+      expect(otherEquip.status).toBe(403);
+
+      const dmEquip = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'off-hand' });
+      expect(dmEquip.status).toBe(200);
+      expect(dmEquip.body.equipped).toBe(true);
+
+      const partyItem = await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(dm).send({ name: 'Rope' });
+      const partyEquip = await request(server)
+        .patch(`/api/v1/inventory/${partyItem.body.id}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'worn' });
+      expect(partyEquip.status).toBe(400);
+    });
+
+    it('rejects a second item equipped into an already-occupied slot on the same character (409)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const sword = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Rapier', ownerType: 'character', characterId: ownCharacterId });
+      const dagger = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${sword.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(first.status).toBe(200);
+
+      const conflict = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('INVENTORY_SLOT_CONFLICT');
+
+      // Unequipping the incumbent frees the slot for the second item.
+      const freed = await request(server).patch(`/api/v1/inventory/${sword.body.id}`).set(player).send({ equipped: false });
+      expect(freed.status).toBe(200);
+      const retry = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(retry.status).toBe(200);
+    });
+
+    it('moving an equipped character item to the party stash auto-unequips it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Cloak', ownerType: 'character', characterId: ownCharacterId });
+      await request(server).patch(`/api/v1/inventory/${created.body.id}`).set(player).send({ equipped: true, equipSlot: 'worn' });
+
+      const moved = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({ ownerType: 'party', characterId: null });
+      expect(moved.status).toBe(200);
+      expect(moved.body.equipped).toBe(false);
+      expect(moved.body.equipSlot).toBeNull();
+    });
+  });
+
   describe('treasury', () => {
     it('GET returns a zeroed treasury before any writes', async () => {
       const server = ctx.app.getHttpServer();

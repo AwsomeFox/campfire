@@ -1455,6 +1455,9 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   compendium_ref TEXT,
   compendium_snapshot TEXT,
   compendium_state TEXT,
+  equipped INTEGER NOT NULL DEFAULT 0,
+  equip_slot TEXT,
+  equipped_action TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT,
@@ -2114,6 +2117,7 @@ CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaig
 CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_character_equipped ON inventory_items(character_id, equipped);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
 CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);

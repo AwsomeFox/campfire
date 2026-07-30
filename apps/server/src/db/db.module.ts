@@ -1564,6 +1564,29 @@ function migrateInventoryItemsCompendium738(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0150 (issue #1326): equip/unequip state on inventory items. `equipped`
+ * defaults to 0 (false) so every existing row upgrades as unequipped — no item is
+ * silently promoted to an active-loadout weapon just because it existed before this
+ * column did. `equip_slot` / `equipped_action` are additive TEXT columns (NULL on
+ * upgrade, same idiom as #738's compendium columns above).
+ */
+function migrateInventoryItemsEquip1326(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return; // fresh DB — BOOTSTRAP_SQL creates the columns directly.
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'equipped')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((c) => c.name === 'equip_slot')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equip_slot TEXT');
+  }
+  if (!columns.some((c) => c.name === 'equipped_action')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped_action TEXT');
+  }
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_inventory_items_character_equipped ON inventory_items(character_id, equipped)');
+}
+
+/**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
  * no table rebuild needed, same shape as the icon_slug migrations above. Existing
@@ -4781,6 +4804,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0148_rule_packs_manifest_hash_1518', run: migrateRulePacksTableForManifestHash },
   // #701 soft-delete schema safety check: guarantees all 14 entity tables carry `deleted_at`.
   { name: '0149_ensure_soft_delete_columns_701', run: migrateEnsureSoftDeleteColumns701 },
+  // #1326 — inventory equip/unequip state + the equipped-item action projection.
+  { name: '0150_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
 ];
 
 /**

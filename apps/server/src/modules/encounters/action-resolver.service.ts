@@ -55,7 +55,7 @@ import {
   statblockSectionHasEntries,
   type ActionEconomySlotKind,
   type ActionRollFn,
-  type CharacterAction,
+  CharacterAction,
   type OutcomeBranch,
   type OutcomeKey,
   type PendingConcentrationCheck,
@@ -66,7 +66,7 @@ import {
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
+import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
@@ -349,6 +349,50 @@ export class ActionResolverService {
     return expandStatblockActions(data, adapter, c?.ruleSystem ?? '');
   }
 
+  /**
+   * Structured actions granted by a character's currently EQUIPPED inventory items
+   * (issue #1326) — an item only contributes when it carries an authored
+   * `equippedAction` (compendium-derived auto-generation is out of scope; see the
+   * issue). Ordered by item id so the index space is stable across calls, which
+   * matters because {@link listUsableActions} and {@link resolveSpec} both append
+   * these AFTER the character's manually-authored `character.actions`, and the apply
+   * path resolves an action purely by that combined index/name.
+   */
+  private equippedItemActions(characterId: number, campaignId: number): CharacterAction[] {
+    const rows = this.db
+      .select({ equippedAction: inventoryItems.equippedAction })
+      .from(inventoryItems)
+      .where(
+        and(
+          eq(inventoryItems.characterId, characterId),
+          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.equipped, true),
+          isNull(inventoryItems.deletedAt),
+        ),
+      )
+      .orderBy(inventoryItems.id)
+      .all();
+    const actions: CharacterAction[] = [];
+    for (const row of rows) {
+      if (!row.equippedAction) continue;
+      const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
+      if (parsed.success) actions.push(parsed.data);
+    }
+    return actions;
+  }
+
+  /**
+   * A character's full usable-action list (issue #1326): hand-authored sheet actions
+   * FIRST, then equipped-item actions appended — merged, never replacing, and in one
+   * stable index space so `resolveSpec`'s actionIndex lookup and `listUsableActions`
+   * agree on what index N means for this character right now.
+   */
+  private characterActionRows(character: typeof characters.$inferSelect): Array<Record<string, unknown>> {
+    const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
+    const equipped = this.equippedItemActions(character.id, character.campaignId) as unknown as Array<Record<string, unknown>>;
+    return [...manual, ...equipped];
+  }
+
   private actionToUsable(a: CharacterAction, index: number): UsableAction {
     const spec = a.spec ?? null;
     return UsableAction.parse({
@@ -425,7 +469,9 @@ export class ActionResolverService {
     }
     const character = this.linkedCharacter(actor);
     if (character) {
-      const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
+      // Issue #1326: sheet actions + equipped-item actions, same combined index space
+      // listUsableActions() returns.
+      const actions = this.characterActionRows(character);
       let idx = req.actionIndex ?? -1;
       if (idx < 0 && req.actionName) idx = actions.findIndex((a) => String(a?.name ?? '') === req.actionName);
       if (idx < 0 || idx >= actions.length) {
@@ -473,9 +519,11 @@ export class ActionResolverService {
   // -------------------------------------------------------------------------
 
   /**
-   * List a combatant's usable actions (issue #414, #425). Characters use sheet actions;
-   * monsters/NPCs use inline statblocks or expanded compendium actions. A player may list
-   * only their own character's actions; the DM may list any.
+   * List a combatant's usable actions (issue #414, #425, #1326). Characters use their
+   * hand-authored sheet actions PLUS any equipped inventory item's action (merged, in
+   * that order — equipping a longsword adds an attack without touching the manually
+   * authored list); monsters/NPCs use inline statblocks or expanded compendium actions.
+   * A player may list only their own character's actions; the DM may list any.
    */
   listUsableActions(encounterId: number, combatantId: number, user: RequestUser, role: Role): UsableAction[] {
     const encounter = this.encounterRowOrThrow(encounterId);
@@ -486,7 +534,7 @@ export class ActionResolverService {
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
-      const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
+      const actions = this.characterActionRows(character);
       return actions.map((a, index) => {
         const parsed = ActionSpec.safeParse(a?.spec);
         const spec = parsed.success ? parsed.data : null;
