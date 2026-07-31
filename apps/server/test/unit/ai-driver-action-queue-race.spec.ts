@@ -50,10 +50,10 @@ describe('AiDriverService action queue — concurrent enqueue race (#1586)', () 
     const stream = { emit: jest.fn(), streamFor: jest.fn() };
     const notifications = {};
     const supportPreferences = { listForPublicAiNarration: jest.fn<any>().mockResolvedValue([]) };
-    const resolver = { resolveEffectiveConfig: jest.fn() };
+    const resolver = { resolveEffectiveConfig: jest.fn(), resolve: jest.fn<any>().mockResolvedValue({ name: 'mock' }) };
     const campaigns = { getOrThrow: jest.fn<any>().mockResolvedValue({ id: CAMPAIGN_ID, narrationLanguage: 'en' }) };
     const rules = {};
-    const encounters = {};
+    const encounters = { listForCampaign: jest.fn<any>().mockResolvedValue([]) };
     const members = { listForCampaign: jest.fn<any>().mockResolvedValue([]) };
     const characters = { getOrThrow: jest.fn() };
     // Each queued entry records a player.action row before it is pushed — a distinct seq per
@@ -172,5 +172,31 @@ describe('AiDriverService action queue — concurrent enqueue race (#1586)', () 
     // array and the returned promise would never settle.
     releaseSeat();
     await expect(p).rejects.toThrow(/torn down/);
+  });
+
+  it('turn completion during getActionQueueDepth yield falls through to run turn directly (#1497)', async () => {
+    let releaseSeat!: () => void;
+    const seatGate = new Promise<void>((r) => { releaseSeat = r; });
+    aiDm.getSeat.mockImplementation(() => seatGate.then(() => ({ tokenBudget: 1000, tokensUsed: 0, actionQueueDepth: 5 })));
+
+    const session = (driver as any).ensureSession(CAMPAIGN_ID);
+    session.status = 'running';
+
+    // Start a runTurn that will yield on getActionQueueDepth while session is running.
+    const p = driver.runTurn(CAMPAIGN_ID, user('player-1'), 'I search the room', {});
+    await flush();
+
+    // While player-1 is yielding on getActionQueueDepth, the running turn completes and sets status to 'idle'.
+    session.status = 'idle';
+
+    // Release getSeat gate so player-1 resumes.
+    releaseSeat();
+
+    // Since status became idle, player-1 does not queue; it falls through to run the turn directly.
+    // Awaiting p confirms the turn runs to completion rather than hanging or queueing.
+    const res = await p;
+    expect(res).toBeDefined();
+    expect((driver as any).actionQueues.get(CAMPAIGN_ID)).toBeUndefined();
+    expect(session.status).toBe('idle');
   });
 });

@@ -4034,31 +4034,34 @@ export class AiDriverService {
         this.actionQueues.set(campaignId, queue);
       }
       const maxDepth = await this.getActionQueueDepth(campaignId);
-      // #1497 review — re-validate after the yield: if teardownSession or drainQueue removed
-      // the map entry while we were awaiting, the local `queue` reference is orphaned — pushing
-      // onto it would create a promise that no drainQueue or teardown can ever settle.
+      // #1497 review — re-validate after the yield:
+      // 1. If teardownSession or flushActionQueue removed or replaced the map entry while we yielded,
+      //    the local `queue` reference was orphaned — throw ConflictException.
       if (this.actionQueues.get(campaignId) !== queue) {
         throw new ConflictException('AI DM session was torn down while queueing; please retry.');
       }
-      if (queue.length >= maxDepth) {
-        throw new ConflictException(
-          `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
-        );
+      // 2. If the turn finished naturally while we yielded (queue was empty when drainQueue ran),
+      //    session.status is no longer 'running'. Clean up the empty queue array and fall through so
+      //    this caller executes the turn directly instead of parking an entry nothing will drain.
+      if (session.status !== 'running') {
+        this.actionQueues.delete(campaignId);
+      } else {
+        if (queue.length >= maxDepth) {
+          throw new ConflictException(
+            `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
+          );
+        }
+        // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
+        // sees who queued what while the current turn is still narrating (#572). Recording it
+        // only when it dequeues would recreate the original bug for queued actions.
+        const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+        return new Promise((resolve, reject) => {
+          // Carry the seq forward: when this entry is finally dequeued the row is buried under
+          // the narration of the turn that was running, so it can no longer be found by position.
+          const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+          queue!.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
+        });
       }
-      // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
-      // sees who queued what while the current turn is still narrating (#572). Recording it
-      // only when it dequeues would recreate the original bug for queued actions.
-      const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
-      return new Promise((resolve, reject) => {
-        // Carry the seq forward: when this entry is finally dequeued the row is buried under
-        // the narration of the turn that was running, so it can no longer be found by position.
-        const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
-        // `queue` is already the array installed in the map above (created here, or handed
-        // back by a concurrent caller's `.get()`) — push onto it directly. No `.set()` needed:
-        // mutating the array in place is visible to every holder of the same reference,
-        // and re-`.set()`-ing here is exactly the statement whose race this fix removes.
-        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
-      });
     }
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
