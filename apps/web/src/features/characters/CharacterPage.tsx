@@ -1430,13 +1430,8 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   disabled={busy}
                   aria-pressed={proficient}
                   aria-label={saveProficiencyLabel(k, proficient)}
-<<<<<<< HEAD
-                  className="absolute top-0 right-0 min-w-[24px] min-h-[24px] inline-flex items-center justify-center p-1"
-                  style={{ background: 'transparent', border: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
-=======
                   className="cf-target-44 absolute top-0.5 right-0.5"
                   style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
->>>>>>> a9da06f84 (feat(web): improve character sheet accessibility (fixes #1488))
                   title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                 >
                   <span aria-hidden="true">{proficient ? '●' : '○'}</span>
