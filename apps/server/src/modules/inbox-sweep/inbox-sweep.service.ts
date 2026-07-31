@@ -75,13 +75,13 @@ class StaleInboxSweepItemError extends Error {
  * exactly how two call sites (an inline classifier-error branch and the main per-item loop)
  * independently reached opposite answers for the identical race-recovered case (#1724).
  */
-interface SweepOutcome {
+export interface SweepOutcome {
   result: InboxSweepItemResult;
   recovered: boolean;
 }
 
 /** Running per-outcome counts for one `sweep()` call. See `tallyOutcome`. */
-interface SweepCounts {
+export interface SweepCounts {
   proposed: number;
   skipped: number;
   errored: number;
@@ -91,7 +91,7 @@ interface SweepCounts {
   newlyErrored: number;
 }
 
-function freshOutcome(result: InboxSweepItemResult): SweepOutcome {
+export function freshOutcome(result: InboxSweepItemResult): SweepOutcome {
   return { result, recovered: false };
 }
 
@@ -101,7 +101,7 @@ function freshOutcome(result: InboxSweepItemResult): SweepOutcome {
  * recovery, or a prior-run ledger row) always increments the total but never `newlyProposed`,
  * regardless of which of the several call sites below produced it.
  */
-function tallyOutcome(counts: SweepCounts, outcome: SweepOutcome): void {
+export function tallyOutcome(counts: SweepCounts, outcome: SweepOutcome): void {
   const { result, recovered } = outcome;
   if (result.outcome === 'proposed') {
     counts.proposed++;
