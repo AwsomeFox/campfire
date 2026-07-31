@@ -1767,21 +1767,10 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      // 13th Age NEVER removes, however complete the fetch looks. Alone among the importers it
-      // parses HTML, and it cannot tell "this <h3> is prose" from "this <h3> is a monster whose
-      // statblock markup drifted": parseMonster returns null for both (no table, or a table
-      // that no longer matches the level + `AC PD MD HP` signature), and collect() skips a null
-      // with a bare `continue` that does NOT increment skippedCount — because counting prose
-      // headings as skips would be wrong too. So an upstream markup change silently drops a
-      // real monster while every completeness signal stays clean, and removal would delete the
-      // installed copy and null out every combatant referencing it. Fail closed: the cost is a
-      // stale entry an operator can delete by hand, versus silent data loss.
-      //
-      // Do not re-enable this without first making the importer distinguish a drifted statblock
-      // from a prose heading and count the former — tracked in issue #1522.
-      completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION, {
-        dropsAreCounted: false,
-      }),
+      // archmage-importer distinguishes drifted statblocks from prose headings and counts
+      // drifted statblocks into skippedCount (issue #1522), so completeManifestOptions can
+      // safely check completeness to gate removal on re-import.
+      completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION),
     );
   }
 

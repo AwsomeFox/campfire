@@ -2053,17 +2053,11 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
 
 /**
  * Issue #500's removal half deletes installed entries absent from a "complete" fetch. That
- * inference is only sound if the importer cannot LOSE a real row without saying so, and the
- * 13th Age importer can: it parses HTML, and parseMonster returns null both for a genuine
- * prose heading and for a monster whose statblock markup drifted. collect() skips a null with
- * a bare `continue` that doesn't increment skippedCount, so a drifted monster disappears from
- * a manifest whose completeness signals all still read clean.
- *
- * Every gate in manifestIsComplete is deliberately satisfied here — both sections requested,
- * nothing counted as skipped, nothing truncated, everything far under the cap — so the only
- * thing standing between the drift and a deleted monster is the source-level opt-out.
+ * inference is sound because the 13th Age importer classifies drifted statblocks and counts them
+ * into skippedCount (issue #1522). A drifted statblock causes skippedCount > 0, which makes
+ * manifestIsComplete return false and blocks deletion of missing entries.
  */
-describe('rules / rule packs — a source that can silently drop rows never prunes (issue #500)', () => {
+describe('rules / rule packs — 13th Age importer drift protection and removal (issue #1522)', () => {
   let ctx: TestAppContext;
   const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'drift-dm' };
 
@@ -2075,7 +2069,7 @@ describe('rules / rule packs — a source that can silently drop rows never prun
     await closeTestApp(ctx);
   });
 
-  it('a drifted 13th Age statblock does not delete the installed monster', async () => {
+  it('a drifted 13th Age statblock increments skippedCount and does not delete the installed monster', async () => {
     const server = ctx.app.getHttpServer();
     const { startFakeArchmageDrifting } = await import('./fake-archmage');
     const fake = await startFakeArchmageDrifting();
@@ -2087,14 +2081,14 @@ describe('rules / rule packs — a source that can silently drop rows never prun
       const packId = first.pack.id;
 
       // Upstream re-themes its statblock tables: Dire Bear's defence labels are spelled out,
-      // so parseMonster no longer recognises it. The monster is still on the page.
+      // so parseMonster returns 'error' and increments skippedCount. The monster is still on the page.
       fake.drift();
 
       const second = await installOpen5e(server, dmHeaders, { source: 'archmage', url: fake.baseUrl, sections });
       expect(second.outcome).toBe('updated');
       // The re-import genuinely did not see Dire Bear...
       expect(second.added).toBe(0);
-      // ...and must not conclude it was removed upstream.
+      // ...and because skippedCount > 0, manifestIsComplete returned false, so it did NOT remove Dire Bear.
       expect(second.removed).toBe(0);
       expect(second.pack.entryCount).toBe(5);
 
