@@ -35,6 +35,11 @@ function getSeedData(): SeedData {
   return createFallbackProxy() as SeedData;
 }
 
+/** Returns whether global-setup.ts has written seed.json. */
+export function hasSeedData(): boolean {
+  return existsSync(resolve(AUTH_DIR, 'seed.json'));
+}
+
 /** Reads the ids written by global-setup.ts (evaluated lazily on property access). */
 export function seed(): SeedData {
   return new Proxy({} as SeedData, {
@@ -88,15 +93,12 @@ async function readError(res: APIResponse): Promise<string> {
  * chaining reopen+start and swallowing failures.
  */
 export async function restoreSeedEncounter(_page?: { request: APIRequestContext }): Promise<void> {
-  let seeded: SeedData;
-  try {
-    seeded = seed();
-  } catch {
+  if (!hasSeedData()) {
     // global-setup has not written seed.json yet (or the worker cannot see it).
     return;
   }
 
-  const { baseURL, campaignId, encounterId, endedEncounterId, bossId, skirmisherId } = seeded;
+  const { baseURL, campaignId, encounterId, endedEncounterId, bossId, skirmisherId } = seed();
   const dm = await request.newContext({
     baseURL: baseURL || undefined,
     storageState: stateFor('dm'),
