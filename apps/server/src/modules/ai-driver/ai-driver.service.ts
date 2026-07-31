@@ -126,7 +126,7 @@ const DEFAULT_STEP_MAX_TOKENS = 1024;
 const DEFAULT_MAX_STEPS = 6;
 const HARD_MAX_STEPS = 12;
 /** Default number of consecutive tool-call errors the model is allowed before the turn stops (#1497). */
-const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 3;
+const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 1;
 
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
