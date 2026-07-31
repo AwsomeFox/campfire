@@ -3244,11 +3244,9 @@ export default function RunSessionPage() {
                 }
               : undefined
           }
-          onEndTurn={() => {
-            if (currentCombatantId != null) {
-              endTurn.mutate({ expectedCurrentCombatantId: currentCombatantId });
-            }
-          }}
+          onEndTurn={(expectedCurrentCombatantId) =>
+            endTurn.mutate({ expectedCurrentCombatantId })
+          }
           endTurnBusy={endTurn.isPending}
         />
       )}

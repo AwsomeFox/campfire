@@ -43,8 +43,10 @@ interface TurnWorkspaceProps {
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   /** Issue #425: DM uses a suggested monster action from the turn workspace. */
   onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
-  /** Issue #1456: the parent owns the single end-turn mutation so errors surface once. */
-  onEndTurn?: () => void;
+  /** Issue #1456: the parent owns the single end-turn mutation so errors surface once.
+   *  The workspace passes the combatant id from the /turn response it is rendering, which
+   *  is authoritative when the parent's encounter cache is briefly stale. */
+  onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
 }
 
@@ -415,7 +417,11 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={controlsDisabled} onClick={onEndTurn} data-testid="workspace-end-turn">
+          <Btn
+            disabled={controlsDisabled}
+            onClick={() => onEndTurn?.(turn.current!.combatantId)}
+            data-testid="workspace-end-turn"
+          >
             Next turn →
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
