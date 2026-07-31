@@ -80,7 +80,7 @@ describe('Issue #1498 AI DM Live Play Tool Surface & Turn Economy', () => {
   });
 
   describe('3. Encounter creation visibility default', () => {
-    it('defaults driver-created encounter hidden flag to false', () => {
+    it('drops hidden arg from create_encounter so private-by-default rule applies', () => {
       const s = session();
       const res = guardDriverLivePlayArgs(
         'create_encounter',
@@ -89,11 +89,11 @@ describe('Issue #1498 AI DM Live Play Tool Surface & Turn Economy', () => {
       );
       expect(res.ok).toBe(true);
       if (res.ok) {
-        expect(res.args.hidden).toBe(false);
+        expect(res.args.hidden).toBeUndefined();
       }
     });
 
-    it('respects explicit boolean hidden arg on create_encounter', () => {
+    it('drops explicit hidden arg from create_encounter', () => {
       const s = session();
       const res = guardDriverLivePlayArgs(
         'create_encounter',
@@ -102,7 +102,7 @@ describe('Issue #1498 AI DM Live Play Tool Surface & Turn Economy', () => {
       );
       expect(res.ok).toBe(true);
       if (res.ok) {
-        expect(res.args.hidden).toBe(true);
+        expect(res.args.hidden).toBeUndefined();
       }
     });
   });
