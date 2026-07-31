@@ -1455,6 +1455,11 @@ export class ExportService {
         // provenance survives export, not rendered to markdown.
         note: 'AI scribe job log with generation provenance; machine copy in campaign.json.',
       },
+      aiScribeJobsTruncated: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Count of omitted no-op scribe jobs when exported list is bounded; machine copy in campaign.json.',
+      },
       proposals: { kind: 'markdown-folder', path: 'proposals/' },
       encounters: { kind: 'markdown-folder', path: 'encounters/' },
       factions: { kind: 'markdown-folder', path: 'factions/' },
