@@ -6568,7 +6568,7 @@ export class EncountersService {
         if (dead) {
           nextStatus = 'dead';
         } else if (priorStatus === 'dead') {
-          nextStatus = row.hpCurrent > 0 ? 'active' : 'dead';
+          nextStatus = row.deathState !== 'dead' ? 'active' : 'dead';
         } else if (priorStatus && priorStatus !== 'active') {
           nextStatus = priorStatus;
         } else {
