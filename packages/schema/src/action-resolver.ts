@@ -704,6 +704,14 @@ export const ActionUndoTarget = z.object({
   deathSaveSuccessesBefore: z.number().int(),
   deathSaveFailuresBefore: z.number().int(),
   conditionsBefore: z.array(z.string()),
+  // Issue #1452: full condition-instances snapshot, stored as JSON so undo can
+  // restore structured instances instead of re-deriving them from names.
+  conditionInstancesBeforeJson: z.string().optional(),
+  // Issue #1452: full turn-state snapshot, stored as JSON for the same reason.
+  turnStateBeforeJson: z.string().optional(),
+  // Issue #1452: true for combatants added only because a cascade touched them;
+  // they must be restored on undo but are not re-checked against the action's target-allow rule.
+  isCascadeSnapshot: z.boolean().optional(),
   effectIdsAdded: z.array(z.string()).default([]),
 });
 export type ActionUndoTarget = z.infer<typeof ActionUndoTarget>;

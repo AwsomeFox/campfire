@@ -29,6 +29,7 @@ import {
   computeSaveDc,
   CombatantStatblock,
   CombatantTurnState,
+  ConditionInstance,
   criticalDamageRuleForAdapter,
   expandStatblockActions,
   isResolvableSpec,
@@ -60,6 +61,7 @@ import {
   type OutcomeKey,
   type PendingConcentrationCheck,
   type ResolverAdapter,
+  MAX_PENDING_CONCENTRATION_CHECKS,
   type RuleSystemAdapter,
   type SpellSlotMap,
   type TargetDefenses,
@@ -71,13 +73,14 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import { conditionWriteSetFromInstances, conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
   applyCombatantHp,
+  cascadeConcentrationLoss,
   concentrationCheckForDamage,
   enqueueConcentrationCheck,
   type CombatantHpState,
@@ -88,6 +91,8 @@ type ResolvedActionEconomyCost = {
   kind: ActionEconomySlotKind | 'legendary';
   max: number | null;
 };
+
+type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 /** A sheet action has no durable id. Store a canonical content fingerprint with a pending
  * resolution so apply() can reject a same-named replacement after an edit or reorder. */
@@ -1505,6 +1510,7 @@ export class ActionResolverService {
     const undoTargets: ActionUndoToken['targets'] = [];
     let concentrationBefore: string | null = null;
     let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
+    let actorConcentrationTouched = false;
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
 
@@ -1668,12 +1674,17 @@ export class ActionResolverService {
         }
       }
 
+      // Issue #1452: snapshot all resolution targets before any consequences are written,
+      // so cascade snapshots added later in the loop do not overwrite a target's own
+      // pre-apply condition instances.
+      const targetUndoById = new Map<number, ActionUndoToken['targets'][number]>();
       for (const t of resolution.targets) {
         const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
         if (!fresh) continue;
         const conditionsBefore = fromJsonText<string[]>(fresh.conditions, []);
-        const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
-        undoTargets.push({
+        const conditionInstancesBefore = readConditionInstances(fresh.conditionInstances, fresh.conditions);
+        const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
+        const snapshot = {
           combatantId: fresh.id,
           hpBefore: fresh.hpCurrent,
           hpTempBefore: fresh.hpTemp,
@@ -1681,10 +1692,95 @@ export class ActionResolverService {
           deathSaveSuccessesBefore: fresh.deathSaveSuccesses,
           deathSaveFailuresBefore: fresh.deathSaveFailures,
           conditionsBefore: [...conditionsBefore],
+          conditionInstancesBeforeJson: toJsonText(conditionInstancesBefore),
+          turnStateBeforeJson: toJsonText(targetTurnState),
           effectIdsAdded: [],
-        });
-        const undoRef = undoTargets[undoTargets.length - 1];
+        };
+        undoTargets.push(snapshot);
+        targetUndoById.set(fresh.id, snapshot);
+      }
 
+      // Spend the actor's resources: action-economy slot, spell slot, concentration.
+      // Issue #1452: break prior concentration BEFORE applying target consequences, so re-casting
+      // a sustained spell (or casting a new concentration spell) clears the actor's old concentration
+      // effects first, allowing target resolution to apply fresh condition instances cleanly.
+      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
+      if (actorFresh) {
+        const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
+        if (resolution.costSlot && resolution.costCount > 0) {
+          this.spendActionEconomyCost(
+            turnState,
+            this.resolveActionEconomyCost(actorFresh, adapter, resolution.costSlot),
+            resolution.costCount,
+          );
+        }
+        const actorDropped = actorFresh.hpCurrent === 0 || actorFresh.deathState === 'dying' || actorFresh.deathState === 'dead';
+        const actorIsConcentrating =
+          turnState.concentration != null ||
+          concentrationBefore != null ||
+          tx
+            .select({ conditionInstances: combatants.conditionInstances, conditions: combatants.conditions })
+            .from(combatants)
+            .where(eq(combatants.encounterId, encounter.id))
+            .all()
+            .some((candidate) =>
+              readConditionInstances(candidate.conditionInstances, candidate.conditions).some(
+                (condition) => condition.isConcentration && condition.sourceCombatantId === actor.id,
+              ),
+            );
+        actorConcentrationTouched = resolution.startsConcentration || (actorIsConcentrating && actorDropped);
+        if (actorConcentrationTouched) {
+          // Issue #1452: before breaking the actor's concentration, snapshot the condition
+          // instances of any non-target combatant that is currently sustaining the actor's
+          // spell, so undoing this action can restore the replaced effect on those targets.
+          const existingTargetIds = new Set(undoTargets.map((u) => u.combatantId));
+          const allRows = tx
+            .select()
+            .from(combatants)
+            .where(eq(combatants.encounterId, encounter.id))
+            .all();
+          for (const row of allRows) {
+            if (existingTargetIds.has(row.id)) continue;
+            const instances = readConditionInstances(row.conditionInstances, row.conditions);
+            if (instances.some((condition) => condition.isConcentration && condition.sourceCombatantId === actor.id)) {
+              undoTargets.push({
+                combatantId: row.id,
+                hpBefore: row.hpCurrent,
+                hpTempBefore: row.hpTemp,
+                deathStateBefore: row.deathState,
+                deathSaveSuccessesBefore: row.deathSaveSuccesses,
+                deathSaveFailuresBefore: row.deathSaveFailures,
+                conditionsBefore: [...fromJsonText<string[]>(row.conditions, [])],
+                conditionInstancesBeforeJson: toJsonText(instances),
+                isCascadeSnapshot: true,
+                effectIdsAdded: [],
+              });
+            }
+          }
+
+          this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState);
+        }
+        if (resolution.startsConcentration) {
+          // Queued saves belong to the PRIOR effect and must never break the new one,
+          // even when no live link made the actor look like it was concentrating.
+          turnState.pendingConcentrationChecks = [];
+          if (!actorDropped) {
+            turnState.concentration = resolution.actionName;
+          }
+        }
+        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
+      }
+
+      for (const t of resolution.targets) {
+        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
+        if (!fresh) continue;
+        const undoRef = targetUndoById.get(fresh.id);
+        if (!undoRef) continue;
+        const liveTargetTurnState = CombatantTurnState.parse(
+          fromJsonText<unknown>(fresh.turnState, null) ?? {},
+        );
+        const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
+        const conditionsBefore = fromJsonText<string[]>(fresh.conditions, []);
         const net = t.healing - t.totalDamage;
         const state: CombatantHpState = {
           kind: fresh.kind as CombatantHpState['kind'],
@@ -1700,17 +1796,19 @@ export class ActionResolverService {
           // Temp HP doesn't stack — take the higher of current and the grant.
           hpTemp: t.tempHp > 0 ? Math.max(fresh.hpTemp, t.tempHp) : undefined,
         });
+        const isConcentratingForDamage =
+          concentratingCombatantIds.has(fresh.id) &&
+          !(fresh.id === actor.id && resolution.startsConcentration);
         const concentrationCheck = concentrationCheckForDamage(
-          concentratingCombatantIds.has(fresh.id),
+          isConcentratingForDamage,
           t.totalDamage,
         );
-        const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
         const nextTargetTurnState = concentrationCheck
-          ? enqueueConcentrationCheck(targetTurnState, {
+          ? enqueueConcentrationCheck(liveTargetTurnState, {
               id: `action-${chainId}-${fresh.id}`,
               ...concentrationCheck,
             })
-          : targetTurnState;
+          : liveTargetTurnState;
 
         // Conditions: union (idempotent).
         const conditions = new Set(conditionsBefore);
@@ -1745,6 +1843,8 @@ export class ActionResolverService {
             turnState: toJsonText(nextTargetTurnState),
             // Structured instances must move with the names (see common/conditions.ts):
             // a resolved action that removes a condition has to drop its instance too.
+            // Issue #1452: use the live conditionInstances so an earlier target's
+            // concentration cascade is not resurrected when writing this target.
             ...conditionWriteSetFromNames([...conditions], fresh.conditionInstances),
             activeEffects: toJsonText(nextEffects),
           })
@@ -1758,7 +1858,6 @@ export class ActionResolverService {
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
-          const sheetPriorInstances = sheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
               hpCurrent: result.hpCurrent,
@@ -1768,11 +1867,51 @@ export class ActionResolverService {
               deathSaveFailures: result.deathSaveFailures,
               // #1047: the sheet has a structured copy now too, so the mirror must move
               // the pair or it recreates the #423 desync one table over.
-              ...sheetConditionWriteSetFromNames([...conditions], sheetPriorInstances),
+              // The live condition name list is the combatant's; the structured instance
+              // prior must come from the sheet itself or legacy rows will wipe sheet detail.
+              ...sheetConditionWriteSetFromNames([...conditions], sheetRow?.conditionInstances ?? null),
               updatedAt: nowIso(),
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+        }
+
+        // Issue #1452: if a concentrating target is dropped by the resolved attack, break
+        // its concentration the same way tracker damage does. Skip self-targets; the actor
+        // break below handles them and avoids a double cascade.
+        const targetDropped =
+          result.hpCurrent === 0 || result.deathState === 'dying' || result.deathState === 'dead';
+        if (targetDropped && fresh.id !== actor.id && concentratingCombatantIds.has(fresh.id)) {
+          // Issue #1452: before breaking the target's concentration, snapshot the condition
+          // instances of any other combatant sustaining the target's spell, so undo can
+          // restore them.
+          const existingTargetIds = new Set(undoTargets.map((u) => u.combatantId));
+          const allRows = tx
+            .select()
+            .from(combatants)
+            .where(eq(combatants.encounterId, encounter.id))
+            .all();
+          for (const row of allRows) {
+            if (existingTargetIds.has(row.id)) continue;
+            const instances = readConditionInstances(row.conditionInstances, row.conditions);
+            if (instances.some((condition) => condition.isConcentration && condition.sourceCombatantId === fresh.id)) {
+              undoTargets.push({
+                combatantId: row.id,
+                hpBefore: row.hpCurrent,
+                hpTempBefore: row.hpTemp,
+                deathStateBefore: row.deathState,
+                deathSaveSuccessesBefore: row.deathSaveSuccesses,
+                deathSaveFailuresBefore: row.deathSaveFailures,
+                conditionsBefore: [...fromJsonText<string[]>(row.conditions, [])],
+                conditionInstancesBeforeJson: toJsonText(instances),
+                isCascadeSnapshot: true,
+                effectIdsAdded: [],
+              });
+            }
+          }
+
+          this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState);
+          tx.update(combatants).set({ turnState: toJsonText(nextTargetTurnState) }).where(eq(combatants.id, fresh.id)).run();
         }
 
         // Combat-log lines (name-free detail; deltas only — never a monster's exact HP).
@@ -1783,28 +1922,6 @@ export class ActionResolverService {
         if (result.deathState === 'dead' && fresh.deathState !== 'dead') consequenceLogs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'died' });
         else if ((fresh.kind === 'monster' || fresh.kind === 'npc') && result.hpCurrent <= 0 && fresh.hpCurrent > 0)
           consequenceLogs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'dropped to 0 HP' });
-      }
-
-      // Spend the actor's resources: action-economy slot, spell slot, concentration.
-      // #1637 — the action-economy spend, like spellSlotSpend, was already validated at the top
-      // of this transaction, before any consequence above was written — this is just the write.
-      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
-      if (actorFresh) {
-        const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
-        if (resolution.costSlot && resolution.costCount > 0) {
-          this.spendActionEconomyCost(
-            turnState,
-            this.resolveActionEconomyCost(actorFresh, adapter, resolution.costSlot),
-            resolution.costCount,
-          );
-        }
-        if (resolution.startsConcentration) {
-          // Starting this action's effect replaces the prior concentration; queued saves
-          // were created for that prior effect and must not be allowed to break the new one.
-          turnState.pendingConcentrationChecks = [];
-          turnState.concentration = resolution.actionName;
-        }
-        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
       // The spend was already validated (and the replacement blob computed) at the top of
       // this transaction, before any consequence above was written — this is just the write.
@@ -1833,7 +1950,7 @@ export class ActionResolverService {
           spellLevelSpent: resolution.spellLevelSpent,
           concentrationBefore,
           pendingConcentrationChecksBeforeJson: toJsonText(pendingConcentrationChecksBefore),
-          startedConcentration: resolution.startsConcentration,
+          startedConcentration: actorConcentrationTouched,
           targetsJson: toJsonText(undoTargets),
           createdAt: nowIso(),
         })
@@ -1880,7 +1997,7 @@ export class ActionResolverService {
       spellLevelSpent: resolution.spellLevelSpent,
       concentrationBefore,
       pendingConcentrationChecksBefore,
-      startedConcentration: resolution.startsConcentration,
+      startedConcentration: actorConcentrationTouched,
     });
   }
 
@@ -1965,6 +2082,7 @@ export class ActionResolverService {
     const targetsAllowParsed = ActionTargetAllow.safeParse(chain.targetsAllow);
     const targetsAllow: ActionTargetAllow = targetsAllowParsed.success ? targetsAllowParsed.data : 'any';
     const storedTargets = fromJsonText<ActionUndoTarget[]>(chain.targetsJson, []);
+    const actorIsStoredTarget = storedTargets.some((t) => t.combatantId === actor.id && !t.isCascadeSnapshot);
     // Issue #1449: re-run the same target-allow gate `apply()` enforced at commit time, for
     // defense in depth — every stored target that still EXISTS is scoped to this encounter
     // and legality-checked before anything is written. A target combatant can legitimately
@@ -1973,6 +2091,10 @@ export class ActionResolverService {
     // the revert loop below (`if (!fresh) continue`) — a REMOVED target is not the same as a
     // FORGED one, and only the latter should ever block an otherwise-legitimate undo.
     for (const t of storedTargets) {
+      // Issue #1452: cascade snapshots are added only to restore dropped conditions;
+      // they were never real targets of the action and must not be re-validated by the
+      // action's own target-allow rule.
+      if (t.isCascadeSnapshot) continue;
       const target = this.db
         .select()
         .from(combatants)
@@ -2016,25 +2138,59 @@ export class ActionResolverService {
         if (!fresh) continue;
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
         const keptEffects = effects.filter((e) => !t.effectIdsAdded.includes(String(e.id)));
-        const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
+        const parsedInstances = t.conditionInstancesBeforeJson
+          ? ConditionInstance.array().safeParse(fromJsonText<unknown>(t.conditionInstancesBeforeJson, []))
+          : null;
+        const conditionInstancesBefore = parsedInstances?.success ? parsedInstances.data : null;
+        // Issue #1452: undo must not clobber unrelated turn progress (movement, used slots,
+        // other pending saves). Start from the LIVE turn state, remove only this chain's
+        // queued check, then merge the concentration slice back from the pre-apply snapshot.
+        const liveTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
         const checkId = `action-${chain.id}-${fresh.id}`;
-        targetTurnState.pendingConcentrationChecks = targetTurnState.pendingConcentrationChecks.filter(
+        liveTurnState.pendingConcentrationChecks = liveTurnState.pendingConcentrationChecks.filter(
           (check) => check.id !== checkId,
         );
+        if (t.turnStateBeforeJson) {
+          const beforeTurnState = CombatantTurnState.parse(fromJsonText<unknown>(t.turnStateBeforeJson, null) ?? {});
+          // Issue #1452: only roll the concentration label back to the pre-apply value when
+          // this chain's effect (or the break it caused) is still the current one. If a later
+          // action changed concentration, leave that later value intact.
+          if (
+            liveTurnState.concentration === chain.actionName ||
+            (liveTurnState.concentration == null && beforeTurnState.concentration != null)
+          ) {
+            liveTurnState.concentration = beforeTurnState.concentration;
+          }
+          if (chain.startedConcentration) {
+            const liveIds = new Set(liveTurnState.pendingConcentrationChecks.map((c) => c.id));
+            const restored = beforeTurnState.pendingConcentrationChecks.filter((c) => !liveIds.has(c.id));
+            liveTurnState.pendingConcentrationChecks = [...restored, ...liveTurnState.pendingConcentrationChecks].slice(
+              -MAX_PENDING_CONCENTRATION_CHECKS,
+            );
+          }
+        }
+        // Issue #1452: cascade snapshots were never real targets; they only exist so undo can
+        // re-apply condition instances that a broken concentration removed. Their HP/effects
+        // must not be rolled back, or bystanders that took damage in the meantime would regress.
+        const hpRestore: Record<string, unknown> = t.isCascadeSnapshot
+          ? {}
+          : {
+              hpCurrent: t.hpBefore,
+              hpTemp: t.hpTempBefore,
+              deathState: t.deathStateBefore,
+              deathSaveSuccesses: t.deathSaveSuccessesBefore,
+              deathSaveFailures: t.deathSaveFailuresBefore,
+            };
         tx.update(combatants)
           .set({
-            hpCurrent: t.hpBefore,
-            hpTemp: t.hpTempBefore,
-            deathState: t.deathStateBefore,
-            deathSaveSuccesses: t.deathSaveSuccessesBefore,
-            deathSaveFailures: t.deathSaveFailuresBefore,
-            // UNDO is the worst place to half-revert. Restoring only the names left the
-            // structured instance the action had added, which the next write re-derived
-            // into visibility — the DM undoes, watches the condition come back, and has no
-            // model for why. Roll both columns back together (see common/conditions.ts).
-            ...conditionWriteSetFromNames(t.conditionsBefore, fresh.conditionInstances),
+            ...hpRestore,
+            // Issue #1452: when we stored full condition instances before the apply, use them
+            // to restore the exact structured state instead of re-deriving from names.
+            ...(conditionInstancesBefore
+              ? conditionWriteSetFromInstances(conditionInstancesBefore)
+              : conditionWriteSetFromNames(t.conditionsBefore, fresh.conditionInstances)),
             activeEffects: toJsonText(keptEffects),
-            turnState: toJsonText(targetTurnState),
+            turnState: toJsonText(liveTurnState),
           })
           .where(eq(combatants.id, fresh.id))
           .run();
@@ -2045,15 +2201,22 @@ export class ActionResolverService {
             .where(eq(characters.id, fresh.characterId))
             .get();
           const undoSheetPriorInstances = undoSheetRow?.conditionInstances ?? null;
+          const sheetHpRestore: Record<string, unknown> = t.isCascadeSnapshot
+            ? {}
+            : {
+                hpCurrent: t.hpBefore,
+                hpTemp: t.hpTempBefore,
+                deathState: t.deathStateBefore,
+                deathSaveSuccesses: t.deathSaveSuccessesBefore,
+                deathSaveFailures: t.deathSaveFailuresBefore,
+              };
           tx.update(characters)
             .set({
-              hpCurrent: t.hpBefore,
-              hpTemp: t.hpTempBefore,
-              deathState: t.deathStateBefore,
-              deathSaveSuccesses: t.deathSaveSuccessesBefore,
-              deathSaveFailures: t.deathSaveFailuresBefore,
-              // #1047: undo must roll the sheet's structured copy back too.
-              ...sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances),
+              ...sheetHpRestore,
+              // Issue #1452: mirror the combatant condition restore onto the linked sheet.
+              ...(conditionInstancesBefore
+                ? sheetConditionWriteSetFromInstances(conditionInstancesBefore)
+                : sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances)),
               updatedAt: nowIso(),
             })
             .where(eq(characters.id, fresh.characterId))
@@ -2078,11 +2241,20 @@ export class ActionResolverService {
             chain.costCount,
           );
         }
-        if (chain.startedConcentration) {
-          turnState.concentration = chain.concentrationBefore;
-          turnState.pendingConcentrationChecks = pendingConcentrationChecksBefore.map((check) => ({
-            ...check,
-          }));
+        if (chain.startedConcentration && !actorIsStoredTarget) {
+          // The actor's concentration was started or broken by this action and it is not one of
+          // the stored target rows (which already merged their turn-state slice). Restore the
+          // pre-apply concentration marker and pending checks only when this chain's effect is
+          // still the current one.
+          if (
+            turnState.concentration === chain.actionName ||
+            (turnState.concentration == null && chain.concentrationBefore != null)
+          ) {
+            turnState.concentration = chain.concentrationBefore;
+            turnState.pendingConcentrationChecks = pendingConcentrationChecksBefore.map((check) => ({
+              ...check,
+            }));
+          }
         }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
@@ -2141,5 +2313,77 @@ export class ActionResolverService {
 
     if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
     return { ok: true };
+  }
+
+  /**
+   * Break a combatant's concentration inside an apply transaction (issue #1452). Removes all
+   * condition instances sourced from the caster across the encounter, updates linked character
+   * sheets, logs one combat event per removed condition, and clears the caster's turn-state
+   * concentration + pending checks.
+   */
+  private breakConcentration(
+    tx: SyncDb,
+    encounterId: number,
+    round: number,
+    caster: { id: number; name: string },
+    turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] },
+  ): void {
+    const allRows = tx
+      .select({
+        id: combatants.id,
+        name: combatants.name,
+        characterId: combatants.characterId,
+        conditions: combatants.conditions,
+        conditionInstances: combatants.conditionInstances,
+      })
+      .from(combatants)
+      .where(eq(combatants.encounterId, encounterId))
+      .all();
+    const withInstances = allRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      characterId: r.characterId,
+      conditionInstances: readConditionInstances(r.conditionInstances, r.conditions),
+    }));
+    const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, caster.id);
+    const now = nowIso();
+    for (const [combatantId, instances] of updatedCombatants) {
+      const row = withInstances.find((row2) => row2.id === combatantId);
+      if (!row) continue;
+      const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      if (row.characterId != null) {
+        Object.assign(write, { sheetSyncedUpdatedAt: now });
+      }
+      tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
+      if (row.characterId != null) {
+        tx.update(characters)
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .where(eq(characters.id, row.characterId))
+          .run();
+      }
+    }
+    for (const r of removed) {
+      const targetName = allRows.find((row2) => row2.id === r.combatantId)?.name ?? 'Unknown';
+      tx.insert(encounterEvents)
+        .values({
+          encounterId,
+          round,
+          type: 'condition',
+          actor: caster.name,
+          actorId: caster.id,
+          target: targetName,
+          targetId: r.combatantId,
+          detail: `condition expired: ${r.condition.name} (concentration broken)`,
+          chainId: null,
+          parentEventId: null,
+          phase: null,
+          performedByJson: null,
+          metadataJson: null,
+          createdAt: now,
+        })
+        .run();
+    }
+    turnState.concentration = null;
+    turnState.pendingConcentrationChecks = [];
   }
 }

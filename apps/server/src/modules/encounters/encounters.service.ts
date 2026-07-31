@@ -43,6 +43,7 @@ import {
   retreatEncounterTurn,
   sortCombatants,
   sortEncountersForList,
+  concentrationCheckForDamage,
   tickConditionInstancesAtTurnEnd,
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
@@ -3851,7 +3852,7 @@ export class EncountersService {
       patch.removeConditionInstanceId !== undefined ||
       patch.updateConditionInstance !== undefined ||
       patch.conditionInstances !== undefined;
-    const conditionFieldsTouched = conditionsTouched || conditionInstancesTouched;
+    let conditionFieldsTouched = conditionsTouched || conditionInstancesTouched;
 
     const spFieldsTouched =
       patch.spSet !== undefined ||
@@ -3919,6 +3920,9 @@ export class EncountersService {
     // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
     let beforeConditions: Set<string> = new Set();
     let afterConditions: Set<string> = new Set();
+    // Issue #1452: when a concentrating combatant drops to 0 HP, we cascade the break
+    // and log one condition event per removed concentration-sourced instance.
+    let concentrationCascades: { combatantId: number; combatantName: string; condition: ConditionInstance }[] = [];
 
     // Issue #580 — per-intent idempotency. `hpDelta`/`spDelta`/`rpDelta`/`deathSaveRoll`
     // are RELATIVE writes: a retry after a lost response applies the damage a second
@@ -4059,9 +4063,12 @@ export class EncountersService {
 
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
+          const isDnd5e = adapter.id === DND5E_ADAPTER_ID;
           const shouldCheckConcentration =
-            adapter.id === DND5E_ADAPTER_ID && patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0;
+            isDnd5e && patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0;
           const turnState = parseTurnState(fresh.turnState);
+          // Issue #1452: concentration check/break knowledge is computed after the HP result
+          // so that absolute hpSet and explicit deathState transitions can break too.
           const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
@@ -4070,22 +4077,7 @@ export class EncountersService {
             deathState: patch.deathState !== undefined ? (patch.deathState as CombatantHpState['deathState']) : (fresh.deathState as CombatantHpState['deathState']),
             deathSaveSuccesses: fresh.deathSaveSuccesses,
             deathSaveFailures: fresh.deathSaveFailures,
-            isConcentrating:
-              shouldCheckConcentration &&
-              (turnState.concentration != null ||
-                tx
-                  .select({
-                    conditionInstances: combatants.conditionInstances,
-                    conditions: combatants.conditions,
-                  })
-                  .from(combatants)
-                  .where(eq(combatants.encounterId, encounterId))
-                  .all()
-                  .some((candidate) =>
-                    parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
-                      (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
-                    ),
-                  )),
+            isConcentrating: false,
           };
           const effectiveHpDelta = (() => {
             if (patch.hpDelta === undefined || patch.hpDelta >= 0) return patch.hpDelta;
@@ -4128,13 +4120,6 @@ export class EncountersService {
           if (patch.deathState !== undefined) {
             result.deathState = patch.deathState as any;
           }
-          if (shouldCheckConcentration && result.concentrationCheck) {
-            const queued = enqueueConcentrationCheck(turnState, {
-              id: `damage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
-              ...result.concentrationCheck,
-            });
-            writeSet.turnState = toJsonText(queued);
-          }
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && effectiveHpDelta !== undefined && effectiveHpDelta < 0) {
@@ -4156,6 +4141,67 @@ export class EncountersService {
             result.hpCurrent = sfResult.hpCurrent;
             result.hpTemp = sfResult.hpTemp;
             result.deathState = patch.deathState !== undefined ? patch.deathState : sfResult.deathState;
+          }
+
+          // Issue #1452: concentration auto-break is 5e-only and must be evaluated against
+          // the final HP/death state after Starfinder SP absorption has routed the damage.
+          // It also triggers on an explicit hpSet to 0 or a deathState transition to dying/dead.
+          const freshIsDown = fresh.hpCurrent === 0 || fresh.deathState === 'dying' || fresh.deathState === 'dead';
+          const resultIsDown = result.hpCurrent === 0 || result.deathState === 'dying' || result.deathState === 'dead';
+          const willBreakConcentration = isDnd5e && resultIsDown && !freshIsDown;
+          const needsConcentrationCheck = shouldCheckConcentration || willBreakConcentration;
+          const isConcentrating =
+            needsConcentrationCheck &&
+            (turnState.concentration != null ||
+              tx
+                .select({
+                  conditionInstances: combatants.conditionInstances,
+                  conditions: combatants.conditions,
+                })
+                .from(combatants)
+                .where(eq(combatants.encounterId, encounterId))
+                .all()
+                .some((candidate) =>
+                  parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
+                    (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
+                  ),
+                ));
+          if (shouldCheckConcentration) {
+            const damage = effectiveHpDelta !== undefined && effectiveHpDelta < 0 ? -effectiveHpDelta : 0;
+            result.concentrationCheck = concentrationCheckForDamage(isConcentrating, damage);
+          }
+          const concentrationBroken = willBreakConcentration && isConcentrating;
+          if (concentrationBroken) {
+            const { removed, casterInstances } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            concentrationCascades = removed;
+            writeSet.turnState = toJsonText(turnState);
+            if (conditionFieldsTouched) {
+              const existingInstances = parseConditionInstances(
+                writeSet.conditionInstances ?? null,
+                fromJsonText<string[]>(writeSet.conditions, []),
+              );
+              const filteredInstances = existingInstances.filter(
+                (i) => !(i.isConcentration && i.sourceCombatantId === combatantId),
+              );
+              const { conditions, conditionInstances } = conditionWriteSetFromInstances(filteredInstances);
+              writeSet.conditions = conditions;
+              writeSet.conditionInstances = conditionInstances;
+            } else {
+              const { conditions, conditionInstances } = conditionWriteSetFromInstances(casterInstances ?? []);
+              writeSet.conditions = conditions;
+              writeSet.conditionInstances = conditionInstances;
+              conditionFieldsTouched = true;
+              beforeConditions = new Set(
+                deriveConditionNames(parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, []))),
+              );
+              afterConditions = new Set(deriveConditionNames(casterInstances ?? []));
+            }
+          } else if (shouldCheckConcentration && result.concentrationCheck) {
+            const queued = enqueueConcentrationCheck(turnState, {
+              id: `damage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+              ...result.concentrationCheck,
+            });
+            writeSet.turnState = toJsonText(queued);
           }
 
           if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
@@ -4421,6 +4467,20 @@ export class EncountersService {
       }
     }
 
+    // Issue #1452: concentration-sourced conditions that were removed from OTHER combatants
+    // when this combatant's concentration broke. The caster's own condition deltas are already
+    // covered by the before/after set above, but every affected target gets its own log line.
+    for (const cascade of concentrationCascades) {
+      if (cascade.combatantId === combatantId) continue;
+      await this.appendEvent(encounterId, round, 'condition', {
+        actor: targetName,
+        actorId: targetCombatantId,
+        target: cascade.combatantName,
+        targetId: cascade.combatantId,
+        detail: `condition expired: ${cascade.condition.name} (concentration broken)`,
+      });
+    }
+
     // Reconcile the turn pointer after an initiative write while combat is running
     // (issue #715). Clearing a combatant's initiative (or rewriting it) re-sorts the
     // running order: a cleared combatant sinks below everyone with a roll (see
@@ -4462,6 +4522,7 @@ export class EncountersService {
     const expiresAt = new Date(Date.now() + 30_000).toISOString();
     let emittedEncounter!: typeof encounters.$inferSelect;
     let replayed = false;
+    let removedConcentrationCascades: { combatantId: number; combatantName: string; condition: ConditionInstance }[] = [];
 
     this.db.transaction((tx) => {
       // Both the transition and its undo snapshots must use one current encounter and
@@ -4565,17 +4626,6 @@ export class EncountersService {
           startingAfterRemoval = advanced.phase === 'combatant' && advanced.currentCombatantId !== null
             ? advanceRoster.find((combatant) => combatant.id === advanced.currentCombatantId) ?? null
             : null;
-          if (startingAfterRemoval) {
-            const startingRow = roster.find((row) => row.id === startingAfterRemoval!.id);
-            if (startingRow) {
-              startedCombatantSnapshot = {
-                id: startingRow.id,
-                turnState: startingRow.turnState,
-                conditions: startingRow.conditions,
-                conditionInstances: startingRow.conditionInstances,
-              };
-            }
-          }
         } else {
           // A lair slot resumes after the actor it points to. If that actor is
           // removed, select its successor through advanceTurn so dead/downed rows
@@ -4627,6 +4677,20 @@ export class EncountersService {
         }
       }
 
+      // Issue #1452: before deleting a concentrating combatant, break its concentration so
+      // condition instances it was sustaining on other combatants are not left orphaned.
+      const isConcentrating =
+        parseTurnState(snapshot.turnState).concentration != null ||
+        roster.some((row) =>
+          parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])).some(
+            (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
+          ),
+        );
+      if (isConcentrating) {
+        const { removed } = this.breakConcentration(tx, encounterId, combatantId, null, true);
+        removedConcentrationCascades = removed.filter((r) => r.combatantId !== combatantId);
+      }
+
       tx.delete(combatants).where(eq(combatants.id, combatantId)).run();
       if (wrappedToNextRound) {
         for (const row of roster) {
@@ -4646,12 +4710,40 @@ export class EncountersService {
       // regular advance, without manufacturing a second turn/audit event.
       if (startingAfterRemoval) {
         const starting = startingAfterRemoval;
+        // Issue #1452: the snapshot used to undo this removal must be captured AFTER
+        // the removed caster's concentration cascade, so undoing the removal leaves the
+        // starting combatant consistent with the other affected targets.
+        const liveSnapshotRow = tx
+          .select({ id: combatants.id, turnState: combatants.turnState, conditions: combatants.conditions, conditionInstances: combatants.conditionInstances })
+          .from(combatants)
+          .where(eq(combatants.id, starting.id))
+          .get();
+        if (liveSnapshotRow) {
+          startedCombatantSnapshot = {
+            id: liveSnapshotRow.id,
+            turnState: liveSnapshotRow.turnState,
+            conditions: liveSnapshotRow.conditions,
+            conditionInstances: liveSnapshotRow.conditionInstances,
+          };
+        }
         const reset = resetTurnStateForStart(wrappedToNextRound ? resetLegendaryUsage(starting.turnState) : starting.turnState);
-        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+        // Issue #1452: the starting combatant's condition instances may have changed
+        // during the concentration break above. Re-read from the transaction so the
+        // start-of-turn tick operates on the post-cascade state.
+        const liveStartingRow = tx
+          .select({ conditionInstances: combatants.conditionInstances, conditions: combatants.conditions })
+          .from(combatants)
+          .where(eq(combatants.id, starting.id))
+          .get();
+        const liveStartingInstances = parseConditionInstances(
+          liveStartingRow?.conditionInstances ?? null,
+          fromJsonText<string[]>(liveStartingRow?.conditions, []),
+        );
+        const condTick = tickConditionInstancesAtTurnStart(liveStartingInstances);
         const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
         if (
           condTick.expired.length > 0 ||
-          condTick.kept.some((condition, index) => condition.roundsRemaining !== starting.conditionInstances?.[index]?.roundsRemaining)
+          condTick.kept.some((condition, index) => condition.roundsRemaining !== liveStartingInstances[index]?.roundsRemaining)
         ) {
           Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
         }
@@ -4692,6 +4784,14 @@ export class EncountersService {
     });
 
     if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    for (const cascade of removedConcentrationCascades) {
+      await this.appendEvent(encounterId, emittedEncounter.round, 'condition', {
+        actor: null,
+        target: cascade.combatantName,
+        targetId: cascade.combatantId,
+        detail: `condition expired: ${cascade.condition.name} (concentration broken)`,
+      });
+    }
     return { undoToken: receiptUndoToken, encounterId, combatantId };
   }
 
@@ -4789,6 +4889,17 @@ export class EncountersService {
         }
         restoredCharacterId = snapshot.characterId;
         restoredNpcId = snapshot.npcId;
+        // Issue #1452: a removed concentrating combatant had its concentration broken on
+        // the way out, and the undo snapshot does not capture the cascaded targets' prior
+        // condition instances. Restore the combatant, but clear its concentration marker so
+        // the state is self-consistent: a caster is not left "concentrating" on effects that
+        // no longer exist.
+        const restoredTurnState = parseTurnState(snapshot.turnState);
+        if (restoredTurnState.concentration != null) {
+          restoredTurnState.concentration = null;
+          restoredTurnState.pendingConcentrationChecks = [];
+          snapshot.turnState = toJsonText(restoredTurnState);
+        }
         tx.insert(combatants).values(snapshot).run();
         const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
@@ -6187,6 +6298,7 @@ export class EncountersService {
     }
 
     const logs: Array<{ detail: string }> = [];
+    let shouldNudge = false;
     let row!: typeof combatants.$inferSelect;
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     let legendaryMax = 0;
@@ -6276,31 +6388,19 @@ export class EncountersService {
         turnState.movementUsedFt = Math.max(0, next);
       }
 
-      const clearConcentration = (): void => {
-        turnState.concentration = null;
-        turnState.pendingConcentrationChecks = [];
-        const allRows = tx
-          .select({
-            id: combatants.id,
-            conditions: combatants.conditions,
-            conditionInstances: combatants.conditionInstances,
-          })
-          .from(combatants)
-          .where(eq(combatants.encounterId, encounterId))
-          .all();
-        const withInstances = allRows.map((r) => ({
-          id: r.id,
-          conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),
-        }));
-        const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
-        for (const [id, instances] of updatedCombatants) {
-          tx.update(combatants)
-            .set(conditionWriteSetFromInstances(instances))
-            .where(eq(combatants.id, id))
-            .run();
-        }
-        for (const r of removed) {
-          logs.push({ detail: `concentration link ended: ${r.condition.name}` });
+      const clearConcentration = (effectName?: string | null): void => {
+        const { removed } = this.breakConcentration(tx, encounterId, combatantId, turnState, false, effectName);
+        for (const cascade of removed) {
+          this.appendEventInTransaction(tx, encounterId, encounterRow.round, 'condition', {
+            actor: existing.name,
+            actorId: existing.id,
+            target: cascade.combatantName,
+            targetId: cascade.combatantId,
+            detail: `condition expired: ${cascade.condition.name} (concentration broken)`,
+          });
+          // Issue #1452: keep the post-commit SSE nudge firing when a cascade-only
+          // change cleared structured condition links without a normal log event.
+          shouldNudge = true;
         }
       };
 
@@ -6309,18 +6409,26 @@ export class EncountersService {
         if (concentrationChanged) {
           logs.push({ detail: patch.concentration ? `began concentrating on ${patch.concentration}` : 'concentration ended' });
         }
+        // Issue #1452: replacing concentration drops only the PREVIOUS effect, not the
+        // freshly-applied one (UI/MCP apply the condition then set the marker). An
+        // explicit clear cascades all links, even if the marker was already null.
+        if (concentrationChanged && turnState.concentration != null) {
+          if (patch.concentration) {
+            // Replacing: only the previous named effect should be dropped.
+            clearConcentration(turnState.concentration);
+          } else {
+            // Explicit end: drop every concentration-linked condition.
+            clearConcentration();
+          }
+        } else if (!patch.concentration) {
+          clearConcentration();
+        }
         if (concentrationChanged && patch.concentration) {
-          // These saves belong to the concentration that was active when damage landed.
-          // Replacing that effect makes every old request stale.
+          // Queued saves belong to the PRIOR effect and must never break the new one,
+          // even when no marker made the actor look like it was concentrating.
           turnState.pendingConcentrationChecks = [];
         }
         turnState.concentration = patch.concentration;
-        // A structured concentration source may exist even when the older
-        // turn-state display marker is absent. Clearing concentration must always
-        // clear its canonical links atomically, not depend on that marker.
-        if (!patch.concentration) {
-          clearConcentration();
-        }
       }
       if (patch.resolveConcentrationCheck) {
         const pending = turnState.pendingConcentrationChecks[0];
@@ -6376,7 +6484,7 @@ export class EncountersService {
         detail: l.detail,
       });
     }
-    if (logs.length > 0) {
+    if (logs.length > 0 || shouldNudge) {
       this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     }
     const domain = combatantToDomain(row);
@@ -7268,5 +7376,75 @@ export class EncountersService {
       throw err;
     }
     this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false); return { ok:true };
+  }
+
+  /**
+   * Break a combatant's concentration inside a transaction. Removes every condition instance
+   * sourced from the caster across the encounter, clears the caster's turn-state concentration,
+   * and updates linked character sheets so the combatant/character mirror stays aligned.
+   *
+   * If `casterExcluded` is true, the caster's row is NOT updated (the caller owns that write,
+   * e.g. the main `updateCombatant` write path). The caller receives the caster's resulting
+   * condition instances to merge into its own write.
+   *
+   * Returns the removed conditions with combatant names so callers can log them.
+   */
+  private breakConcentration(
+    tx: SyncDb,
+    encounterId: number,
+    casterCombatantId: number,
+    turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] } | null,
+    casterExcluded: boolean,
+    effectName?: string | null,
+  ): { removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[]; casterInstances?: ConditionInstance[] } {
+    const allRows = tx
+      .select({
+        id: combatants.id,
+        name: combatants.name,
+        characterId: combatants.characterId,
+        conditions: combatants.conditions,
+        conditionInstances: combatants.conditionInstances,
+      })
+      .from(combatants)
+      .where(eq(combatants.encounterId, encounterId))
+      .all();
+    const withInstances = allRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      characterId: r.characterId,
+      conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),
+    }));
+    const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, casterCombatantId, effectName);
+    const now = nowIso();
+    for (const [combatantId, instances] of updatedCombatants) {
+      if (casterExcluded && combatantId === casterCombatantId) continue;
+      const row = withInstances.find((r) => r.id === combatantId);
+      if (!row) continue;
+      const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      if (row.characterId != null) {
+        Object.assign(write, { sheetSyncedUpdatedAt: now });
+      }
+      tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
+      if (row.characterId != null) {
+        tx.update(characters)
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .where(eq(characters.id, row.characterId))
+          .run();
+      }
+    }
+    if (turnState) {
+      turnState.concentration = null;
+      turnState.pendingConcentrationChecks = [];
+    }
+    const casterRow = withInstances.find((r) => r.id === casterCombatantId);
+    const casterInstances = updatedCombatants.get(casterCombatantId) ?? casterRow?.conditionInstances;
+    return {
+      removed: removed.map((r) => ({
+        combatantId: r.combatantId,
+        combatantName: allRows.find((row) => row.id === r.combatantId)?.name ?? 'Unknown',
+        condition: r.condition,
+      })),
+      casterInstances,
+    };
   }
 }

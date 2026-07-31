@@ -1932,4 +1932,75 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(evicted.some((entry) => String(entry.detail).includes('chain-promotion-cap-0'))).toBe(true);
     expect(evicted.some((entry) => entry.actor === `token:ai-dm-seat:${campaignId}`)).toBe(true);
   });
+
+  it('#1452: re-casting a concentration spell refreshes the condition on target rather than leaving it empty', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const holdPersonSpec = {
+      name: 'Hold Person',
+      kind: 'spell',
+      toHit: '',
+      damage: '1d4 psychic',
+      notes: 'Paralyzes a humanoid target.',
+      spec: ActionSpec.parse({
+        mode: 'save',
+        save: { ability: 'WIS', dc: { kind: 'fixed', dc: 30 } },
+        cost: { slot: 'action', count: 1 },
+        uses: { concentration: true, spellLevel: 2 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: {
+          failure: {
+            damage: [{ formula: '1d4', type: 'psychic' }],
+            effects: [{ condition: 'paralyzed', rounds: 10, saveEnds: false, ongoingDamage: 0 }],
+          },
+        },
+      }),
+    };
+    orm.update(characters).set({ actions: JSON.stringify([holdPersonSpec]), spellSlots: JSON.stringify({ 2: { max: 3, used: 0 } }) }).where(eq(characters.id, aliceChar.id)).run();
+
+    const res1 = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Hold Person', targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    expect(res1.applied).toBe(true);
+    let drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get();
+    expect(drakeRow?.conditions).toContain('paralyzed');
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {} }) }).where(eq(combatants.id, actor)).run();
+
+    const res2 = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Hold Person', targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    expect(res2.applied).toBe(true);
+    drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get();
+    expect(drakeRow?.conditions).toContain('paralyzed');
+  });
+
+  it('#1452: undoing an attack removes its pending check without restoring resolved checks', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preCheck = { id: 'pre-existing-1', dc: 15, damage: 20 };
+    orm.update(combatants).set({ turnState: JSON.stringify({ pendingConcentrationChecks: [preCheck] }) }).where(eq(combatants.id, drake)).run();
+
+    const res = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    expect(res.applied).toBe(true);
+
+    let drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get();
+    const currentTs = CombatantTurnState.parse(JSON.parse(drakeRow?.turnState ?? '{}'));
+    currentTs.pendingConcentrationChecks = currentTs.pendingConcentrationChecks.filter((c) => c.id !== 'pre-existing-1');
+    orm.update(combatants).set({ turnState: JSON.stringify(currentTs) }).where(eq(combatants.id, drake)).run();
+
+    service.undo(encounterId, res.undoToken!, alice, 'player');
+    drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get();
+    const undoneTs = CombatantTurnState.parse(JSON.parse(drakeRow?.turnState ?? '{}'));
+    expect(undoneTs.pendingConcentrationChecks.some((c) => c.id === 'pre-existing-1')).toBe(false);
+  });
 });
