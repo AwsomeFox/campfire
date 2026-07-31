@@ -22,6 +22,7 @@ import {
   actionEconomyForAdapter,
   ddbImportSupported,
   DND5E_ADAPTER_ID,
+  DND5E_PACK_SLUG,
   encounterDifficultySupported,
   OPEN_LEGEND_PACK_SLUG,
   PF2E_PACK_SLUG,
@@ -336,7 +337,9 @@ export function capabilityStatusLabel(status: RulesetCapabilityStatus): string {
 }
 
 function hasNativeAdapter(slug: string): boolean {
-  return !!ruleSystemForPackSlug(slug);
+  if (!slug) return false;
+  if (slug === DND5E_ADAPTER_ID || slug === DND5E_PACK_SLUG || slug === 'dnd5e' || slug === 'open5e') return true;
+  return ruleSystemAdapter(slug).id !== DND5E_ADAPTER_ID;
 }
 
 function actionEconomySummary(slug: string, native: boolean): { status: RulesetCapabilityStatus; summary: string } {

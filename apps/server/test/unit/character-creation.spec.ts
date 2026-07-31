@@ -7,6 +7,7 @@ import {
   isCharacterSheetComplete,
   isMinimalCharacterCreate,
   listRuleSystemAdapters,
+  ruleSystemAdapter,
   resolveCharacterCreateStatus,
   starterTemplatesForAdapter,
   Dnd5eAdapter,
@@ -128,11 +129,13 @@ describe('character-creation (issue #719)', () => {
   });
 
   describe('adapter-owned sheet topology', () => {
-    it('is declared by every registered adapter', () => {
+    it('characterizes sheet topology across all registered adapters and fallback for unregistered slugs', () => {
       for (const adapter of listRuleSystemAdapters()) {
         expect(adapter.characterSheet?.abilityFields.length).toBeGreaterThan(0);
         expect(adapter.characterSheet?.classField).toBeDefined();
       }
+      const fallbackAdapter = ruleSystemAdapter('unregistered-slug');
+      expect(fallbackAdapter.characterSheet?.abilityFields.map((f: { key: string }) => f.key)).toEqual(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']);
     });
   });
 });

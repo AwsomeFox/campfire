@@ -55,7 +55,7 @@ describe('encounter difficulty adapters (issue #429)', () => {
       expect(d.label).not.toBe('Trivial');
     });
 
-    it('is supported for the open5e pack slug and homebrew fallback', () => {
+    it('characterizes fallback for open5e pack slug, empty slug, and null/homebrew', () => {
       expect(encounterDifficultySupported(DND5E_PACK_SLUG)).toBe(true);
       expect(encounterDifficultySupported('')).toBe(true);
       expect(encounterDifficultySupported(null)).toBe(true);
@@ -99,7 +99,7 @@ describe('encounter difficulty adapters (issue #429)', () => {
     expect(d.label).not.toBe('Trivial');
   });
 
-  it('homebrew (empty slug) uses 5e math but still surfaces unknown for zero-data', () => {
+  it('characterizes homebrew (empty slug) 5e math fallback when zero-data', () => {
     const d = estimateEncounterDifficultyForRuleSystem('', {
       partyLevels: PARTY,
       monsterChallengeRatings: [null, null],

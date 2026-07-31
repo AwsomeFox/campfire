@@ -44,6 +44,11 @@ describe('campaign import — compendium refs (issue #584, e2e)', () => {
         summary: 'CR 0.25',
         body: '',
         dataJson: JSON.stringify({ cr: 0.25, hitPoints: 7 }),
+        source: 'Open5e API',
+        license: 'OGL 1.0a',
+        attribution: 'Wizards of the Coast',
+        author: 'Open5e Team',
+        sourceUrl: 'https://open5e.com/monsters/goblin',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -97,7 +102,13 @@ describe('campaign import — compendium refs (issue #584, e2e)', () => {
       entrySlug: 'goblin',
       entryType: 'monster',
     });
-    expect(combatant.compendiumSnapshot).toBeTruthy();
+    expect(combatant.compendiumSnapshot).toMatchObject({
+      source: 'Open5e API',
+      license: 'OGL 1.0a',
+      attribution: 'Wizards of the Coast',
+      author: 'Open5e Team',
+      sourceUrl: 'https://open5e.com/monsters/goblin',
+    });
     expect(exported.body.compendiumDependencies).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

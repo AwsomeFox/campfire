@@ -2,6 +2,11 @@ import {
   Dnd5eAdapter,
   DND5E_ADAPTER_ID,
   ruleSystemAdapter,
+  listRuleSystemAdapters,
+  hasDeathSavesForAdapter,
+  initiativeModelForAdapter,
+  gridDistanceForAdapter,
+  actionEconomyForAdapter,
   CONDITIONS,
   isKnownCondition,
   Pf2eAdapter,
@@ -308,5 +313,53 @@ describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
     expect(p.supported).toBe(false);
     expect(p.ready).toBe(false);
     expect(p.pct).toBe(0);
+  });
+});
+
+describe('RuleSystemAdapter — adapter capabilities for player-visible rules', () => {
+  it.each(listRuleSystemAdapters().map((a) => [a.id, a] as const))(
+    '%s adapter defines explicit expectations for death saves, grid distance, initiative model, and action economy',
+    (id, adapter) => {
+      const hasDeathSaves = hasDeathSavesForAdapter(adapter);
+      const gridDistance = gridDistanceForAdapter(adapter);
+      const initiativeModel = initiativeModelForAdapter(adapter);
+      const actionEconomy = actionEconomyForAdapter(adapter);
+
+      if (id === 'dnd5e') {
+        expect(hasDeathSaves).toBe(true);
+        expect(gridDistance.square).toBe('euclidean');
+        expect(initiativeModel.mode).toBe('individual');
+        expect(initiativeModel.usesDexModifier).toBe(true);
+        expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action', 'bonus', 'reaction', 'movement']);
+      } else if (id === 'pf2e' || id === 'sf2e') {
+        expect(hasDeathSaves).toBe(false);
+        expect(gridDistance.square).toBe('euclidean');
+        expect(initiativeModel.mode).toBe('individual');
+        expect(actionEconomy.slots.map((s) => s.key)).toEqual(['actions', 'reaction']);
+      } else if (
+        id === 'osr' ||
+        id === 'basic-fantasy' ||
+        id === 'osric' ||
+        id === 'swords-wizardry' ||
+        id === 'labyrinth-lord' ||
+        id === 'old-school-essentials' ||
+        id === 'ose'
+      ) {
+        expect(hasDeathSaves).toBe(false);
+        expect(gridDistance.square).toBe('euclidean');
+        expect(initiativeModel.mode).toBeDefined();
+        expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action']);
+      } else {
+        expect(hasDeathSaves).toBe(false);
+        expect(gridDistance.square).toBe('euclidean');
+        expect(initiativeModel.mode).toBe('individual');
+        expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action']);
+      }
+    },
+  );
+
+  it('hasDeathSavesForAdapter defaults to true when adapter is null or undefined', () => {
+    expect(hasDeathSavesForAdapter(null)).toBe(true);
+    expect(hasDeathSavesForAdapter(undefined)).toBe(true);
   });
 });
