@@ -4072,9 +4072,13 @@ export class AiDriverService {
     // Re-verify admissibility after any post-yield fallthrough (e.g. queueing yield).
     this.assertTurnAdmissible(campaignId, session, opts);
     session.status = 'running';
-    // #1497 review: track whether THIS turn already released the slot so the outer finally
-    // does not clear a newer turn's `running` status after the inner finally yields.
     let slotReleased = false;
+    let turnEndEmitted = false;
+    let totalTokens = 0;
+    let budgetRemaining: number | null = seat.budgetRemaining;
+    let finalNarration = '';
+    let steps = 0;
+    let providerError: AiProviderError | undefined;
     try {
 
     // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
@@ -4281,9 +4285,9 @@ export class AiDriverService {
     const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, isDmCaller ? HARD_MAX_STEPS : DEFAULT_MAX_STEPS);
     const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, isDmCaller ? 4096 : DEFAULT_STEP_MAX_TOKENS);
 
-    let totalTokens = 0;
-    let budgetRemaining = seat.budgetRemaining;
-    let finalNarration = '';
+    totalTokens = 0;
+    budgetRemaining = seat.budgetRemaining;
+    finalNarration = '';
     // #577 — the last step's parsed reply. `finalNarration` always holds the STRIPPED prose
     // (what the table saw) and `turnGrounding` the machine-readable claims that came with it,
     // so the two can never drift apart no matter which exit path the turn takes.
@@ -4295,9 +4299,9 @@ export class AiDriverService {
     let latestSeat = seat;
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
-    let steps = 0;
+    steps = 0;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
-    let providerError: AiProviderError | undefined;
+    providerError = undefined;
     /**
      * #1052 — "any part of this turn's spend was unmeasured", accumulated across every attempt
      * and every step.
@@ -5096,6 +5100,7 @@ export class AiDriverService {
     });
 
     this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, usageUnknown());
+    turnEndEmitted = true;
 
     return {
       narration: finalNarration,
@@ -5109,6 +5114,20 @@ export class AiDriverService {
       grounding,
     };
   } finally {
+    // #1497 — ensure turn.end is ALWAYS emitted if an unhandled throw occurs after turn start
+    if (!turnEndEmitted) {
+      this.emitTurnEnd(
+        campaignId,
+        providerError ? 'provider_error' : 'aborted',
+        finalNarration || '',
+        steps,
+        totalTokens,
+        budgetRemaining ?? 0,
+        providerError,
+        false,
+      );
+      turnEndEmitted = true;
+    }
     // #1497 — release the running slot on every exit, including throws before the step loop
     // or during post-loop bookkeeping, and drain the queue so queued callers always settle.
     // Guard with `slotReleased` so a throw that happens after the inner finally has already
