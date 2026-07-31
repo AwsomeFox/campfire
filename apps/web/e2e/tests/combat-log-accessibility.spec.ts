@@ -284,8 +284,10 @@ test.describe('combat log accessibility — remote clients', () => {
     let remoteEvents: EncounterEvent[] = [];
 
     await viewerPage.route(`**/api/v1/encounters/${encounterId}/events`, async (route) => {
-      const response = await route.fetch();
-      const persisted = (await response.json()) as EncounterEvent[];
+      const response = await route.fetch().catch(() => null);
+      if (!response) return route.continue().catch(() => undefined);
+      const persisted = (await response.json().catch(() => null)) as EncounterEvent[] | null;
+      if (!persisted) return route.continue().catch(() => undefined);
       await route.fulfill({ response, json: [...persisted, ...historicalEvents, ...remoteEvents] });
     });
 
@@ -326,6 +328,7 @@ test.describe('combat log accessibility — remote clients', () => {
       await expect(log).toBeFocused();
       expect(await log.evaluate((node) => node.scrollTop)).toBe(scrollBefore);
     } finally {
+      await viewerPage.unrouteAll({ behavior: 'ignoreErrors' });
       await viewerContext.close();
     }
   });

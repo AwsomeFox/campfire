@@ -73,9 +73,12 @@ test('Preferences keeps catalog language separate from System formatting across 
 
   // Dashboard schedule banners use the explicit formatting preference too.
   const scheduledAt = '2026-07-21T17:05:00.000Z';
-  await page.route(`**/api/v1/campaigns/${seed().campaignId}/summary`, async (route) => {
-    const response = await route.fetch();
-    const summary = await response.json();
+  const summaryRoutePattern = `**/api/v1/campaigns/${seed().campaignId}/summary`;
+  await page.route(summaryRoutePattern, async (route) => {
+    const response = await route.fetch().catch(() => null);
+    if (!response) return route.continue().catch(() => undefined);
+    const summary = await response.json().catch(() => null);
+    if (!summary) return route.continue().catch(() => undefined);
     await route.fulfill({ response, json: {
       ...summary,
       inProgressSession: null,
@@ -93,15 +96,19 @@ test('Preferences keeps catalog language separate from System formatting across 
       },
     } });
   });
-  const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }), scheduledAt);
-  await page.goto(`/c/${seed().campaignId}`);
-  await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
+  try {
+    const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }), scheduledAt);
+    await page.goto(`/c/${seed().campaignId}`);
+    await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
+  } finally {
+    await page.unroute(summaryRoutePattern).catch(() => undefined);
+  }
 
   // System is itself explicit, survives reload, and does not change the rendered catalog.
   await page.goto('/preferences');

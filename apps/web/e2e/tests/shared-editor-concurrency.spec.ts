@@ -6,6 +6,10 @@ import { seed, stateFor } from './seed';
 test.describe('shared-editor stale-write recovery — #881', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   test('two DM clients preserve a resumed mobile draft and resolve the conflict accessibly', async ({ browser }) => {
     const { campaignId } = seed();
     const desktop = await browser.newContext({ storageState: stateFor('dm') });
@@ -90,8 +94,10 @@ test.describe('shared-editor stale-write recovery — #881', () => {
     let sequence = 0;
     await page.route(`**/api/v1/campaigns/${campaignId}/session-zero`, async (route) => {
       const requestSequence = ++sequence;
-      const response = await route.fetch();
-      const body = await response.json() as SessionZero;
+      const response = await route.fetch().catch(() => null);
+      if (!response) return route.continue().catch(() => undefined);
+      const body = (await response.json().catch(() => null)) as SessionZero | null;
+      if (!body) return route.continue().catch(() => undefined);
       if (requestSequence === 1) {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
