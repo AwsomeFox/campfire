@@ -32,7 +32,12 @@ function getSeedData(): SeedData {
     cachedSeed = JSON.parse(readFileSync(seedPath, 'utf8')) as SeedData;
     return cachedSeed;
   }
-  return createFallbackProxy() as SeedData;
+  if (process.argv.includes('--list')) {
+    return createFallbackProxy() as SeedData;
+  }
+  throw new Error(
+    `ENOENT: no such file or directory, open '${seedPath}'\nseed.json missing. Global setup must run before tests access seed data.`,
+  );
 }
 
 /** Returns whether global-setup.ts has written seed.json. */
@@ -46,6 +51,16 @@ export function seed(): SeedData {
     get(_target, prop, receiver) {
       const data = getSeedData();
       return Reflect.get(data, prop, receiver);
+    },
+    has(_target, prop) {
+      return Reflect.has(getSeedData(), prop);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getSeedData());
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      const desc = Reflect.getOwnPropertyDescriptor(getSeedData(), prop);
+      return desc ? { ...desc, configurable: true } : undefined;
     },
   });
 }
@@ -98,7 +113,14 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
     return;
   }
 
-  const { baseURL, campaignId, encounterId, endedEncounterId, bossId, skirmisherId } = seed();
+  let seeded: SeedData;
+  try {
+    seeded = seed();
+  } catch {
+    return;
+  }
+
+  const { baseURL, campaignId, encounterId, endedEncounterId, bossId, skirmisherId } = seeded;
   const dm = await request.newContext({
     baseURL: baseURL || undefined,
     storageState: stateFor('dm'),
