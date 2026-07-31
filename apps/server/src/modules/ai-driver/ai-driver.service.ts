@@ -3527,14 +3527,21 @@ export class AiDriverService {
     try {
       resolver.undo(ref.encounterId, token, user, 'dm');
     } catch (err) {
-      // A stale reference — the chain was already undone (the model called undo_action itself, or
-      // a prior DM undo raced this one) — must not leave a dead lever on the seat, so clear it.
-      // An already-undone chain is "nothing left to undo" (404): the client dismisses the control
-      // cleanly instead of surfacing the resolver's 400 as a hard failure (#1501 review). Any other
-      // error is rethrown so the DM sees the concrete reason.
-      session.lastUndoableCommit = null;
-      this.persistControlState(session);
-      if (err instanceof BadRequestException && /already undone/i.test(String(err.message ?? ''))) {
+      // Classify BEFORE touching the lever. A STALE reference — the chain was already undone
+      // (the model called undo_action itself, or a prior DM undo raced this one and won the
+      // conditional claim, which still throws "already undone"), no longer exists ("unknown
+      // chain"), or belongs to a different encounter — is "nothing left to undo" (404) and must
+      // not leave a dead lever, so clear it. Every OTHER failure is RETRYABLE while the chain is
+      // still undoable: a busy database, an `assertTargetAllowed` target guard, or a missing
+      // encounter row from the transaction-local read. Clearing the lever on those would strand
+      // the DM with no undo button (AiTablePage renders it only while lastUndoableCommit is set)
+      // and a follow-up 404, so keep it armed and rethrow the concrete reason (#1501 review).
+      const stale =
+        err instanceof BadRequestException &&
+        /already undone|unknown chain|different encounter|no chain id/i.test(String(err.message ?? ''));
+      if (stale) {
+        session.lastUndoableCommit = null;
+        this.persistControlState(session);
         throw new NotFoundException('The AI seat has no reversible action to undo.');
       }
       throw err;
