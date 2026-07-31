@@ -51,15 +51,18 @@ function buildService(entities: {
   const auditEntries = entities.auditEntries ?? [];
   const auditTruncated = entities.auditTruncated ?? 0;
   const campaign = campaignRow();
-  // `.where(...)` is both awaitable (the unbounded aiScribeJobs read, #501) and
-  // `.limit()`-able (the single-row AI seat / scribe-config reads), matching the real
-  // drizzle builder. Same shape as export-markdown-zip.spec.ts.
-  const emptyWhereResult = () => Object.assign(Promise.resolve([]), { limit: async () => [] });
-  const emptyDbQuery = {
-    from: () => ({ where: emptyWhereResult }),
+  const emptyWhereResult = (selection?: any) => {
+    const rows = selection && typeof selection === 'object' && 'count' in selection ? [{ count: 0 }] : [];
+    return Object.assign(Promise.resolve(rows), {
+      limit: async () => [],
+      orderBy: () => Object.assign(Promise.resolve([]), { limit: async () => [] }),
+    });
   };
+  const emptyDbQuery = (selection?: any) => ({
+    from: () => ({ where: () => emptyWhereResult(selection) }),
+  });
   return new ExportService(
-    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
+    { select: (selection?: any) => emptyDbQuery(selection) } as any, // db (AI seat + scribe reads)
     { getOrThrow: async () => campaign } as any,
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any,
     { listForCampaign: async () => entities.npcs ?? [] } as any,

@@ -37,12 +37,18 @@ function buildService(entities: {
   const campaign = campaignRow();
   // Each property is a service-shaped object exposing only the methods
   // buildExport / buildMarkdownZip actually call.
-  const emptyWhereResult = () => Object.assign(Promise.resolve([]), { limit: async () => [] });
-  const emptyDbQuery = {
-    from: () => ({ where: emptyWhereResult }),
+  const emptyWhereResult = (selection?: any) => {
+    const rows = selection && typeof selection === 'object' && 'count' in selection ? [{ count: 0 }] : [];
+    return Object.assign(Promise.resolve(rows), {
+      limit: async () => [],
+      orderBy: () => Object.assign(Promise.resolve([]), { limit: async () => [] }),
+    });
   };
+  const emptyDbQuery = (selection?: any) => ({
+    from: () => ({ where: () => emptyWhereResult(selection) }),
+  });
   return new ExportService(
-    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
+    { select: (selection?: any) => emptyDbQuery(selection) } as any, // db (AI seat + scribe reads)
     { getOrThrow: async () => campaign } as any, // campaigns
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any, // quests
     { listForCampaign: async () => entities.npcs ?? [] } as any, // npcs

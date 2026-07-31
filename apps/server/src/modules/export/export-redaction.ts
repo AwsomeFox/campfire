@@ -433,11 +433,16 @@ export function projectExport(raw: Row, policy: ResolvedExportPolicy, extra: Rea
   if (policy.credentials) {
     data.aiSeat = raw.aiSeat;
     data.aiScribeConfig = raw.aiScribeConfig;
+    data.aiScribeJobs = raw.aiScribeJobs;
+    data.aiScribeJobsTruncated = raw.aiScribeJobsTruncated;
   } else {
     excludeModule('aiSeat', raw.aiSeat);
     excludeModule('aiScribeConfig', raw.aiScribeConfig);
+    excludeModule('aiScribeJobs', raw.aiScribeJobs);
     data.aiSeat = null;
     data.aiScribeConfig = null;
+    data.aiScribeJobs = [];
+    data.aiScribeJobsTruncated = 0;
   }
 
   // ── attachments (metadata; bytes are decided by the service, which has disk) ──

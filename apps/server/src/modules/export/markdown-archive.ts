@@ -189,6 +189,7 @@ export const MACHINE_EXPORT_MODULES = [
   'aiSeat',
   'aiScribeConfig',
   'aiScribeJobs',
+  'aiScribeJobsTruncated',
   'proposals',
   'encounters',
   'factions',
