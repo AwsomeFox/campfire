@@ -605,7 +605,7 @@ function AdminCatalog() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <PageTitle className="flex items-center gap-2 text-xl font-extrabold text-white">
+      <PageTitle className="flex items-center gap-2 text-xl text-white">
         <GameIcon slug="scroll-quill" size={UI_ICON_SIZE.md} aria-hidden /> {t('admin.catalog.title')}
       </PageTitle>
       <p className="text-xs text-secondary">{t('admin.catalog.subtitle')}</p>
