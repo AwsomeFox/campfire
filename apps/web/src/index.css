@@ -1200,10 +1200,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /*
- * Issue #428 / Issue #1698 — WCAG 2.2 target-size helpers for encounter combat / map controls.
+ * Issue #428 — WCAG 2.2 map-tool sizing for encounter combat / map controls.
  * Primary combat actions use the 44×44 enhanced size; secondary controls still meet
  * the 24×24 AA minimum. Visual glyphs can stay compact inside the larger hit area.
- * Declarations live below control base rules (.btn, .cf-btn, .input) so target helpers win.
  */
 
 .cf-map-tool {
@@ -1593,7 +1592,7 @@ h1, h2, h3, h4, h5, h6 {
  * Issue #428 / Issue #1698 — WCAG 2.2 target-size helpers for encounter combat / map / UI controls.
  * Primary combat actions use the 44×44 enhanced size; secondary controls still meet
  * the 24×24 AA minimum. Visual glyphs can stay compact inside the larger hit area.
- * Placed after control base rules (.btn, .cf-btn, .input, .cf-textarea, .cf-select) so target-size
+ * Placed after control base rules (.btn, .cf-btn, .input, .cf-input, .cf-textarea, .cf-select) so target-size
  * helpers take precedence over default or density-aliased control sizes.
  */
 .cf-target-44 {

@@ -264,8 +264,9 @@ test.describe('Design-system density (#674, #1683)', () => {
   /**
    * Issue #1698: `.cf-target-24` and `.cf-target-44` target-size helpers must not be silently
    * overridden by `.btn` density aliases or `.btn.cf-density-*` rules at equal or lower specificity.
-   * Target helpers must be declared after control base classes (.btn, .cf-btn, .input, .cf-input) and provide
-   * compound selectors (.btn.cf-target-*, .cf-btn.cf-target-*, .input.cf-target-*, .cf-input.cf-target-*) so explicit target
+   * Target helpers must be declared after control base classes (.btn, .cf-btn, .input, .cf-input, .cf-textarea, .cf-select) and provide
+   * compound selectors (.btn.cf-target-*, .cf-btn.cf-target-*, .input.cf-target-*, .cf-input.cf-target-*,
+   * .cf-textarea.cf-target-*, .cf-select.cf-target-*) so explicit target
    * sizes take precedence over default control min-heights.
    */
   test('.cf-target-24 and .cf-target-44 floors cannot be silently overridden by control aliases (issue #1698)', () => {
@@ -289,6 +290,10 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(css, '.input.cf-target-44 compound rule must exist').toMatch(/\.input\.cf-target-44\b/);
     expect(css, '.cf-input.cf-target-24 compound rule must exist').toMatch(/\.cf-input\.cf-target-24\b/);
     expect(css, '.cf-input.cf-target-44 compound rule must exist').toMatch(/\.cf-input\.cf-target-44\b/);
+    expect(css, '.cf-textarea.cf-target-24 compound rule must exist').toMatch(/\.cf-textarea\.cf-target-24\b/);
+    expect(css, '.cf-textarea.cf-target-44 compound rule must exist').toMatch(/\.cf-textarea\.cf-target-44\b/);
+    expect(css, '.cf-select.cf-target-24 compound rule must exist').toMatch(/\.cf-select\.cf-target-24\b/);
+    expect(css, '.cf-select.cf-target-44 compound rule must exist').toMatch(/\.cf-select\.cf-target-44\b/);
   });
 
   test('ui.tsx exports canonical primitives with density support', () => {
