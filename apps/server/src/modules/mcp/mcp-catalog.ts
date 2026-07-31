@@ -147,6 +147,7 @@ export const MCP_TOOL_NAMES = [
   'submit_inbox_item',
   'resolve_inbox_item',
   'sweep_inbox',
+  'get_inbox_sweep_result',
   'update_campaign_status',
   'update_campaign',
   'approve_proposal',

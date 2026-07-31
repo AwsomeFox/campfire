@@ -13,11 +13,11 @@ import {
 /**
  * Issue #1645 — MCP parity for the inbox sweep (#1644).
  *
- * `sweep_inbox` must call the EXACT SAME `InboxSweepService.sweep()` orchestration the REST
- * `POST /campaigns/:id/inbox/sweep` route uses (see test/inbox-sweep.e2e-spec.ts for the REST
- * coverage of that shared path) — this suite only exercises the MCP-specific surface: tool
- * registration, DM-role gating, the archived-campaign read-only gate, and write-mode/token-scope
- * parity (propose/none writeScope tokens must be refused like the REST route).
+ * `sweep_inbox` must call the EXACT SAME `InboxSweepService.startInboxSweep()` orchestration
+ * the REST `POST /campaigns/:id/inbox/sweep` route uses (see test/inbox-sweep.e2e-spec.ts for
+ * the REST coverage of that shared path) — this suite only exercises the MCP-specific surface:
+ * tool registration, DM-role gating, the archived-campaign read-only gate, and write-mode/
+ * token-scope parity (propose/none writeScope tokens must be refused like the REST route).
  */
 interface TextContent {
   type: 'text';
@@ -37,9 +37,11 @@ function errorOf(result: unknown): { status: number; code: string; message: stri
 class ScriptedClassifier implements InboxSweepClassifier {
   script = new Map<string, InboxSweepClassification>();
   calls: Array<{ capture: InboxSweepCapture; context: InboxSweepContext }> = [];
+  beforeReturn: (() => Promise<void>) | null = null;
 
   async classify(capture: InboxSweepCapture, context: InboxSweepContext): Promise<InboxSweepClassification> {
     this.calls.push({ capture, context });
+    if (this.beforeReturn) await this.beforeReturn();
     const scripted = this.script.get(capture.body);
     if (!scripted) throw new Error(`no scripted classification for: ${capture.body}`);
     return scripted;
@@ -100,6 +102,7 @@ describe('sweep_inbox MCP tool (e2e, issue #1645)', () => {
   beforeEach(() => {
     classifier.script.clear();
     classifier.calls = [];
+    classifier.beforeReturn = null;
   });
 
   it('is registered on the MCP catalog', async () => {
@@ -235,5 +238,58 @@ describe('sweep_inbox MCP tool (e2e, issue #1645)', () => {
     expect(err).not.toBeNull();
     expect(err!.status).toBe(403);
     expect(classifier.calls).toHaveLength(0);
+  });
+
+  it('is registered on the MCP catalog (poll tool)', async () => {
+    const token = await mintToken('direct');
+    const client = await mcpClient(token);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain('get_inbox_sweep_result');
+  });
+
+  it('exposes the background-sweep result over MCP with the same contract as REST (#1716)', async () => {
+    const campaignId = await newCampaign('MCP Sweep Background');
+    const noteId = await submitInbox(campaignId, 'The party wants a new quest about the cursed keep.');
+    classifier.script.set('The party wants a new quest about the cursed keep.', {
+      action: 'create',
+      entityType: 'quest',
+      targetId: null,
+      fields: { title: 'The Cursed Keep' },
+      reason: 'players raised a new quest hook',
+    });
+
+    // Ensure the fast-path race loses (8s timeout) so sweep_inbox returns a running job.
+    classifier.beforeReturn = () => new Promise<void>((resolve) => setTimeout(resolve, 9500));
+
+    const token = await mintToken('direct');
+    const client = await mcpClient(token);
+    const start = await client.callTool({ name: 'sweep_inbox', arguments: { campaignId } });
+    expect(start.isError).toBeFalsy();
+    const startBody = parseResult(start) as { job: { id: number; status: string } };
+    expect(startBody.job.status).toBe('running');
+    const jobId = startBody.job.id;
+
+    // Poll get_inbox_sweep_result until the background work completes.
+    let result = startBody;
+    for (let i = 0; i < 40 && result.job.status === 'running'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const poll = await client.callTool({
+        name: 'get_inbox_sweep_result',
+        arguments: { campaignId, jobId },
+      });
+      expect(poll.isError).toBeFalsy();
+      result = parseResult(poll) as { job: { id: number; status: string } };
+    }
+
+    expect(result.job.status).toBe('succeeded');
+    const final = result as unknown as {
+      job: { itemsProposed: number };
+      items: Array<{ noteId: number; outcome: string; entityType: string | null; proposalId: number | null }>;
+    };
+    expect(final.job.itemsProposed).toBe(1);
+    expect(final.items).toHaveLength(1);
+    expect(final.items[0]).toMatchObject({ noteId, outcome: 'proposed', entityType: 'quest' });
+
+    classifier.beforeReturn = null;
   });
 });

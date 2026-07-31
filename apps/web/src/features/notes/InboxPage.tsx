@@ -209,11 +209,67 @@ export default function InboxPage() {
   // busy flag: an in-flight sweep's finally block intentionally skips state updates
   // once cidRef.current has moved on, but that leaves sweepBusy stuck true.
   useEffect(() => {
-    sweepTokenRef.current++;
+    const tokenBefore = sweepTokenRef.current;
+    const currentToken = tokenBefore + 1;
+    sweepTokenRef.current = currentToken;
     setSweepBusy(false);
     setSweepResult(null);
     setSweepItemBodies({});
     setSweepError(null);
+
+    // #1716: Resume polling if a background sweep job was running for this campaign before navigation/unmount
+    try {
+      const storedJobId = localStorage.getItem(`campfire_inbox_sweep_job_${cid}`);
+      if (storedJobId && Number.isFinite(Number(storedJobId))) {
+        const jobId = Number(storedJobId);
+        setSweepBusy(true);
+        void (async () => {
+          try {
+            const res = await pollInboxSweepResult(cid, jobId, () =>
+              cid === cidRef.current && sweepTokenRef.current === currentToken,
+            );
+            if (cid === cidRef.current && sweepTokenRef.current === currentToken) {
+              if (res.job.status === 'failed') {
+                setSweepError(res.job.detail || t('notes.sweepFailed'));
+              }
+              setSweepResult(res);
+              const newlyProposed = res.job.itemsNewlyProposed;
+              if (newlyProposed === undefined) {
+                const delta = res.job.itemsProposed;
+                if (delta > 0 && sweepTokenRef.current === currentToken) bumpPendingProposalsBadge(delta, cid);
+              }
+              const freshOpenTotal = await load();
+              if (cid === cidRef.current && sweepTokenRef.current === currentToken && freshOpenTotal !== undefined) {
+                setInboxCountBadge(freshOpenTotal, cid);
+              }
+            }
+          } catch {
+            // Ignore resume errors
+          } finally {
+            if (cid === cidRef.current && sweepTokenRef.current === currentToken) {
+              setSweepBusy(false);
+            }
+            try {
+              const currentStored = localStorage.getItem(`campfire_inbox_sweep_job_${cid}`);
+              if (currentStored === String(jobId)) {
+                localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`);
+              }
+            } catch {
+              // Ignore localStorage write errors
+            }
+          }
+        })();
+      }
+    } catch {
+      // Ignore localStorage read errors
+    }
+
+    // #1716: when this page unmounts, cancel any in-flight result polling. The cleanup
+    // also runs on every cid change (before the body above), so it stops the previous
+    // campaign's poll before the new one starts.
+    return () => {
+      sweepTokenRef.current++;
+    };
   }, [cid]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
@@ -303,8 +359,37 @@ export default function InboxPage() {
     // lists provides fallback titles when an item outcome lacks a server body.
     setSweepItemBodies(buildNoteBodiesMap(openList.items, historyList.items));
     try {
-      const result = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
+      const started = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
       if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
+
+      // #1716 — the POST now starts a background job and returns immediately. Poll the
+      // result endpoint until the job is no longer running, so a long sweep cannot be
+      // lost when the HTTP write budget (120s) aborts the client connection.
+      if (started.job.status === 'running') {
+        try {
+          localStorage.setItem(`campfire_inbox_sweep_job_${sweepCid}`, String(started.job.id));
+        } catch {
+          // Ignore localStorage write errors
+        }
+      }
+      const result =
+        started.job.status === 'running'
+          ? await pollInboxSweepResult(sweepCid, started.job.id, () =>
+              sweepCid === cidRef.current && sweepToken === sweepTokenRef.current,
+            )
+          : started;
+      try {
+        localStorage.removeItem(`campfire_inbox_sweep_job_${sweepCid}`);
+      } catch {
+        // Ignore localStorage write errors
+      }
+
+      if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
+
+      if (result.job.status === 'failed') {
+        setSweepError(result.job.detail || t('notes.sweepFailed'));
+      }
+
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
@@ -549,6 +634,34 @@ function SweepControl({
       )}
     </div>
   );
+}
+
+/**
+ * Poll the inbox-sweep result endpoint until the job finishes or the caller stops
+ * caring (e.g. the DM switched campaigns or started a newer sweep). #1716
+ *
+ * Bounded by both an attempt count and an overall deadline so a stale `running` job
+ * (e.g. after a server restart) cannot leave the page polling forever.
+ */
+async function pollInboxSweepResult(
+  campaignId: number,
+  jobId: number,
+  isStillRelevant: () => boolean,
+  intervalMs = 2000,
+  deadlineMs = 10 * 60 * 1000,
+): Promise<InboxSweepResult> {
+  const startedAt = Date.now();
+  const maxAttempts = Math.ceil(deadlineMs / intervalMs);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0 && !isStillRelevant()) throw new Error('Sweep polling cancelled');
+    const result = await api.get<InboxSweepResult>(`${API}/campaigns/${campaignId}/inbox/sweep/${jobId}`);
+    if (result.job.status !== 'running') return result;
+    if (Date.now() - startedAt > deadlineMs) {
+      throw new Error('Sweep result polling timed out; the job may still be running on the server');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Sweep result polling reached the maximum number of attempts');
 }
 
 const SWEEP_OUTCOME_TAG: Record<InboxSweepItemResult['outcome'], { cls: string; labelKey: string }> = {

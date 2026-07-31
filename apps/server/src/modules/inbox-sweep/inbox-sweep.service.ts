@@ -1,6 +1,6 @@
-import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
+import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Note, Role } from '@campfire/schema';
 import {
   CharacterCreate,
   CharacterUpdate,
@@ -132,6 +132,7 @@ interface JobRow {
   itemsProposed: number;
   itemsSkipped: number;
   itemsErrored: number;
+  snapshot: string | null;
   detail: string;
   createdBy: string;
   createdAt: string;
@@ -157,16 +158,18 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  *
  * Reads a campaign's OPEN inbox items, infers create/update/dismiss per capture, files
  * PENDING PROPOSALS ONLY via `ProposalRecordsService.create` (never a direct canon
- * write), and resolves swept items. Intentionally exposes a single `sweep()` method
- * with no controller-specific shape, so a future MCP tool (#1645) can call the exact
- * same path instead of reimplementing it — the parity-without-duplication requirement
- * called out on that issue.
+ * write), and resolves swept items. Intentionally exposes a single entry point
+ * (`startInboxSweep`) with no controller-specific shape, so both REST and MCP (#1645)
+ * call the exact same path — the parity-without-duplication requirement called out on
+ * that issue. Completed jobs persist a snapshot so `getInboxSweepResult` can return the
+ * same per-item outcomes on the poll path.
  *
  * AUTHORIZATION: this service does NOT itself check role — the caller (REST controller
- * today, MCP tool later) must gate with `CampaignAccessService.requireRole(user,
- * campaignId, 'dm')` BEFORE calling `sweep()`. That call also enforces the
- * archived-campaign read-only gate (issue's requirement #5), since `requireRole`
- * asserts writability by default. #1450 was a critical hole behind an auth check that
+ * or MCP tool) must gate with `CampaignAccessService.requireRole(user, campaignId, 'dm')`
+ * BEFORE calling `startInboxSweep()`. That call also enforces the archived-campaign
+ * read-only gate (issue's requirement #5), since `requireRole` asserts writability by
+ * default. Poll reads use `requireRole(..., { allowArchived: true })` so a sweep started
+ * before archiving can still be followed to completion. #1450 was a critical hole behind an auth check that
  * looked right from the route name alone — the actual guard here is `requireRole`,
  * never `requireMember({write:true})` (which only asserts the CAMPAIGN is writable, not
  * that the caller holds DM authority).
@@ -189,7 +192,7 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  * item sweepable without manual intervention.
  */
 @Injectable()
-export class InboxSweepService {
+export class InboxSweepService implements OnModuleInit {
   private readonly logger = new Logger(InboxSweepService.name);
 
   constructor(
@@ -201,7 +204,36 @@ export class InboxSweepService {
     @Inject(INBOX_SWEEP_CLASSIFIER) private readonly classifier: InboxSweepClassifier,
   ) {}
 
-  async sweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {
+  /**
+   * #1716 review: a server that is restarted while a background sweep is running never
+   * sees that sweep complete. Reconcile any `running` jobs left by a prior process so
+   * clients don't poll them forever. A starting process cannot own a `running` row, so
+   * every one of them is an orphan.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const stale = await this.db
+        .select()
+        .from(inboxSweepJobs)
+        .where(eq(inboxSweepJobs.status, 'running'))
+        .all();
+      for (const job of stale) {
+        this.logger.warn(`Reconciling stale inbox sweep job ${job.id} (created ${job.createdAt}) as failed`);
+        await this.updateJob(job.id, {
+          status: 'failed',
+          itemsTotal: job.itemsTotal,
+          itemsProposed: job.itemsProposed,
+          itemsSkipped: job.itemsSkipped,
+          itemsErrored: job.itemsErrored,
+          detail: 'sweep interrupted by server restart',
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Failed to reconcile stale inbox sweep jobs: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async startInboxSweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {
     const openItems = await this.notes.listAllInbox(campaignId, false);
 
     if (openItems.length === 0) {
@@ -215,36 +247,7 @@ export class InboxSweepService {
       return { job: { ...jobToDomain(job), itemsNewlyProposed: 0, itemsNewlySkipped: 0, itemsNewlyErrored: 0 }, items: [] };
     }
 
-    const existing = await this.db
-      .select()
-      .from(inboxSweepItems)
-      .where(
-        and(
-          eq(inboxSweepItems.campaignId, campaignId),
-          inArray(
-            inboxSweepItems.noteId,
-            openItems.map((n) => n.id),
-          ),
-        ),
-      );
-    const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
-    const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
-
-    const summary = await this.campaigns.summary(campaignId, user, role);
-    const context: InboxSweepContext = {
-      campaignId,
-      quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),
-      npcs: (summary?.npcs ?? []).map((n) => ({ id: n.id, name: n.name })),
-      locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
-      characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
-    };
-    const results: InboxSweepItemResult[] = [];
-    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0, newlySkipped: 0, newlyErrored: 0 };
-
-    // Placeholder job row so ledger rows have a valid job_id from the start; totals are
-    // corrected with a single UPDATE once the loop below finishes (best-effort auditable
-    // record, same shape as ScribeService's `record()` — see scribe.service.ts).
-    const job = await this.insertJob(campaignId, user, 'succeeded', {
+    const job = await this.insertJob(campaignId, user, 'running', {
       itemsTotal: openItems.length,
       itemsProposed: 0,
       itemsSkipped: 0,
@@ -252,58 +255,197 @@ export class InboxSweepService {
       detail: 'sweep in progress',
     });
 
-    for (const item of openItems) {
-      const prior = existingByNote.get(item.id);
-      if (prior) {
-        // Already swept in an earlier run — never re-classify or re-propose. Self-heal
-        // the crash window where a terminal ledger row was written but the inbox close
-        // did not complete.
-        if (!item.resolved) {
-          const link = this.resolveLinkForPrior(prior);
-          await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
+    // #1716 — run the sweep outside the request/response cycle. The client polls
+    // GET /campaigns/:id/inbox/sweep/:jobId for the outcome, so a slow classifier
+    // cannot be aborted by the 120s write-budget timeout. Fast sweeps still return
+    // the full result in the POST response; slower ones return a running job.
+    const sweep = this.performInboxSweep(campaignId, user, role, job, openItems);
+    // #1716 review: never leave the background sweep promise unobserved. Once the
+    // request returns, an unhandled rejection in the detached promise could terminate
+    // the whole Node process. Keep the timer handle so the dangling 8s timeout is
+    // cleared if the sweep wins the race.
+    sweep.catch((err) => {
+      this.logger.error(
+        `Background inbox sweep rejected for campaign ${campaignId}, job ${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const fastResult = await Promise.race([
+        sweep.catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 8000);
+        }),
+      ]);
+      if (fastResult !== null) return fastResult;
+      return await this.getInboxSweepResult(campaignId, job.id);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async performInboxSweep(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    job: JobRow,
+    openItems: Note[],
+  ): Promise<InboxSweepResult> {
+    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0, newlySkipped: 0, newlyErrored: 0 };
+    const results: InboxSweepItemResult[] = [];
+
+    try {
+      const existing = await this.db
+        .select()
+        .from(inboxSweepItems)
+        .where(
+          and(
+            eq(inboxSweepItems.campaignId, campaignId),
+            inArray(inboxSweepItems.noteId, openItems.map((n) => n.id)),
+          ),
+        );
+      const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
+      const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
+
+      const summary = await this.campaigns.summary(campaignId, user, role);
+      const context: InboxSweepContext = {
+        campaignId,
+        quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),
+        npcs: (summary?.npcs ?? []).map((n) => ({ id: n.id, name: n.name })),
+        locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
+        characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
+      };
+
+      for (const item of openItems) {
+        const prior = existingByNote.get(item.id);
+        if (prior) {
+          // Already swept in an earlier run — never re-classify or re-propose. Self-heal
+          // the crash window where a terminal ledger row was written but the inbox close
+          // did not complete.
+          if (!item.resolved) {
+            const link = this.resolveLinkForPrior(prior);
+            await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
+          }
+          const outcome = this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? '');
+          results.push(outcome.result);
+          tallyOutcome(counts, outcome);
+          continue;
         }
-        const outcome = this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? '');
-        results.push(outcome.result);
-        tallyOutcome(counts, outcome);
-        continue;
-      }
 
-      const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
-      const externalAiGate = await this.externalAiGate(campaignId, config);
-      const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
-      if (withheldReason) {
-        const outcome = freshOutcome({
-          noteId: item.id,
-          outcome: 'errored',
-          entityType: null,
-          entityId: null,
-          proposalId: null,
-          reason: withheldReason,
-          body: item.body,
-        });
-        results.push(outcome.result);
-        tallyOutcome(counts, outcome);
-        continue;
-      }
-
-      let classification: InboxSweepClassification;
-      try {
-        classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context, config);
-      } catch (err) {
-        if (err instanceof NoProviderConfiguredError) {
-          // No point classifying the remaining items either — abort the whole run with a
-          // job-level 'disabled' status, same shape as ScribeService's disabled path.
-          const disabledJob = await this.updateJob(job.id, {
-            status: 'disabled',
-            itemsTotal: openItems.length,
-            itemsProposed: counts.proposed,
-            itemsSkipped: counts.skipped,
-            itemsErrored: counts.errored,
-            detail: 'no AI provider configured for this campaign',
+        const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+        const externalAiGate = await this.externalAiGate(campaignId, config);
+        const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
+        if (withheldReason) {
+          const outcome = freshOutcome({
+            noteId: item.id,
+            outcome: 'errored',
+            entityType: null,
+            entityId: null,
+            proposalId: null,
+            reason: withheldReason,
+            body: item.body,
           });
+          results.push(outcome.result);
+          tallyOutcome(counts, outcome);
+          continue;
+        }
+
+        let classification: InboxSweepClassification;
+        try {
+          classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context, config);
+        } catch (err) {
+          if (err instanceof NoProviderConfiguredError) {
+            // No point classifying the remaining items either — abort the whole run with a
+            // job-level 'disabled' status, same shape as ScribeService's disabled path.
+            const disabledJob = await this.updateJob(job.id, {
+              status: 'disabled',
+              itemsTotal: openItems.length,
+              itemsProposed: counts.proposed,
+              itemsSkipped: counts.skipped,
+              itemsErrored: counts.errored,
+              detail: 'no AI provider configured for this campaign',
+              snapshot: this.buildResultSnapshot(results, counts),
+            });
+            return {
+              job: {
+                ...jobToDomain(disabledJob),
+                itemsNewlyProposed: counts.newlyProposed,
+                itemsNewlySkipped: counts.newlySkipped,
+                itemsNewlyErrored: counts.newlyErrored,
+              },
+              items: results,
+            };
+          }
+          const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
+          if (err instanceof InvalidInboxSweepClassificationError) {
+            const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
+            results.push(outcome.result);
+            tallyOutcome(counts, outcome);
+          } else {
+            const outcome = freshOutcome({
+              noteId: item.id,
+              outcome: 'errored',
+              entityType: null,
+              entityId: null,
+              proposalId: null,
+              reason,
+              body: item.body,
+            });
+            results.push(outcome.result);
+            tallyOutcome(counts, outcome);
+          }
+          continue;
+        }
+
+        const outcome = await this.applyClassification(
+          campaignId,
+          job.id,
+          item.id,
+          item.body,
+          item.updatedAt,
+          classification,
+          user,
+          role,
+        );
+        results.push(outcome.result);
+        tallyOutcome(counts, outcome);
+      }
+
+      const finalJob = await this.updateJob(job.id, {
+        status: 'succeeded',
+        itemsTotal: openItems.length,
+        itemsProposed: counts.proposed,
+        itemsSkipped: counts.skipped,
+        itemsErrored: counts.errored,
+        detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
+        snapshot: this.buildResultSnapshot(results, counts),
+      });
+      return {
+        job: {
+          ...jobToDomain(finalJob),
+          itemsNewlyProposed: counts.newlyProposed,
+          itemsNewlySkipped: counts.newlySkipped,
+          itemsNewlyErrored: counts.newlyErrored,
+        },
+        items: results,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Inbox sweep failed for campaign ${campaignId}, job ${job.id}: ${message}`, err instanceof Error ? err.stack : undefined);
+      try {
+        const failedJob = await this.updateJob(job.id, {
+          status: 'failed',
+          itemsTotal: openItems.length,
+          itemsProposed: counts.proposed,
+          itemsSkipped: counts.skipped,
+          itemsErrored: counts.errored,
+          detail: `sweep failed: ${message}`,
+          snapshot: this.buildResultSnapshot(results, counts),
+        });
+        if (failedJob) {
           return {
             job: {
-              ...jobToDomain(disabledJob),
+              ...jobToDomain(failedJob),
               itemsNewlyProposed: counts.newlyProposed,
               itemsNewlySkipped: counts.newlySkipped,
               itemsNewlyErrored: counts.newlyErrored,
@@ -311,57 +453,113 @@ export class InboxSweepService {
             items: results,
           };
         }
-        const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
-        if (err instanceof InvalidInboxSweepClassificationError) {
-          const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
-          results.push(outcome.result);
-          tallyOutcome(counts, outcome);
-        } else {
-          const outcome = freshOutcome({
-            noteId: item.id,
-            outcome: 'errored',
-            entityType: null,
-            entityId: null,
-            proposalId: null,
-            reason,
-            body: item.body,
-          });
-          results.push(outcome.result);
-          tallyOutcome(counts, outcome);
-        }
-        continue;
+      } catch (updateErr) {
+        this.logger.error(
+          `Failed to update sweep job ${job.id} to failed: ${updateErr instanceof Error ? updateErr.message : String(updateErr)}`,
+        );
       }
+      return {
+        job: {
+          ...jobToDomain(job),
+          status: 'failed',
+          detail: `sweep failed: ${message}`,
+          itemsTotal: openItems.length,
+          itemsProposed: counts.proposed,
+          itemsSkipped: counts.skipped,
+          itemsErrored: counts.errored,
+          itemsNewlyProposed: counts.newlyProposed,
+          itemsNewlySkipped: counts.newlySkipped,
+          itemsNewlyErrored: counts.newlyErrored,
+        },
+        items: results,
+      };
+    }
+  }
 
-      const outcome = await this.applyClassification(
-        campaignId,
-        job.id,
-        item.id,
-        item.body,
-        item.updatedAt,
-        classification,
-        user,
-        role,
-      );
-      results.push(outcome.result);
-      tallyOutcome(counts, outcome);
+  private buildResultSnapshot(items: InboxSweepItemResult[], counts: SweepCounts): string {
+    return JSON.stringify({
+      items,
+      itemsNewlyProposed: counts.newlyProposed,
+      itemsNewlySkipped: counts.newlySkipped,
+      itemsNewlyErrored: counts.newlyErrored,
+    });
+  }
+
+  async getInboxSweepResult(campaignId: number, jobId: number): Promise<InboxSweepResult> {
+    const [jobRow] = await this.db
+      .select()
+      .from(inboxSweepJobs)
+      .where(and(eq(inboxSweepJobs.id, jobId), eq(inboxSweepJobs.campaignId, campaignId)))
+      .limit(1);
+    if (!jobRow) throw new NotFoundException('Inbox sweep job not found');
+
+    // #1716 review: completed sweeps store the exact `InboxSweepResult` returned by the
+    // synchronous path. This preserves per-item outcomes that are deliberately not written
+    // to the idempotency ledger (consent-withheld, no-provider, non-deterministic errors)
+    // and the correct `itemsNewly*` breakdown for clients.
+    const snapshot = (jobRow as JobRow).snapshot;
+    if (snapshot) {
+      try {
+        const parsed = JSON.parse(snapshot) as {
+          items: InboxSweepItemResult[];
+          itemsNewlyProposed: number;
+          itemsNewlySkipped: number;
+          itemsNewlyErrored: number;
+        };
+        const job = jobToDomain(jobRow as JobRow);
+        return {
+          job: {
+            ...job,
+            itemsNewlyProposed: parsed.itemsNewlyProposed,
+            itemsNewlySkipped: parsed.itemsNewlySkipped,
+            itemsNewlyErrored: parsed.itemsNewlyErrored,
+          },
+          items: parsed.items,
+        };
+      } catch (err) {
+        this.logger.error(`Failed to parse inbox sweep snapshot for job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
+        // fall through to the reconstructed path
+      }
     }
 
-    const finalJob = await this.updateJob(job.id, {
-      status: 'succeeded',
-      itemsTotal: openItems.length,
-      itemsProposed: counts.proposed,
-      itemsSkipped: counts.skipped,
-      itemsErrored: counts.errored,
-      detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
-    });
+    const itemRows = await this.db
+      .select({
+        noteId: inboxSweepItems.noteId,
+        outcome: inboxSweepItems.outcome,
+        entityType: inboxSweepItems.entityType,
+        entityId: inboxSweepItems.entityId,
+        proposalId: inboxSweepItems.proposalId,
+        reason: inboxSweepItems.reason,
+        body: notesTable.body,
+      })
+      .from(inboxSweepItems)
+      .leftJoin(notesTable, eq(inboxSweepItems.noteId, notesTable.id))
+      .where(and(eq(inboxSweepItems.jobId, jobId), eq(inboxSweepItems.campaignId, campaignId)))
+      .orderBy(inboxSweepItems.id);
+
+    const items: InboxSweepItemResult[] = itemRows.map((row) => ({
+      noteId: row.noteId,
+      outcome: row.outcome as InboxSweepItemResult['outcome'],
+      entityType: (row.entityType as InboxSweepItemResult['entityType']) ?? null,
+      entityId: row.entityId ?? null,
+      proposalId: row.proposalId ?? null,
+      reason: row.reason,
+      body: row.body ?? undefined,
+    }));
+
+    const job = jobToDomain(jobRow as JobRow);
+    const proposedCount = items.filter((i) => i.outcome === 'proposed').length;
+    const skippedCount = items.filter((i) => i.outcome === 'skipped').length;
+    const erroredCount = items.filter((i) => i.outcome === 'errored').length;
+
     return {
       job: {
-        ...jobToDomain(finalJob),
-        itemsNewlyProposed: counts.newlyProposed,
-        itemsNewlySkipped: counts.newlySkipped,
-        itemsNewlyErrored: counts.newlyErrored,
+        ...job,
+        itemsProposed: Math.max(job.itemsProposed, proposedCount),
+        itemsSkipped: Math.max(job.itemsSkipped, skippedCount),
+        itemsErrored: Math.max(job.itemsErrored, erroredCount),
       },
-      items: results,
+      items,
     };
   }
 
@@ -733,8 +931,8 @@ export class InboxSweepService {
   private async insertJob(
     campaignId: number,
     user: RequestUser,
-    status: 'succeeded' | 'disabled',
-    counts: { itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
+    status: InboxSweepJob['status'],
+    counts: { itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string; snapshot?: string | null },
   ): Promise<JobRow> {
     const [row] = await this.db
       .insert(inboxSweepJobs)
@@ -745,6 +943,7 @@ export class InboxSweepService {
         itemsProposed: counts.itemsProposed,
         itemsSkipped: counts.itemsSkipped,
         itemsErrored: counts.itemsErrored,
+        snapshot: counts.snapshot ?? null,
         detail: counts.detail,
         createdBy: auditActor(user),
         createdAt: nowIso(),
@@ -755,7 +954,7 @@ export class InboxSweepService {
 
   private async updateJob(
     jobId: number,
-    patch: { status: 'succeeded' | 'disabled'; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
+    patch: { status: InboxSweepJob['status']; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string; snapshot?: string | null },
   ): Promise<JobRow> {
     const [row] = await this.db
       .update(inboxSweepJobs)
@@ -765,6 +964,7 @@ export class InboxSweepService {
         itemsProposed: patch.itemsProposed,
         itemsSkipped: patch.itemsSkipped,
         itemsErrored: patch.itemsErrored,
+        snapshot: patch.snapshot ?? null,
         detail: patch.detail,
       })
       .where(eq(inboxSweepJobs.id, jobId))

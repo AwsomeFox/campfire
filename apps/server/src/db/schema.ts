@@ -2003,6 +2003,10 @@ export const inboxSweepJobs = sqliteTable('inbox_sweep_jobs', {
   itemsProposed: integer('items_proposed').notNull().default(0),
   itemsSkipped: integer('items_skipped').notNull().default(0),
   itemsErrored: integer('items_errored').notNull().default(0),
+  // #1716 review: a durable snapshot of the completed `InboxSweepResult` so the poll
+  // endpoint can return the same per-item outcomes (including non-ledgered ones) the
+  // synchronous fast path returns, instead of reconstructing a subset from `inbox_sweep_items`.
+  snapshot: text('snapshot'),
   detail: text('detail').notNull().default(''),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
