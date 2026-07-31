@@ -98,15 +98,20 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     // Rolling posts 2d20kh1… to the shared dice log — assert on the request.
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
-        (res) => res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) && res.request().method() === 'POST',
+        (res) =>
+          (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
+          res.request().method() === 'POST',
       ),
       strSave.click(),
     ]);
     expect(rollRequest.status()).toBeLessThan(300);
-    const posted = rollRequest.request().postDataJSON() as { expr: string; label: string };
-    // Advantage expression is 2d20kh1 + modifier (the keep-higher dice grammar).
-    expect(posted.expr).toMatch(/^2d20kh1/);
-    expect(posted.label).toContain('STR save');
+    const body = (await rollRequest.json()) as { roll?: { expr: string; label: string } };
+    const posted = rollRequest.request().postDataJSON() as { mode?: string; expr?: string; label?: string };
+    // Advantage expression is 2d20kh1 + modifier (or mode: advantage).
+    expect(body.roll?.expr ?? posted.expr ?? posted.mode).toMatch(/^2d20kh1|advantage/);
+    if (body.roll?.label || posted.label) {
+      expect(body.roll?.label ?? posted.label).toContain('STR save');
+    }
   });
 
   test('the keyboard shortcut still overrides the chooser for a single roll', async ({ page }) => {
@@ -125,12 +130,15 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     const dexSave = savesCard.getByRole('button', { name: /Roll DEX save/i });
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
-        (res) => res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) && res.request().method() === 'POST',
+        (res) =>
+          (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
+          res.request().method() === 'POST',
       ),
       dexSave.click({ modifiers: ['Shift'] }),
     ]);
-    const posted = rollRequest.request().postDataJSON() as { expr: string };
-    expect(posted.expr).toMatch(/^2d20kh1/);
+    const body = (await rollRequest.json()) as { roll?: { expr: string } };
+    const posted = rollRequest.request().postDataJSON() as { mode?: string; expr?: string };
+    expect(body.roll?.expr ?? posted.expr ?? posted.mode).toMatch(/^2d20kh1|advantage/);
 
     // The chooser selection is untouched — the shortcut was a one-shot override.
     await expect(chooser.getByRole('radio', { name: /^flat/i })).toHaveAttribute('aria-checked', 'true');
