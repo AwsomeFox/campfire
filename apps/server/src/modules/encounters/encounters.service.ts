@@ -5086,7 +5086,6 @@ export class EncountersService {
       tx.update(encounters)
         .set({
           status: 'running',
-          hidden: false,
           round: 1,
           turnVersion: sql`${encounters.turnVersion} + 1`,
           turnIndex,
