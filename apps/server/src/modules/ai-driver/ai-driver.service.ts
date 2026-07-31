@@ -1678,7 +1678,7 @@ export interface DriverLivePlayToolArgRule {
 export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLivePlayToolArgRule>> = {
   'generate_map': {
     allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit']),
-    forbidden: new Set(),
+    forbidden: new Set(['mapAlignment']),
   },
   'generate_ai_map': {
     allowed: new Set([
