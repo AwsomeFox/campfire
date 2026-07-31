@@ -1,5 +1,5 @@
-import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
 import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Note, Role } from '@campfire/schema';
 import {
   CharacterCreate,
@@ -132,6 +132,7 @@ interface JobRow {
   itemsProposed: number;
   itemsSkipped: number;
   itemsErrored: number;
+  snapshot: string | null;
   detail: string;
   createdBy: string;
   createdAt: string;
@@ -189,7 +190,7 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  * item sweepable without manual intervention.
  */
 @Injectable()
-export class InboxSweepService {
+export class InboxSweepService implements OnModuleInit {
   private readonly logger = new Logger(InboxSweepService.name);
 
   constructor(
@@ -200,6 +201,36 @@ export class InboxSweepService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(INBOX_SWEEP_CLASSIFIER) private readonly classifier: InboxSweepClassifier,
   ) {}
+
+  /**
+   * #1716 review: a server that is restarted while a background sweep is running never
+   * sees that sweep complete. Reconcile any stale `running` jobs left by a prior process
+   * so clients don't poll them forever. A 10-minute grace period covers the normal fast
+   * path before we declare the job orphaned.
+   */
+  async onModuleInit(): Promise<void> {
+    const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    try {
+      const stale = await this.db
+        .select()
+        .from(inboxSweepJobs)
+        .where(and(eq(inboxSweepJobs.status, 'running'), lt(inboxSweepJobs.createdAt, cutoff)))
+        .all();
+      for (const job of stale) {
+        this.logger.warn(`Reconciling stale inbox sweep job ${job.id} (created ${job.createdAt}) as failed`);
+        await this.updateJob(job.id, {
+          status: 'failed',
+          itemsTotal: job.itemsTotal,
+          itemsProposed: job.itemsProposed,
+          itemsSkipped: job.itemsSkipped,
+          itemsErrored: job.itemsErrored,
+          detail: 'sweep interrupted by server restart',
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Failed to reconcile stale inbox sweep jobs: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   async sweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {
     const openItems = await this.notes.listAllInbox(campaignId, false);
@@ -341,6 +372,7 @@ export class InboxSweepService {
               itemsSkipped: counts.skipped,
               itemsErrored: counts.errored,
               detail: 'no AI provider configured for this campaign',
+              snapshot: this.buildResultSnapshot(results, counts),
             });
             return {
               job: {
@@ -394,6 +426,7 @@ export class InboxSweepService {
         itemsSkipped: counts.skipped,
         itemsErrored: counts.errored,
         detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
+        snapshot: this.buildResultSnapshot(results, counts),
       });
       return {
         job: {
@@ -414,6 +447,7 @@ export class InboxSweepService {
         itemsSkipped: counts.skipped,
         itemsErrored: counts.errored,
         detail: `sweep failed: ${message}`,
+        snapshot: this.buildResultSnapshot(results, counts),
       });
       return {
         job: {
@@ -427,6 +461,15 @@ export class InboxSweepService {
     }
   }
 
+  private buildResultSnapshot(items: InboxSweepItemResult[], counts: SweepCounts): string {
+    return JSON.stringify({
+      items,
+      itemsNewlyProposed: counts.newlyProposed,
+      itemsNewlySkipped: counts.newlySkipped,
+      itemsNewlyErrored: counts.newlyErrored,
+    });
+  }
+
   async getInboxSweepResult(campaignId: number, jobId: number): Promise<InboxSweepResult> {
     const [jobRow] = await this.db
       .select()
@@ -434,6 +477,35 @@ export class InboxSweepService {
       .where(and(eq(inboxSweepJobs.id, jobId), eq(inboxSweepJobs.campaignId, campaignId)))
       .limit(1);
     if (!jobRow) throw new NotFoundException('Inbox sweep job not found');
+
+    // #1716 review: completed sweeps store the exact `InboxSweepResult` returned by the
+    // synchronous path. This preserves per-item outcomes that are deliberately not written
+    // to the idempotency ledger (consent-withheld, no-provider, non-deterministic errors)
+    // and the correct `itemsNewly*` breakdown for clients.
+    const snapshot = (jobRow as JobRow).snapshot;
+    if (snapshot) {
+      try {
+        const parsed = JSON.parse(snapshot) as {
+          items: InboxSweepItemResult[];
+          itemsNewlyProposed: number;
+          itemsNewlySkipped: number;
+          itemsNewlyErrored: number;
+        };
+        const job = jobToDomain(jobRow as JobRow);
+        return {
+          job: {
+            ...job,
+            itemsNewlyProposed: parsed.itemsNewlyProposed,
+            itemsNewlySkipped: parsed.itemsNewlySkipped,
+            itemsNewlyErrored: parsed.itemsNewlyErrored,
+          },
+          items: parsed.items,
+        };
+      } catch (err) {
+        this.logger.error(`Failed to parse inbox sweep snapshot for job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
+        // fall through to the reconstructed path
+      }
+    }
 
     const itemRows = await this.db
       .select({
@@ -452,12 +524,7 @@ export class InboxSweepService {
 
     const job = jobToDomain(jobRow as JobRow);
     return {
-      job: {
-        ...job,
-        itemsNewlyProposed: job.itemsProposed,
-        itemsNewlySkipped: job.itemsSkipped,
-        itemsNewlyErrored: job.itemsErrored,
-      },
+      job,
       items: itemRows.map((row) => ({
         noteId: row.noteId,
         outcome: row.outcome as InboxSweepItemResult['outcome'],
@@ -839,7 +906,7 @@ export class InboxSweepService {
     campaignId: number,
     user: RequestUser,
     status: InboxSweepJob['status'],
-    counts: { itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
+    counts: { itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string; snapshot?: string | null },
   ): Promise<JobRow> {
     const [row] = await this.db
       .insert(inboxSweepJobs)
@@ -850,6 +917,7 @@ export class InboxSweepService {
         itemsProposed: counts.itemsProposed,
         itemsSkipped: counts.itemsSkipped,
         itemsErrored: counts.itemsErrored,
+        snapshot: counts.snapshot ?? null,
         detail: counts.detail,
         createdBy: auditActor(user),
         createdAt: nowIso(),
@@ -860,7 +928,7 @@ export class InboxSweepService {
 
   private async updateJob(
     jobId: number,
-    patch: { status: InboxSweepJob['status']; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
+    patch: { status: InboxSweepJob['status']; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string; snapshot?: string | null },
   ): Promise<JobRow> {
     const [row] = await this.db
       .update(inboxSweepJobs)
@@ -870,6 +938,7 @@ export class InboxSweepService {
         itemsProposed: patch.itemsProposed,
         itemsSkipped: patch.itemsSkipped,
         itemsErrored: patch.itemsErrored,
+        snapshot: patch.snapshot ?? null,
         detail: patch.detail,
       })
       .where(eq(inboxSweepJobs.id, jobId))

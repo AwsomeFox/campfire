@@ -43,7 +43,7 @@ export class InboxSweepController {
   }
 
   @Get('sweep/:jobId')
-  @Throttle({ ai: { limit: 30, ttl: 60000 } })
+  @Throttle({ ai: { limit: 120, ttl: 60000 } })
   @ApiOperation({
     summary: 'Get the current result of a sweep job',
     description:

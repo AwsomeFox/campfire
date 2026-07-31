@@ -569,19 +569,29 @@ function SweepControl({
 /**
  * Poll the inbox-sweep result endpoint until the job finishes or the caller stops
  * caring (e.g. the DM switched campaigns or started a newer sweep). #1716
+ *
+ * Bounded by both an attempt count and an overall deadline so a stale `running` job
+ * (e.g. after a server restart) cannot leave the page polling forever.
  */
 async function pollInboxSweepResult(
   campaignId: number,
   jobId: number,
   isStillRelevant: () => boolean,
   intervalMs = 2000,
+  maxAttempts = 180,
+  deadlineMs = 10 * 60 * 1000,
 ): Promise<InboxSweepResult> {
-  for (;;) {
+  const startedAt = Date.now();
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const result = await api.get<InboxSweepResult>(`${API}/campaigns/${campaignId}/inbox/sweep/${jobId}`);
     if (result.job.status !== 'running') return result;
     if (!isStillRelevant()) throw new Error('Sweep polling cancelled');
+    if (Date.now() - startedAt > deadlineMs) {
+      throw new Error('Sweep result polling timed out; the job may still be running on the server');
+    }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+  throw new Error('Sweep result polling reached the maximum number of attempts');
 }
 
 const SWEEP_OUTCOME_TAG: Record<InboxSweepItemResult['outcome'], { cls: string; labelKey: string }> = {

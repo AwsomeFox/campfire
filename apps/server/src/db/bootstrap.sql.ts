@@ -1723,6 +1723,7 @@ CREATE TABLE IF NOT EXISTS inbox_sweep_jobs (
   items_proposed INTEGER NOT NULL DEFAULT 0,
   items_skipped INTEGER NOT NULL DEFAULT 0,
   items_errored INTEGER NOT NULL DEFAULT 0,
+  snapshot TEXT,
   detail TEXT NOT NULL DEFAULT '',
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL

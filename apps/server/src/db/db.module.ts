@@ -3370,6 +3370,18 @@ function migrateInboxSweepTables1644(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * #1716 review: the poll endpoint needs a durable `InboxSweepResult` snapshot
+ * (per-item outcomes including non-ledgered ones, plus the `newly*` counts) so
+ * a slow/backgrounded sweep can return the same result the synchronous path does.
+ */
+function migrateInboxSweepJobsSnapshot1716(sqlite: Database.Database): void {
+  const columns = sqlite.prepare('PRAGMA table_info(inbox_sweep_jobs)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'snapshot')) {
+    sqlite.exec('ALTER TABLE inbox_sweep_jobs ADD COLUMN snapshot TEXT');
+  }
+}
+
 function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
   const hasConfigs = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_configs'")
@@ -4886,6 +4898,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // This migration has not shipped on main, so keep the feature and give it the
   // next unique recorded name rather than creating a duplicate human-facing ordinal.
   { name: '0140_inbox_sweep_1644', run: migrateInboxSweepTables1644 },
+  // #1716 review: durable result snapshot for backgrounded sweep poll endpoint.
+  { name: '0140b_inbox_sweep_snapshot_1716', run: migrateInboxSweepJobsSnapshot1716 },
   // #742 campaign-owned taxonomy, bulk journals, and current-format templates.
   // 0141: main claimed 0140 for inbox sweep (#1644) after this branch's earlier 0140.
   { name: '0141_campaign_library_management_742', run: migrateCampaignLibraryManagement742 },
