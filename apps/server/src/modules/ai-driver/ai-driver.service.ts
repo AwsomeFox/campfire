@@ -4015,13 +4015,13 @@ export class AiDriverService {
       }
       const maxDepth = await this.getActionQueueDepth(campaignId);
       // #1497 review — re-validate after the yield:
-      // 1. If teardownSession or flushActionQueue ran while we yielded, this queue was flushed.
+      // 1. Stop conditions can change while we await getActionQueueDepth (pause, safety hold,
+      //    human takeover, wrap-up). Re-run admission gates FIRST so safety holds throw 503 instead of 409.
+      this.assertTurnAdmissible(campaignId, session, opts);
+      // 2. If teardownSession or flushActionQueue ran while we yielded, this queue was flushed.
       if ((queue as any).flushed) {
         throw new ConflictException('AI DM session was torn down while queueing; please retry.');
       }
-      // 2. Stop conditions can change while we await getActionQueueDepth (pause, safety hold,
-      //    human takeover, wrap-up). Re-run the same admission gates before deciding to run.
-      this.assertTurnAdmissible(campaignId, session, opts);
       // 3. If the turn finished naturally while we yielded:
       if (session.status !== 'running') {
         if (queue.length === 0) {
@@ -4037,7 +4037,9 @@ export class AiDriverService {
               `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
             );
           }
-          const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+          const queuedActionSeq = opts.dequeued
+            ? (opts.actionSeq ?? null)
+            : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
           return new Promise((resolve, reject) => {
             const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
             targetQueue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
@@ -4056,7 +4058,9 @@ export class AiDriverService {
             `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
           );
         }
-        const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+        const queuedActionSeq = opts.dequeued
+          ? (opts.actionSeq ?? null)
+          : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
         return new Promise((resolve, reject) => {
           const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
           targetQueue!.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
