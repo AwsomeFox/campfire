@@ -261,17 +261,41 @@ test.describe('Design-system density (#674, #1683)', () => {
     );
   });
 
-  // NOTE for #1700/#1698 (checked, not ported): a ported version of #1700's own test
-  // (".cf-target-24/.cf-target-44 floors cannot be silently overridden") FAILS against
-  // this branch — confirmed by measurement (getComputedStyle against the real compiled
-  // CSS, apps/web/e2e/lib/computedStyle.ts): a bare `.btn` combined with `.cf-target-24`
-  // still renders at 44px, not 24px, because `.btn`'s later "Nocturne .btn aliases
-  // default-density controls" rule (below, issue #674) wins at equal specificity (both
-  // are single, non-compound class selectors) on source order alone. This PR does not
-  // touch that mechanism — it only adds `.btn.cf-density-xs`, a HIGHER-specificity
-  // compound selector, an unrelated fix. #1700 is therefore NOT superseded here and its
-  // test is intentionally left off this branch (it would fail); #1700 still needs to
-  // land, separately, after this merges.
+  /**
+   * Issue #1698: `.cf-target-24` and `.cf-target-44` target-size helpers must not be silently
+   * overridden by `.btn` density aliases or `.btn.cf-density-*` rules at equal or lower specificity.
+   * Target helpers must be declared after control base classes (.btn, .cf-btn, .input, .cf-input, .cf-textarea, .cf-select) and provide
+   * compound selectors (.btn.cf-target-*, .cf-btn.cf-target-*, .input.cf-target-*, .cf-input.cf-target-*,
+   * .cf-textarea.cf-target-*, .cf-select.cf-target-*) so explicit target
+   * sizes take precedence over default control min-heights.
+   */
+  test('.cf-target-24 and .cf-target-44 floors cannot be silently overridden by control aliases (issue #1698)', () => {
+    const css = READ(INDEX_CSS);
+
+    // Rule position check: target helpers must be declared after top-level .btn alias in index.css
+    const btnMatch = css.search(/^\.btn\s*\{/m);
+    expect(btnMatch, 'Top-level .btn rule must exist').toBeGreaterThan(-1);
+
+    const target24Pos = css.lastIndexOf('.cf-target-24');
+    const target44Pos = css.lastIndexOf('.cf-target-44');
+    expect(target24Pos, '.cf-target-24 must be declared after top-level .btn alias').toBeGreaterThan(btnMatch);
+    expect(target44Pos, '.cf-target-44 must be declared after top-level .btn alias').toBeGreaterThan(btnMatch);
+
+    // Specificity / compound selector checks (must match bare .btn compound, not just .cf-btn)
+    expect(css, '.btn.cf-target-24 compound rule must exist').toMatch(/(^|[\s,])\.btn\.cf-target-24\b/m);
+    expect(css, '.btn.cf-target-44 compound rule must exist').toMatch(/(^|[\s,])\.btn\.cf-target-44\b/m);
+    expect(css, '.cf-btn.cf-target-24 compound rule must exist').toMatch(/\.cf-btn\.cf-target-24\b/);
+    expect(css, '.cf-btn.cf-target-44 compound rule must exist').toMatch(/\.cf-btn\.cf-target-44\b/);
+    expect(css, '.input.cf-target-24 compound rule must exist').toMatch(/\.input\.cf-target-24\b/);
+    expect(css, '.input.cf-target-44 compound rule must exist').toMatch(/\.input\.cf-target-44\b/);
+    expect(css, '.cf-input.cf-target-24 compound rule must exist').toMatch(/\.cf-input\.cf-target-24\b/);
+    expect(css, '.cf-input.cf-target-44 compound rule must exist').toMatch(/\.cf-input\.cf-target-44\b/);
+    expect(css, '.cf-textarea.cf-target-24 compound rule must exist').toMatch(/\.cf-textarea\.cf-target-24\b/);
+    expect(css, '.cf-textarea.cf-target-44 compound rule must exist').toMatch(/\.cf-textarea\.cf-target-44\b/);
+    expect(css, '.cf-select.cf-target-24 compound rule must exist').toMatch(/\.cf-select\.cf-target-24\b/);
+    expect(css, '.cf-select.cf-target-44 compound rule must exist').toMatch(/\.cf-select\.cf-target-44\b/);
+  });
+
   test('ui.tsx exports canonical primitives with density support', () => {
     const ui = READ(UI_TSX);
     const density = READ(DENSITY_TS);
