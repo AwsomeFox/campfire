@@ -1019,6 +1019,31 @@ describe('characters (e2e)', () => {
       expect(revived.body.deathState).toBe('none');
       expect(revived.body.status).toBe('active');
     });
+
+    it('a Starfinder character dropped to 0 HP via the sheet is flagged dying, not none (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder Sheet HP #1503' });
+      expect(camp.status).toBe(201);
+      const sfCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Vesk Marine', hpCurrent: 12, hpMax: 12 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Starfinder models 0 HP as dying (Resolve-Point recovery, not a 5e death-save tracker), so
+      // dropping to 0 via the sheet flags 'dying' — matching applyStarfinderDamage's damage path
+      // instead of leaving the character 'none' (Devin review #1812).
+      const dropped = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 });
+      expect(dropped.status).toBe(201);
+      expect(dropped.body.hpCurrent).toBe(0);
+      expect(dropped.body.deathState).toBe('dying');
+      // No 5e death-save counters are written for a system without death saves.
+      expect(dropped.body.deathSaveSuccesses).toBe(0);
+      expect(dropped.body.deathSaveFailures).toBe(0);
+    });
   });
 
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —

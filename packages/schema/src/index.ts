@@ -4200,6 +4200,16 @@ export interface HpModel {
    * state — exactly the monster path.
    */
   readonly deathSaves: boolean;
+  /**
+   * Whether this system flags a combatant 'dying' when HP reaches 0 via its OWN model — not 5e
+   * death saves. Starfinder, for example, treats 0 HP as dying but recovers via Resolve Points
+   * rather than a 3-success/3-failure tracker. Systems with no downed concept at all (PF2e, OSR,
+   * Open Legend, …) leave this false: 0 HP is simply "down" with deathState 'none'. The damage
+   * path still runs each system's own model (e.g. applyStarfinderDamage); this flag only governs
+   * the absolute-set (hpSet) path and the character sheet, so a combatant reaches the same state
+   * at 0 HP regardless of how the zero was applied (issue #1503).
+   */
+  readonly dyingAtZeroHp: boolean;
 }
 
 /**
@@ -4211,6 +4221,9 @@ export interface HpModel {
 export const DND5E_HP_MODEL: HpModel = {
   massiveDamageInstantDeath: true,
   deathSaves: true,
+  // 5e also treats 0 HP as dying; the deathSaves branch above is what actually writes it, but the
+  // flag is declared so a system whose dying model is NOT 5e death saves can express the same.
+  dyingAtZeroHp: true,
 };
 
 /**
@@ -4223,6 +4236,7 @@ export const DND5E_HP_MODEL: HpModel = {
 export const NEUTRAL_HP_MODEL: HpModel = {
   massiveDamageInstantDeath: false,
   deathSaves: false,
+  dyingAtZeroHp: false,
 };
 
 export interface RuleSystemAdapter {

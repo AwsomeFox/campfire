@@ -743,17 +743,39 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(applyCombatantHp({ ...dead }, { hpDelta: 10 }, NEUTRAL_HP_MODEL).deathState).toBe('none');
     });
 
+    it('a system with its own dying model (Starfinder) flags dying at 0 HP via hpSet, matching the damage path', () => {
+      // #1503 (Devin review #1812): a Starfinder combatant set straight to 0 HP (hpSet) must reach
+      // the same 'dying' state as one damaged to 0 (hpDelta) — its damage path computes dying via
+      // applyStarfinderDamage; applyCombatantHp agrees via hpModel.dyingAtZeroHp on the absolute-set
+      // path, so the two routes no longer diverge.
+      const starfinder = { massiveDamageInstantDeath: false, deathSaves: false, dyingAtZeroHp: true };
+      // Absolute-set path: setting HP straight to 0 -> 'dying' (NOT 'none').
+      const fromSet = applyCombatantHp(charState({ hpCurrent: 6 }), { hpSet: 0 }, starfinder);
+      expect(fromSet.hpCurrent).toBe(0);
+      expect(fromSet.deathState).toBe('dying');
+      // No 5e death-save counters are written for a system without death saves.
+      expect(fromSet.deathSaveSuccesses).toBe(0);
+      expect(fromSet.deathSaveFailures).toBe(0);
+      // Damage path (applyCombatantHp's own view) reaches the same 'dying' state.
+      const fromDelta = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, starfinder);
+      expect(fromDelta.deathState).toBe('dying');
+      // A system/DM-flagged state is still preserved at 0 HP (not overridden to 'dying').
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dead' }), { hpSet: 0 }, starfinder).deathState).toBe('dead');
+      // Healing above 0 still revives.
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { hpSet: 5 }, starfinder).deathState).toBe('none');
+    });
+
     // The server-side parity check the issue asked for: for EVERY registered adapter, a
     // character reduced to 0 HP is "dying" only when the adapter declares 5e death saves, and
     // never accumulates death-save state otherwise. This is the test that proves the death model
     // the adapter declares is the one applyCombatantHp honours server-side.
     const adaptersForHpParity = listRuleSystemAdapters();
     it.each(adaptersForHpParity.map((a) => a.id))(
-      'adapter %s at 0 HP: dying only when the adapter declares death saves',
+      'adapter %s at 0 HP: dying when the adapter declares death saves OR its own dying model',
       (id) => {
         const adapter = adaptersForHpParity.find((a) => a.id === id)!;
         const model = hpModelForAdapter(adapter);
-        const expected = hasDeathSavesForAdapter(adapter) ? 'dying' : 'none';
+        const expected = hasDeathSavesForAdapter(adapter) || model.dyingAtZeroHp ? 'dying' : 'none';
         const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, model);
         expect(r.deathState).toBe(expected);
         expect(r.deathSaveSuccesses).toBe(0);

@@ -4088,6 +4088,39 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(rejectedSuccesses.status).toBe(400);
   });
 
+  it('a Starfinder combatant set straight to 0 HP is dying, matching the damage path (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder hpSet dying #1503' });
+    expect(camp.status).toBe(201);
+    const sfCampaignId = camp.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Solarian', hpCurrent: 15, hpMax: 15 })
+      ).status,
+    ).toBe(201);
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${sfCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Asteroid Fight', hidden: false });
+    const encId = enc.body.id as number;
+    const combatantId = enc.body.combatants[0].id as number;
+    // Starfinder models 0 HP as dying (Resolve-Point recovery, not 5e death saves). Setting HP
+    // straight to 0 (hpSet) must reach the same 'dying' state as dealing damage to 0 — the two
+    // routes no longer diverge (Devin review #1812).
+    const dropped = await request(server)
+      .patch(`/api/v1/encounters/${encId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ hpSet: 0 });
+    expect(dropped.status).toBe(200);
+    expect(dropped.body.hpCurrent).toBe(0);
+    expect(dropped.body.deathState).toBe('dying');
+  });
+
   it('rejects a fresh death save when the encounter ends after preflight but before its keyed transaction', async () => {
     const server = ctx.app.getHttpServer();
     const raceEncounter = await request(server)

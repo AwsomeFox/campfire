@@ -930,14 +930,21 @@ export function applyCombatantHp(
     // `hpCurrent > 0` clause below — so a character healed back above 0 HP stops being "down".
     // At 0 HP, whatever the system or DM already set is preserved: a DM-flagged 'dead' stays
     // 'dead' (not resurrected by an unrelated HP tweak); a Starfinder combatant keeps the
-    // 'dying'/'dead' its own damage model computed; a combatant simply reduced to 0 HP keeps the
-    // default 'none' and is "down" via hpBand. The death-save counters cannot accumulate for a
-    // non-death-save system (their write paths are gated on hpModel.deathSaves above), and are
-    // zeroed on revive. Massive damage was already gated off above, so instantDeath is false here.
+    // 'dying'/'dead' its own damage model computed. A combatant simply reduced to 0 HP is "down":
+    // deathState stays 'none' for a system with no downed concept (PF2e/OSR/…), but a system that
+    // models its own dying state (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' so the
+    // hpSet path agrees with the dying/dead outcome its damage path computes (applyStarfinderDamage
+    // — #1503, Devin review #1812). The death-save counters cannot accumulate for a non-death-save
+    // system (their write paths are gated on hpModel.deathSaves above), and are zeroed on revive.
+    // Massive damage was already gated off above, so instantDeath is false here.
     if (hpCurrent > 0) {
       deathState = 'none';
       succ = 0;
       fail = 0;
+    } else if (hpModel.dyingAtZeroHp && deathState === 'none') {
+      // A system like Starfinder models its own dying state without 5e death saves: 0 HP from a
+      // healthy state ('none') is 'dying', matching its damage path so hpSet and hpDelta agree.
+      deathState = 'dying';
     }
     const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {

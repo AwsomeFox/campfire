@@ -1368,7 +1368,8 @@ export class CharactersService {
         .where(eq(campaigns.id, fresh.campaignId))
         .limit(1)
         .all();
-      const deathSavesSupported = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem)).deathSaves;
+      const hpModel = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem));
+      const deathSavesSupported = hpModel.deathSaves;
 
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;
       const hpCurrent = clampHpCurrent(requested, fresh.hpMax);
@@ -1392,13 +1393,18 @@ export class CharactersService {
         // the next encounter's auto-add despite being alive again.
         if (fresh.status === 'dead') hpSet.status = 'active';
       } else if (hpCurrent === 0 && fresh.hpCurrent > 0 && fresh.deathState === 'none') {
-        // Only systems with 5e death saves flag a freshly-dropped character 'dying' (issue #1503);
-        // a system without them leaves deathState 'none' (the character is just "down" via hpBand),
-        // mirroring applyCombatantHp's no-death-saves branch so the sheet and combat tracker agree.
+        // Systems with 5e death saves flag a freshly-dropped character 'dying' with a cleared
+        // 3-success/3-failure tracker (issue #1503). A system with no downed concept at all
+        // (PF2e/OSR/…) leaves deathState 'none'. A system that models its own dying state without
+        // 5e death saves (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' too — without the
+        // counters — so the sheet agrees with applyCombatantHp and the Starfinder damage path
+        // (Devin review #1812).
         if (deathSavesSupported) {
           hpSet.deathState = 'dying';
           hpSet.deathSaveSuccesses = 0;
           hpSet.deathSaveFailures = 0;
+        } else if (hpModel.dyingAtZeroHp) {
+          hpSet.deathState = 'dying';
         }
       }
       const [updated] = tx

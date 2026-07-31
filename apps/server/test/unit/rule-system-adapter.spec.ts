@@ -20,9 +20,7 @@ import {
   OsrAdapter,
   checkProficiencyBonusForAdapter,
   criticalDamageRuleForAdapter,
-  hasDeathSavesForAdapter,
   hpModelForAdapter,
-  listRuleSystemAdapters,
   NEUTRAL_HP_MODEL,
   xpProgressForCharacter,
   xpProgressionFromThresholds,
@@ -379,7 +377,7 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
  * hardcoded 5e math.
  */
 describe('RuleSystemAdapter — adapter-owned death/proficiency/crit model (issue #1503)', () => {
-  it('only D&D 5e carries 5e death saves + massive damage; every other system is neutral', () => {
+  it('only D&D 5e carries 5e death saves + massive damage; Starfinder models its own dying state', () => {
     for (const adapter of listRuleSystemAdapters()) {
       const model = hpModelForAdapter(adapter);
       const fiveSaves = hasDeathSavesForAdapter(adapter);
@@ -389,8 +387,17 @@ describe('RuleSystemAdapter — adapter-owned death/proficiency/crit model (issu
       expect(model.massiveDamageInstantDeath).toBe(fiveSaves);
       if (adapter.id === DND5E_ADAPTER_ID) {
         expect(model).toEqual(DND5E_HP_MODEL);
+        expect(model.dyingAtZeroHp).toBe(true);
+      } else if (adapter.id === StarfinderAdapter.id) {
+        // Starfinder has no 5e death saves but DOES model 0 HP as dying (Resolve-Point recovery,
+        // not a 3-success/3-failure tracker), so the hpSet/sheet path agrees with its damage
+        // path instead of leaving a 0-HP combatant at deathState 'none' (#1503, Devin #1812).
+        expect(model.deathSaves).toBe(false);
+        expect(model.massiveDamageInstantDeath).toBe(false);
+        expect(model.dyingAtZeroHp).toBe(true);
       } else {
         expect(model).toEqual(NEUTRAL_HP_MODEL);
+        expect(model.dyingAtZeroHp).toBe(false);
       }
     }
   });
