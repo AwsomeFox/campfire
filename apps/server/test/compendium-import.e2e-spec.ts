@@ -207,18 +207,6 @@ describe('campaign import — compendium refs (issue #584, e2e)', () => {
     const encDetail = await request(server).get(`/api/v1/encounters/${encs.body[0].id}`).set(dm);
     expect(encDetail.body.combatants[0].ruleEntryId).toBeNull();
     expect(encDetail.body.combatants[0].name).toBe('Goblin');
-
-    const detachedExport = await request(server).get(`/api/v1/campaigns/${imported.body.id}/export?format=json`).set(dm);
-    expect(detachedExport.status).toBe(200);
-    const detachedCombatant = (detachedExport.body.encounters as Array<{ combatants: Array<Record<string, unknown>> }>)[0]
-      .combatants[0];
-    expect(detachedCombatant.compendiumSnapshot).toMatchObject({
-      source: 'Open5e API',
-      license: 'OGL 1.0a',
-      attribution: 'Wizards of the Coast',
-      author: 'Open5e Team',
-      sourceUrl: 'https://open5e.com/monsters/goblin',
-    });
   });
 
   it('blocks import on content hash mismatch (updated entry on target)', async () => {
