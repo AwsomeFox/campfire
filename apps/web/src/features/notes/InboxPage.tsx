@@ -301,8 +301,26 @@ export default function InboxPage() {
     // panel show "which capture" a reason applies to, not just a bare note id.
     setSweepItemBodies(Object.fromEntries(openList.items.map((n) => [n.id, n.body])));
     try {
-      const result = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
+      const started = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
       if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
+
+      // #1716 — the POST now starts a background job and returns immediately. Poll the
+      // result endpoint until the job is no longer running, so a long sweep cannot be
+      // lost when the HTTP write budget (120s) aborts the client connection.
+      const result =
+        started.job.status === 'running'
+          ? await pollInboxSweepResult(sweepCid, started.job.id, () =>
+              sweepCid === cidRef.current && sweepToken === sweepTokenRef.current,
+            )
+          : started;
+
+      if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
+
+      if (result.job.status === 'failed') {
+        setSweepError(result.job.detail || t('notes.sweepFailed'));
+        return;
+      }
+
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
@@ -546,6 +564,24 @@ function SweepControl({
       )}
     </div>
   );
+}
+
+/**
+ * Poll the inbox-sweep result endpoint until the job finishes or the caller stops
+ * caring (e.g. the DM switched campaigns or started a newer sweep). #1716
+ */
+async function pollInboxSweepResult(
+  campaignId: number,
+  jobId: number,
+  isStillRelevant: () => boolean,
+  intervalMs = 2000,
+): Promise<InboxSweepResult> {
+  for (;;) {
+    const result = await api.get<InboxSweepResult>(`${API}/campaigns/${campaignId}/inbox/sweep/${jobId}`);
+    if (result.job.status !== 'running') return result;
+    if (!isStillRelevant()) throw new Error('Sweep polling cancelled');
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 const SWEEP_OUTCOME_TAG: Record<InboxSweepItemResult['outcome'], { cls: string; labelKey: string }> = {

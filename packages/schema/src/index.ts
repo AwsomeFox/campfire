@@ -2836,7 +2836,7 @@ export const InboxSweepItemResult = z.object({
 export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
 
 /** `disabled` = no AI provider configured for the campaign (campaign or server default). */
-export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled']);
+export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled', 'running', 'failed']);
 export type InboxSweepJobStatus = z.infer<typeof InboxSweepJobStatus>;
 
 export const InboxSweepJob = z.object({

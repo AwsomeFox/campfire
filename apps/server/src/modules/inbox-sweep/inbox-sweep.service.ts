@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
+import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Note, Role } from '@campfire/schema';
 import {
   CharacterCreate,
   CharacterUpdate,
@@ -215,36 +215,7 @@ export class InboxSweepService {
       return { job: { ...jobToDomain(job), itemsNewlyProposed: 0, itemsNewlySkipped: 0, itemsNewlyErrored: 0 }, items: [] };
     }
 
-    const existing = await this.db
-      .select()
-      .from(inboxSweepItems)
-      .where(
-        and(
-          eq(inboxSweepItems.campaignId, campaignId),
-          inArray(
-            inboxSweepItems.noteId,
-            openItems.map((n) => n.id),
-          ),
-        ),
-      );
-    const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
-    const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
-
-    const summary = await this.campaigns.summary(campaignId, user, role);
-    const context: InboxSweepContext = {
-      campaignId,
-      quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),
-      npcs: (summary?.npcs ?? []).map((n) => ({ id: n.id, name: n.name })),
-      locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
-      characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
-    };
-    const results: InboxSweepItemResult[] = [];
-    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0, newlySkipped: 0, newlyErrored: 0 };
-
-    // Placeholder job row so ledger rows have a valid job_id from the start; totals are
-    // corrected with a single UPDATE once the loop below finishes (best-effort auditable
-    // record, same shape as ScribeService's `record()` — see scribe.service.ts).
-    const job = await this.insertJob(campaignId, user, 'succeeded', {
+    const job = await this.insertJob(campaignId, user, 'running', {
       itemsTotal: openItems.length,
       itemsProposed: 0,
       itemsSkipped: 0,
@@ -252,116 +223,250 @@ export class InboxSweepService {
       detail: 'sweep in progress',
     });
 
-    for (const item of openItems) {
-      const prior = existingByNote.get(item.id);
-      if (prior) {
-        // Already swept in an earlier run — never re-classify or re-propose. Self-heal
-        // the crash window where a terminal ledger row was written but the inbox close
-        // did not complete.
-        if (!item.resolved) {
-          const link = this.resolveLinkForPrior(prior);
-          await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
-        }
-        const outcome = this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? '');
-        results.push(outcome.result);
-        tallyOutcome(counts, outcome);
-        continue;
-      }
+    return this.performInboxSweep(campaignId, user, role, job, openItems);
+  }
 
-      const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
-      const externalAiGate = await this.externalAiGate(campaignId, config);
-      const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
-      if (withheldReason) {
-        const outcome = freshOutcome({
-          noteId: item.id,
-          outcome: 'errored',
-          entityType: null,
-          entityId: null,
-          proposalId: null,
-          reason: withheldReason,
-          body: item.body,
-        });
-        results.push(outcome.result);
-        tallyOutcome(counts, outcome);
-        continue;
-      }
+  async startInboxSweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {
+    const openItems = await this.notes.listAllInbox(campaignId, false);
 
-      let classification: InboxSweepClassification;
-      try {
-        classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context, config);
-      } catch (err) {
-        if (err instanceof NoProviderConfiguredError) {
-          // No point classifying the remaining items either — abort the whole run with a
-          // job-level 'disabled' status, same shape as ScribeService's disabled path.
-          const disabledJob = await this.updateJob(job.id, {
-            status: 'disabled',
-            itemsTotal: openItems.length,
-            itemsProposed: counts.proposed,
-            itemsSkipped: counts.skipped,
-            itemsErrored: counts.errored,
-            detail: 'no AI provider configured for this campaign',
-          });
-          return {
-            job: {
-              ...jobToDomain(disabledJob),
-              itemsNewlyProposed: counts.newlyProposed,
-              itemsNewlySkipped: counts.newlySkipped,
-              itemsNewlyErrored: counts.newlyErrored,
-            },
-            items: results,
-          };
-        }
-        const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
-        if (err instanceof InvalidInboxSweepClassificationError) {
-          const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
+    if (openItems.length === 0) {
+      const job = await this.insertJob(campaignId, user, 'succeeded', {
+        itemsTotal: 0,
+        itemsProposed: 0,
+        itemsSkipped: 0,
+        itemsErrored: 0,
+        detail: 'no open inbox items',
+      });
+      return { job: { ...jobToDomain(job), itemsNewlyProposed: 0, itemsNewlySkipped: 0, itemsNewlyErrored: 0 }, items: [] };
+    }
+
+    const job = await this.insertJob(campaignId, user, 'running', {
+      itemsTotal: openItems.length,
+      itemsProposed: 0,
+      itemsSkipped: 0,
+      itemsErrored: 0,
+      detail: 'sweep in progress',
+    });
+
+    // #1716 — run the sweep outside the request/response cycle. The client polls
+    // GET /campaigns/:id/inbox/sweep/:jobId for the outcome, so a slow classifier
+    // cannot be aborted by the 120s write-budget timeout. Fast sweeps still return
+    // the full result in the POST response; slower ones return a running job.
+    const sweep = this.performInboxSweep(campaignId, user, role, job, openItems);
+    const fastResult = await Promise.race([
+      sweep,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+    ]);
+    if (fastResult !== null) return fastResult;
+    return this.getInboxSweepResult(campaignId, job.id);
+  }
+
+  private async performInboxSweep(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    job: JobRow,
+    openItems: Note[],
+  ): Promise<InboxSweepResult> {
+    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0, newlySkipped: 0, newlyErrored: 0 };
+    const results: InboxSweepItemResult[] = [];
+
+    try {
+      const existing = await this.db
+        .select()
+        .from(inboxSweepItems)
+        .where(
+          and(
+            eq(inboxSweepItems.campaignId, campaignId),
+            inArray(inboxSweepItems.noteId, openItems.map((n) => n.id)),
+          ),
+        );
+      const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
+      const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
+
+      const summary = await this.campaigns.summary(campaignId, user, role);
+      const context: InboxSweepContext = {
+        campaignId,
+        quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),
+        npcs: (summary?.npcs ?? []).map((n) => ({ id: n.id, name: n.name })),
+        locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
+        characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
+      };
+
+      for (const item of openItems) {
+        const prior = existingByNote.get(item.id);
+        if (prior) {
+          // Already swept in an earlier run — never re-classify or re-propose. Self-heal
+          // the crash window where a terminal ledger row was written but the inbox close
+          // did not complete.
+          if (!item.resolved) {
+            const link = this.resolveLinkForPrior(prior);
+            await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
+          }
+          const outcome = this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? '');
           results.push(outcome.result);
           tallyOutcome(counts, outcome);
-        } else {
+          continue;
+        }
+
+        const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+        const externalAiGate = await this.externalAiGate(campaignId, config);
+        const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
+        if (withheldReason) {
           const outcome = freshOutcome({
             noteId: item.id,
             outcome: 'errored',
             entityType: null,
             entityId: null,
             proposalId: null,
-            reason,
+            reason: withheldReason,
             body: item.body,
           });
           results.push(outcome.result);
           tallyOutcome(counts, outcome);
+          continue;
         }
-        continue;
+
+        let classification: InboxSweepClassification;
+        try {
+          classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context, config);
+        } catch (err) {
+          if (err instanceof NoProviderConfiguredError) {
+            // No point classifying the remaining items either — abort the whole run with a
+            // job-level 'disabled' status, same shape as ScribeService's disabled path.
+            const disabledJob = await this.updateJob(job.id, {
+              status: 'disabled',
+              itemsTotal: openItems.length,
+              itemsProposed: counts.proposed,
+              itemsSkipped: counts.skipped,
+              itemsErrored: counts.errored,
+              detail: 'no AI provider configured for this campaign',
+            });
+            return {
+              job: {
+                ...jobToDomain(disabledJob),
+                itemsNewlyProposed: counts.newlyProposed,
+                itemsNewlySkipped: counts.newlySkipped,
+                itemsNewlyErrored: counts.newlyErrored,
+              },
+              items: results,
+            };
+          }
+          const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
+          if (err instanceof InvalidInboxSweepClassificationError) {
+            const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
+            results.push(outcome.result);
+            tallyOutcome(counts, outcome);
+          } else {
+            const outcome = freshOutcome({
+              noteId: item.id,
+              outcome: 'errored',
+              entityType: null,
+              entityId: null,
+              proposalId: null,
+              reason,
+              body: item.body,
+            });
+            results.push(outcome.result);
+            tallyOutcome(counts, outcome);
+          }
+          continue;
+        }
+
+        const outcome = await this.applyClassification(
+          campaignId,
+          job.id,
+          item.id,
+          item.body,
+          item.updatedAt,
+          classification,
+          user,
+          role,
+        );
+        results.push(outcome.result);
+        tallyOutcome(counts, outcome);
       }
 
-      const outcome = await this.applyClassification(
-        campaignId,
-        job.id,
-        item.id,
-        item.body,
-        item.updatedAt,
-        classification,
-        user,
-        role,
-      );
-      results.push(outcome.result);
-      tallyOutcome(counts, outcome);
+      const finalJob = await this.updateJob(job.id, {
+        status: 'succeeded',
+        itemsTotal: openItems.length,
+        itemsProposed: counts.proposed,
+        itemsSkipped: counts.skipped,
+        itemsErrored: counts.errored,
+        detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
+      });
+      return {
+        job: {
+          ...jobToDomain(finalJob),
+          itemsNewlyProposed: counts.newlyProposed,
+          itemsNewlySkipped: counts.newlySkipped,
+          itemsNewlyErrored: counts.newlyErrored,
+        },
+        items: results,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Inbox sweep failed for campaign ${campaignId}, job ${job.id}: ${message}`, err instanceof Error ? err.stack : undefined);
+      const failedJob = await this.updateJob(job.id, {
+        status: 'failed',
+        itemsTotal: openItems.length,
+        itemsProposed: counts.proposed,
+        itemsSkipped: counts.skipped,
+        itemsErrored: counts.errored,
+        detail: `sweep failed: ${message}`,
+      });
+      return {
+        job: {
+          ...jobToDomain(failedJob),
+          itemsNewlyProposed: counts.newlyProposed,
+          itemsNewlySkipped: counts.newlySkipped,
+          itemsNewlyErrored: counts.newlyErrored,
+        },
+        items: results,
+      };
     }
+  }
 
-    const finalJob = await this.updateJob(job.id, {
-      status: 'succeeded',
-      itemsTotal: openItems.length,
-      itemsProposed: counts.proposed,
-      itemsSkipped: counts.skipped,
-      itemsErrored: counts.errored,
-      detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
-    });
+  async getInboxSweepResult(campaignId: number, jobId: number): Promise<InboxSweepResult> {
+    const [jobRow] = await this.db
+      .select()
+      .from(inboxSweepJobs)
+      .where(and(eq(inboxSweepJobs.id, jobId), eq(inboxSweepJobs.campaignId, campaignId)))
+      .limit(1);
+    if (!jobRow) throw new NotFoundException('Inbox sweep job not found');
+
+    const itemRows = await this.db
+      .select({
+        noteId: inboxSweepItems.noteId,
+        outcome: inboxSweepItems.outcome,
+        entityType: inboxSweepItems.entityType,
+        entityId: inboxSweepItems.entityId,
+        proposalId: inboxSweepItems.proposalId,
+        reason: inboxSweepItems.reason,
+        body: notesTable.body,
+      })
+      .from(inboxSweepItems)
+      .leftJoin(notesTable, eq(inboxSweepItems.noteId, notesTable.id))
+      .where(and(eq(inboxSweepItems.jobId, jobId), eq(inboxSweepItems.campaignId, campaignId)))
+      .orderBy(inboxSweepItems.id);
+
+    const job = jobToDomain(jobRow as JobRow);
     return {
       job: {
-        ...jobToDomain(finalJob),
-        itemsNewlyProposed: counts.newlyProposed,
-        itemsNewlySkipped: counts.newlySkipped,
-        itemsNewlyErrored: counts.newlyErrored,
+        ...job,
+        itemsNewlyProposed: job.itemsProposed,
+        itemsNewlySkipped: job.itemsSkipped,
+        itemsNewlyErrored: job.itemsErrored,
       },
-      items: results,
+      items: itemRows.map((row) => ({
+        noteId: row.noteId,
+        outcome: row.outcome as InboxSweepItemResult['outcome'],
+        entityType: (row.entityType as InboxSweepItemResult['entityType']) ?? null,
+        entityId: row.entityId ?? null,
+        proposalId: row.proposalId ?? null,
+        reason: row.reason,
+        body: row.body ?? undefined,
+      })),
     };
   }
 
@@ -733,7 +838,7 @@ export class InboxSweepService {
   private async insertJob(
     campaignId: number,
     user: RequestUser,
-    status: 'succeeded' | 'disabled',
+    status: InboxSweepJob['status'],
     counts: { itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
   ): Promise<JobRow> {
     const [row] = await this.db
@@ -755,7 +860,7 @@ export class InboxSweepService {
 
   private async updateJob(
     jobId: number,
-    patch: { status: 'succeeded' | 'disabled'; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
+    patch: { status: InboxSweepJob['status']; itemsTotal: number; itemsProposed: number; itemsSkipped: number; itemsErrored: number; detail: string },
   ): Promise<JobRow> {
     const [row] = await this.db
       .update(inboxSweepJobs)
