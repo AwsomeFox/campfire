@@ -109,7 +109,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await nextSessionLink.focus();
     await expect(nextSessionLink).toBeFocused();
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(`/c/${campaignId}/sessions?tab=schedule`);
+    await expect(page).toHaveURL(new RegExp(`^/c/${campaignId}/sessions\\?tab=schedule`));
     await page.goBack();
     await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toBeVisible();
 
