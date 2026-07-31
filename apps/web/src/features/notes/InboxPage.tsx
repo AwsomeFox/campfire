@@ -217,7 +217,7 @@ export default function InboxPage() {
     // also runs on every cid change (before the body above), so it stops the previous
     // campaign's poll before the new one starts.
     return () => {
-      sweepTokenRef.current = tokenBefore + 1;
+      sweepTokenRef.current++;
     };
   }, [cid]);
 
