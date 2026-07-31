@@ -2,7 +2,7 @@
  * Campfire UI primitives — mirror the design package (design/tokens.html).
  * Feature screens compose these; do not restyle geometry locally (issue #674).
  */
-import { forwardRef, useEffect, useRef, useState, type ReactNode, type RefObject, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ComponentPropsWithoutRef, type ElementType, type ForwardedRef, type ReactNode, type RefObject, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
 import { GameIcon } from './GameIcon';
 import { chipClass, type ChipVariant } from './chipVariants';
@@ -16,30 +16,48 @@ export { EntityCard, type EntityCardProps } from './EntityCard';
 
 export type DensityProps = { density?: UiDensity };
 
-export function Card({
-  children,
-  className = '',
-  density = 'comfortable',
-  elev,
-  hover = false,
-  flush = false,
-  ...props
-}: HTMLAttributes<HTMLElement> & DensityProps & {
-  children: ReactNode;
+export type CardProps<E extends ElementType = 'section'> = {
+  as?: E;
+  children?: ReactNode;
+  className?: string;
+  density?: UiDensity;
   elev?: UiElevation;
   hover?: boolean;
   /** Drop shell padding so inner regions control inset (cover tiles, menus). */
   flush?: boolean;
-}) {
+} & Omit<ComponentPropsWithoutRef<E>, 'as' | 'children' | 'className' | 'density' | 'elev' | 'hover' | 'flush'>;
+
+/**
+ * Card surface primitive.
+ *
+ * Density:
+ *  - `comfortable` (default): 16.8px / 14px padding. Primary content cards, auth forms, settings panels.
+ *  - `compact`: 8.4px / 8px padding. Compact list items, toolbars, popovers, inline widgets.
+ */
+export const Card = forwardRef(function Card<E extends ElementType = 'section'>(
+  {
+    as,
+    children,
+    className = '',
+    density = 'comfortable',
+    elev,
+    hover = false,
+    flush = false,
+    ...props
+  }: CardProps<E>,
+  ref: ForwardedRef<any>,
+) {
+  const Component = as || 'section';
   return (
-    <section
+    <Component
+      ref={ref}
       className={`cf-card ${densityClass(density)} ${flush ? 'cf-card-flush' : ''} ${elevClass(elev)} ${hover ? 'cf-card-hover' : ''} ${className}`.trim()}
       {...props}
     >
       {children}
-    </section>
+    </Component>
   );
-}
+});
 
 export function Inset({
   children,
@@ -391,7 +409,7 @@ export function SkeletonCard({
   label?: string;
 }) {
   return (
-    <section className="card elev-sm" data-testid={SKELETON_TEST_IDS.card}>
+    <Card density="compact" elev="sm" data-testid={SKELETON_TEST_IDS.card}>
       <SkeletonStatus label={label} className="space-y-4">
         {Array.from({ length: sections }, (_, section) => (
           <div key={section} className={section > 0 ? 'space-y-2 pt-3 border-t border-[var(--color-neutral-800)]' : 'space-y-2'}>
@@ -402,7 +420,7 @@ export function SkeletonCard({
           </div>
         ))}
       </SkeletonStatus>
-    </section>
+    </Card>
   );
 }
 

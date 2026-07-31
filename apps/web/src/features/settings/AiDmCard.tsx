@@ -42,7 +42,7 @@ import {
   type AiDmStylePresets,
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
-import { SkeletonCard } from '../../components/ui';
+import { Card, SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { AI_DM_STYLE_SECTION_ID, aiDmStyleSelectId } from './aiDmStyleIds';
 import { ProviderForm } from './ProviderForm';
@@ -161,13 +161,13 @@ export default function AiDmCard({
 
   if (loadError && !seat) {
     return (
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <span className="card-kicker">{t('settings.aiDm.title')}</span>
         <p className="text-sm" style={{ color: '#f87171' }}>{loadError}</p>
         <button className="btn btn-secondary" style={{ fontSize: 12.5, alignSelf: 'flex-start' }} onClick={() => void load()}>
           {t('common.retry')}
         </button>
-      </div>
+      </Card>
     );
   }
 
@@ -177,8 +177,8 @@ export default function AiDmCard({
   const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((committedTokens / seat.tokenBudget) * 100)) : 0;
 
   return (
-    <div
-      className="card elev-sm settings-anchor"
+    <Card
+      density="compact" elev="sm" className="settings-anchor"
       id="ai-dm"
       tabIndex={-1}
       aria-labelledby="ai-dm-heading"
@@ -237,7 +237,7 @@ export default function AiDmCard({
       />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
       <TableStyleSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
-    </div>
+    </Card>
   );
 }
 

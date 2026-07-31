@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useState } from 'react';
 import type { SessionZeroConsentStatus } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
-import { Btn, ErrorNote } from '../../components/ui';
+import { Card, Btn, ErrorNote } from '../../components/ui';
 
 function DiffList({ label, items, tone }: { label: string; items: string[]; tone: 'add' | 'remove' }) {
   if (items.length === 0) return null;
@@ -100,8 +100,8 @@ export function CharterConsentPanel({
   const { latestVersion, effectiveVersion, awaitingRenewal, outstanding, mine, diff } = status;
 
   return (
-    <section
-      className="card elev-sm"
+    <Card
+      density="compact" elev="sm"
       aria-labelledby="charter-consent-heading"
       data-testid="charter-consent"
       style={{ display: 'grid', gap: 10 }}
@@ -214,7 +214,7 @@ export function CharterConsentPanel({
           </span>
         </div>
       )}
-    </section>
+    </Card>
   );
 }
 

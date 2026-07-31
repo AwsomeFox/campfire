@@ -8,6 +8,7 @@
  * orchestrator-owned; this keeps the flow reachable from the "+ New campaign"
  * tile on the hub without new route wiring.
  */
+import { Card } from '../../components/ui';
 import { forwardRef, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
@@ -197,7 +198,7 @@ export function NewCampaignWizard({
             >
               {STEP_TITLES.details}
             </h2>
-            <div className="card elev-sm">
+            <Card density="compact" elev="sm">
               <div className="field">
                 <label htmlFor="cname">Name</label>
                 <input
@@ -222,7 +223,7 @@ export function NewCampaignWizard({
                   onChange={(e) => setDescription(e.target.value)}
                 />
               </div>
-            </div>
+            </Card>
             {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
             <div className="flex gap-2 items-center">
               <button type="button" className="btn btn-ghost" style={{ fontSize: 13 }} onClick={onClose}>
@@ -246,7 +247,7 @@ export function NewCampaignWizard({
             >
               {STEP_TITLES.system}
             </h2>
-            <div className="card elev-sm">
+            <Card density="compact" elev="sm">
               {packs === null ? (
                 <p className="text-muted" style={{ fontSize: 13 }}>Loading installed rule systems…</p>
               ) : (
@@ -289,7 +290,7 @@ export function NewCampaignWizard({
                   )}
                 </div>
               )}
-            </div>
+            </Card>
             {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
             <div className="flex gap-2 items-center">
               <button type="button" className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => setStep('details')}>

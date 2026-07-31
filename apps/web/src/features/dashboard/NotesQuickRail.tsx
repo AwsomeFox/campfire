@@ -4,7 +4,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import type { Note, NoteListPage } from '@campfire/schema';
 import { NOTES_RECENT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { Chip, TextInput, Btn, ErrorNote, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
+import { Card, Chip, TextInput, Btn, ErrorNote, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
@@ -103,7 +103,7 @@ export function NotesQuickRail({
   }
 
   return (
-    <div className="card elev-sm">
+    <Card density="compact" elev="sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <span className="card-kicker">My notes</span>
         <div style={{ flex: 1 }} />
@@ -211,6 +211,6 @@ export function NotesQuickRail({
           Want to share a longer note with the DM or party? Open My Notes →
         </Link>
       )}
-    </div>
+    </Card>
   );
 }

@@ -4,6 +4,7 @@
  * language as LoginPage/SetupPage. Bounces to /setup on first run and to /login
  * when signup is disabled.
  */
+import { Card } from '../../components/ui';
 import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
@@ -124,7 +125,7 @@ export function SignupPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <Card density="compact" elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
           <div>
             <h3 style={{ margin: 0 }}>Campfire</h3>
@@ -232,7 +233,7 @@ export function SignupPage() {
           <Link to="/login" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
             Already have an account? Sign in
           </Link>
-        </div>
+        </Card>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
           Self-hosted with ❤️ · campfire v{__APP_VERSION__}

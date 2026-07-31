@@ -6,6 +6,7 @@
  * exposes aria-busy without an h1 — route-change focus stays on main until data
  * arrives and the real heading mounts.
  */
+import { Card } from '../../components/ui';
 import type { ReactNode } from 'react';
 
 const CHARACTER_DETAIL_LOADING_LABEL = 'Loading character…';
@@ -72,20 +73,20 @@ export function CharacterDetailLoadingSkeleton() {
         </div>
       </div>
 
-      <div className="card elev-sm space-y-3 p-4" aria-hidden="true">
+      <Card density="compact" elev="sm" className="space-y-3 p-4" aria-hidden="true">
         <SkeletonBar width="28%" className="h-2.5" />
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
           {Array.from({ length: 6 }, (_, i) => (
             <SkeletonBar key={i} width="100%" className="h-16" />
           ))}
         </div>
-      </div>
+      </Card>
 
-      <div className="card elev-sm space-y-3 p-4" aria-hidden="true">
+      <Card density="compact" elev="sm" className="space-y-3 p-4" aria-hidden="true">
         <SkeletonBar width="36%" className="h-2.5" />
         <SkeletonBar width="min(100%, 180px)" className="h-9" />
         <SkeletonBar width="100%" className="h-2" />
-      </div>
+      </Card>
     </CharacterDetailLoadingStatus>
   );
 }

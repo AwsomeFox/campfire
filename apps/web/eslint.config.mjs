@@ -78,6 +78,56 @@ const noBareToLocaleString = {
   },
 };
 
+const noBareCardClass = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Disallow bare ".card" CSS class in JSX className strings (issue #1712). Use <Card density="compact"> or <Card> component from components/ui instead.',
+    },
+    messages: {
+      noBareCard:
+        'Do not use bare ".card" class in className. Use <Card density="compact"> or <Card> component from components/ui instead.',
+    },
+    schema: [],
+  },
+  create(context) {
+    const BARE_CARD_REGEX = /(?<![a-zA-Z0-9_-])card(?![a-zA-Z0-9_-])/;
+
+    function checkValue(node, value) {
+      if (typeof value === 'string' && BARE_CARD_REGEX.test(value)) {
+        context.report({
+          node,
+          messageId: 'noBareCard',
+        });
+      }
+    }
+
+    return {
+      JSXAttribute(node) {
+        if (node.name.name !== 'className') return;
+        const val = node.value;
+        if (!val) return;
+        if (val.type === 'Literal') {
+          checkValue(val, val.value);
+        } else if (val.type === 'JSXExpressionContainer') {
+          const expr = val.expression;
+          if (expr.type === 'Literal') {
+            checkValue(expr, expr.value);
+          } else if (expr.type === 'TemplateLiteral') {
+            for (const quasi of expr.quasis) {
+              checkValue(quasi, quasi.value.raw);
+            }
+          } else if (expr.type === 'ConditionalExpression') {
+            if (expr.consequent.type === 'Literal') checkValue(expr.consequent, expr.consequent.value);
+            if (expr.alternate.type === 'Literal') checkValue(expr.alternate, expr.alternate.value);
+          }
+        }
+      },
+    };
+  },
+};
+
 export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'playwright-report/**', 'test-results/**'] },
   js.configs.recommended,
@@ -94,6 +144,7 @@ export default tseslint.config(
         rules: {
           'no-duplicate-import-specifiers': noDuplicateImportSpecifiers,
           'no-bare-tolocalestring': noBareToLocaleString,
+          'no-bare-card-class': noBareCardClass,
         },
       },
     },
@@ -121,6 +172,7 @@ export default tseslint.config(
       // TS2300 shape from issue #1702 before merge.
       'campfire/no-duplicate-import-specifiers': 'error',
       'campfire/no-bare-tolocalestring': 'error',
+      'campfire/no-bare-card-class': 'error',
     },
   },
   {

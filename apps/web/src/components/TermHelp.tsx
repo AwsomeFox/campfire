@@ -15,6 +15,7 @@
  * panel stays in the DOM where it is rendered (no portal) so it remains inside
  * the More sheet's `aria-modal` dialog and its focus trap.
  */
+import { Card } from './ui';
 import {
   useCallback,
   useEffect,
@@ -219,10 +220,10 @@ export function TermHelp({
         ?
       </button>
       {open && (
-        <span
+        <Card
           {...(regionAttrs as HTMLAttributes<HTMLSpanElement>)}
           ref={setPanelRef}
-          className="cf-term-help__panel card elev-md"
+          density="compact" elev="md" as="span" className="cf-term-help__panel"
           data-testid={`term-help-panel-${termId}`}
           style={{
             top: position?.top ?? 0,
@@ -254,7 +255,7 @@ export function TermHelp({
               {t('glossary.dismiss')}
             </button>
           </span>
-        </span>
+        </Card>
       )}
     </span>
   );

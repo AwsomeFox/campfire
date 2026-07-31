@@ -4,6 +4,7 @@
  * If setup is not required, authenticated users return to the campaign hub and
  * signed-out users continue to /login.
  */
+import { Card } from '../../components/ui';
 import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
@@ -155,7 +156,7 @@ export function SetupPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <Card density="compact" elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
           <div>
             <h3 style={{ margin: 0 }}>Campfire</h3>
@@ -259,7 +260,7 @@ export function SetupPage() {
               {submitting ? 'Lighting…' : 'Light the fire'}
             </button>
           </form>
-        </div>
+        </Card>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
           Self-hosted with ❤️ · campfire v{__APP_VERSION__}

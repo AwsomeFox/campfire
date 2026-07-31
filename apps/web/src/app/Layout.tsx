@@ -1211,12 +1211,12 @@ function MoreSheet({
       }}
       onClick={onClose}
     >
-      <div
+      <Card
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
         aria-label={t('nav.moreNavigation')}
-        className="card elev-lg w-full flex flex-col"
+        density="compact" elev="lg" className="w-full flex flex-col"
         style={{
           maxWidth: 440,
           maxHeight: 'calc(100dvh - 16px)',
@@ -1224,7 +1224,7 @@ function MoreSheet({
           padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
           gap: 4,
         }}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
       >
         <div
           className="mx-auto mb-2.5 shrink-0"
@@ -1308,7 +1308,7 @@ function MoreSheet({
             {t('nav.signOut')}
           </button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -1411,11 +1411,11 @@ function UserMenu({
   // through), so no focus trap — outside-click close is handled in Layout.
   const menuRef = useDialog<HTMLDivElement>({ onClose, trapFocus: false });
   return (
-    <div
+    <Card
       ref={menuRef}
       role="menu"
       aria-label="Account menu"
-      className="absolute right-0 top-11 w-56 card elev-md p-2 space-y-1 text-sm z-40"
+      density="compact" elev="md" className="absolute right-0 top-11 w-56 p-2 space-y-1 text-sm z-40"
       style={{ gap: 2 }}
     >
       <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
@@ -1469,6 +1469,6 @@ function UserMenu({
       <button role="menuitem" className="w-full text-left px-2 py-1.5 rounded-md text-rose-400" onClick={onLogout}>
         Logout
       </button>
-    </div>
+    </Card>
   );
 }
