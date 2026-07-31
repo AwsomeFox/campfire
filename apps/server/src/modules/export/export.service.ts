@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, gt, isNotNull, or } from 'drizzle-orm';
 import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -76,6 +76,12 @@ export function slugify(name: string): string {
     .replace(/^-+|-+$/g, '');
   return slug || 'untitled';
 }
+
+/**
+ * Issue #1529: Default maximum number of recent non-proposal AI scribe jobs exported.
+ * Proposal-filing jobs are preserved without limit to maintain durable provenance.
+ */
+export const DEFAULT_AI_SCRIBE_JOBS_EXPORT_LIMIT = 50;
 
 /**
  * De-duplicating filename allocator retained for callers that still need
@@ -188,6 +194,46 @@ export class ExportService {
     private readonly revisions: RevisionsService,
     private readonly rolls: RollsService,
   ) {}
+
+  /**
+   * Issue #1529: Bounded AI scribe job log for campaign export.
+   * Preserves all jobs that filed a proposal (preserving durable provenance for content
+   * landed in the campaign) plus up to `DEFAULT_AI_SCRIBE_JOBS_EXPORT_LIMIT` most recent
+   * jobs overall to capture recent operational history without unbounded growth.
+   */
+  private async listScribeJobsForExport(campaignId: number) {
+    const [proposalJobs, recentJobs] = await Promise.all([
+      this.db
+        .select()
+        .from(aiScribeJobs)
+        .where(
+          and(
+            eq(aiScribeJobs.campaignId, campaignId),
+            or(
+              isNotNull(aiScribeJobs.proposalId),
+              gt(aiScribeJobs.proposalCount, 0),
+              eq(aiScribeJobs.status, 'succeeded'),
+            ),
+          ),
+        ),
+      this.db
+        .select()
+        .from(aiScribeJobs)
+        .where(eq(aiScribeJobs.campaignId, campaignId))
+        .orderBy(desc(aiScribeJobs.id))
+        .limit(DEFAULT_AI_SCRIBE_JOBS_EXPORT_LIMIT),
+    ]);
+
+    const jobMap = new Map<number, (typeof proposalJobs)[number]>();
+    for (const job of proposalJobs) {
+      jobMap.set(job.id, job);
+    }
+    for (const job of recentJobs) {
+      jobMap.set(job.id, job);
+    }
+
+    return Array.from(jobMap.values()).sort((a, b) => a.id - b.id);
+  }
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
   private attachmentArchivePath(row: { id: number; mime: string }): string {
@@ -354,7 +400,7 @@ export class ExportService {
     const [[aiSeatRow], [aiScribeConfigRow], aiScribeJobRows] = await Promise.all([
       this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1),
       this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1),
-      this.db.select().from(aiScribeJobs).where(eq(aiScribeJobs.campaignId, campaignId)),
+      this.listScribeJobsForExport(campaignId),
     ]);
 
     // members "sans anything sensitive" — CampaignMember already carries no

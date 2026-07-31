@@ -37,7 +37,11 @@ function buildService(entities: {
   const campaign = campaignRow();
   // Each property is a service-shaped object exposing only the methods
   // buildExport / buildMarkdownZip actually call.
-  const emptyWhereResult = () => Object.assign(Promise.resolve([]), { limit: async () => [] });
+  const emptyWhereResult = () =>
+    Object.assign(Promise.resolve([]), {
+      limit: async () => [],
+      orderBy: () => Object.assign(Promise.resolve([]), { limit: async () => [] }),
+    });
   const emptyDbQuery = {
     from: () => ({ where: emptyWhereResult }),
   };

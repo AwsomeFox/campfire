@@ -54,7 +54,11 @@ function buildService(entities: {
   // `.where(...)` is both awaitable (the unbounded aiScribeJobs read, #501) and
   // `.limit()`-able (the single-row AI seat / scribe-config reads), matching the real
   // drizzle builder. Same shape as export-markdown-zip.spec.ts.
-  const emptyWhereResult = () => Object.assign(Promise.resolve([]), { limit: async () => [] });
+  const emptyWhereResult = () =>
+    Object.assign(Promise.resolve([]), {
+      limit: async () => [],
+      orderBy: () => Object.assign(Promise.resolve([]), { limit: async () => [] }),
+    });
   const emptyDbQuery = {
     from: () => ({ where: emptyWhereResult }),
   };
