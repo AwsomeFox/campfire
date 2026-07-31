@@ -1,4 +1,4 @@
-import type { Combatant } from '@campfire/schema';
+import type { Combatant, HpModel, RuleSystemAdapter } from '@campfire/schema';
 import {
   applyStarfinderDamage,
   ruleSystemAdapter,
@@ -9,11 +9,16 @@ import { withOptimisticHpLifecycle } from './combatantLifecycle';
 /**
  * Applies the client-side HP estimate for one pending mutation.
  */
-export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): Combatant {
+export function applyOptimisticHpDelta(
+  c: Combatant,
+  delta: number,
+  ruleSystem?: string | RuleSystemAdapter | HpModel | null,
+): Combatant {
   if (c.hpCurrent == null || c.hpMax == null) return c;
   const isStarfinder =
-    ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID ||
-    ruleSystem?.startsWith('starfinder') ||
+    (typeof ruleSystem === 'string' &&
+      (ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID || ruleSystem.startsWith('starfinder'))) ||
+    (typeof ruleSystem === 'object' && ruleSystem !== null && 'id' in ruleSystem && ruleSystem.id === STARFINDER_ADAPTER_ID) ||
     (c.spMax != null && c.spMax > 0);
   if (isStarfinder && delta < 0) {
     const sfResult = applyStarfinderDamage(
@@ -42,7 +47,7 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
     const hpCurrent = Math.min(c.hpMax, c.hpCurrent + delta);
     // A zero or capped heal leaves a downed combatant's server-owned lifecycle
     // state alone. Only a real recovery above 0 clears its death-save slate.
-    return hpCurrent > 0 ? withOptimisticHpLifecycle(c, hpCurrent, false) : { ...c, hpCurrent };
+    return hpCurrent > 0 ? withOptimisticHpLifecycle(c, hpCurrent, false, false, ruleSystem) : { ...c, hpCurrent };
   }
   // Damage: temporary HP absorbs first, then real HP, floored at 0.
   const dmg = -delta;
@@ -60,6 +65,7 @@ export function applyOptimisticHpDelta(c: Combatant, delta: number, ruleSystem?:
     newHpCurrent,
     realDmg > 0,
     isInstantDeath,
+    ruleSystem,
   );
 }
 
@@ -72,7 +78,7 @@ export type OptimisticHpDelta = {
 export function replayOptimisticHpDeltas(
   encounter: Combatant[],
   operations: readonly OptimisticHpDelta[],
-  ruleSystem?: string | null,
+  ruleSystem?: string | RuleSystemAdapter | HpModel | null,
 ): Combatant[] {
   return operations.reduce(
     (combatants, { combatantId, delta }) =>

@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Combatant } from '@campfire/schema';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { hpModelForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import {
   canStabilizeCombatant,
   hasRestoredTrashedEncounter,
@@ -138,6 +139,66 @@ test.describe('combatant lifecycle (issue #1469)', () => {
       deathState: 'none',
       deathSaveSuccesses: 0,
       deathSaveFailures: 0,
+    });
+  });
+
+  test('non-5e system (PF2e/OSR) does not predict 5e death saves or dying state at 0 HP (issue #1829)', () => {
+    // PF2e / OSR character dropping to 0 HP stays deathState: 'none' and 0 counters
+    expect(applyOptimisticHpDelta(combatant(), -5, 'pf2e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+      deathSaveSuccesses: 0,
+    });
+    expect(applyOptimisticHpDelta(combatant(), -5, 'osr')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+      deathSaveSuccesses: 0,
+    });
+    const pf2eAdapter = ruleSystemAdapter('pf2e');
+    expect(applyOptimisticHpDelta(combatant(), -5, pf2eAdapter)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+    });
+    const dndAdapter = ruleSystemAdapter('dnd5e');
+    expect(applyOptimisticHpDelta(combatant(), -5, dndAdapter)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+    });
+    const customHpModel = hpModelForAdapter(pf2eAdapter);
+    expect(applyOptimisticHpDelta(combatant(), -5, customHpModel)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+    });
+
+    // Damage while down at 0 HP in a non-5e system does not increment deathSaveFailures
+    expect(
+      applyOptimisticHpDelta(combatant({ hpCurrent: 0, deathState: 'none', deathSaveFailures: 0 }), -5, 'pf2e'),
+    ).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+    });
+
+    // Massive damage in non-5e system does not trigger 5e instant death
+    expect(applyOptimisticHpDelta(combatant({ hpCurrent: 10, hpMax: 20 }), -35, 'pf2e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+    });
+
+    // 5e character still predicts dying and increments death saves (default or explicit dnd5e)
+    expect(applyOptimisticHpDelta(combatant(), -5, 'dnd5e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+    });
+    expect(
+      applyOptimisticHpDelta(combatant({ hpCurrent: 0, deathState: 'dying', deathSaveFailures: 1 }), -5, 'dnd5e'),
+    ).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+      deathSaveFailures: 2,
     });
   });
 
