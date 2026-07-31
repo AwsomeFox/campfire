@@ -85,7 +85,7 @@ export function CharacterInventorySection({
   return (
     <div className="space-y-3" data-testid="character-inventory">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <p className="card-kicker mb-0">{t('inventory.title')}</p>
+        <h2 id="character-section-inventory-heading" className="card-kicker mb-0">{t('inventory.title')}</h2>
         <Link
           to={`/c/${campaignId}/inventory`}
           className="text-xs text-[var(--color-accent)] hover:underline"

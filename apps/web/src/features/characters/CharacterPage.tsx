@@ -27,7 +27,7 @@ import { useLiveEncounterState } from '../../lib/useLiveEncounterState';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { UIIcon } from '../../components/UIIcon';
 import { CharacterSheetNav } from './CharacterSheetNav';
-import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
+import { characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type {
   Attachment,
@@ -118,6 +118,7 @@ import { RollModeChooser } from './RollModeChooser';
 import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { useAnnounce } from '../../components/Announcer';
 import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { CharacterCompletionBanner } from './CharacterCompletionBanner';
@@ -130,6 +131,7 @@ import {
   hpFullHealLabel,
   saveProficiencyLabel,
   skillProficiencyLabel,
+  skillRankLabel,
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
@@ -162,11 +164,16 @@ export default function CharacterPage() {
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
   const { liveEncounter } = useLiveEncounterState(Number.isFinite(cid) ? cid : undefined);
+  const announce = useAnnounce();
   const { tab, setTab, tabRefs, onTabKeyDown } = useCharacterSheetTab({
     campaignId: cid,
     characterId: id,
     canViewDmSecret: isDm,
   });
+  const xpProgress = useMemo(
+    () => (character ? xpProgressForCharacter(adapter, character.level, character.xp) : null),
+    [adapter, character],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -283,6 +290,7 @@ export default function CharacterPage() {
         portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
       });
       await load();
+      announce('Portrait saved');
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
     }
@@ -308,6 +316,7 @@ export default function CharacterPage() {
     await api.post(`${API}/characters/${id}/restore`);
     setPendingUndo(false);
     await load();
+    announce('Character restored');
   }
 
   async function markActive() {
@@ -316,6 +325,7 @@ export default function CharacterPage() {
     try {
       await api.patch(`${API}/characters/${id}`, { status: 'active' });
       await load();
+      announce('Character marked active');
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Couldn't mark this character active.");
     } finally {
@@ -355,6 +365,14 @@ export default function CharacterPage() {
           <p className="text-sm text-slate-400">
             {classSummary}Level {character.level} · played by{' '}
             {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}
+            {xpProgress?.ready && (
+              <span className="cf-print-hide" aria-hidden="true">
+                {' · '}
+                <span className="tag tag-accent text-[9px]" aria-label="Ready to level up">
+                  Ready to level up
+                </span>
+              </span>
+            )}
           </p>
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
@@ -407,6 +425,7 @@ export default function CharacterPage() {
         tabRefs={tabRefs}
         onTabKeyDown={onTabKeyDown}
         liveEncounter={liveEncounter != null}
+        levelUpReady={xpProgress?.ready}
       />
 
       {/*
@@ -426,11 +445,11 @@ export default function CharacterPage() {
       >
         <section
           id={characterSheetSectionId('abilities')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.abilities}
-          className="scroll-mt-24"
+          aria-labelledby={`${characterSheetSectionId('abilities')}-heading`}
+          className="cf-sheet-section"
         >
           <Card className="space-y-3">
-            <p className="card-kicker">Ability scores</p>
+            <h2 id={`${characterSheetSectionId('abilities')}-heading`} className="card-kicker">Ability scores</h2>
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
               {abilityFields.map(({ key, label }) => {
                 const score = abilityScore(character, key);
@@ -451,12 +470,12 @@ export default function CharacterPage() {
 
         <section
           id={characterSheetSectionId('hp')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.hp}
-          className="scroll-mt-24"
+          aria-labelledby={`${characterSheetSectionId('hp')}-heading`}
+          className="cf-sheet-section"
         >
           <Card className="space-y-3">
             <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
-              <p className="card-kicker mb-0">Hit points & Defenses</p>
+              <h2 id={`${characterSheetSectionId('hp')}-heading`} className="card-kicker mb-0">Hit points & Defenses</h2>
               <div className="text-xs text-slate-400 font-semibold">
                 {character.eac != null || character.kac != null ? (
                   <span>EAC <strong className="text-white">{character.eac ?? '—'}</strong> · KAC <strong className="text-white">{character.kac ?? '—'}</strong></span>
@@ -512,11 +531,11 @@ export default function CharacterPage() {
 
         <section
           id={characterSheetSectionId('conditions')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.conditions}
-          className="scroll-mt-24"
+          aria-labelledby={`${characterSheetSectionId('conditions')}-heading`}
+          className="cf-sheet-section"
         >
           <Card className="space-y-2.5">
-            <p className="card-kicker mb-0">Conditions</p>
+            <h2 id={`${characterSheetSectionId('conditions')}-heading`} className="card-kicker mb-0">Conditions</h2>
             {leveledConditionTrack && (
               <ConditionLevelRow
                 character={character}
@@ -539,8 +558,8 @@ export default function CharacterPage() {
 
         <section
           id={characterSheetSectionId('actions')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.actions}
-          className="scroll-mt-24"
+          aria-labelledby={`${characterSheetSectionId('actions')}-heading`}
+          className="cf-sheet-section"
         >
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
         </section>
@@ -548,8 +567,8 @@ export default function CharacterPage() {
         {showSavingThrowEditor && (
           <section
             id={characterSheetSectionId('saves')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.saves}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('saves')}-heading`}
+            className="cf-sheet-section"
           >
             <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
           </section>
@@ -558,8 +577,8 @@ export default function CharacterPage() {
         {showSkillEditor && (
           <section
             id={characterSheetSectionId('skills')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.skills}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('skills')}-heading`}
+            className="cf-sheet-section"
           >
             <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
           </section>
@@ -568,14 +587,14 @@ export default function CharacterPage() {
         {showSpellSlotEditor ? (
           <section
             id={characterSheetSectionId('slots')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.slots}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('slots')}-heading`}
+            className="cf-sheet-section"
           >
             <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
           </section>
         ) : adapter.characterSheet?.genericModeDescription ? (
           <Card className="space-y-1.5">
-            <p className="card-kicker mb-0">Rules-native sheet mode</p>
+            <h2 id="character-rules-native-heading" className="card-kicker mb-0">Rules-native sheet mode</h2>
             <p className="text-xs text-secondary">{adapter.characterSheet.genericModeDescription}</p>
           </Card>
         ) : null}
@@ -583,8 +602,8 @@ export default function CharacterPage() {
         {specialResource && (
           <section
             id={characterSheetSectionId('resources')}
-            aria-label={specialResource.name}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('resources')}-heading`}
+            className="cf-sheet-section"
           >
             <AdapterResourceCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} def={specialResource} />
           </section>
@@ -605,20 +624,20 @@ export default function CharacterPage() {
         <div className="space-y-4 min-w-0">
           <section
             id={characterSheetSectionId('xp')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.xp}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('xp')}-heading`}
+            className="cf-sheet-section"
           >
             <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
           </section>
 
           <section
             id={characterSheetSectionId('background')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.background}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('background')}-heading`}
+            className="cf-sheet-section"
           >
             <Card className="space-y-3">
               <div className="flex items-center justify-between">
-                <p className="card-kicker mb-0">Background</p>
+                <h2 id={`${characterSheetSectionId('background')}-heading`} className="card-kicker mb-0">Background</h2>
               </div>
               <div className="space-y-1.5 text-[13px]">
                 <div className="flex justify-between gap-2">
@@ -636,8 +655,8 @@ export default function CharacterPage() {
 
           <section
             id={characterSheetSectionId('inventory')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.inventory}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('inventory')}-heading`}
+            className="cf-sheet-section"
           >
             <Card>
               <CharacterInventorySection campaignId={cid} character={character} />
@@ -647,8 +666,8 @@ export default function CharacterPage() {
           {isDm && (
             <section
               id={characterSheetSectionId('dm-secret')}
-              aria-label={CHARACTER_SHEET_SECTION_LABEL['dm-secret']}
-              className="scroll-mt-24 cf-print-secret"
+              aria-labelledby={`${characterSheetSectionId('dm-secret')}-heading`}
+              className="cf-sheet-section cf-print-secret"
             >
               <DmSecretCard character={character} onChange={load} onError={setActionError} />
             </section>
@@ -658,8 +677,8 @@ export default function CharacterPage() {
         <div className="space-y-4 min-w-0">
           <section
             id={characterSheetSectionId('portrait')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.portrait}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('portrait')}-heading`}
+            className="cf-sheet-section"
           >
             <Card className="items-center text-center py-6 space-y-1.5">
               {canEdit ? (
@@ -688,11 +707,11 @@ export default function CharacterPage() {
           </section>
           <section
             id={characterSheetSectionId('player')}
-            aria-label={CHARACTER_SHEET_SECTION_LABEL.player}
-            className="scroll-mt-24"
+            aria-labelledby={`${characterSheetSectionId('player')}-heading`}
+            className="cf-sheet-section"
           >
             <Card className="space-y-2">
-              <p className="card-kicker mb-0">Player</p>
+              <h2 id={`${characterSheetSectionId('player')}-heading`} className="card-kicker mb-0">Player</h2>
               <div className="space-y-1.5 text-[13px]">
                 <div className="flex justify-between">
                   <span className="text-muted">Owner</span>
@@ -751,6 +770,7 @@ function SheetEditForm({
   // surfaces a message here rather than silently coercing to 0/1.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const formatLocale = useFormattingLocale();
+  const announce = useAnnounce();
   const clearPersistedDraftRef = useRef<() => void>(() => {});
   const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
   const classFieldVisible = classField.visible;
@@ -813,6 +833,7 @@ function SheetEditForm({
       });
       clearPersistedDraftRef.current();
       onSaved();
+      announce(`${name.trim()} profile saved`);
       return true;
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't save the sheet.");
@@ -822,6 +843,7 @@ function SheetEditForm({
     }
   }, [
     ac,
+    announce,
     background,
     character.id,
     character.stats,
@@ -1054,6 +1076,7 @@ function XpCard({
 }) {
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   const [levellingUp, setLevellingUp] = useState(false);
   const [newHpMax, setNewHpMax] = useState(String(character.hpMax));
   // Per-field parse errors (issue #633): XP award and level-up HP are parsed in
@@ -1106,6 +1129,7 @@ function XpCard({
       await api.post(`${API}/characters/${character.id}/xp`, { delta: parsed.value });
       setAmount('');
       onChange();
+      announce(`Awarded ${parsed.value} XP to ${character.name}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't award XP.");
     } finally {
@@ -1131,6 +1155,7 @@ function XpCard({
       setLevellingUp(false);
       setCelebratedLevel(character.level + 1);
       onChange();
+      announce(`${character.name} reached level ${character.level + 1}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't level up.");
     } finally {
@@ -1141,7 +1166,7 @@ function XpCard({
   return (
     <Card className="space-y-3" data-testid="character-xp">
       <div className="flex items-baseline gap-2.5 flex-wrap">
-        <p className="card-kicker mb-0">Experience</p>
+        <h2 id={`${characterSheetSectionId('xp')}-heading`} className="card-kicker mb-0">Experience</h2>
         {supported && ready && (
           <span className="tag tag-accent cf-anim-ready">
             Ready to level up
@@ -1337,6 +1362,7 @@ function RollChip({
 
 function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   // Roll-mode chooser (issue #713): a touch- and keyboard-visible Flat / Advantage
   // / Disadvantage selector shared by every save in this card. The chooser holds
   // the persistent one-tap default; a shift/alt-click still overrides it for a
@@ -1350,11 +1376,13 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
     setBusy(true);
     onError(null);
     try {
-      const next = profs.has(k)
+      const removing = profs.has(k);
+      const next = removing
         ? character.saveProficiencies.filter((a) => a !== k)
         : [...character.saveProficiencies, k];
       await api.patch(`${API}/characters/${character.id}`, { saveProficiencies: next });
       onChange();
+      announce(`${abilityLabelForAdapter(adapter, k)} save proficiency ${removing ? 'cleared' : 'gained'}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update saving throws.");
     } finally {
@@ -1365,7 +1393,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   return (
     <Card className="space-y-2" data-testid="character-saving-throws">
       <div className="flex items-center gap-2 flex-wrap">
-        <p className="card-kicker mb-0">Saving throws</p>
+        <h2 id={`${characterSheetSectionId('saves')}-heading`} className="card-kicker mb-0">Saving throws</h2>
         <span className="text-[11px] text-secondary">proficiency {signed(pb)}</span>
         <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
           {rollModeSummary(mode)}
@@ -1387,8 +1415,8 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                 type="button"
                 onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${k} save`)}
                 disabled={roller.rolling}
-                className="w-full"
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                className="cf-target-44 w-full"
+                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}
                 title={`Roll ${k} save (${signed(mod)}) · ${rollModeSummary(mode)}`}
                 aria-label={`Roll ${k} save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
@@ -1402,8 +1430,8 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   disabled={busy}
                   aria-pressed={proficient}
                   aria-label={saveProficiencyLabel(k, proficient)}
-                  className="absolute top-0 right-0 min-w-[24px] min-h-[24px] inline-flex items-center justify-center p-1"
-                  style={{ background: 'transparent', border: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                  className="cf-target-44 absolute top-0.5 right-0.5"
+                  style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                 >
                   <span aria-hidden="true">{proficient ? '●' : '○'}</span>
@@ -1428,6 +1456,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
 function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   // Roll-mode chooser (issue #713): one persistent default for every skill roll
   // in this card; the keyboard shortcut (shift/alt-click) still overrides once.
   const [mode, setMode] = useState<RollMode>('flat');
@@ -1443,8 +1472,10 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
       if (rank === undefined) next[name] = 'proficient';
       else if (rank === 'proficient') next[name] = 'expertise';
       else delete next[name];
+      const nextRank = next[name];
       await api.patch(`${API}/characters/${character.id}`, { skills: next });
       onChange();
+      announce(`${name} proficiency ${nextRank === undefined ? 'removed' : skillRankLabel(nextRank)}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update skills.");
     } finally {
@@ -1455,7 +1486,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   return (
     <Card className="space-y-2" data-testid="character-skills">
       <div className="flex items-center gap-2 flex-wrap">
-        <p className="card-kicker mb-0">Skills</p>
+        <h2 id={`${characterSheetSectionId('skills')}-heading`} className="card-kicker mb-0">Skills</h2>
         <span className="text-[11px] text-secondary">
           tap a skill to roll{canEdit ? '; tap the ○/●/★ to cycle proficiency' : ''}
         </span>
@@ -1475,7 +1506,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
           const mod = (modOf(adapter, character, ability) ?? 0) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
           const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
           return (
-            <div key={name} className="flex items-center gap-1.5 text-[13px] py-0.5">
+            <div key={name} className="flex items-center gap-1.5 text-[13px] min-h-11">
               {canEdit ? (
                 <button
                   type="button"
@@ -1483,7 +1514,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   disabled={busy}
                   aria-label={skillProficiencyLabel(name, rank ?? 'none')}
                   aria-pressed={rank != null}
-                  className="w-4 shrink-0 text-center"
+                  className="cf-target-44 shrink-0 text-center"
                   style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
                 >
@@ -1502,7 +1533,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                 type="button"
                 onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${name} check`)}
                 disabled={roller.rolling}
-                className="flex-1 flex items-center gap-1.5 min-w-0"
+                className="cf-target-44 flex-1 flex items-center gap-1.5 min-w-0"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${name} (${signed(mod)}) · ${rollModeSummary(mode)}`}
                 aria-label={`Roll ${name} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
@@ -1522,6 +1553,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
 function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCardProps & { roller: Roller }) {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   const [name, setName] = useState('');
   const [kind, setKind] = useState('');
   const [toHit, setToHit] = useState('');
@@ -1537,13 +1569,14 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   // the same form Add uses, so order is preserved by writing back to the same index.
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
-  async function saveActions(next: CharacterAction[], failMsg: string) {
+  async function saveActions(next: CharacterAction[], failMsg: string, successMsg?: string) {
     if (busy) return;
     setBusy(true);
     onError(null);
     try {
       await api.patch(`${API}/characters/${character.id}`, { actions: next });
       onChange();
+      if (successMsg) announce(successMsg);
       return true;
     } catch (err) {
       onError(err instanceof ApiError ? err.message : failMsg);
@@ -1573,7 +1606,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       targetAc: targetAc.trim(),
       notes: notes.trim(),
     };
-    const ok = await saveActions([...character.actions, action], "Couldn't add the action.");
+    const ok = await saveActions([...character.actions, action], "Couldn't add the action.", `Added action ${action.name}`);
     if (ok) {
       resetForm();
       setAdding(false);
@@ -1591,7 +1624,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       notes: notes.trim(),
     };
     const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
-    const ok = await saveActions(next, "Couldn't save the action.");
+    const ok = await saveActions(next, "Couldn't save the action.", `Updated action ${action.name}`);
     if (ok) resetForm();
   }
 
@@ -1609,9 +1642,11 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   }
 
   function remove(index: number) {
+    const action = character.actions[index];
     void saveActions(
       character.actions.filter((_, i) => i !== index),
       "Couldn't remove the action.",
+      action ? `Removed action ${action.name}` : undefined,
     );
   }
 
@@ -1622,7 +1657,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2 flex-wrap">
-        <p className="card-kicker mb-0">Actions</p>
+        <h2 id={`${characterSheetSectionId('actions')}-heading`} className="card-kicker mb-0">Actions</h2>
         {hasAttackRoll && (
           <span className="cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
             {rollModeSummary(mode)}
@@ -1727,6 +1762,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
+                  className="cf-target-44"
                   aria-label={`Edit ${action.name}`}
                   onClick={() => startEdit(i)}
                   disabled={busy}
@@ -1744,6 +1780,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                 </button>
                 <button
                   type="button"
+                  className="cf-target-44"
                   aria-label={`Remove ${action.name}`}
                   onClick={() => remove(i)}
                   disabled={busy}
@@ -1924,6 +1961,7 @@ function ActionForm({
 
 function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   const [editing, setEditing] = useState(false);
   const [maxima, setMaxima] = useState<Record<string, string>>({});
   // Per-level parse errors (issue #633): a slot maximum that can't be parsed in
@@ -1941,6 +1979,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
     try {
       await api.post(`${API}/characters/${character.id}/spell-slots`, { level: Number(level), delta });
       onChange();
+      announce(`Level ${level} spell slot ${delta > 0 ? 'used' : 'restored'}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update spell slots.");
     } finally {
@@ -1984,6 +2023,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
       await api.patch(`${API}/characters/${character.id}`, { spellSlots: next });
       setEditing(false);
       onChange();
+      announce('Spell slots updated');
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't save spell slots.");
     } finally {
@@ -1994,7 +2034,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2">
-        <p className="card-kicker mb-0">Spell slots</p>
+        <h2 id={`${characterSheetSectionId('slots')}-heading`} className="card-kicker mb-0">Spell slots</h2>
         {canEdit && !editing && (
           <Btn density="xs" ghost className="text-xs ml-auto" onClick={startEdit}>
             ✎ Edit slots
@@ -2095,6 +2135,7 @@ function AdapterResourceCard({
 }: SheetCardProps & { def: AdapterResourceDef }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
 
   const { max, used, available } = resourceAvailability(def, character);
 
@@ -2125,6 +2166,7 @@ function AdapterResourceCard({
         });
       }
       onChange();
+      announce(`${def.name} ${delta > 0 ? 'spent' : 'restored'}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: def.name }));
     } finally {
@@ -2134,7 +2176,7 @@ function AdapterResourceCard({
 
   return (
     <Card className="space-y-2.5">
-      <p className="card-kicker mb-0">{def.name}</p>
+      <h3 id={`${characterSheetSectionId('resources')}-heading`} className="card-kicker mb-0">{def.name}</h3>
       <div className="flex items-center gap-2.5 flex-wrap">
         <span
           className="tracking-[3px] text-[15px] leading-none"
@@ -2172,6 +2214,7 @@ function HpEditor({
   onError: (msg: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
 
   async function applyDelta(delta: number) {
     if (busy) return;
@@ -2180,6 +2223,7 @@ function HpEditor({
     try {
       await api.post(`${API}/characters/${character.id}/hp`, { delta });
       onChange();
+      announce(hpDeltaLabel(character.name, delta, character.hpCurrent, character.hpMax));
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update HP.");
     } finally {
@@ -2194,6 +2238,7 @@ function HpEditor({
     try {
       await api.post(`${API}/characters/${character.id}/hp`, { set: character.hpMax });
       onChange();
+      announce(hpFullHealLabel(character.name, character.hpMax));
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't heal to full.");
     } finally {
@@ -2258,6 +2303,7 @@ function ConditionLevelRow({
 }: SheetCardProps & { track: LeveledConditionTrack }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   const level = conditionLevel(track, character);
 
   async function adjust(delta: number) {
@@ -2267,6 +2313,7 @@ function ConditionLevelRow({
     try {
       await api.post(`${API}/characters/${character.id}/conditions/level`, { name: track.name, delta });
       onChange();
+      announce(`${track.name} ${delta > 0 ? 'raised' : 'lowered'} to level ${level + delta}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : t('characters.conditionLevel.updateError', { name: track.name }));
     } finally {
@@ -2326,6 +2373,7 @@ function ConditionsRow({
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
   // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
   const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
   if (compositionGateRef.current === null) {
@@ -2343,6 +2391,7 @@ function ConditionsRow({
       setValue('');
       setAdding(false);
       onChange();
+      announce(`Added condition ${v}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't add condition.");
     } finally {
@@ -2357,6 +2406,7 @@ function ConditionsRow({
     try {
       await api.post(`${API}/characters/${character.id}/conditions`, { remove: [cond] });
       onChange();
+      announce(`Removed condition ${cond}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't remove condition.");
     } finally {
@@ -2381,6 +2431,7 @@ function ConditionsRow({
           {canEdit && (
             <button
               type="button"
+              className="cf-target-44"
               aria-label={`Remove ${cond}`}
               onClick={() => removeCondition(cond)}
               disabled={busy}
@@ -2466,6 +2517,7 @@ function StoryBody({
   const [editing, setEditing] = useState(false);
   const [notes, setNotes] = useState(character.notes);
   const [saving, setSaving] = useState(false);
+  const announce = useAnnounce();
 
   async function save() {
     setSaving(true);
@@ -2474,6 +2526,7 @@ function StoryBody({
       await api.patch(`${API}/characters/${character.id}`, { notes });
       setEditing(false);
       onChange();
+      announce('Story notes saved');
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't save the story.");
     } finally {
@@ -2550,6 +2603,7 @@ function DmSecretCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const announce = useAnnounce();
 
   async function save() {
     setSaving(true);
@@ -2558,6 +2612,7 @@ function DmSecretCard({
       await api.patch(`${API}/characters/${character.id}`, { dmSecret: draft });
       setEditing(false);
       onChange();
+      announce('DM secret notes saved');
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't save the DM notes.");
     } finally {
@@ -2587,7 +2642,7 @@ function DmSecretCard({
         background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
       }}
     >
-      <span className="card-kicker">DM only — hidden from players</span>
+      <h3 id={`${characterSheetSectionId('dm-secret')}-heading`} className="card-kicker">DM only — hidden from players</h3>
       {editing ? (
         <div className="space-y-2">
           <TextArea style={{ minHeight: 100 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
@@ -2628,6 +2683,7 @@ function RestControls({
   onError: (msg: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
 
   async function takeRest(type: 'stamina' | 'night') {
     if (busy) return;
@@ -2636,6 +2692,7 @@ function RestControls({
     try {
       await api.post(`${API}/characters/${character.id}/rest`, { type });
       onChange();
+      announce(`${type === 'night' ? 'Long' : 'Short'} rest completed`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't complete rest.");
     } finally {

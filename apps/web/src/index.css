@@ -473,8 +473,17 @@
   --cf-tabbar-content-height: 0px;
   --cf-keyboard-inset: 0px;
   --cf-snackbar-gap: 12px;
+  /* Mobile sticky topbar height so sub-nav + deep-link scroll-margin can stay
+     below chrome (issue #1488). Desktop has no topbar, so the default is 0. */
+  --app-header-h: 0px;
 
   color-scheme: dark;
+}
+
+@media (max-width: 767px) {
+  :root {
+    --app-header-h: 51px;
+  }
 }
 
 html,
@@ -1301,6 +1310,16 @@ h1, h2, h3, h4, h5, h6 {
 .cf-dismiss-target:hover {
   color: var(--color-neutral-300);
 }
+
+/*
+ * Issue #1488 — character-sheet deep-link scroll-margin clears the mobile topbar
+ * (var(--app-header-h)) plus the ~58px sticky sheet tab bar so ?focus= anchors
+ * land below chrome instead of underneath it.
+ */
+.cf-sheet-section {
+  scroll-margin-top: calc(var(--app-header-h, 0px) + 58px);
+}
+
 /* Active / DM — accent-blurple family (primary emphasis) */
 .cf-chip-active {
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
