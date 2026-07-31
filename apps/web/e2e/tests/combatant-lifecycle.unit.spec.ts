@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Combatant } from '@campfire/schema';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { hpModelForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import {
   canStabilizeCombatant,
   hasRestoredTrashedEncounter,
@@ -154,6 +155,22 @@ test.describe('combatant lifecycle (issue #1469)', () => {
       deathState: 'none',
       deathSaveFailures: 0,
       deathSaveSuccesses: 0,
+    });
+    const pf2eAdapter = ruleSystemAdapter('pf2e');
+    expect(applyOptimisticHpDelta(combatant(), -5, pf2eAdapter)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+    });
+    const dndAdapter = ruleSystemAdapter('dnd5e');
+    expect(applyOptimisticHpDelta(combatant(), -5, dndAdapter)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+    });
+    const customHpModel = hpModelForAdapter(pf2eAdapter);
+    expect(applyOptimisticHpDelta(combatant(), -5, customHpModel)).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
     });
 
     // Damage while down at 0 HP in a non-5e system does not increment deathSaveFailures
