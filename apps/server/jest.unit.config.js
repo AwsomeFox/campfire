@@ -16,16 +16,14 @@ module.exports = {
   collectCoverageFrom: ['<rootDir>/src/**/*.ts', '!<rootDir>/src/**/*.d.ts'],
   coveragePathIgnorePatterns: ['/node_modules/', '/dist/', '/test/'],
   coverageReporters: ['json', 'lcov', 'text-summary'],
-  // Measured unit-only baseline on 2026-07-28:
-  // 29.91% stmts / 23.46% branches / 27.65% funcs / 30.40% lines.
-  // These floors leave ~2 points of normal instrumentation headroom while
-  // preventing the new baseline from silently regressing.
+  // Milestone 1 unit coverage floors:
+  // 40% statements / 30% branches / 35% functions / 40% lines.
   coverageThreshold: {
     global: {
-      statements: 28,
-      branches: 21,
-      functions: 25,
-      lines: 28,
+      statements: 40,
+      branches: 30,
+      functions: 35,
+      lines: 40,
     },
   },
 };
