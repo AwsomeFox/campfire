@@ -422,7 +422,7 @@ export function TurnWorkspace({
             onClick={() => onEndTurn?.(turn.current!.combatantId)}
             data-testid="workspace-end-turn"
           >
-            Next turn →
+            {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
           <span className="text-sm text-muted">The DM advances turns in this campaign.</span>

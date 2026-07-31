@@ -1527,6 +1527,11 @@ h1, h2, h3, h4, h5, h6 {
   font-size: var(--type-control);
   border-radius: var(--radius-md);
 }
+/* Issue #1456: when an input also has the 44×44 target-size helper, keep the larger floor. */
+.input.cf-target-44 {
+  min-width: 44px;
+  min-height: 44px;
+}
 .cf-input:hover {
   border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
 }
