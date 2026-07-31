@@ -15,6 +15,7 @@ import {
   MAX_LEVEL,
   normalizeStats,
   ruleSystemAdapter,
+  hpModelForAdapter,
   ddbImportSupported,
   resolveCharacterCreateStatus,
   // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
@@ -1358,15 +1359,28 @@ export class CharactersService {
       if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
       this.assertCanWrite(fresh, user, role);
 
+      // #1503 — route the death model through the campaign's adapter so a system without 5e
+      // death saves (Starfinder, PF2e, OSR, …) matches the combat engine: a character dropped
+      // to 0 HP is simply "down", never auto-flagged 'dying' by a rule they don't use.
+      const [deathCampaign] = tx
+        .select({ ruleSystem: campaigns.ruleSystem })
+        .from(campaigns)
+        .where(eq(campaigns.id, fresh.campaignId))
+        .limit(1)
+        .all();
+      const deathSavesSupported = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem)).deathSaves;
+
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;
       const hpCurrent = clampHpCurrent(requested, fresh.hpMax);
       // Issue #711: make recovery/revival transitions explicit on the sheet, the
       // same way the combat engine does. Healing a downed character above 0 HP
       // revives them (deathState -> 'none', death-save counters reset); dropping
-      // a healthy character to 0 HP from a sheet edit puts them 'dying'. This
-      // keeps the persistent death-state echo self-consistent when a DM/player
-      // adjusts HP outside an encounter instead of leaving a stale 'dead' flag
-      // on a healed character or a stale 'none' on a freshly-dropped one.
+      // a healthy character to 0 HP from a sheet edit puts them 'dying' — but only
+      // for a system with 5e death saves (issue #1503): a system without them leaves
+      // the character 'none' at 0 HP, matching applyCombatantHp. This keeps the
+      // persistent death-state echo self-consistent when a DM/player adjusts HP
+      // outside an encounter instead of leaving a stale 'dead' flag on a healed
+      // character or a stale 'none' on a freshly-dropped one.
       const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nowIso() };
       if (hpCurrent > 0 && fresh.deathState !== 'none') {
         hpSet.deathState = 'none';
@@ -1378,9 +1392,14 @@ export class CharactersService {
         // the next encounter's auto-add despite being alive again.
         if (fresh.status === 'dead') hpSet.status = 'active';
       } else if (hpCurrent === 0 && fresh.hpCurrent > 0 && fresh.deathState === 'none') {
-        hpSet.deathState = 'dying';
-        hpSet.deathSaveSuccesses = 0;
-        hpSet.deathSaveFailures = 0;
+        // Only systems with 5e death saves flag a freshly-dropped character 'dying' (issue #1503);
+        // a system without them leaves deathState 'none' (the character is just "down" via hpBand),
+        // mirroring applyCombatantHp's no-death-saves branch so the sheet and combat tracker agree.
+        if (deathSavesSupported) {
+          hpSet.deathState = 'dying';
+          hpSet.deathSaveSuccesses = 0;
+          hpSet.deathSaveFailures = 0;
+        }
       }
       const [updated] = tx
         .update(characters)

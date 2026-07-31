@@ -963,6 +963,64 @@ describe('characters (e2e)', () => {
     });
   });
 
+  // Issue #1503: a system without 5e death saves must not auto-flag a character 'dying' when
+  // their HP is dropped to 0 from the sheet — CharactersService.patchHp routes the death model
+  // through the adapter, matching the encounter combat engine.
+  describe('sheet HP drop to 0 honours the rule-system adapter (issue #1503)', () => {
+    it('a PF2e character dropped to 0 HP stays deathState none (no 5e dying flag)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Sheet HP #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Hero', hpCurrent: 10, hpMax: 10 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Dropping a healthy PF2e character to 0 HP from the sheet must NOT write 'dying' — PF2e
+      // has no 5e death saves, so the character is simply "down" (deathState stays 'none').
+      const dropped = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 });
+      expect(dropped.status).toBe(201);
+      expect(dropped.body.hpCurrent).toBe(0);
+      expect(dropped.body.deathState).toBe('none');
+      const fetched = await request(server).get(`/api/v1/characters/${charId}`).set(owner);
+      expect(fetched.status).toBe(200);
+      expect(fetched.body.deathState).toBe('none');
+      expect(fetched.body.deathSaveFailures).toBe(0);
+    });
+
+    it('a downed PF2e character healed above 0 HP still revives (revive-on-heal parity, #1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Revive #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Reviver', hpCurrent: 10, hpMax: 10 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Drop to 0 first (deathState stays 'none' — no 5e dying flag), then seed a non-'none'
+      // state via DM override. Healing above 0 must revive the PC (deathState -> 'none',
+      // status -> 'active') even though PF2e has no 5e death saves: the revive-on-heal branch is
+      // unconditional, matching applyCombatantHp's no-death-saves branch (Devin #1812).
+      expect((await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 })).status).toBe(201);
+      const markedDead = await dbUpdate(server, dm, charId, { deathState: 'dead', status: 'dead' });
+      expect(markedDead.status).toBe(200);
+      expect(markedDead.body.deathState).toBe('dead');
+      const revived = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 5 });
+      expect(revived.status).toBe(201);
+      expect(revived.body.hpCurrent).toBe(5);
+      expect(revived.body.deathState).toBe('none');
+      expect(revived.body.status).toBe('active');
+    });
+  });
+
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —
   // the API always allowed it, and now the owner (not just the dm) can delete their own.
   describe('multi-character ownership & owner delete (issue #129)', () => {

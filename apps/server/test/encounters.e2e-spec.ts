@@ -4052,6 +4052,42 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     }
   });
 
+  it('rejects a death-save counter edit for a ruleset without 5e death saves (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const starfinderCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No 5e death saves (counters)' });
+    expect(starfinderCampaign.status).toBe(201);
+    const starfinderCampaignId = starfinderCampaign.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, starfinderCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${starfinderCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Vesk', hpCurrent: 12, hpMax: 12 })
+      ).status,
+    ).toBe(201);
+    const starfinderEncounter = await request(server)
+      .post(`/api/v1/campaigns/${starfinderCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Zero G', hidden: false });
+    const starfinderEncounterId = starfinderEncounter.body.id as number;
+    const starfinderCombatantId = starfinderEncounter.body.combatants[0].id as number;
+    // A DM/AI attempt to write 5e death-save counters to a Starfinder combatant is rejected up
+    // front — not silently dropped while the override log claims a counter edit (#1503, Devin #1812).
+    const rejectedFailures = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 1 });
+    expect(rejectedFailures.status).toBe(400);
+    expect(rejectedFailures.body.message).toMatch(/Death saves are not supported for the .+ ruleset/);
+    const rejectedSuccesses = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveSuccesses: 2 });
+    expect(rejectedSuccesses.status).toBe(400);
+  });
+
   it('rejects a fresh death save when the encounter ends after preflight but before its keyed transaction', async () => {
     const server = ctx.app.getHttpServer();
     const raceEncounter = await request(server)
