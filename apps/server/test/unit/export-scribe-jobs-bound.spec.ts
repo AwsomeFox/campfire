@@ -147,4 +147,42 @@ describe('ExportService — AI scribe jobs bounding (Issue #1529)', () => {
       expect(exported.aiScribeJobs[i]!.id).toBeLessThan(exported.aiScribeJobs[i + 1]!.id);
     }
   });
+
+  it('does not treat dry-run preview jobs (status succeeded but proposalCount 0) as proposal-filing', async () => {
+    const now = new Date().toISOString();
+    await db.insert(users).values({ id: 1, username: 'dm', displayName: 'DM', createdAt: now, updatedAt: now });
+    await db.insert(campaigns).values({ id: 1, name: 'Test Campaign', createdAt: now, updatedAt: now });
+
+    // Job #1: An old dry-run job with status 'succeeded' but proposalId null and proposalCount 0
+    await db.insert(aiScribeJobs).values({
+      id: 1,
+      campaignId: 1,
+      trigger: 'on_demand',
+      status: 'succeeded',
+      proposalId: null,
+      proposalCount: 0,
+      detail: 'dry-run preview (no proposal filed)',
+      createdAt: now,
+    });
+
+    // Seed 60 subsequent no-op jobs (#2 to #61)
+    for (let i = 2; i <= 61; i++) {
+      await db.insert(aiScribeJobs).values({
+        id: i,
+        campaignId: 1,
+        trigger: 'cron',
+        status: 'no_material',
+        proposalCount: 0,
+        createdAt: now,
+      });
+    }
+
+    const service = createExportService();
+    const exported = await service.buildExport(1, USER);
+
+    // Job #1 was an old dry-run (no proposal) and is older than the 50 most recent jobs (#12..61),
+    // so it must NOT be included in the export (capped to 50 jobs total).
+    expect(exported.aiScribeJobs).toHaveLength(50);
+    expect(exported.aiScribeJobs.find((j) => j.id === 1)).toBeUndefined();
+  });
 });

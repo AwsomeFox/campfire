@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
-import { and, desc, eq, gt, isNotNull, or } from 'drizzle-orm';
+import { and, desc, eq, gt, isNotNull, or, sql } from 'drizzle-orm';
 import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -202,6 +202,12 @@ export class ExportService {
    * jobs overall to capture recent operational history without unbounded growth.
    */
   private async listScribeJobsForExport(campaignId: number) {
+    const [totalCountRow] = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(aiScribeJobs)
+      .where(eq(aiScribeJobs.campaignId, campaignId));
+    const totalCount = Number(totalCountRow?.count ?? 0);
+
     const [proposalJobs, recentJobs] = await Promise.all([
       this.db
         .select()
@@ -212,7 +218,6 @@ export class ExportService {
             or(
               isNotNull(aiScribeJobs.proposalId),
               gt(aiScribeJobs.proposalCount, 0),
-              eq(aiScribeJobs.status, 'succeeded'),
             ),
           ),
         ),
@@ -232,7 +237,9 @@ export class ExportService {
       jobMap.set(job.id, job);
     }
 
-    return Array.from(jobMap.values()).sort((a, b) => a.id - b.id);
+    const jobs = Array.from(jobMap.values()).sort((a, b) => a.id - b.id);
+    const truncated = Math.max(0, totalCount - jobs.length);
+    return { jobs, truncated };
   }
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
@@ -397,11 +404,13 @@ export class ExportService {
     // AI seat + scribe config (issue #1078): export the DM's hand-authored steering
     // and trigger settings. Runtime counters (tokensUsed, turnCount, lastTurnAt) and
     // provider keys (aiProviderConfigs — encrypted, install-specific) are excluded.
-    const [[aiSeatRow], [aiScribeConfigRow], aiScribeJobRows] = await Promise.all([
+    const [[aiSeatRow], [aiScribeConfigRow], scribeJobsResult] = await Promise.all([
       this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1),
       this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1),
       this.listScribeJobsForExport(campaignId),
     ]);
+    const aiScribeJobRows = scribeJobsResult.jobs;
+    const aiScribeJobsTruncated = scribeJobsResult.truncated;
 
     // members "sans anything sensitive" — CampaignMember already carries no
     // password/session data, but drop nothing further needed; kept explicit
