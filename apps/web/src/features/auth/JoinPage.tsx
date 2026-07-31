@@ -17,6 +17,7 @@ import { useAuth } from '../../app/auth';
 import { PasswordInput } from '../../components/PasswordInput';
 import { BrandMark } from '../../components/BrandMark';
 import { CharterPreviewPanel } from '../session-zero/CharterPreviewPanel';
+import { Card } from '../../components/ui';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -289,7 +290,7 @@ export function JoinPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <Card density="compact" elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
 
           {loading || !ready ? (
@@ -525,7 +526,7 @@ export function JoinPage() {
               )}
             </>
           ) : null}
-        </div>
+        </Card>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
           Self-hosted with ❤️ · campfire v{__APP_VERSION__}
