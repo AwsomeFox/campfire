@@ -67,3 +67,8 @@ export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean
   return chosen;
 }
 
+export function toCheckRollMode(mode: RollMode): 'flat' | 'advantage' | 'disadvantage' {
+  return mode === 'adv' ? 'advantage' : mode === 'dis' ? 'disadvantage' : 'flat';
+}
+
+

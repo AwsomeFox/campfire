@@ -1759,6 +1759,7 @@ describe('POST /characters/:id/rest — individual character rest', () => {
   let ctx: TestAppContext;
   let restCampaignId: number;
   let restCharId: number;
+  let sfCharId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -1791,6 +1792,36 @@ describe('POST /characters/:id/rest — individual character rest', () => {
         deathState: 'stable',
       });
     restCharId = charRes.body.id;
+
+    const sfCampRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: `Starfinder Rest Campaign ${Date.now()}` });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampRes.body.id));
+
+    await request(server)
+      .post(`/api/v1/campaigns/${sfCampRes.body.id}/members`)
+      .set(dm)
+      .send({ userId: 'dev:user', role: 'player' });
+
+    const sfCharRes = await request(server)
+      .post(`/api/v1/campaigns/${sfCampRes.body.id}/characters`)
+      .set(dm)
+      .send({
+        name: 'Starfinder Hero',
+        className: 'Soldier',
+        level: 3,
+        hpMax: 30,
+        hpCurrent: 10,
+        spMax: 15,
+        spCurrent: 5,
+        rpMax: 3,
+        rpCurrent: 1,
+        deathState: 'stable',
+      });
+    sfCharId = sfCharRes.body.id;
   });
 
   afterAll(async () => {
@@ -1828,11 +1859,22 @@ describe('POST /characters/:id/rest — individual character rest', () => {
     expect(res.body.message).toContain('requires at least 1 Resolve Point');
   });
 
-  it('night rest heals max(1, level) HP, resets deathState, and restores SP/RP to max', async () => {
+  it('5e long rest restores full HP and clears deathState', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .post(`/api/v1/characters/${restCharId}/rest`)
       .set(owner)
+      .send({ type: 'long' });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(30); // 5e long rest restores full HP (30/30)
+    expect(res.body.deathState).toBe('none');
+  });
+
+  it('Starfinder night rest heals max(1, level) HP, resets deathState, and restores SP/RP to max', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${sfCharId}/rest`)
+      .set(dm)
       .send({ type: 'night' });
     expect(res.status).toBe(201);
     expect(res.body.hpCurrent).toBe(13); // 10 + level(3) = 13

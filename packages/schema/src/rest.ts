@@ -199,12 +199,38 @@ export const NEUTRAL_REST_MODEL: RestModel = RestModel.parse({});
  */
 export const HIT_DICE_RESOURCE_KEY = 'hitDice';
 
+export interface RestOptionDef {
+  /** The rest type passed to POST /characters/:id/rest. */
+  readonly type: 'short' | 'long' | 'stamina' | 'night';
+  /** Human label shown on the button, e.g. "Short Rest", "Long Rest", "Stamina Rest (1 RP)", "Night's Rest". */
+  readonly label: string;
+  /** Hover tooltip / description. */
+  readonly description?: string;
+}
+
+export const DEFAULT_GENERIC_REST_OPTIONS: readonly RestOptionDef[] = [
+  { type: 'short', label: 'Short Rest', description: 'Take a short rest (1 hour)' },
+  { type: 'long', label: 'Long Rest', description: 'Take a long rest (8 hours)' },
+];
+
+export const DEFAULT_STARFINDER_REST_OPTIONS: readonly RestOptionDef[] = [
+  { type: 'stamina', label: '⚡ Stamina Rest (1 RP)', description: 'Spend 1 RP to restore full Stamina Points (10-min rest)' },
+  { type: 'night', label: "🌙 Night's Rest", description: "Full Night's Rest (8 hours) — restores full SP, RP, and HP equal to Level" },
+];
+
+export function restOptionsForAdapter(adapter: { id: string; restOptions?: readonly RestOptionDef[] }): readonly RestOptionDef[] {
+  if (adapter.restOptions) return adapter.restOptions;
+  if (adapter.id === 'starfinder-1e') return DEFAULT_STARFINDER_REST_OPTIONS;
+  return DEFAULT_GENERIC_REST_OPTIONS;
+}
+
 /** The minimal adapter surface this module reads. The real `RuleSystemAdapter` satisfies it. */
 export interface RestAdapter {
   readonly id: string;
   /** Ability-score → modifier; used for the CON bonus on a spent hit die. */
   abilityModifier(score: number): number;
   readonly restModel?: RestModel;
+  readonly restOptions?: readonly RestOptionDef[];
   readonly resources?: readonly { key: string; name: string; recharge: RestRechargeCadence; defaultMax?: number }[];
 }
 
@@ -212,6 +238,7 @@ export interface RestAdapter {
 export function restModelForAdapter(adapter: Pick<RestAdapter, 'restModel'>): RestModel {
   return adapter.restModel ?? NEUTRAL_REST_MODEL;
 }
+
 
 // ---------------------------------------------------------------------------
 // Input / output shapes

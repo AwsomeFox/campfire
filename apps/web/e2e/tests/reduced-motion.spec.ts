@@ -135,7 +135,9 @@ test.describe('reduced-motion global policy (issue #594)', () => {
       await expect(strSaveBtn).toBeVisible();
       const [rollResponse] = await Promise.all([
         page.waitForResponse(
-          (res) => res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) && res.request().method() === 'POST',
+          (res) =>
+            (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
+            res.request().method() === 'POST',
         ),
         strSaveBtn.click(),
       ]);

@@ -43,6 +43,7 @@ import {
   // #1643 — the adapter-owned leveled condition track (5e Exhaustion; PF2e has none).
   ConditionLevelPatch,
   leveledConditionTrackFor,
+  STARFINDER_ADAPTER_ID,
 } from '@campfire/schema';
 import type {
   Character,
@@ -1424,9 +1425,11 @@ export class CharactersService {
   async rest(id: number, restType: 'stamina' | 'night' | 'short' | 'long', user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
+    const adapter = await this.adapterForCampaign(existing.campaignId);
 
-    if (restType === 'short' || restType === 'long') {
-      await this.restParty(existing.campaignId, restType, [id], {}, user, role);
+    if (restType === 'short' || restType === 'long' || (restType === 'night' && adapter.id !== STARFINDER_ADAPTER_ID)) {
+      const kind: RestKind = restType === 'short' ? 'short' : 'long';
+      await this.restParty(existing.campaignId, kind, [id], {}, user, role);
       return redactSecret(toDomain(await this.getRowOrThrow(id)), role);
     }
 

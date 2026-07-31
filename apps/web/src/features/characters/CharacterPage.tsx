@@ -39,7 +39,16 @@ import type {
   LeveledConditionTrack,
   AdapterResourceDef,
 } from '@campfire/schema';
-import { abilityLabelForAdapter, xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
+import {
+  abilityLabelForAdapter,
+  xpProgressForCharacter,
+  ruleSystemAdapter,
+  type RuleSystemAdapter,
+  checkCatalogForAdapter,
+  sortCheckCatalog,
+  formatCheckBreakdown,
+  restOptionsForAdapter,
+} from '@campfire/schema';
 import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -102,20 +111,17 @@ import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import {
   type Ability,
-  SKILLS,
   SPELL_LEVELS,
   profBonus,
   abilityScore,
   abilityFieldsForCharacter,
-  modOf,
   signed,
-  d20Expr,
   toHitExpr,
   damageExpr,
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
+import { resolveRollMode, toCheckRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -132,6 +138,7 @@ import {
   saveProficiencyLabel,
   skillProficiencyLabel,
   skillRankLabel,
+  type SkillProficiencyRank,
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
@@ -523,7 +530,7 @@ export default function CharacterPage() {
             {canEdit && (
               <div className="space-y-2">
                 <HpEditor character={character} onChange={load} onError={setActionError} />
-                <RestControls character={character} onChange={load} onError={setActionError} />
+                <RestControls character={character} onChange={load} onError={setActionError} adapter={adapter} />
               </div>
             )}
           </Card>
@@ -1371,6 +1378,9 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   const pb = profBonus(character.level);
   const profs = new Set<string>(character.saveProficiencies);
 
+  const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
+  const saves = useMemo(() => catalog.filter((c) => c.category === 'save'), [catalog]);
+
   async function toggle(k: Ability) {
     if (!canEdit || busy) return;
     setBusy(true);
@@ -1406,21 +1416,23 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
         aria-label="Saving throw roll mode"
       />
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-        {abilityFieldsForCharacter(adapter, character).map(({ key: k }) => {
-          const proficient = profs.has(k);
-          const mod = (modOf(adapter, character, k) ?? 0) + (proficient ? pb : 0);
+        {saves.map((def) => {
+          const k = (def.ability ?? def.id.replace('save:', '')) as Ability;
+          const proficient = def.favorite || (def.proficiency != null && def.proficiency !== 'untrained') || profs.has(k);
+          const mod = def.modifier;
+          const breakdownStr = formatCheckBreakdown(def);
           return (
-            <div key={k} className="cf-inset text-center py-2 px-1.5 relative">
+            <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               <button
                 type="button"
-                onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${k} save`)}
+                onClick={(e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(mode, e)))}
                 disabled={roller.rolling}
                 className="cf-target-44 w-full"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}
-                title={`Roll ${k} save (${signed(mod)}) · ${rollModeSummary(mode)}`}
-                aria-label={`Roll ${k} save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
+                title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
+                aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
-                <p className="text-[10px] tracking-wide text-secondary">{k}</p>
+                <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
               </button>
               {canEdit ? (
@@ -1460,7 +1472,9 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   // Roll-mode chooser (issue #713): one persistent default for every skill roll
   // in this card; the keyboard shortcut (shift/alt-click) still overrides once.
   const [mode, setMode] = useState<RollMode>('flat');
-  const pb = profBonus(character.level);
+
+  const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
+  const skillChecks = useMemo(() => catalog.filter((c) => c.category === 'skill'), [catalog]);
 
   async function cycle(name: string) {
     if (!canEdit || busy) return;
@@ -1501,21 +1515,25 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
         aria-label="Skill check roll mode"
       />
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        {SKILLS.map(({ name, ability }) => {
-          const rank = character.skills[name];
-          const mod = (modOf(adapter, character, ability) ?? 0) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
-          const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
+        {skillChecks.map((def) => {
+          const name = def.label;
+          const ability = def.ability;
+          const rank = character.skills[name] ?? (def.proficiency as SkillRank | null);
+          const mod = def.modifier;
+          const breakdownStr = formatCheckBreakdown(def);
+          const isProf = rank != null && rank !== ('untrained' as any);
+          const marker = rank === 'expertise' ? '★' : isProf ? '●' : '○';
           return (
-            <div key={name} className="flex items-center gap-1.5 text-[13px] min-h-11">
+            <div key={def.id} className="flex items-center gap-1.5 text-[13px] min-h-11">
               {canEdit ? (
                 <button
                   type="button"
                   onClick={() => void cycle(name)}
                   disabled={busy}
-                  aria-label={skillProficiencyLabel(name, rank ?? 'none')}
-                  aria-pressed={rank != null}
+                  aria-label={skillProficiencyLabel(name, (character.skills[name] as SkillProficiencyRank) ?? (rank as SkillProficiencyRank) ?? 'none')}
+                  aria-pressed={isProf}
                   className="cf-target-44 shrink-0 text-center"
-                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
                 >
                   <span aria-hidden="true">{marker}</span>
@@ -1523,7 +1541,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               ) : (
                 <span
                   className="w-4 shrink-0 text-center"
-                  style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                  style={{ color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   aria-hidden
                 >
                   {marker}
@@ -1531,15 +1549,15 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               <button
                 type="button"
-                onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${name} check`)}
+                onClick={(e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(mode, e)))}
                 disabled={roller.rolling}
                 className="cf-target-44 flex-1 flex items-center gap-1.5 min-w-0"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${name} (${signed(mod)}) · ${rollModeSummary(mode)}`}
+                title={`Roll ${name} (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
                 aria-label={`Roll ${name} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
                 <span className="flex-1 text-left truncate">{name}</span>
-                <span className="text-[10px] text-secondary">{ability}</span>
+                {ability && <span className="text-[10px] text-secondary">{ability}</span>}
                 <span className="w-8 text-right font-semibold">{signed(mod)}</span>
               </button>
             </div>
@@ -2677,22 +2695,26 @@ function RestControls({
   character,
   onChange,
   onError,
+  adapter,
 }: {
   character: Character;
   onChange: () => void;
   onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
 }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
+  const options = restOptionsForAdapter(adapter);
 
-  async function takeRest(type: 'stamina' | 'night') {
+  async function takeRest(type: 'stamina' | 'night' | 'short' | 'long') {
     if (busy) return;
     setBusy(true);
     onError(null);
     try {
       await api.post(`${API}/characters/${character.id}/rest`, { type });
       onChange();
-      announce(`${type === 'night' ? 'Long' : 'Short'} rest completed`);
+      const label = options.find((opt) => opt.type === type)?.label ?? 'Rest';
+      announce(`${label} completed`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't complete rest.");
     } finally {
@@ -2700,26 +2722,26 @@ function RestControls({
     }
   }
 
+  if (options.length === 0) return null;
+
   return (
-    <div className="flex gap-2 items-center flex-wrap pt-1">
-      <Btn density="xs"
-        ghost
-        className="text-xs"
-        disabled={busy || character.rpCurrent < 1}
-        onClick={() => void takeRest('stamina')}
-        title="Spend 1 RP to restore full Stamina Points (10-min rest)"
-      >
-        ⚡ Stamina Rest (1 RP)
-      </Btn>
-      <Btn density="xs"
-        ghost
-        className="text-xs"
-        disabled={busy}
-        onClick={() => void takeRest('night')}
-        title="Full Night's Rest (8 hours) — restores full SP, RP, and HP equal to Level"
-      >
-        🌙 Night's Rest
-      </Btn>
+    <div className="flex gap-2 items-center flex-wrap pt-1" data-testid="rest-controls">
+      {options.map((opt) => {
+        const isDisabled = busy || (opt.type === 'stamina' && character.rpCurrent < 1);
+        return (
+          <Btn
+            key={opt.type}
+            density="xs"
+            ghost
+            className="text-xs"
+            disabled={isDisabled}
+            onClick={() => void takeRest(opt.type)}
+            title={opt.description ?? opt.label}
+          >
+            {opt.label}
+          </Btn>
+        );
+      })}
     </div>
   );
 }
