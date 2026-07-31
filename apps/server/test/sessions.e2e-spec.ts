@@ -104,6 +104,146 @@ describe('sessions (e2e) — sessionCount + duplicate number', () => {
   });
 });
 
+/**
+ * Issue #841 — campaign position must use the highest canonical session number,
+ * not the recap COUNT(*). sessionCount stays a true row count; latestSessionNumber
+ * tracks MAX(number) among live sessions so gaps/imports/deletes don't mislabel
+ * the campaign as "Session 3" when the latest recap is Session 12.
+ */
+describe('sessions (e2e) — latestSessionNumber vs sessionCount (issue #841)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const res = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Position Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('empty campaign reports 0 count and 0 latest session number', async () => {
+    const campRes = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(campRes.status).toBe(200);
+    expect(campRes.body.sessionCount).toBe(0);
+    expect(campRes.body.latestSessionNumber).toBe(0);
+  });
+
+  it('non-contiguous numbering: count is row tally, latest is MAX(number)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    for (const number of [1, 7, 12]) {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number });
+      expect(res.status).toBe(201);
+    }
+
+    const campRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(campRes.body.sessionCount).toBe(3);
+    expect(campRes.body.latestSessionNumber).toBe(12);
+  });
+
+  it('deleting the highest session drops latestSessionNumber to the next-highest', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
+    expect(list.status).toBe(200);
+    const twelve = list.body.find((s: { id: number; number: number }) => s.number === 12);
+    expect(twelve).toBeTruthy();
+
+    const del = await request(server).delete(`/api/v1/sessions/${twelve.id}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const campRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(campRes.body.sessionCount).toBe(2);
+    expect(campRes.body.latestSessionNumber).toBe(7);
+  });
+
+  it('restoring a deleted high session restores latestSessionNumber', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const high = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 20 });
+    expect(high.status).toBe(201);
+    const highId = high.body.id as number;
+
+    const afterCreate = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(afterCreate.body.latestSessionNumber).toBe(20);
+    expect(afterCreate.body.sessionCount).toBe(3);
+
+    expect((await request(server).delete(`/api/v1/sessions/${highId}`).set(dm)).status).toBe(200);
+    const afterDelete = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(afterDelete.body.latestSessionNumber).toBe(7);
+    expect(afterDelete.body.sessionCount).toBe(2);
+
+    const restored = await request(server).post(`/api/v1/sessions/${highId}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    const afterRestore = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(afterRestore.body.latestSessionNumber).toBe(20);
+    expect(afterRestore.body.sessionCount).toBe(3);
+  });
+
+  it('renumbering a session updates latestSessionNumber without changing sessionCount', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
+    const seven = list.body.find((s: { id: number; number: number }) => s.number === 7);
+    expect(seven).toBeTruthy();
+
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    const countBefore = before.body.sessionCount as number;
+
+    const patch = await request(server).patch(`/api/v1/sessions/${seven.id}`).set(dm).send({ number: 99 });
+    expect(patch.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(after.body.sessionCount).toBe(countBefore);
+    expect(after.body.latestSessionNumber).toBe(99);
+  });
+
+  it('downward renumbering drops latestSessionNumber to the next highest', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
+    const high = list.body.find((s: { id: number; number: number }) => s.number === 99);
+    expect(high).toBeTruthy();
+
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(before.body.sessionCount).toBe(3);
+    expect(before.body.latestSessionNumber).toBe(99);
+
+    const patch = await request(server).patch(`/api/v1/sessions/${high.id}`).set(dm).send({ number: 7 });
+    expect(patch.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(after.body.sessionCount).toBe(3);
+    expect(after.body.latestSessionNumber).toBe(20); // 99 -> 7, so the next highest is 20
+
+    // Renumber it back to a value that makes it the highest again so the next test's
+    // count assertion stays deterministic.
+    const restoreHigh = await request(server).patch(`/api/v1/sessions/${high.id}`).set(dm).send({ number: 99 });
+    expect(restoreHigh.status).toBe(200);
+    const restored = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(restored.body.latestSessionNumber).toBe(99);
+    expect(restored.body.sessionCount).toBe(3);
+  });
+
+  it('a future-dated recap still contributes to latestSessionNumber (scheduled upcoming is separate)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Session recaps with a future playedAt are still numbered recaps — distinct from
+    // ScheduledSession rows, which never touch these denormalized fields.
+    const farFuture = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 100, playedAt: '2099-01-01' });
+    expect(farFuture.status).toBe(201);
+
+    const campRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(campRes.body.latestSessionNumber).toBe(100);
+    expect(campRes.body.sessionCount).toBe(4);
+  });
+});
+
 describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
   let ctx: TestAppContext;
   let campaignId: number;

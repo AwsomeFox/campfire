@@ -40,7 +40,7 @@ test.describe('Player Display cast sessions', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, ruleSystem: '' },
+          campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
           currentLocation: null,
           quests: [],
           npcs: [],
@@ -188,7 +188,7 @@ const TRANSPARENT_PNG_BASE64 =
 
 function castSummary() {
   return {
-    campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, ruleSystem: '' },
+    campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
     currentLocation: null,
     quests: [],
     npcs: [],

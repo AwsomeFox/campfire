@@ -845,6 +845,7 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
         status: 'active',
         dangerLevel: 'low',
         sessionCount: 0,
+        latestSessionNumber: 0,
         ruleSystem: slug,
         createdAt: now,
         updatedAt: now,

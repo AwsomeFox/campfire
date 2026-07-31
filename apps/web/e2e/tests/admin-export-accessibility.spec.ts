@@ -12,6 +12,7 @@ function campaign(id: number, name: string) {
     dangerLevel: 'low',
     dmControlsProgression: false,
     sessionCount: 0,
+    latestSessionNumber: 0,
     ruleSystem: '',
     mapAttachmentId: null,
     storageQuotaBytes: null,

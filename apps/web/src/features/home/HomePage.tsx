@@ -29,6 +29,7 @@ import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
 import { PageTitle } from '../../components/PageTitle';
 import { CampaignCover } from '../../components/CampaignCover';
 import { timeAgo, useTimeTick } from '../../lib/format';
+import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { UIIcon } from '../../components/UIIcon';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
@@ -231,7 +232,7 @@ function CampaignTile({
             </p>
           )}
           <div className="text-muted" style={{ fontSize: 11.5 }}>
-            {campaign.sessionCount > 0 ? `${campaign.sessionCount} session${campaign.sessionCount === 1 ? '' : 's'}` : 'No sessions yet'}
+            {formatCampaignSessionPosition(campaign)}
           </div>
         </div>
       </Link>

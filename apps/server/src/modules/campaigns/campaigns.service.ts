@@ -320,6 +320,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     narrationLanguage: (row.narrationLanguage ?? 'en') as Campaign['narrationLanguage'],
     aiExternalContentPolicy: (row.aiExternalContentPolicy ?? 'member_consent') as Campaign['aiExternalContentPolicy'],
     sessionCount: row.sessionCount,
+    latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
@@ -581,6 +582,7 @@ export class CampaignsService {
         narrationLanguage: input.narrationLanguage ?? 'en',
         aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
         sessionCount: 0,
+        latestSessionNumber: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
         createdAt: ts,
@@ -1255,6 +1257,7 @@ export class CampaignsService {
           narrationLanguage: source.narrationLanguage ?? 'en',
           aiExternalContentPolicy: source.aiExternalContentPolicy ?? 'member_consent',
           sessionCount: template ? 0 : source.sessionCount,
+          latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           createdAt: ts,
@@ -1929,6 +1932,9 @@ export class CampaignsService {
         }).run();
       }
 
+      // Re-sync denormalized session stats from the rows actually cloned (#841).
+      this.sessions.recomputeSessionStatsInTx(tx, cloneId);
+
       return cloneId;
     });
 
@@ -2253,6 +2259,7 @@ export class CampaignsService {
           narrationLanguage,
           aiExternalContentPolicy,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
+          latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           createdAt: ts,
@@ -3143,6 +3150,22 @@ export class CampaignsService {
           createdAt: ts,
         })
         .run();
+
+      // Re-sync denormalized session stats from the rows actually imported (#841).
+      // Publishable modules explicitly reset these to 0 so the module arrives
+      // pristine; only recompute when the source document carried real play state
+      // (missing fields in older exports, or actual recaps in played-state backups).
+      const sessionCountSrc = Number(campaignSrc.sessionCount);
+      const latestSessionSrc = Number(campaignSrc.latestSessionNumber);
+      const bothExplicitZero =
+        !Number.isNaN(sessionCountSrc) &&
+        !Number.isNaN(latestSessionSrc) &&
+        sessionCountSrc === 0 &&
+        latestSessionSrc === 0;
+      const hasRecapsInRows = sessionRows.some((s) => s.recap || s.playedAt);
+      if (hasRecapsInRows || !bothExplicitZero) {
+        this.sessions.recomputeSessionStatsInTx(tx, cid);
+      }
 
       return cid;
     });

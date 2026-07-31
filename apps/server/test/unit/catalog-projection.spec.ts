@@ -73,6 +73,7 @@ describe('#587 catalog projection', () => {
       'icsToken',
       'icsTokenExpiresAt',
       'activeEncounterId',
+      'latestSessionNumber', // denormalized session-position stat; not needed in the catalog
     ];
     const all = Object.keys(getTableColumns(campaigns));
     const unclassified = all.filter(

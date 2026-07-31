@@ -6,6 +6,7 @@ type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
+import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
@@ -170,7 +171,7 @@ export function StatusHeader({
           </Link>
         )}
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
-          {campaign.sessionCount > 0 ? `${campaign.sessionCount} session${campaign.sessionCount === 1 ? '' : 's'}` : 'No sessions yet'}
+          {formatCampaignSessionPosition(campaign)}
         </span>
         <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
           {DANGER_LABEL[campaign.dangerLevel]} danger

@@ -40,7 +40,7 @@ function deferred<T>(): Deferred<T> {
 
 function summaryFor(campaignId: number, name: string): CampaignSummary {
   return {
-    campaign: { id: campaignId, name, sessionCount: 1 },
+    campaign: { id: campaignId, name, sessionCount: 1, latestSessionNumber: 1 },
   } as unknown as CampaignSummary;
 }
 

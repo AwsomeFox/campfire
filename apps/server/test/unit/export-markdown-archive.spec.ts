@@ -28,6 +28,7 @@ function campaignRow() {
     status: 'active',
     dangerLevel: 'medium',
     sessionCount: 0,
+    latestSessionNumber: 0,
     mapAttachmentId: null,
   };
 }

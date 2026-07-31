@@ -56,6 +56,7 @@ async function setupPage(page: Page) {
           publicRecapSharingEnabled: true,
           publicInvitesEnabled: true,
           sessionCount: 0,
+          latestSessionNumber: 0,
           ruleSystem: '',
           mapAttachmentId: null,
           storageQuotaBytes: null,
