@@ -3658,7 +3658,11 @@ export class AiDriverService {
    */
   private flushActionQueue(campaignId: number): void {
     const queue = this.actionQueues.get(campaignId);
-    if (!queue || queue.length === 0) return;
+    if (!queue) return;
+    // #1497 review: mark and remove the queue FIRST, even if it is currently empty. An empty
+    // but installed queue is exactly the state a runTurn caller leaves while awaiting
+    // getActionQueueDepth, and without this marker that caller falls through and starts a turn
+    // after a hold/pause that should have refused it.
     (queue as any).flushed = true;
     this.actionQueues.delete(campaignId);
     for (const entry of queue) {
@@ -3872,6 +3876,43 @@ export class AiDriverService {
   }
 
   /**
+   * Stop-condition gates for a new turn. Called synchronously at the top of `runTurn` and
+   * again after any yield in the queueing path, because pause / safety hold / human takeover
+   * / lifecycle phase can change while a caller is suspended in `getActionQueueDepth`.
+   */
+  private assertTurnAdmissible(campaignId: number, session: AiDmSessionState, opts: RunTurnOptions): void {
+    // #599: the safety hold is checked FIRST and against the durable row, not against session
+    // state. It must outrank `human_control` — a human at the seat is not a reason to keep
+    // taking input after someone stopped the table.
+    if (this.safety?.isHeld(campaignId)) {
+      throw new ServiceUnavailableException(
+        'The table is paused by a safety hold. A facilitator must resolve it before the AI DM takes input again.',
+      );
+    }
+    if (session.state === 'human_control') {
+      throw new ServiceUnavailableException(
+        `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
+      );
+    }
+    if (session.status === 'paused') {
+      throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
+    }
+    // #1043. `ended` refuses every new turn EXCEPT a lifecycle transition.
+    if (session.phase === 'ended' && !opts.lifecycle) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_ENDED',
+        message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
+      });
+    }
+    if (session.phase === 'wrap_up' && !opts.lifecycle) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_WRAPPING_UP',
+        message: 'The AI is wrapping up the session. Wait for the closing summary before sending anything else.',
+      });
+    }
+  }
+
+  /**
    * Run one driver turn for `input` (a player action). Streams narration + executes
    * tool calls in a loop until the model stops, the budget is exhausted, a tool errors,
    * or the step ceiling is hit. `triggeredBy` is the member who submitted the input —
@@ -3924,73 +3965,10 @@ export class AiDriverService {
     const seat = await this.aiDm.assertRunnable(campaignId);
 
     const session = this.ensureSession(campaignId);
-    // #599: the safety hold is checked FIRST and against the durable row, not against session
-    // state. Two reasons. It must outrank `human_control` — a human at the seat is not a reason
-    // to keep taking input after someone stopped the table. And reading the row rather than
-    // `session.status` closes the window where the hold is written but the freeze hook has not
-    // yet landed on this session object: the input gate should never be the last thing to hear.
-    // The distinct message matters too, because "resume it" is wrong advice here — the seat's
-    // resume refuses while a hold stands.
-    if (this.safety?.isHeld(campaignId)) {
-      throw new ServiceUnavailableException(
-        'The table is paused by a safety hold. A facilitator must resolve it before the AI DM takes input again.',
-      );
-    }
-    if (session.state === 'human_control') {
-      throw new ServiceUnavailableException(
-        `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
-      );
-    }
-    if (session.status === 'paused') {
-      throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
-    }
-    // #1043. `ended` refuses every new turn EXCEPT a lifecycle transition.
-    //
-    // The exemption is keyed on `opts.lifecycle`, NOT on `opts.proactive`. `proactive` means only
-    // "no player action sits behind this turn", and `ProactiveService` sets it too — for campaign
-    // event watchers and `POST /ai-dm/trigger`. Exempting on it let an event watcher start a full
-    // provider-and-tools turn at a table that had wrapped up: tokens spent and narration streamed
-    // into a closed session, which is precisely the thing this gate exists to stop, arriving from
-    // the one direction nobody was watching. Only a greeting (reopening) or a wrap-up replay has
-    // any business running here, and both carry `lifecycle`.
-    //
-    // This is the one place the lifecycle has teeth beyond prompt text, and it is deliberate: a
-    // phase that changed nothing but tone would be decoration. It is also deliberately the ONLY
-    // place, and it is recoverable by any player in one request — the error names the endpoint —
-    // so a closed session is a speed bump, never a lockout that needs a DM to clear.
-    if (session.phase === 'ended' && !opts.lifecycle) {
-      throw new ConflictException({
-        code: 'AI_DM_SESSION_ENDED',
-        message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
-      });
-    }
-    // #1043 — a wrap-up IN PROGRESS refuses ordinary player input too, rather than queueing it.
-    //
-    // The mirror of the reject-not-defer rule one gate below: an action queued behind a session
-    // punctuation mark is not the same action when it drains. A wrap-up lands in `ended`, so by the
-    // time the queue drains, the gate above either refuses the action outright or — depending on
-    // drain scheduling — it starts as the phase changes and is answered under the closing-summary
-    // direction. Either way the table was told the action was ACCEPTED: a `player.action` row was
-    // persisted and broadcast to everyone, and then the action vanished or was answered as if the
-    // session had closed. A phantom row in the shared log is exactly the silent divergence #572
-    // exists to prevent.
-    //
-    // `greeting` deliberately does NOT refuse. It lands in `active`, so an action queued behind a
-    // greeting drains into an ordinary turn and is answered normally — nothing is lost, and a table
-    // should be able to start typing while the AI is welcoming them.
-    //
-    // Recoverable in seconds and self-describing, like every other lifecycle refusal: a wrap-up is
-    // one turn, and the message says to wait for it.
-    //
-    // Keyed on `opts.lifecycle` for the same reason as the gate above: an autonomous trigger is
-    // no more entitled to talk over a closing summary than a player is, and `proactive` does not
-    // distinguish the two. Only the wrap-up turn itself needs through, and it carries `lifecycle`.
-    if (session.phase === 'wrap_up' && !opts.lifecycle) {
-      throw new ConflictException({
-        code: 'AI_DM_SESSION_WRAPPING_UP',
-        message: 'The AI is wrapping up the session. Wait for the closing summary before sending anything else.',
-      });
-    }
+    // Stop-condition gates. Re-evaluated after every yield because the session can be paused,
+    // handed to a human, or wrapped up while a would-be caller is in the queueing await.
+    this.assertTurnAdmissible(campaignId, session, opts);
+
     // Serialize turns per campaign (#381): reject a concurrent POST /message while a turn is
     // already streaming. Two interleaved turns would splice their narration.delta events onto the
     // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
@@ -4041,7 +4019,10 @@ export class AiDriverService {
       if ((queue as any).flushed) {
         throw new ConflictException('AI DM session was torn down while queueing; please retry.');
       }
-      // 2. If the turn finished naturally while we yielded:
+      // 2. Stop conditions can change while we await getActionQueueDepth (pause, safety hold,
+      //    human takeover, wrap-up). Re-run the same admission gates before deciding to run.
+      this.assertTurnAdmissible(campaignId, session, opts);
+      // 3. If the turn finished naturally while we yielded:
       if (session.status !== 'running') {
         if (queue.length === 0) {
           if (this.actionQueues.get(campaignId) === queue) {
@@ -4084,6 +4065,8 @@ export class AiDriverService {
     }
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
+    // Re-verify admissibility after any post-yield fallthrough (e.g. queueing yield).
+    this.assertTurnAdmissible(campaignId, session, opts);
     session.status = 'running';
     // #1497 review: track whether THIS turn already released the slot so the outer finally
     // does not clear a newer turn's `running` status after the inner finally yields.
