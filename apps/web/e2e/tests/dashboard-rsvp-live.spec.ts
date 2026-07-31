@@ -86,7 +86,7 @@ test('dashboard RSVP cue reflects the viewer response and remote changes', async
     await nextSessionLink.focus();
     await expect(nextSessionLink).toBeFocused();
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(new RegExp(`^/c/${campaignId}/sessions\\?tab=schedule`));
+    await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/sessions\\?tab=schedule`));
   } finally {
     await clearIssueSchedules(writer.request, campaignId).catch(() => undefined);
     await Promise.all([reader.close(), writer.close()]);
