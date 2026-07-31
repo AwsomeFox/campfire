@@ -4034,6 +4034,12 @@ export class AiDriverService {
         this.actionQueues.set(campaignId, queue);
       }
       const maxDepth = await this.getActionQueueDepth(campaignId);
+      // #1497 review — re-validate after the yield: if teardownSession or drainQueue removed
+      // the map entry while we were awaiting, the local `queue` reference is orphaned — pushing
+      // onto it would create a promise that no drainQueue or teardown can ever settle.
+      if (this.actionQueues.get(campaignId) !== queue) {
+        throw new ConflictException('AI DM session was torn down while queueing; please retry.');
+      }
       if (queue.length >= maxDepth) {
         throw new ConflictException(
           `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,

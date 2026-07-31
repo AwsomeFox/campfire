@@ -143,4 +143,34 @@ describe('AiDriverService action queue — concurrent enqueue race (#1586)', () 
       /Action queue is full/,
     );
   });
+
+  it('teardown during getActionQueueDepth yield rejects the caller instead of orphaning the promise (#1497)', async () => {
+    // Make getSeat asynchronous so the yield window is wide enough for teardownSession to run.
+    let releaseSeat!: () => void;
+    const seatGate = new Promise<void>((r) => { releaseSeat = r; });
+    aiDm.getSeat.mockImplementation(() => seatGate.then(() => ({ tokenBudget: 1000, tokensUsed: 0, actionQueueDepth: 5 })));
+
+    const session = (driver as any).ensureSession(CAMPAIGN_ID);
+    session.status = 'running';
+
+    // Start a runTurn that will yield on getActionQueueDepth.
+    const p = driver.runTurn(CAMPAIGN_ID, user('player-1'), 'I search the room', {});
+    await flush();
+
+    // The queue array is installed in the map but the entry has NOT been pushed yet — the
+    // caller is still awaiting getActionQueueDepth.
+    const queueBefore = (driver as any).actionQueues.get(CAMPAIGN_ID);
+    expect(queueBefore).toBeDefined();
+    expect(queueBefore).toHaveLength(0);
+
+    // Tear down the session while the caller is mid-yield — this deletes the map entry.
+    driver.teardownSession(CAMPAIGN_ID);
+    expect((driver as any).actionQueues.get(CAMPAIGN_ID)).toBeUndefined();
+
+    // Release the getSeat gate so the caller resumes — with the fix it hits the re-validation
+    // check and throws ConflictException. Without the fix it would push onto the orphaned
+    // array and the returned promise would never settle.
+    releaseSeat();
+    await expect(p).rejects.toThrow(/torn down/);
+  });
 });
