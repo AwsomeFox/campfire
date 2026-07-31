@@ -179,16 +179,21 @@ export function ItemRow({
   return (
     <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2" {...entityTargetProps('item', committed.id)}>
       {editable ? (
-        <button
-          type="button"
-          onClick={() => setPickingIcon(true)}
-          disabled={busy}
-          title={hasOverride ? t('inventory.iconTitleOverride', { name: getIcon(iconSlug)?.name ?? 'custom' }) : t('inventory.iconTitleAuto')}
-          aria-label={t('inventory.iconAriaChange', { name: committed.name })}
-          className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)]"
-        >
-          <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={() => setPickingIcon(true)}
+            disabled={busy}
+            title={hasOverride ? t('inventory.iconTitleOverride', { name: getIcon(iconSlug)?.name ?? 'custom' }) : t('inventory.iconTitleAuto')}
+            aria-label={t('inventory.iconAriaChange', { name: committed.name })}
+            className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)] cf-print-hide"
+          >
+            <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
+          </button>
+          <span className="shrink-0 mt-0.5 text-[var(--color-accent)] cf-print-only">
+            <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
+          </span>
+        </>
       ) : (
         <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
           <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
@@ -215,7 +220,7 @@ export function ItemRow({
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
       </div>
       {editable && (
-        <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end">
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end cf-print-hide">
           <Btn density="xs"
             ghost
             className="!px-2 text-xs"

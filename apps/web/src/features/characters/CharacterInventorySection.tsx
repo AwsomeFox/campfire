@@ -102,7 +102,7 @@ export function CharacterInventorySection({
         <>
           {canManageCharacter && !adding && (
             <>
-              <Btn density="xs" type="button" className="text-xs" onClick={() => setAdding(true)}>
+              <Btn density="xs" type="button" className="text-xs cf-print-hide" onClick={() => setAdding(true)}>
                 {t('inventory.addItem')}
               </Btn>
               <Btn density="xs" ghost type="button" className="cf-print-hide text-xs ml-2" onClick={() => setShowCompendiumPicker(true)} aria-label={t('inventory.fromCompendium')}>
