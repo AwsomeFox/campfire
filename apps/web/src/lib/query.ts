@@ -18,7 +18,7 @@
  * only owns caching, dedupe, polling, and optimistic writes on top of it.
  */
 import { QueryClient, useQuery, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
-import type { AiDmSeat, AiDmToolConfirmation, TableSafetyHold } from '@campfire/schema';
+import type { AiDmSeat, AiDmToolConfirmation, DriverLastUndoableCommit, TableSafetyHold } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 
 /**
@@ -144,18 +144,8 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
-/**
- * The seat's most recent committed action a DM can still reverse (#1501), mirroring the
- * server's `DriverLastUndoableCommit`. Null when nothing undoable was committed. The DM-only
- * "Undo the AI's last action" control reads this; the undo itself is enforced server-side.
- */
-export interface DriverLastUndoableCommit {
-  encounterId: number;
-  actorCombatantId: number;
-  chainId: string;
-  actionName: string;
-  committedAt: string;
-}
+// `DriverLastUndoableCommit` (the seat's last reversible action, #1501) is shared from
+// `@campfire/schema` above — the server and web import the single definition so they cannot drift.
 
 /**
  * The thin server-truth session state (GET /campaigns/:id/ai-dm/session), mirroring the

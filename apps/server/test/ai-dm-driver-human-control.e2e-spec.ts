@@ -67,6 +67,7 @@ describe('ai-dm driver — human-control levers (issue #1501, e2e)', () => {
   async function armedEncounter(campaignId: number): Promise<{
     encounterId: number;
     targetCombatantId: number;
+    actorCombatantId: number;
     chainId: string;
   }> {
     const action = {
@@ -112,7 +113,7 @@ describe('ai-dm driver — human-control levers (issue #1501, e2e)', () => {
       .set(dm)
       .send({ actorCombatantId, actionIndex: 0, targetIds: [targetCombatantId], commit: false });
     expect(preview.status).toBe(200);
-    return { encounterId, targetCombatantId, chainId: preview.body.chainId as string };
+    return { encounterId, targetCombatantId, actorCombatantId: actorCombatantId as number, chainId: preview.body.chainId as string };
   }
 
   const combatantHp = async (encounterId: number, combatantId: number): Promise<number> => {
@@ -170,6 +171,41 @@ describe('ai-dm driver — human-control levers (issue #1501, e2e)', () => {
     await h.configureSeat(campaignId, { mode: 'driver' });
     const denied = await undo(campaignId, viewer);
     expect(denied.status).toBe(403);
+  });
+
+  it('#1501 when the seat undoes its own last action the DM lever is cleared (no stale reversal offered)', async () => {
+    const campaignId = await h.createCampaign('Seat Self-Undo');
+    await h.configureSeat(campaignId, { mode: 'driver' });
+    const { encounterId, targetCombatantId, actorCombatantId, chainId } = await armedEncounter(campaignId);
+
+    const beforeHp = await combatantHp(encounterId, targetCombatantId);
+
+    // The seat commits the action — the DM undo lever arms.
+    h.script({
+      text: 'The actor strikes the target.',
+      toolCalls: [{ id: 'apply1', name: 'apply_action', arguments: { encounterId, chainId } }],
+    });
+    h.script({ text: 'Done.' });
+    await h.sendMessage(campaignId, { input: 'apply the strike' });
+    expect(await combatantHp(encounterId, targetCombatantId)).toBeLessThan(beforeHp);
+    expect((await h.getDriverSession(campaignId)).body.lastUndoableCommit).toMatchObject({ encounterId, chainId });
+
+    // The seat reverses its OWN action — the lever must clear so the DM is never offered a
+    // reversal the AI already performed (and would 400 on). Review: the armed reference was not
+    // cleared when the AI undid itself.
+    h.script({
+      text: 'On reflection, I reverse that strike.',
+      toolCalls: [{ id: 'undo1', name: 'undo_action', arguments: { encounterId, actorCombatantId, chainId } }],
+    });
+    h.script({ text: 'Reversed.' });
+    const turn = await h.sendMessage(campaignId, { input: 'undo that strike' });
+    expect(turn.status).toBe(201);
+    expect(turn.body.toolCalls[0]).toMatchObject({ name: 'undo_action', isError: false });
+    expect(await combatantHp(encounterId, targetCombatantId)).toBe(beforeHp); // HP restored by the reversal
+    expect((await h.getDriverSession(campaignId)).body.lastUndoableCommit).toBeNull();
+
+    // The lever is gone, so a DM undo is "nothing left to undo" (404) — not a stale 400.
+    expect((await undo(campaignId)).status).toBe(404);
   });
 
   // ---- 3. Secrecy: the undo reference is DM-only --------------------------------

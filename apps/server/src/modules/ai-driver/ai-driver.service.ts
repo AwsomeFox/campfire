@@ -18,7 +18,7 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
+import type { AiDmSeat, Character, DriverLastUndoableCommit, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
@@ -507,29 +507,8 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
-/**
- * The seat's most recent committed action that a DM can still reverse (#1501). The model has
- * always been able to call `undo_action` with the `undoToken` a resolve/apply returned; a human
- * had no lever. This captures that same chain server-side so a DM-only control can drive the
- * existing {@link ActionResolverService.undo} path without holding a client token.
- *
- * Only action resolutions are reversible (resolve_action with `commit`, or apply_action), so
- * this is set exclusively from those tool results. `chainId` is the LOOKUP KEY `undo()` trusts;
- * the actionName is display-only. Cleared on a successful undo, and never carried across a
- * restart (a stale reference to an already-undone chain is useless, and the safe direction to be
- * wrong in is "nothing to undo").
- */
-export interface DriverLastUndoableCommit {
-  encounterId: number;
-  /** The combatant whose action was applied (echoed for a complete undo token; `undo` trusts the chain). */
-  actorCombatantId: number;
-  /** The `action_apply_chains` row id `undo()` re-reads its snapshot from. */
-  chainId: string;
-  /** Display-only label of the action the seat applied. */
-  actionName: string;
-  /** ISO time the seat captured this commit. */
-  committedAt: string;
-}
+// `DriverLastUndoableCommit` (the seat's last reversible action, #1501) is the shared shape from
+// `@campfire/schema`, imported above — server and web use the single definition.
 
 export interface AiDmSessionState {
   campaignId: number;
@@ -3549,10 +3528,15 @@ export class AiDriverService {
       resolver.undo(ref.encounterId, token, user, 'dm');
     } catch (err) {
       // A stale reference — the chain was already undone (the model called undo_action itself, or
-      // a prior DM undo raced this one) — must not leave a dead lever on the seat. Clear it and
-      // let the service's own BadRequestException surface so the DM sees the concrete reason.
+      // a prior DM undo raced this one) — must not leave a dead lever on the seat, so clear it.
+      // An already-undone chain is "nothing left to undo" (404): the client dismisses the control
+      // cleanly instead of surfacing the resolver's 400 as a hard failure (#1501 review). Any other
+      // error is rethrown so the DM sees the concrete reason.
       session.lastUndoableCommit = null;
       this.persistControlState(session);
+      if (err instanceof BadRequestException && /already undone/i.test(String(err.message ?? ''))) {
+        throw new NotFoundException('The AI seat has no reversible action to undo.');
+      }
       throw err;
     }
     session.lastUndoableCommit = null;
@@ -6216,6 +6200,16 @@ export class AiDriverService {
         } catch {
           // Non-JSON tool payload — nothing to capture.
         }
+      }
+
+      // #1501 — when the seat reverses its own action (undo_action), the armed last-undoable
+      // lever is now stale: that chain is undone and the seat is self-correcting. Clear it so the
+      // DM control never offers a reversal that cannot succeed. The safe direction to be wrong in
+      // is "nothing to undo" — a still-valid newer commit simply re-arms the lever on the seat's
+      // next resolve/apply.
+      if (!res.isError && call.name === 'undo_action') {
+        session.lastUndoableCommit = null;
+        this.persistControlState(session);
       }
 
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,

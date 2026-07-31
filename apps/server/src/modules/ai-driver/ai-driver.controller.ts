@@ -25,6 +25,7 @@ import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
+import { assertDirectWriteAllowed } from '../../common/proposed.util';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -346,6 +347,12 @@ export class AiDriverController {
   @ApiResponse({ status: 404, description: 'No reversible action to undo.' })
   async undo(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
+    // #1501 review: this handler performs a DIRECT combat mutation (it drives
+    // ActionResolverService.undo, rewriting combatant HP/conditions/effects + character sheets) but
+    // bypasses the tool layer that normally gates the seat's writes, so it cannot lean on the
+    // controller-wide @WriteModeExempt(). Enforce the same write-mode/PAT-scope gate the
+    // WriteModeGuard applies to the equivalent POST /encounters/:id/actions/undo route.
+    assertDirectWriteAllowed(user);
     return this.driver.undoLastSeatAction(id, user);
   }
 

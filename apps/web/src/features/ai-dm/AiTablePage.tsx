@@ -49,8 +49,8 @@ import {
   useAiDmSession,
   invalidateAiDm,
   invalidateAiDmToolConfirmations,
-  type DriverLastUndoableCommit,
 } from '../../lib/query';
+import type { DriverLastUndoableCommit } from '@campfire/schema';
 import { useAiDmStream } from '../../lib/useAiDmStream';
 import { aiDmPauseRequest } from './aiDmPause';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';

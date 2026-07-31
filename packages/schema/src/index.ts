@@ -7607,6 +7607,24 @@ export const AiDmToolConfirmation = z.object({
 export type AiDmToolConfirmation = z.infer<typeof AiDmToolConfirmation>;
 
 /**
+ * The AI DM seat's most recent committed action a DM can still reverse (#1501). The model has
+ * always been able to call `undo_action` with the `undoToken` a resolve/apply returned; this
+ * captures that same chain server-side so a DM-only control can drive the existing undo path
+ * without holding a client token. Only `chainId` (and `encounterId` for the cross-encounter
+ * guard) are trusted; `actionName` is display-only. Projected to DMs only (its encounterId could
+ * name a DM-only hidden fight), cleared on a successful undo (including one the seat performs
+ * itself), and never persisted across restart.
+ */
+export const DriverLastUndoableCommit = z.object({
+  encounterId: z.number().int(),
+  actorCombatantId: z.number().int(),
+  chainId: z.string(),
+  actionName: z.string(),
+  committedAt: IsoDate,
+});
+export type DriverLastUndoableCommit = z.infer<typeof DriverLastUndoableCommit>;
+
+/**
  * SERVER-WIDE AI SEAT DEFAULTS (#1070).
  *
  * A multi-campaign DM used to reconfigure the AI seat from scratch every time: `defaultSeat`
