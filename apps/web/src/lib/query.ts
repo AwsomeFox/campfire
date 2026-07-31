@@ -145,6 +145,19 @@ export interface AiDmTableVote {
 }
 
 /**
+ * The seat's most recent committed action a DM can still reverse (#1501), mirroring the
+ * server's `DriverLastUndoableCommit`. Null when nothing undoable was committed. The DM-only
+ * "Undo the AI's last action" control reads this; the undo itself is enforced server-side.
+ */
+export interface DriverLastUndoableCommit {
+  encounterId: number;
+  actorCombatantId: number;
+  chainId: string;
+  actionName: string;
+  committedAt: string;
+}
+
+/**
  * The thin server-truth session state (GET /campaigns/:id/ai-dm/session), mirroring the
  * server's `AiDmSessionState`. Deliberately lightweight: the running transcript is
  * client-assembled from the SSE stream (see features/ai-dm/transcript.ts), and a late
@@ -171,6 +184,8 @@ export interface AiDmSession {
    * retention pruning immediately. Optional: a server predating #1038 simply omits it.
    */
   historyLength?: number;
+  /** The seat's last reversible action commit (#1501), or null when there is nothing to undo. */
+  lastUndoableCommit?: DriverLastUndoableCommit | null;
 }
 
 /**

@@ -42,14 +42,17 @@ import { formatNumber } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import {
   queryKeys,
   useAiDmSeat,
   useAiDmSession,
   invalidateAiDm,
   invalidateAiDmToolConfirmations,
+  type DriverLastUndoableCommit,
 } from '../../lib/query';
 import { useAiDmStream } from '../../lib/useAiDmStream';
+import { aiDmPauseRequest } from './aiDmPause';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import {
   transcriptReducer,
@@ -182,6 +185,12 @@ export default function AiTablePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  // #1501 — DM undo of the AI's last reversible action. `undoSnackbar` holds the commit a fresh
+  // snackbar is offering (cleared on undo, dismiss, or once a different commit supersedes it);
+  // `seenUndoChainRef` stops a page reload that rehydrates an existing commit from re-popping it.
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [undoSnackbar, setUndoSnackbar] = useState<DriverLastUndoableCommit | null>(null);
+  const seenUndoChainRef = useRef<string | null>(null);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -837,13 +846,44 @@ export default function AiTablePage() {
     }
   }
 
+  // #1501 — when the seat commits a new reversible action, surface the standard UndoSnackbar so a
+  // DM has the same one-click "X — Undo" affordance every soft-delete in the app offers. A commit
+  // we have already shown (or that rehydrated on load) does not re-pop.
+  useEffect(() => {
+    const commit = session?.lastUndoableCommit ?? null;
+    if (commit && commit.chainId !== seenUndoChainRef.current) {
+      seenUndoChainRef.current = commit.chainId;
+      setUndoSnackbar(commit);
+    } else if (!commit) {
+      seenUndoChainRef.current = null;
+    }
+  }, [session?.lastUndoableCommit]);
+
+  async function undoAiAction(): Promise<void> {
+    if (campaignId === undefined) return;
+    setUndoBusy(true);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
+      setUndoSnackbar(null);
+      invalidateAiDm(queryClient, campaignId);
+    } catch {
+      // A 404/400 here means there is nothing left to undo (already reversed, or superseded) —
+      // the server is the authority, so just dismiss the snackbar rather than surfacing a stale
+      // error for a lever that no longer exists.
+      setUndoSnackbar(null);
+    } finally {
+      setUndoBusy(false);
+    }
+  }
+
   async function onTogglePause() {
     if (campaignId === undefined) return;
-    const action = paused ? 'resume' : 'pause';
+    // #1501 — the strict /pause DTO needs { paused }; see aiDmPauseRequest.
+    const { action, body } = aiDmPauseRequest(paused);
     setPauseBusy(true);
     setPauseError(null);
     try {
-      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`, body);
       invalidateAiDm(queryClient, campaignId);
     } catch {
       setPauseError(t('table.pauseFailed'));
@@ -968,9 +1008,24 @@ export default function AiTablePage() {
           <div className="flex flex-col items-end gap-1.5">
             <BudgetMeter used={seat?.tokensUsed ?? 0} budget={seat?.tokenBudget ?? 0} />
             {isDm && (
-              <Btn ghost onClick={onTogglePause} disabled={pauseBusy}>
-                {paused ? t('table.resume') : t('table.pause')}
-              </Btn>
+              <div className="flex items-center justify-end gap-1.5">
+                <Btn ghost onClick={onTogglePause} disabled={pauseBusy}>
+                  {paused ? t('table.resume') : t('table.pause')}
+                </Btn>
+                {/* #1501 — DM-only "Undo the AI's last action". The lever is the server's
+                    `lastUndoableCommit`; the button is hidden entirely (not merely disabled) when
+                    there is nothing to reverse, so it never offers an action the server would 404. */}
+                {session?.lastUndoableCommit && (
+                  <Btn
+                    ghost
+                    onClick={() => void undoAiAction()}
+                    disabled={undoBusy}
+                    title={t('table.undoAiAction')}
+                  >
+                    {t('table.undoAiAction')}
+                  </Btn>
+                )}
+              </div>
             )}
             {/* #1043 — session lifecycle. Start Session is player+ (sitting down to play is a
                 table act); Wrap Up is DM-only (closing a session is a decision). Both are hidden
@@ -1235,6 +1290,16 @@ export default function AiTablePage() {
         </form>
       ) : (
         <p className="text-xs text-center text-secondary py-2">{t('table.viewerHint')}</p>
+      )}
+      {/* #1501 — the standard "X — Undo" affordance, offered to a DM the moment the AI commits a
+          reversible action. The persistent header button covers the case where this dismisses. */}
+      {isDm && undoSnackbar && (
+        <UndoSnackbar
+          message={t('table.undoAiSnackbar', { action: undoSnackbar.actionName || t('table.undoAiAction') })}
+          onUndo={undoAiAction}
+          onExpire={() => setUndoSnackbar(null)}
+          successMessage={t('table.undoAiDone')}
+        />
       )}
     </div>
   );

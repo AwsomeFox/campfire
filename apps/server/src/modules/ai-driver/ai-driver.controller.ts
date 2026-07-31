@@ -333,6 +333,21 @@ export class AiDriverController {
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
   }
 
+  @Post('undo')
+  @ApiOperation({
+    summary: 'Undo the AI DM seat\'s last reversible action',
+    description:
+      'DM only. Reverses the seat\'s most recently committed undoable action (a resolve_action/apply_action) ' +
+      'by driving the existing undo path against the chain the seat observed — no client-held undo token required. ' +
+      '404 when there is nothing reversible to undo.',
+  })
+  @ApiResponse({ status: 201, description: 'The reversal completed.' })
+  @ApiResponse({ status: 404, description: 'No reversible action to undo.' })
+  async undo(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.undoLastSeatAction(id, user);
+  }
+
   // ---- Session lifecycle (#1043) ----------------------------------------------------
 
   @Post('start-session')

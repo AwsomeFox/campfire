@@ -44,6 +44,12 @@
     },
     "pauseFailed": "Couldn't change the AI DM's pause state.",
 
+    "undoAiAction": "Undo the AI's last action",
+    "undoAiSnackbar": "The AI applied {{action}}.",
+    "undoAiDone": "Reversed the AI's last action.",
+    "undoAiFailed": "Couldn't undo the AI's last action. It may already be reversed.",
+    "undoAiNothing": "The AI has no reversible action to undo.",
+
     "emptyTitle": "The table is quiet",
     "emptyHint": "Type an action below to begin the scene.",
     "transcriptLabel": "Table transcript",

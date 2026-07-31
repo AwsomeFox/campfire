@@ -334,6 +334,85 @@ const ARG_NAME_TYPE: ReadonlyMap<string, GroundingSourceType> = new Map<string, 
   ['campaignId', 'campaign'],
 ]);
 
+/**
+ * Record the `updatedAt` each authorized read actually returned for an entity (#1501), so a later
+ * seat UPDATE of that same entity can carry it as `expectedUpdatedAt` and LOSE a compare-and-set
+ * race instead of silently overwriting a concurrent human edit. Mirrors {@link harvestRetrievals}'s
+ * structural walk (same tool/type maps) but captures the version rather than just the id.
+ *
+ * The versions map is the SEAT's, not the turn's: an entity the seat read last turn is still the
+ * version it last saw, and a write that no longer matches it is exactly the concurrent edit a CAS
+ * exists to refuse. A successful seat write refreshes the entry (update results are entity-shaped
+ * with a fresh `updatedAt`), so sequential same-turn writes compose instead of self-clobbering.
+ */
+export function recordDriverReadVersions(
+  versions: Record<string, string>,
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  resultText: string | undefined,
+): void {
+  const primary = TOOL_PRIMARY_TYPE.get(toolName);
+
+  if (!resultText) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(resultText);
+  } catch {
+    return; // free-form / error payloads carry no structured version.
+  }
+  let budget = HARVEST_MAX_NODES;
+
+  const record = (type: GroundingSourceType, id: unknown, node: Record<string, unknown>): void => {
+    if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) return;
+    const updatedAt = node.updatedAt;
+    if (typeof updatedAt !== 'string' || updatedAt.length === 0 || updatedAt.length > 64) return;
+    versions[ledgerKey(type, id)] = updatedAt;
+  };
+
+  const walk = (node: unknown, type: GroundingSourceType | undefined, depth: number): void => {
+    if (budget <= 0 || depth > HARVEST_MAX_DEPTH || node === null || typeof node !== 'object') return;
+    budget -= 1;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, type, depth + 1);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    if (type) record(type, obj.id, obj);
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === null || typeof value !== 'object') continue;
+      const childType = COLLECTION_KEY_TYPE.get(key) ?? (key === 'results' || key === 'entries' || key === 'items' ? type : undefined);
+      if (childType) walk(value, childType, depth + 1);
+      else walk(value, undefined, depth + 1);
+    }
+  };
+
+  walk(parsed, primary, 0);
+  // The same per-entity arg signal harvestRetrievals trusts: get_encounter{encounterId},
+  // update_encounter{encounterId}, etc. The payload shape can vary, but a top-level `updatedAt`
+  // paired with the arg id is the strongest available version signal for a single-entity read OR
+  // write — so this runs even when the tool has no `primary` type (e.g. update_encounter, whose
+  // result is the updated entity but which is not itself in TOOL_PRIMARY_TYPE).
+  if (args) {
+    for (const [key, value] of Object.entries(args)) {
+      if (!/Id$/.test(key) || typeof value !== 'number') continue;
+      const argType = ARG_NAME_TYPE.get(key);
+      if (argType && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        record(argType, value, parsed as Record<string, unknown>);
+      }
+    }
+  }
+}
+
+/** Read the seat's last-observed `updatedAt` for an entity, or undefined when it never read it. */
+export function driverExpectedUpdatedAt(
+  versions: Record<string, string> | undefined,
+  type: GroundingSourceType,
+  id: number,
+): string | undefined {
+  return versions?.[ledgerKey(type, id)];
+}
+
+
 /** Bounds on what the parser will accept out of a model-authored block. */
 const MAX_CLAIMS = 24;
 const MAX_CITES_PER_CLAIM = 8;

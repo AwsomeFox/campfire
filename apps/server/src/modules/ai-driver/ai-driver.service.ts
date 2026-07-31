@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { and, desc, eq, lt } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
@@ -23,6 +23,7 @@ import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
   AiDmToolConfirmation,
+  ActionUndoToken,
   buildNarrationLanguageContract,
   DriverSessionProfile,
   DriverToolPolicyClass,
@@ -99,11 +100,13 @@ import {
 // in driver-grounding.ts so it is unit-testable without a provider or a database; the persistence
 // + human-correction half lives in driver-grounding.service.ts.
 import {
+  driverExpectedUpdatedAt,
   evaluateGrounding,
   GROUNDING_CITATION_CONTRACT,
   GroundingDeltaFilter,
   harvestRetrievals,
   parseGroundingBlock,
+  recordDriverReadVersions,
   RetrievalLedger,
   type GroundingVerdict,
   type ParsedGrounding,
@@ -506,6 +509,30 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
+/**
+ * The seat's most recent committed action that a DM can still reverse (#1501). The model has
+ * always been able to call `undo_action` with the `undoToken` a resolve/apply returned; a human
+ * had no lever. This captures that same chain server-side so a DM-only control can drive the
+ * existing {@link ActionResolverService.undo} path without holding a client token.
+ *
+ * Only action resolutions are reversible (resolve_action with `commit`, or apply_action), so
+ * this is set exclusively from those tool results. `chainId` is the LOOKUP KEY `undo()` trusts;
+ * the actionName is display-only. Cleared on a successful undo, and never carried across a
+ * restart (a stale reference to an already-undone chain is useless, and the safe direction to be
+ * wrong in is "nothing to undo").
+ */
+export interface DriverLastUndoableCommit {
+  encounterId: number;
+  /** The combatant whose action was applied (echoed for a complete undo token; `undo` trusts the chain). */
+  actorCombatantId: number;
+  /** The `action_apply_chains` row id `undo()` re-reads its snapshot from. */
+  chainId: string;
+  /** Display-only label of the action the seat applied. */
+  actionName: string;
+  /** ISO time the seat captured this commit. */
+  committedAt: string;
+}
+
 export interface AiDmSessionState {
   campaignId: number;
   status: AiDmSessionStatus;
@@ -592,6 +619,19 @@ export interface AiDmSessionState {
    */
   aftermathGrantWindow?: AftermathGrantWindow | null;
   /**
+   * The seat's last reversible action commit, exposed so a DM can undo the AI's last action
+   * (#1501) without holding the client undo token. Null when nothing undoable was committed.
+   * Public (DM-only enforced at the undo endpoint): the chain id alone carries no secret.
+   */
+  lastUndoableCommit?: DriverLastUndoableCommit | null;
+  /**
+   * Per-entity `updatedAt` the seat last observed in a read this session (#1501), keyed
+   * `${type}:${id}`. Carried as `expectedUpdatedAt` on the seat's direct writes so a concurrent
+   * human edit can win a compare-and-set instead of the AI silently overwriting it. Internal
+   * bookkeeping only — never serialized to members, never persisted across restart.
+   */
+  driverReadVersions?: Record<string, string>;
+  /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
    * must not write ladder/status updates that would race a replacement session.
@@ -609,7 +649,8 @@ type AiDmSessionPrivateGuardFields =
   | 'policyViolationsThisTurn'
   | 'pendingToolConfirmations'
   | 'detached'
-  | 'aftermathGrantWindow';
+  | 'aftermathGrantWindow'
+  | 'driverReadVersions';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
@@ -634,6 +675,7 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
     aftermathGrantWindow: _aftermathGrantWindow,
+    driverReadVersions: _driverReadVersions,
     ...rest
   } = session;
   return rest;
@@ -1793,6 +1835,28 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
   if (!session.driverAuthoredEncounterIds.includes(encounterId)) {
     session.driverAuthoredEncounterIds.push(encounterId);
   }
+}
+
+/**
+ * Capture the seat's most recent reversible action commit so a DM can undo it (#1501). The
+ * autonomous seat has always been able to call `undo_action` with the `undoToken` a resolve
+ * (commit) / apply returned; a human had no such lever. Recording the chain here lets a DM-only
+ * control drive the existing {@link ActionResolverService.undo} path without holding a token.
+ *
+ * `chainId` is the LOOKUP KEY `undo()` trusts; every other echoed field is ignored in favor of
+ * the persisted `action_apply_chains` snapshot. `actionName` is display-only. Taken from the
+ * RESULT (the server-issued token), never from the model's arguments — exactly the same
+ * "observe, do not assert" rule as {@link recordDriverAuthoredEncounter}.
+ */
+export function recordDriverUndoableCommit(
+  session: AiDmSessionState,
+  encounterId: number,
+  actorCombatantId: number,
+  chainId: string,
+  actionName: string,
+): void {
+  if (!chainId) return;
+  session.lastUndoableCommit = { encounterId, actorCombatantId, chainId, actionName, committedAt: nowIso() };
 }
 
 /**
@@ -3436,6 +3500,60 @@ export class AiDriverService {
     // as a transient banner that a reloading client loses.
     this.recordControl(campaignId, { control: paused ? 'paused' : 'resumed', state: session.state });
     return session;
+  }
+
+  /**
+   * Reverse the seat's last reversible action commit (#1501). The autonomous seat has always
+   * been able to call `undo_action` with the token a resolve/apply returned; this exposes the
+   * SAME reversal to a DM without requiring the client undo token. DM-only (the controller
+   * enforces the role floor) and it drives the existing {@link ActionResolverService.undo} path,
+   * which re-reads its snapshot from the persisted `action_apply_chains` row — so the only field
+   * trusted out of the stored reference is `chainId`, exactly as the model's own `undo_action`
+   * call does. Audited with the real human actor.
+   */
+  async undoLastSeatAction(
+    campaignId: number,
+    user: RequestUser,
+  ): Promise<{ encounterId: number; chainId: string; actionName: string }> {
+    const resolver = this.actionResolver;
+    if (!resolver) {
+      throw new ServiceUnavailableException('The action resolver is unavailable, so undo is not possible right now.');
+    }
+    const session = this.ensureSession(campaignId);
+    const ref = session.lastUndoableCommit ?? null;
+    if (!ref) {
+      throw new NotFoundException('The AI seat has no reversible action to undo.');
+    }
+    // Only `chainId` (and `encounterId` for the cross-encounter guard) are read from the token —
+    // every other field is re-derived from the persisted chain. `.parse` fills the rest with the
+    // schema's safe defaults, matching how an `undo_action` tool call constructs its token.
+    const token = ActionUndoToken.parse({
+      encounterId: ref.encounterId,
+      actorCombatantId: ref.actorCombatantId,
+      chainId: ref.chainId,
+    });
+    try {
+      resolver.undo(ref.encounterId, token, user, 'dm');
+    } catch (err) {
+      // A stale reference — the chain was already undone (the model called undo_action itself, or
+      // a prior DM undo raced this one) — must not leave a dead lever on the seat. Clear it and
+      // let the service's own BadRequestException surface so the DM sees the concrete reason.
+      session.lastUndoableCommit = null;
+      this.persistControlState(session);
+      throw err;
+    }
+    session.lastUndoableCommit = null;
+    this.persistControlState(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.undo',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `DM undid AI action chain=${ref.chainId} encounter=${ref.encounterId} (${ref.actionName || 'unknown'})`,
+    });
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
+    return { encounterId: ref.encounterId, chainId: ref.chainId, actionName: ref.actionName };
   }
 
   /**
@@ -6025,6 +6143,23 @@ export class AiDriverService {
       if (canPropose && call.name !== 'add_session_recap') args.propose = true;
       const proposed = canPropose && args.propose === true;
 
+      // #1501 — optimistic concurrency on the seat's DIRECT writes. Canon writes (npc/location/
+      // quest/…) are forced to `propose` above, so they are DM-reviewed and cannot silently
+      // overwrite a concurrent human edit. The live-play DIRECT writes are the real race surface;
+      // `update_encounter` is the one that already supports `expectedUpdatedAt`, so when the model
+      // omits it we inject the `updatedAt` the seat last observed for that encounter. A concurrent
+      // human save in between then 409s the AI instead of being silently clobbered. Combatant CAS
+      // is deferred (see #1501 PR: combatants have no `updatedAt` and the combat tracker writes
+      // them from ~30 paths).
+      if (
+        call.name === 'update_encounter' &&
+        args.expectedUpdatedAt === undefined &&
+        typeof args.encounterId === 'number'
+      ) {
+        const expected = driverExpectedUpdatedAt(session.driverReadVersions, 'encounter', args.encounterId);
+        if (expected) args.expectedUpdatedAt = expected;
+      }
+
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
 
@@ -6047,6 +6182,33 @@ export class AiDriverService {
           if (typeof parsed.id === 'number') recordDriverAuthoredEncounter(session, parsed.id);
         } catch {
           // Non-JSON tool payload — skip tracking; the seat simply cannot reshape this one.
+        }
+      }
+
+      // #1501 — capture the seat's last reversible action commit so a DM can undo it. Both
+      // resolve_action (when commit:true applied atomically) and apply_action return an
+      // `undoToken` whose `chainId` is the key `undo()` re-reads its snapshot from. A
+      // resolve that only previewed (commit:false) returns undoToken:null and is skipped.
+      if (!res.isError && (call.name === 'resolve_action' || call.name === 'apply_action')) {
+        try {
+          const parsed = JSON.parse(res.text) as {
+            undoToken?: { chainId?: unknown; actionName?: unknown; actorCombatantId?: unknown } | null;
+          };
+          const token = parsed.undoToken;
+          const chainId = typeof token?.chainId === 'string' ? token.chainId : null;
+          const encounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
+          const actorCombatantId = typeof token?.actorCombatantId === 'number' ? token.actorCombatantId : 0;
+          if (chainId && Number.isFinite(encounterId)) {
+            recordDriverUndoableCommit(
+              session,
+              encounterId,
+              actorCombatantId,
+              chainId,
+              typeof token?.actionName === 'string' ? token.actionName : '',
+            );
+          }
+        } catch {
+          // Non-JSON tool payload — nothing to capture.
         }
       }
 
@@ -6099,6 +6261,12 @@ export class AiDriverService {
       // entity behind a narrow secret-read approval (#557). Such an id stays citeable — the
       // model genuinely read it — but is projected out of every non-DM view (#825).
       harvestRetrievals(ledger, call.name, args, visibleCleanedText, !res.isError, useSeatPrincipal);
+      // #1501 — track the `updatedAt` this read (or, for an update, this write) returned per
+      // entity, so the seat's next direct write can carry it as `expectedUpdatedAt`. A successful
+      // update refreshes the entry from its result, so sequential seat writes compose.
+      if (!res.isError) {
+        recordDriverReadVersions((session.driverReadVersions ??= {}), call.name, args, cleanedText);
+      }
       const identity = await this.resolveToolResourceIdentity(
         campaignId,
         call.name,
