@@ -60,7 +60,7 @@ export function QuickCaptureDialog({
       data-keyboard-command-overlay
       afterBody={
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
+          <p className="text-sm text-muted mb-4">{t('keyboard.quickCaptureHint')}</p>
           {error && <ErrorNote message={error} />}
           {!isDm && (
             <div className="flex gap-2 mb-2 text-xs">
