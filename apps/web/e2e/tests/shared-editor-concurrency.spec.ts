@@ -6,6 +6,10 @@ import { seed, stateFor } from './seed';
 test.describe('shared-editor stale-write recovery — #881', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   test('two DM clients preserve a resumed mobile draft and resolve the conflict accessibly', async ({ browser }) => {
     const { campaignId } = seed();
     const desktop = await browser.newContext({ storageState: stateFor('dm') });
@@ -114,6 +118,5 @@ test.describe('shared-editor stale-write recovery — #881', () => {
     await page.waitForTimeout(350);
     await expect(page.getByText('Newest response')).toBeVisible();
     await expect(page.getByText('Delayed older response')).toHaveCount(0);
-    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 });

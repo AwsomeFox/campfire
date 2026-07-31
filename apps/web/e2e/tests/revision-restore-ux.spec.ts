@@ -110,6 +110,10 @@ async function openHistory(page: Page) {
 test.describe('revision restore preview and confirmation', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   test('inspects a full field-aware diff and confirms a successful restore with keyboard-safe cancellation', async ({ page }) => {
     const { campaignId, navigation } = seed();
     const quest = await currentQuest(page);
@@ -210,7 +214,6 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByRole('status').filter({ hasText: /Restored the version/ })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'The recovered crossing' })).toBeVisible();
     await expect(panelTrigger).toHaveAttribute('aria-expanded', 'true');
-    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 
   test('recovers from history-load and restore failures without changing the current content', async ({ page }) => {

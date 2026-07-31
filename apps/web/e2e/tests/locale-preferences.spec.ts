@@ -96,16 +96,19 @@ test('Preferences keeps catalog language separate from System formatting across 
       },
     } });
   });
-  const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }), scheduledAt);
-  await page.goto(`/c/${seed().campaignId}`);
-  await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
-  await page.unroute(summaryRoutePattern);
+  try {
+    const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }), scheduledAt);
+    await page.goto(`/c/${seed().campaignId}`);
+    await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
+  } finally {
+    await page.unroute(summaryRoutePattern);
+  }
 
   // System is itself explicit, survives reload, and does not change the rendered catalog.
   await page.goto('/preferences');

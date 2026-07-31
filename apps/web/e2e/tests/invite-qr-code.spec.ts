@@ -80,6 +80,10 @@ async function mockInvites(page: Page, campaignId: number, invites: MockInvite[]
 test.describe('issue #822 — invite QR code card', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   test('renders a QR code canvas for an active invite with correct aria-label', async ({ page }) => {
     const { campaignId } = seed();
     await mockInvites(page, campaignId, [ACTIVE_INVITE]);
@@ -165,7 +169,6 @@ test.describe('issue #822 — invite QR code card', () => {
     await expect(qrCard).toHaveAttribute('data-invite-active', 'false');
     await expect(qrCard.getByTestId('qr-inactive-overlay')).toContainText('Suspended');
     await expect(qrCard.getByRole('button', { name: 'Show QR code full screen' })).toBeDisabled();
-    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 
   test('full-screen display toggles on button click and closes with Escape', async ({ page }) => {
