@@ -13,11 +13,11 @@ import {
 /**
  * Issue #1645 — MCP parity for the inbox sweep (#1644).
  *
- * `sweep_inbox` must call the EXACT SAME `InboxSweepService.sweep()` orchestration the REST
- * `POST /campaigns/:id/inbox/sweep` route uses (see test/inbox-sweep.e2e-spec.ts for the REST
- * coverage of that shared path) — this suite only exercises the MCP-specific surface: tool
- * registration, DM-role gating, the archived-campaign read-only gate, and write-mode/token-scope
- * parity (propose/none writeScope tokens must be refused like the REST route).
+ * `sweep_inbox` must call the EXACT SAME `InboxSweepService.startInboxSweep()` orchestration
+ * the REST `POST /campaigns/:id/inbox/sweep` route uses (see test/inbox-sweep.e2e-spec.ts for
+ * the REST coverage of that shared path) — this suite only exercises the MCP-specific surface:
+ * tool registration, DM-role gating, the archived-campaign read-only gate, and write-mode/
+ * token-scope parity (propose/none writeScope tokens must be refused like the REST route).
  */
 interface TextContent {
   type: 'text';

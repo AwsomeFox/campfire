@@ -449,8 +449,8 @@ export class McpToolsService {
     // with placeholder arguments, so inserting a parameter in the middle would silently
     // shift every dependency after it rather than failing loudly.
     private readonly sessionZeroConsent: SessionZeroConsentService,
-    // Issue #1645: the MCP surface for the inbox sweep (#1644) — calls the exact same
-    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // Issue #1645/1716: the MCP surface for the inbox sweep (#1644) — calls the exact same
+    // InboxSweepService.startInboxSweep() orchestration the REST POST /campaigns/:id/inbox/sweep
     // route uses, never a second implementation. Appended near-last for the same
     // positional-constructor-test reason as sessionZeroConsent above.
     private readonly inboxSweep: InboxSweepService,
@@ -3431,8 +3431,9 @@ export class McpToolsService {
         'files each inferred canon change as a PENDING PROPOSAL (never a direct canon write), records the sweep, and ' +
         'resolves swept items. Requires direct write authority; propose-only tokens are rejected to match REST. ' +
         'Safe to re-run: an item already swept is never re-classified or re-proposed. Returns a job row whose status ' +
-        'is initially `running`; poll `get_inbox_sweep_result {campaignId, jobId}` until the status is no longer ' +
-        '`running` to receive the per-item outcomes. Identical behavior to REST POST /campaigns/:id/inbox/sweep.',
+        'is `running` when the sweep needs more time (poll `get_inbox_sweep_result {campaignId, jobId}` until the ' +
+        'status is no longer `running` to receive the per-item outcomes), or already terminal (`succeeded`/`failed`/' +
+        '`disabled`) when the sweep completes within a few seconds. Identical behavior to REST POST /campaigns/:id/inbox/sweep.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         assertDirectWriteAllowed(user);
@@ -3454,7 +3455,9 @@ export class McpToolsService {
         '`running`. Identical behavior to REST GET /campaigns/:id/inbox/sweep/:jobId.',
       { campaignId: CampaignIdArg, jobId: Id.describe('Inbox sweep job id — from sweep_inbox') },
       async ({ campaignId, jobId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        // #1716 review: reading a sweep result is a poll, not a write, so archived campaigns
+        // must still be allowed (same as the REST route).
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.inboxSweep.getInboxSweepResult(campaignId as number, jobId as number);
       },
       false, // read-only

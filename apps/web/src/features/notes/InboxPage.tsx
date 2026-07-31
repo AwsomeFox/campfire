@@ -589,9 +589,9 @@ async function pollInboxSweepResult(
 ): Promise<InboxSweepResult> {
   const startedAt = Date.now();
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0 && !isStillRelevant()) throw new Error('Sweep polling cancelled');
     const result = await api.get<InboxSweepResult>(`${API}/campaigns/${campaignId}/inbox/sweep/${jobId}`);
     if (result.job.status !== 'running') return result;
-    if (!isStillRelevant()) throw new Error('Sweep polling cancelled');
     if (Date.now() - startedAt > deadlineMs) {
       throw new Error('Sweep result polling timed out; the job may still be running on the server');
     }

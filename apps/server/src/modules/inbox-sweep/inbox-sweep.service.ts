@@ -158,16 +158,18 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  *
  * Reads a campaign's OPEN inbox items, infers create/update/dismiss per capture, files
  * PENDING PROPOSALS ONLY via `ProposalRecordsService.create` (never a direct canon
- * write), and resolves swept items. Intentionally exposes a single `sweep()` method
- * with no controller-specific shape, so a future MCP tool (#1645) can call the exact
- * same path instead of reimplementing it — the parity-without-duplication requirement
- * called out on that issue.
+ * write), and resolves swept items. Intentionally exposes a single entry point
+ * (`startInboxSweep`) with no controller-specific shape, so both REST and MCP (#1645)
+ * call the exact same path — the parity-without-duplication requirement called out on
+ * that issue. Completed jobs persist a snapshot so `getInboxSweepResult` can return the
+ * same per-item outcomes on the poll path.
  *
  * AUTHORIZATION: this service does NOT itself check role — the caller (REST controller
- * today, MCP tool later) must gate with `CampaignAccessService.requireRole(user,
- * campaignId, 'dm')` BEFORE calling `sweep()`. That call also enforces the
- * archived-campaign read-only gate (issue's requirement #5), since `requireRole`
- * asserts writability by default. #1450 was a critical hole behind an auth check that
+ * or MCP tool) must gate with `CampaignAccessService.requireRole(user, campaignId, 'dm')`
+ * BEFORE calling `startInboxSweep()`. That call also enforces the archived-campaign
+ * read-only gate (issue's requirement #5), since `requireRole` asserts writability by
+ * default. Poll reads use `requireRole(..., { allowArchived: true })` so a sweep started
+ * before archiving can still be followed to completion. #1450 was a critical hole behind an auth check that
  * looked right from the route name alone — the actual guard here is `requireRole`,
  * never `requireMember({write:true})` (which only asserts the CAMPAIGN is writable, not
  * that the caller holds DM authority).
@@ -229,31 +231,6 @@ export class InboxSweepService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`Failed to reconcile stale inbox sweep jobs: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }
-
-  async sweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {
-    const openItems = await this.notes.listAllInbox(campaignId, false);
-
-    if (openItems.length === 0) {
-      const job = await this.insertJob(campaignId, user, 'succeeded', {
-        itemsTotal: 0,
-        itemsProposed: 0,
-        itemsSkipped: 0,
-        itemsErrored: 0,
-        detail: 'no open inbox items',
-      });
-      return { job: { ...jobToDomain(job), itemsNewlyProposed: 0, itemsNewlySkipped: 0, itemsNewlyErrored: 0 }, items: [] };
-    }
-
-    const job = await this.insertJob(campaignId, user, 'running', {
-      itemsTotal: openItems.length,
-      itemsProposed: 0,
-      itemsSkipped: 0,
-      itemsErrored: 0,
-      detail: 'sweep in progress',
-    });
-
-    return this.performInboxSweep(campaignId, user, role, job, openItems);
   }
 
   async startInboxSweep(campaignId: number, user: RequestUser, role: Role): Promise<InboxSweepResult> {

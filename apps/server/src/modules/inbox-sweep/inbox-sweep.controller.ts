@@ -56,7 +56,7 @@ export class InboxSweepController {
     @Param('jobId', ParseIntPipe) jobId: number,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, id, 'dm');
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.sweep.getInboxSweepResult(id, jobId);
   }
 }
