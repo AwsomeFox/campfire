@@ -2,6 +2,7 @@ import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schem
 import {
   CombatantTurnState,
   Dnd5eAdapter,
+  DND5E_HP_MODEL,
   hasDeathSavesForAdapter,
   hpModelForAdapter,
   listRuleSystemAdapters,
@@ -818,6 +819,17 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
         expect(model.deathSaves).toBe(hasDeathSavesForAdapter(adapter));
       },
     );
+
+    it('the two death-rule authorities agree on a missing adapter too (null → 5e default, #1503)', () => {
+      // ruleSystemAdapter() always returns a resolved adapter (5e fallback), so hpModelForAdapter
+      // never sees null in production — but its signature accepts null, and hasDeathSavesForAdapter
+      // answers `true` for null (a homebrew/unknown campaign shows the 5e tracker). The two must
+      // agree at that boundary so a future caller can't get divergent death handling
+      // (Devin review #1812).
+      expect(hpModelForAdapter(null).deathSaves).toBe(hasDeathSavesForAdapter(null));
+      expect(hpModelForAdapter(undefined).deathSaves).toBe(hasDeathSavesForAdapter(undefined));
+      expect(hpModelForAdapter(null)).toBe(DND5E_HP_MODEL);
+    });
   });
 });
 

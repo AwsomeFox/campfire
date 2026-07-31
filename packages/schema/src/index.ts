@@ -5976,12 +5976,21 @@ export function hasDeathSavesForAdapter(adapter?: Pick<RuleSystemAdapter, 'id' |
  * 5e death math on a table that isn't 5e. Always read the model through this function so an
  * unaudited adapter is never silently handed 5e's rules.
  *
- * `hpModel.deathSaves` agrees with {@link hasDeathSavesForAdapter} for every shipped adapter
- * (both true only for 5e): the former is the server-resolution flag (whether to COMPUTE a death
- * save), the latter the UI capability (whether to SHOW a tracker) — see the parity test.
+ * A MISSING adapter (null/undefined) resolves to {@link DND5E_HP_MODEL}, matching
+ * {@link hasDeathSavesForAdapter}'s `true` default for the same input — a homebrew/unknown
+ * campaign shows the 5e death-save tracker, so the server-resolution flag agrees with the UI
+ * capability at that boundary too. In practice {@link ruleSystemAdapter} always returns a
+ * resolved adapter (5e fallback), so this null branch is defensive consistency, not a live path
+ * (Devin review #1812).
+ *
+ * `hpModel.deathSaves` agrees with {@link hasDeathSavesForAdapter} for every shipped adapter AND
+ * for a missing adapter (both true only for 5e / the default): the former is the server-resolution
+ * flag (whether to COMPUTE a death save), the latter the UI capability (whether to SHOW a tracker)
+ * — see the parity test.
  */
 export function hpModelForAdapter(adapter?: Pick<RuleSystemAdapter, 'hpModel'> | null): HpModel {
-  return adapter?.hpModel ?? NEUTRAL_HP_MODEL;
+  if (!adapter) return DND5E_HP_MODEL;
+  return adapter.hpModel ?? NEUTRAL_HP_MODEL;
 }
 
 /**
