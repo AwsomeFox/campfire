@@ -720,6 +720,19 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
     });
 
+    it('preserves an existing deathState (e.g. a DM-flagged dead) without 5e death saves', () => {
+      // #1503 review: a non-5e character the table already declared dead must NOT be resurrected
+      // by an unrelated HP tweak — the no-death-saves branch preserves the incoming state rather
+      // than inventing 'none'. (Starfinder computes its own dying/dead; a DM may flag dead.)
+      const dead = charState({ hpCurrent: 0, deathState: 'dead' });
+      expect(applyCombatantHp({ ...dead }, { hpTemp: 5 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      // Healing HP does not auto-revive a system/DM-owned dead state either.
+      expect(applyCombatantHp({ ...dead }, { hpDelta: 10 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      // And death-save counters never accumulate for a non-death-save system.
+      expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(0);
+    });
+
     // The server-side parity check the issue asked for: for EVERY registered adapter, a
     // character reduced to 0 HP is "dying" only when the adapter declares 5e death saves, and
     // never accumulates death-save state otherwise. This is the test that proves the death model

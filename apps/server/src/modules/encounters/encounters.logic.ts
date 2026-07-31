@@ -923,17 +923,22 @@ export function applyCombatantHp(
     };
   }
   if (!hpModel.deathSaves) {
-    // A character in a system WITHOUT 5e death saves (issue #1503): 0 HP is simply "down" — no
-    // dying/stable/dead tracking, no death-save counters, no instant death — mirroring the
-    // monster path above so a Starforged/Open Legend/OSR/PF2e character at 0 HP never accumulates
-    // 5e death-save state. (Massive damage was already gated off above, so instantDeath is false.)
+    // A character in a system WITHOUT 5e death saves (issue #1503): the 5e death-save tracker
+    // and massive-damage instant death do not apply, so this engine does NOT recompute
+    // deathState — it preserves whatever the system or DM already set. A DM-flagged 'dead'
+    // stays 'dead' (it must not be resurrected by an unrelated HP tweak — review of #1503); a
+    // Starfinder combatant keeps the 'dying'/'dead' its own damage model computed; a combatant
+    // simply reduced to 0 HP keeps the default 'none' and is "down" via hpBand. The death-save
+    // counters cannot accumulate for a non-death-save system (their write paths are gated on
+    // hpModel.deathSaves above), so they are passed through unchanged. Massive damage was
+    // already gated off above, so instantDeath is false here regardless.
     const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
       hpTemp,
-      deathState: 'none',
-      deathSaveSuccesses: 0,
-      deathSaveFailures: 0,
+      deathState,
+      deathSaveSuccesses: succ,
+      deathSaveFailures: fail,
       concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
     };
   }
