@@ -73,7 +73,7 @@ async function mockInvites(page: Page, campaignId: number, invites: MockInvite[]
     if (route.request().method() === 'GET') {
       return route.fulfill({ status: 200, json: invites });
     }
-    return route.continue();
+    return route.continue().catch(() => undefined);
   });
 }
 
@@ -152,11 +152,11 @@ test.describe('issue #822 — invite QR code card', () => {
   test('shows Suspended overlay when campaign public invites are disabled (#857)', async ({ page }) => {
     const { campaignId } = seed();
     await page.route('**/api/v1/campaigns', async (route) => {
-      if (route.request().method() !== 'GET') return route.continue();
+      if (route.request().method() !== 'GET') return route.continue().catch(() => undefined);
       const res = await route.fetch().catch(() => null);
-      if (!res) return route.continue();
+      if (!res) return route.continue().catch(() => undefined);
       const list = (await res.json().catch(() => null)) as Array<{ id: number; publicInvitesEnabled?: boolean }> | null;
-      if (!list) return route.continue();
+      if (!list) return route.continue().catch(() => undefined);
       const updated = list.map((c) =>
         c.id === campaignId ? { ...c, publicInvitesEnabled: false } : c,
       );

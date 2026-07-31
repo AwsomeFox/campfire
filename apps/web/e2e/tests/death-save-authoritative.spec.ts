@@ -72,9 +72,9 @@ async function stubAuthoritativeResult(page: Page, drill: Drill, outcome: Outcom
   });
   await page.route(`**/api/v1/encounters/${drill.encounterId}`, async (route) => {
     const response = await route.fetch().catch(() => null);
-    if (!response) return route.continue();
+    if (!response) return route.continue().catch(() => undefined);
     const encounter = (await response.json().catch(() => null)) as { combatants: Array<Record<string, unknown>> } | null;
-    if (!encounter) return route.continue();
+    if (!encounter) return route.continue().catch(() => undefined);
     if (requestCount > 0) {
       const combatant = encounter.combatants.find((item) => item.id === drill.combatantId)!;
       const terminal = requestCount === 3;

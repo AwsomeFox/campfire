@@ -199,9 +199,9 @@ test.describe('revision restore preview and confirmation', () => {
     let restored = false;
     await page.route(`**/api/v1/quests/${navigation.questId}`, async (route) => {
       const response = await route.fetch().catch(() => null);
-      if (!response) return route.continue();
+      if (!response) return route.continue().catch(() => undefined);
       const body = (await response.json().catch(() => null)) as Quest | null;
-      if (!body) return route.continue();
+      if (!body) return route.continue().catch(() => undefined);
       await route.fulfill({ response, json: restored ? { ...body, body: RECOVERED_BODY } : body });
     });
     await page.getByRole('button', { name: 'Restore this version' }).click();

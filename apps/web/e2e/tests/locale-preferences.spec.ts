@@ -76,9 +76,9 @@ test('Preferences keeps catalog language separate from System formatting across 
   const summaryRoutePattern = `**/api/v1/campaigns/${seed().campaignId}/summary`;
   await page.route(summaryRoutePattern, async (route) => {
     const response = await route.fetch().catch(() => null);
-    if (!response) return route.continue();
+    if (!response) return route.continue().catch(() => undefined);
     const summary = await response.json().catch(() => null);
-    if (!summary) return route.continue();
+    if (!summary) return route.continue().catch(() => undefined);
     await route.fulfill({ response, json: {
       ...summary,
       inProgressSession: null,
@@ -107,7 +107,7 @@ test('Preferences keeps catalog language separate from System formatting across 
     await page.goto(`/c/${seed().campaignId}`);
     await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
   } finally {
-    await page.unroute(summaryRoutePattern);
+    await page.unroute(summaryRoutePattern).catch(() => undefined);
   }
 
   // System is itself explicit, survives reload, and does not change the rendered catalog.

@@ -15,9 +15,9 @@ async function mockAllowlist(page: Page, initialAllowedModels: string[]) {
       return;
     }
     const response = await route.fetch().catch(() => null);
-    if (!response) return route.continue();
+    if (!response) return route.continue().catch(() => undefined);
     const body = (await response.json().catch(() => null)) as AiOverview | null;
-    if (!body) return route.continue();
+    if (!body) return route.continue().catch(() => undefined);
     overview = { ...body, allowedModels: effectiveAllowedModels };
     await route.fulfill({ response, json: overview });
   });

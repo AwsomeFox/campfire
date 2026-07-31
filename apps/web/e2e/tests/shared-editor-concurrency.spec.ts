@@ -95,9 +95,9 @@ test.describe('shared-editor stale-write recovery — #881', () => {
     await page.route(`**/api/v1/campaigns/${campaignId}/session-zero`, async (route) => {
       const requestSequence = ++sequence;
       const response = await route.fetch().catch(() => null);
-      if (!response) return route.continue();
+      if (!response) return route.continue().catch(() => undefined);
       const body = (await response.json().catch(() => null)) as SessionZero | null;
-      if (!body) return route.continue();
+      if (!body) return route.continue().catch(() => undefined);
       if (requestSequence === 1) {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }

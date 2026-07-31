@@ -285,9 +285,9 @@ test.describe('combat log accessibility — remote clients', () => {
 
     await viewerPage.route(`**/api/v1/encounters/${encounterId}/events`, async (route) => {
       const response = await route.fetch().catch(() => null);
-      if (!response) return route.continue();
+      if (!response) return route.continue().catch(() => undefined);
       const persisted = (await response.json().catch(() => null)) as EncounterEvent[] | null;
-      if (!persisted) return route.continue();
+      if (!persisted) return route.continue().catch(() => undefined);
       await route.fulfill({ response, json: [...persisted, ...historicalEvents, ...remoteEvents] });
     });
 
