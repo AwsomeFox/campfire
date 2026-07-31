@@ -25,6 +25,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEve
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveEncounterState } from '../../lib/useLiveEncounterState';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { PrintOnly } from '../../components/PrintOnly';
 import { UIIcon } from '../../components/UIIcon';
 import { CharacterSheetNav } from './CharacterSheetNav';
 import { characterSheetSectionId } from './characterSheetTabs';
@@ -702,17 +703,19 @@ export default function CharacterPage() {
                       onError={setActionError}
                     />
                   </div>
-                  {character.portraitUrl ? (
-                    <img
-                      src={character.portraitUrl}
-                      alt=""
-                      className="cf-print-only h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
-                    />
-                  ) : (
-                    <span className="cf-print-only h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
-                      Portrait
-                    </span>
-                  )}
+                  <PrintOnly>
+                    {character.portraitUrl ? (
+                      <img
+                        src={character.portraitUrl}
+                        alt=""
+                        className="cf-print-only h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+                      />
+                    ) : (
+                      <span className="cf-print-only h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
+                        Portrait
+                      </span>
+                    )}
+                  </PrintOnly>
                   <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
                 </>
               ) : character.portraitUrl ? (
@@ -1468,9 +1471,11 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                     <span aria-hidden="true">{proficient ? '●' : '○'}</span>
                   </button>
                   {proficient && (
-                    <span className="cf-print-only absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
-                      ●
-                    </span>
+                    <PrintOnly>
+                      <span className="cf-print-only absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                        ●
+                      </span>
+                    </PrintOnly>
                   )}
                 </>
               ) : (
@@ -1566,13 +1571,15 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   >
                     <span aria-hidden="true">{marker}</span>
                   </button>
-                  <span
-                    className="w-4 shrink-0 text-center cf-print-only"
-                    style={{ color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
-                    aria-hidden
-                  >
-                    {marker}
-                  </span>
+                  <PrintOnly>
+                    <span
+                      className="w-4 shrink-0 text-center cf-print-only"
+                      style={{ color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                      aria-hidden
+                    >
+                      {marker}
+                    </span>
+                  </PrintOnly>
                 </>
               ) : (
                 <span
@@ -2616,13 +2623,15 @@ function StoryBody({
             </Btn>
           </div>
         </div>
-        <div className="space-y-2 cf-print-only">
-          {notes.trim() ? (
-            <Markdown>{notes}</Markdown>
-          ) : (
-            <p className="text-sm text-secondary italic">No story written yet.</p>
-          )}
-        </div>
+        <PrintOnly>
+          <div className="space-y-2 cf-print-only">
+            {notes.trim() ? (
+              <Markdown>{notes}</Markdown>
+            ) : (
+              <p className="text-sm text-secondary italic">No story written yet.</p>
+            )}
+          </div>
+        </PrintOnly>
       </>
     );
   }

@@ -24,6 +24,7 @@ import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { PrintOnly } from '../../components/PrintOnly';
 import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 
@@ -190,9 +191,11 @@ export function ItemRow({
           >
             <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
           </button>
-          <span className="shrink-0 mt-0.5 text-[var(--color-accent)] cf-print-only">
-            <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
-          </span>
+          <PrintOnly>
+            <span className="shrink-0 mt-0.5 text-[var(--color-accent)] cf-print-only">
+              <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
+            </span>
+          </PrintOnly>
         </>
       ) : (
         <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
