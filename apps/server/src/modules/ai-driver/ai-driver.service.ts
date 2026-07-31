@@ -4073,6 +4073,7 @@ export class AiDriverService {
     this.assertTurnAdmissible(campaignId, session, opts);
     session.status = 'running';
     let slotReleased = false;
+    let turnStarted = false;
     let turnEndEmitted = false;
     let totalTokens = 0;
     let budgetRemaining: number | null = seat.budgetRemaining;
@@ -4277,6 +4278,7 @@ export class AiDriverService {
       campaignId,
       ...(opts.proactive ? { trigger: 'proactive' } : {}),
     });
+    turnStarted = true;
 
     // #1499: a non-DM caller's step/token caps are clamped to the campaign DEFAULT rather than
     // the DM's HARD ceiling. Letting any player dial both knobs to their max (HARD_MAX_STEPS x
@@ -5061,6 +5063,7 @@ export class AiDriverService {
       // nobody counted). Being detached says nothing about whether the spend was measured, and
       // omitting the argument used to claim it was.
       this.emitTurnEnd(campaignId, detachedStopReason, finalNarration, steps, totalTokens, budgetRemaining, undefined, usageUnknown());
+      turnEndEmitted = true;
       return {
         narration: finalNarration,
         stopReason: detachedStopReason,
@@ -5115,7 +5118,7 @@ export class AiDriverService {
     };
   } finally {
     // #1497 — ensure turn.end is ALWAYS emitted if an unhandled throw occurs after turn start
-    if (!turnEndEmitted) {
+    if (turnStarted && !turnEndEmitted) {
       this.emitTurnEnd(
         campaignId,
         providerError ? 'provider_error' : 'aborted',
