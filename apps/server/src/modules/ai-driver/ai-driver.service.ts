@@ -3146,6 +3146,7 @@ export class AiDriverService {
     // #1497 — reject any queued player actions instead of orphaning their HTTP requests.
     const queue = this.actionQueues.get(campaignId);
     if (queue) {
+      (queue as any).flushed = true;
       this.actionQueues.delete(campaignId);
       for (const entry of queue) {
         entry.reject(new ConflictException('AI DM session torn down; queued action rejected.'));
@@ -3658,6 +3659,7 @@ export class AiDriverService {
   private flushActionQueue(campaignId: number): void {
     const queue = this.actionQueues.get(campaignId);
     if (!queue || queue.length === 0) return;
+    (queue as any).flushed = true;
     this.actionQueues.delete(campaignId);
     for (const entry of queue) {
       entry.reject(
@@ -4035,31 +4037,48 @@ export class AiDriverService {
       }
       const maxDepth = await this.getActionQueueDepth(campaignId);
       // #1497 review — re-validate after the yield:
-      // 1. If teardownSession or flushActionQueue removed or replaced the map entry while we yielded,
-      //    the local `queue` reference was orphaned — throw ConflictException.
-      if (this.actionQueues.get(campaignId) !== queue) {
+      // 1. If teardownSession or flushActionQueue ran while we yielded, this queue was flushed.
+      if ((queue as any).flushed) {
         throw new ConflictException('AI DM session was torn down while queueing; please retry.');
       }
-      // 2. If the turn finished naturally while we yielded (queue was empty when drainQueue ran),
-      //    session.status is no longer 'running'. Clean up the empty queue array and fall through so
-      //    this caller executes the turn directly instead of parking an entry nothing will drain.
+      // 2. If the turn finished naturally while we yielded:
       if (session.status !== 'running') {
-        this.actionQueues.delete(campaignId);
+        if (queue.length === 0) {
+          if (this.actionQueues.get(campaignId) === queue) {
+            this.actionQueues.delete(campaignId);
+          }
+          // Fall through to run turn directly (no queueing needed).
+        } else {
+          // Other entries were queued (e.g. A, B). Push this entry onto the queue so no item is dropped.
+          const targetQueue = this.actionQueues.get(campaignId) ?? queue;
+          if (targetQueue.length >= maxDepth) {
+            throw new ConflictException(
+              `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
+            );
+          }
+          const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+          return new Promise((resolve, reject) => {
+            const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+            targetQueue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
+          });
+        }
       } else {
-        if (queue.length >= maxDepth) {
+        // session.status IS still 'running'
+        let targetQueue = this.actionQueues.get(campaignId);
+        if (!targetQueue) {
+          // drainQueue shifted the last item and deleted the map entry while the turn was running; re-install a queue array.
+          targetQueue = [];
+          this.actionQueues.set(campaignId, targetQueue);
+        }
+        if (targetQueue.length >= maxDepth) {
           throw new ConflictException(
             `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
           );
         }
-        // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
-        // sees who queued what while the current turn is still narrating (#572). Recording it
-        // only when it dequeues would recreate the original bug for queued actions.
         const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
         return new Promise((resolve, reject) => {
-          // Carry the seq forward: when this entry is finally dequeued the row is buried under
-          // the narration of the turn that was running, so it can no longer be found by position.
           const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
-          queue!.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
+          targetQueue!.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
         });
       }
     }
