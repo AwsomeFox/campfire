@@ -232,7 +232,11 @@ export default function InboxPage() {
           } catch {
             // Ignore resume errors
           } finally {
-            try { localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`); } catch {}
+            try {
+              localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`);
+            } catch {
+              // Ignore localStorage write errors
+            }
           }
         })();
       }
@@ -246,7 +250,7 @@ export default function InboxPage() {
     return () => {
       sweepTokenRef.current++;
     };
-  }, [cid, t]);
+  }, [cid]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
@@ -342,7 +346,11 @@ export default function InboxPage() {
       // result endpoint until the job is no longer running, so a long sweep cannot be
       // lost when the HTTP write budget (120s) aborts the client connection.
       if (started.job.status === 'running') {
-        try { localStorage.setItem(`campfire_inbox_sweep_job_${sweepCid}`, String(started.job.id)); } catch {}
+        try {
+          localStorage.setItem(`campfire_inbox_sweep_job_${sweepCid}`, String(started.job.id));
+        } catch {
+          // Ignore localStorage write errors
+        }
       }
       const result =
         started.job.status === 'running'
@@ -350,7 +358,11 @@ export default function InboxPage() {
               sweepCid === cidRef.current && sweepToken === sweepTokenRef.current,
             )
           : started;
-      try { localStorage.removeItem(`campfire_inbox_sweep_job_${sweepCid}`); } catch {}
+      try {
+        localStorage.removeItem(`campfire_inbox_sweep_job_${sweepCid}`);
+      } catch {
+        // Ignore localStorage write errors
+      }
 
       if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
 
