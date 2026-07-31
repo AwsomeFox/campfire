@@ -688,8 +688,11 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.deathState).toBe('none');
     });
 
-    it('explicit death-save counter patches are ignored without death saves', () => {
-      // A client/MCP patch trying to write death-save state to a non-5e combatant is a no-op.
+    it('death-save counter patches on a non-5e combatant only ever decrease (never introduce state)', () => {
+      // #1503 (Devin review #1812): a non-death-save system never gains 5e state. An increase is
+      // capped at the current value (a no-op on a 0 baseline); a decrease/clear of leftover
+      // counters lands so the combatant path matches the sheet.
+      // From a 0 baseline, ANY value stays 0 (no new state introduced).
       const r = applyCombatantHp(
         charState({ hpCurrent: 0 }),
         { deathSaveFailures: 3, deathSaveSuccesses: 2 },
@@ -698,6 +701,17 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.deathState).toBe('none');
       expect(r.deathSaveFailures).toBe(0);
       expect(r.deathSaveSuccesses).toBe(0);
+      // Leftover counters (a campaign switched off 5e) CAN be cleared — a decrease lands.
+      const cleared = applyCombatantHp(
+        charState({ hpCurrent: 0, deathSaveFailures: 3, deathSaveSuccesses: 1 }),
+        { deathSaveFailures: 0 },
+        NEUTRAL_HP_MODEL,
+      );
+      expect(cleared.deathSaveFailures).toBe(0);
+      expect(cleared.deathSaveSuccesses).toBe(1); // untouched (not in the patch)
+      // A partial decrease lands; an increase is capped at the current value.
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathSaveFailures: 3 }), { deathSaveFailures: 1 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(1);
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathSaveFailures: 1 }), { deathSaveFailures: 5 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(1);
     });
 
     it('a rolled death save has no effect without death saves', () => {

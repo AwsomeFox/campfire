@@ -4128,6 +4128,42 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(dropped.body.deathState).toBe('dying');
   });
 
+  it('clears leftover death-save counters on a non-5e combatant and only logs a real change (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder Counter Clear #1503' });
+    expect(camp.status).toBe(201);
+    const sfCampaignId = camp.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Operative', hpCurrent: 0, hpMax: 10 })
+      ).status,
+    ).toBe(201);
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${sfCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Clear Test', hidden: false });
+    const encId = enc.body.id as number;
+    const combatantId = enc.body.combatants[0].id as number;
+    // Seed leftover 5e state (a campaign switched off 5e, or pre-#1503 data) directly on the row.
+    await db.update(combatantsTable).set({ deathSaveFailures: 3, deathSaveSuccesses: 1 }).where(eq(combatantsTable.id, combatantId));
+    // A clear must actually LAND (not return 200 unchanged) and not be rejected — the combatant
+    // path now honours a decrease so it matches the sheet (Devin review #1812).
+    const cleared = await request(server)
+      .patch(`/api/v1/encounters/${encId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 0 });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.deathSaveFailures).toBe(0);
+    expect(cleared.body.deathSaveSuccesses).toBe(1); // untouched (not in the patch)
+    const after = await db.select().from(combatantsTable).where(eq(combatantsTable.id, combatantId)).limit(1);
+    expect(after[0]!.deathSaveFailures).toBe(0);
+  });
+
   it('rejects a fresh death save when the encounter ends after preflight but before its keyed transaction', async () => {
     const server = ctx.app.getHttpServer();
     const raceEncounter = await request(server)

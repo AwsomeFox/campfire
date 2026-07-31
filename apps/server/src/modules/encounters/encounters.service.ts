@@ -4437,7 +4437,13 @@ export class EncountersService {
         targetId: targetCombatantId,
         detail: deathSaveRollEventDetail(die, afterSucc, afterFail, beforeDeath, afterDeath),
       });
-    } else if (patch.deathSaveSuccesses !== undefined || patch.deathSaveFailures !== undefined) {
+    } else if (
+      (patch.deathSaveSuccesses !== undefined && afterSucc !== _beforeSucc) ||
+      (patch.deathSaveFailures !== undefined && afterFail !== _beforeFail)
+    ) {
+      // Only log a counter override when the counters actually changed — otherwise a non-5e
+      // table's idempotent snapshot save (or a clear that the no-death-saves branch left untouched)
+      // would log a misleading "counters edited" event (#1503, Devin review #1812).
       await this.appendEvent(encounterId, round, 'override', {
         target: targetName,
         targetId: targetCombatantId,

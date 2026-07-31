@@ -946,6 +946,14 @@ export function applyCombatantHp(
       // healthy state ('none') is 'dying', matching its damage path so hpSet and hpDelta agree.
       deathState = 'dying';
     }
+    // A non-death-save system never accumulates 5e death-save state, but a decrease/clear of
+    // leftover counters (e.g. a campaign switched off 5e) is honoured so the combatant path
+    // matches the sheet — capped at the current value so no caller can introduce new state
+    // (updateCombatant's gate rejects increases before reaching here; this is belt-and-suspenders).
+    // Without this, a clear request would return 200 but leave the counters unchanged while the
+    // override combat-log still claimed an edit (#1503, Devin review #1812).
+    if (patch.deathSaveSuccesses !== undefined) succ = Math.min(succ, Math.max(0, Math.min(3, patch.deathSaveSuccesses)));
+    if (patch.deathSaveFailures !== undefined) fail = Math.min(fail, Math.max(0, Math.min(3, patch.deathSaveFailures)));
     const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
