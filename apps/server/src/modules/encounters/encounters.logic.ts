@@ -1,5 +1,6 @@
 import {
   Dnd5eAdapter,
+  DND5E_HP_MODEL,
   LEGENDARY_ACTION_SLOT,
   LEGENDARY_ACTIONS_PER_ROUND,
   LAIR_INITIATIVE_COUNT,
@@ -28,6 +29,7 @@ import type {
   EncounterTurnPhase,
   EncounterWarning,
   HpBand,
+  HpModel,
   PendingConcentrationCheck,
   RuleSystemAdapter,
   TurnPrompt,
@@ -853,17 +855,32 @@ export function enqueueConcentrationCheck(
  *                        (deathState none, saves cleared); 10–19 = one success; 2–9 = one
  *                        failure. The roll is applied to a dying/stable character only.
  *
+ * The 5e-specific death rules (massive damage, the death-save tracker) apply ONLY when the
+ * rule-system adapter's `hpModel` says the system has them (issue #1503): a character in a
+ * system without 5e death saves (Starforged, Open Legend, OSR, PF2e, …) drops to 0 HP and is
+ * simply "down" — `deathState` stays `none`, counters stay 0 — exactly the monster path, never
+ * accumulating death-save state a system without them does not have. Callers pass the model via
+ * {@link hpModelForAdapter}; the default ({@link DND5E_HP_MODEL}) preserves this function's
+ * pre-#1503 behaviour byte-identically for existing callers and unit tests.
+ *
  * Returns only the mutated fields; hpMax/kind are inputs, not outputs.
  */
-export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatch): CombatantHpResult {
+export function applyCombatantHp(
+  state: CombatantHpState,
+  patch: CombatantHpPatch,
+  hpModel: HpModel = DND5E_HP_MODEL,
+): CombatantHpResult {
   const isCharacter = state.kind === 'character';
   let { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail } = state;
   const { hpMax } = state;
 
-  // 1. explicit sets (DM overrides / recording a rolled death save).
+  // 1. explicit sets (DM overrides / recording a rolled death save). Death-save counter sets
+  //    are a no-op for a system without 5e death saves, so a client/MCP patch can't write them.
   if (patch.hpTemp !== undefined) hpTemp = Math.max(0, patch.hpTemp);
-  if (patch.deathSaveSuccesses !== undefined) succ = clamp(patch.deathSaveSuccesses, 0, 3);
-  if (patch.deathSaveFailures !== undefined) fail = clamp(patch.deathSaveFailures, 0, 3);
+  if (hpModel.deathSaves) {
+    if (patch.deathSaveSuccesses !== undefined) succ = clamp(patch.deathSaveSuccesses, 0, 3);
+    if (patch.deathSaveFailures !== undefined) fail = clamp(patch.deathSaveFailures, 0, 3);
+  }
 
   // 2. HP change.
   let instantDeath = false;
@@ -880,7 +897,9 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
         damagedWhileDown = hpCurrent === 0;
         const overflow = dmg - hpCurrent; // damage remaining after dropping to 0.
         hpCurrent = Math.max(0, hpCurrent - dmg);
-        if (isCharacter && hpCurrent === 0 && overflow >= hpMax) instantDeath = true;
+        // 5e massive-damage instant death (issue #1503): gated on the adapter's hpModel so a
+        // system without it drops to 0 HP ("down") instead of dying on a single big hit.
+        if (hpModel.massiveDamageInstantDeath && isCharacter && hpCurrent === 0 && overflow >= hpMax) instantDeath = true;
       }
     } else {
       hpCurrent = Math.min(hpMax, hpCurrent + patch.hpDelta);
@@ -900,6 +919,59 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       deathState: 'none',
       deathSaveSuccesses: 0,
       deathSaveFailures: 0,
+      concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
+    };
+  }
+  if (!hpModel.deathSaves) {
+    // A character in a system WITHOUT 5e death saves (issue #1503): the 5e death-save tracker
+    // and massive-damage instant death do not apply, so this engine does NOT recompute
+    // deathState from death saves. It DOES still revive on heal: regaining any HP clears a stale
+    // 'dying'/'dead' flag (review of #1503) — exactly the monster path above and the 5e
+    // `hpCurrent > 0` clause below — so a character healed back above 0 HP stops being "down".
+    // At 0 HP, whatever the system or DM already set is preserved: a DM-flagged 'dead' stays
+    // 'dead' (not resurrected by an unrelated HP tweak); a Starfinder combatant keeps the
+    // 'dying'/'dead' its own damage model computed. A combatant simply reduced to 0 HP is "down":
+    // deathState stays 'none' for a system with no downed concept (PF2e/OSR/…), but a system that
+    // models its own dying state (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' so the
+    // hpSet path agrees with the dying/dead outcome its damage path computes (applyStarfinderDamage
+    // — #1503, Devin review #1812). The death-save counters cannot accumulate for a non-death-save
+    // system (their write paths are gated on hpModel.deathSaves above), and are zeroed on revive.
+    // Massive damage was already gated off above, so instantDeath is false here.
+    if (hpCurrent > 0) {
+      deathState = 'none';
+      succ = 0;
+      fail = 0;
+    } else if (
+      hpModel.dyingAtZeroHp &&
+      deathState === 'none' &&
+      // Only flag 'dying' when THIS patch actually produced the zero — an explicit absolute-set
+      // (hpSet) or real damage (a negative hpDelta). updateCombatant sets recomputeHp for ANY
+      // HP-adjacent field (temp HP, a lowered hpMax, a leftover-counter clear), so without this
+      // gate an unrelated bookkeeping edit would silently flip an already-down combatant to
+      // 'dying' while the 'condition' combat-log event only fires for an explicit patch.deathState
+      // — an invisible transition. Gating on a real drop keeps the hpSet/hpDelta parity the tests
+      // assert and leaves untouched combatants alone (#1503, Devin review #1812).
+      (patch.hpSet !== undefined || (patch.hpDelta !== undefined && patch.hpDelta < 0))
+    ) {
+      // A system like Starfinder models its own dying state without 5e death saves: 0 HP from a
+      // healthy state ('none') is 'dying', matching its damage path so hpSet and hpDelta agree.
+      deathState = 'dying';
+    }
+    // A non-death-save system never accumulates 5e death-save state, but a decrease/clear of
+    // leftover counters (e.g. a campaign switched off 5e) is honoured so the combatant path
+    // matches the sheet — capped at the current value so no caller can introduce new state
+    // (updateCombatant's gate rejects increases before reaching here; this is belt-and-suspenders).
+    // Without this, a clear request would return 200 but leave the counters unchanged while the
+    // override combat-log still claimed an edit (#1503, Devin review #1812).
+    if (patch.deathSaveSuccesses !== undefined) succ = Math.min(succ, Math.max(0, Math.min(3, patch.deathSaveSuccesses)));
+    if (patch.deathSaveFailures !== undefined) fail = Math.min(fail, Math.max(0, Math.min(3, patch.deathSaveFailures)));
+    const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+    return {
+      hpCurrent,
+      hpTemp,
+      deathState,
+      deathSaveSuccesses: succ,
+      deathSaveFailures: fail,
       concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
     };
   }

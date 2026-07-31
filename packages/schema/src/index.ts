@@ -4170,6 +4170,75 @@ export const STANDARD_CLASS_FIELD: CharacterSheetClassField = {
   visible: true,
 };
 
+/**
+ * How a rule system applies HP changes and treats a combatant at 0 HP (issue #1503). The
+ * structured HP engine (`applyCombatantHp` in apps/server) used to hardcode D&D 5e's rules for
+ * EVERY combatant — a single hit whose overflow past 0 HP reached the combatant's maxHP killed
+ * outright (massive damage), and 0 HP tracked 5e's 3-success/3-failure death saves (dying /
+ * stable / dead, nat-20 revive, nat-1 two failures, damage-while-down a failure). A
+ * Starforged / Open Legend / OSR character reduced to 0 therefore silently accumulated
+ * death-save state a system without them does not have, and could be marked dead by rules the
+ * table never agreed to.
+ *
+ * Each clause is a 5e-specific DEATH rule, not a universal damage rule — temp HP absorbing
+ * before real HP stays universal (every system with temp HP works that way) and is NOT modelled
+ * here. Only the systems whose model has been confirmed declare an {@link RuleSystemAdapter.hpModel};
+ * everyone else omits it and {@link hpModelForAdapter} returns {@link NEUTRAL_HP_MODEL} — 0 HP is
+ * simply "down", no 5e death math — never silent 5e rules on a table that isn't 5e.
+ */
+export interface HpModel {
+  /**
+   * Whether a single hit whose damage exceeds a combatant's current HP by at least its maxHP
+   * kills it outright (D&D 5e massive damage). Systems without this rule drop to 0 HP and are
+   * "down" instead.
+   */
+  readonly massiveDamageInstantDeath: boolean;
+  /**
+   * Whether this system tracks D&D-5e-style 3-success/3-failure death saving throws at 0 HP
+   * (dying / stable / dead, nat-20 revive at 1 HP, nat-1 two failures, damage taken while down a
+   * failure). Systems without 5e death saves leave a downed combatant at 0 HP with no death-save
+   * state — exactly the monster path.
+   */
+  readonly deathSaves: boolean;
+  /**
+   * Whether this system flags a combatant 'dying' when HP reaches 0 via its OWN model — not 5e
+   * death saves. Starfinder, for example, treats 0 HP as dying but recovers via Resolve Points
+   * rather than a 3-success/3-failure tracker. Systems with no downed concept at all (PF2e, OSR,
+   * Open Legend, …) leave this false: 0 HP is simply "down" with deathState 'none'. The damage
+   * path still runs each system's own model (e.g. applyStarfinderDamage); this flag only governs
+   * the absolute-set (hpSet) path and the character sheet, so a combatant reaches the same state
+   * at 0 HP regardless of how the zero was applied (issue #1503).
+   */
+  readonly dyingAtZeroHp: boolean;
+}
+
+/**
+ * D&D 5e's HP/death model — massive-damage instant death plus the full death-save tracker.
+ * Declared explicitly on {@link Dnd5eAdapter} (the one adapter whose model the engine has
+ * audited) rather than relying on a default, the same way 5e declares its own
+ * `checkProficiencyBonus` instead of leaning on the resolver's safe default.
+ */
+export const DND5E_HP_MODEL: HpModel = {
+  massiveDamageInstantDeath: true,
+  deathSaves: true,
+  // 5e also treats 0 HP as dying; the deathSaves branch above is what actually writes it, but the
+  // flag is declared so a system whose dying model is NOT 5e death saves can express the same.
+  dyingAtZeroHp: true,
+};
+
+/**
+ * The safe default for every adapter that has not declared an {@link HpModel} — 0 HP is "down",
+ * with no 5e massive-damage instant death and no 5e death-save tracker. This is the model
+ * {@link hpModelForAdapter} returns for Starforged / Open Legend / OSR / PF2e / Starfinder /
+ * 13th Age and any unaudited or custom system, so a non-5e table never has 5e death rules
+ * written to its combatants (issue #1503).
+ */
+export const NEUTRAL_HP_MODEL: HpModel = {
+  massiveDamageInstantDeath: false,
+  deathSaves: false,
+  dyingAtZeroHp: false,
+};
+
 export interface RuleSystemAdapter {
   /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
@@ -4324,6 +4393,18 @@ export interface RuleSystemAdapter {
    * 5e sets this to true; systems without 5e death saves set it to false or omit it.
    */
   readonly hasDeathSaves?: boolean;
+  /**
+   * OPTIONAL — this system's HP/death model for the resolution layer (issue #1503): whether a
+   * single hit past 0 HP by >= maxHP kills outright (5e massive damage) and whether 0 HP tracks
+   * 5e 3-success/3-failure death saves. The structured HP engine (`applyCombatantHp`) used to
+   * apply BOTH unconditionally to every combatant, so a non-5e character at 0 HP silently
+   * accumulated death-save state a system without them does not have. Adapters whose model is
+   * 5e's declare it; everyone else omits it and {@link hpModelForAdapter} returns
+   * {@link NEUTRAL_HP_MODEL} (0 HP is "down", no 5e death math) — never silent 5e rules on a
+   * table that isn't 5e. {@link hasDeathSaves} remains the UI-facing capability (whether to SHOW
+   * a death-save tracker); this is the server-facing one (whether to COMPUTE one).
+   */
+  readonly hpModel?: HpModel;
   /**
    * Whether this rule system is field-compatible with the D&D Beyond public-sheet importer
    * (issue #714). The importer maps a DDB sheet into the D&D-5e character shape (six
@@ -4504,6 +4585,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     supportsSpellSlotEditor: true,
   },
   hasDeathSaves: true,
+  // #1503 — 5e's HP/death model is the one the engine implements (massive-damage instant death
+  // + the 3-success/3-failure death-save tracker). Every other adapter omits hpModel and
+  // hpModelForAdapter hands them NEUTRAL_HP_MODEL (0 HP is "down"), so a non-5e table never has
+  // 5e death rules written to its combatants.
+  hpModel: DND5E_HP_MODEL,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -5879,6 +5965,32 @@ export function listRuleSystemAdapters(): RuleSystemAdapter[] {
 export function hasDeathSavesForAdapter(adapter?: Pick<RuleSystemAdapter, 'id' | 'hasDeathSaves'> | null): boolean {
   if (!adapter) return true;
   return adapter.hasDeathSaves ?? (adapter.id === DND5E_ADAPTER_ID || adapter.id === DND5E_PACK_SLUG);
+}
+
+/**
+ * Resolve the HP/death model an adapter's combatants are governed by (issue #1503). The one
+ * place the default lives: an adapter that has declared {@link RuleSystemAdapter.hpModel} (5e)
+ * gets its own model; every adapter that has not (Starforged, Open Legend, OSR, PF2e,
+ * Starfinder, 13th Age, and any unaudited or custom system) gets {@link NEUTRAL_HP_MODEL} —
+ * 0 HP is "down", no 5e massive-damage instant death, no 5e death-save tracker — never silent
+ * 5e death math on a table that isn't 5e. Always read the model through this function so an
+ * unaudited adapter is never silently handed 5e's rules.
+ *
+ * A MISSING adapter (null/undefined) resolves to {@link DND5E_HP_MODEL}, matching
+ * {@link hasDeathSavesForAdapter}'s `true` default for the same input — a homebrew/unknown
+ * campaign shows the 5e death-save tracker, so the server-resolution flag agrees with the UI
+ * capability at that boundary too. In practice {@link ruleSystemAdapter} always returns a
+ * resolved adapter (5e fallback), so this null branch is defensive consistency, not a live path
+ * (Devin review #1812).
+ *
+ * `hpModel.deathSaves` agrees with {@link hasDeathSavesForAdapter} for every shipped adapter AND
+ * for a missing adapter (both true only for 5e / the default): the former is the server-resolution
+ * flag (whether to COMPUTE a death save), the latter the UI capability (whether to SHOW a tracker)
+ * — see the parity test.
+ */
+export function hpModelForAdapter(adapter?: Pick<RuleSystemAdapter, 'hpModel'> | null): HpModel {
+  if (!adapter) return DND5E_HP_MODEL;
+  return adapter.hpModel ?? NEUTRAL_HP_MODEL;
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   MAX_LEVEL,
   normalizeStats,
   ruleSystemAdapter,
+  hpModelForAdapter,
   ddbImportSupported,
   resolveCharacterCreateStatus,
   // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
@@ -1172,6 +1173,29 @@ export class CharactersService {
         }
       }
     }
+    // #1503 — death-save counters are a 5e construct. A genuine attempt to write NEW 5e
+    // death-save state on a campaign whose adapter has no death saves is rejected (matching
+    // EncountersService.updateCombatant). The rejection fires only for an INCREASE — mirroring
+    // the adapter level cap just above (only an increase past the cap is rejected) — so an
+    // idempotent snapshot save (e.g. MCP upsert_character echoing the current counters, usually 0)
+    // succeeds, and a DECREASE or reset to 0 clears leftover 5e state (a campaign switched off 5e,
+    // or pre-#1503 data): that is the only cleanup surface, since the UI hides the tracker for these
+    // systems, so a DM reviving such a character with {deathState:'none', deathSaveFailures:0} is
+    // not blocked (Devin review #1812). deathState stays writable on any system.
+    const succIncrease = input.deathSaveSuccesses !== undefined && clampDeathSaveCount(input.deathSaveSuccesses) > existing.deathSaveSuccesses;
+    const failIncrease = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) > existing.deathSaveFailures;
+    if (succIncrease || failIncrease) {
+      const [deathCampaign] = this.db
+        .select({ ruleSystem: campaigns.ruleSystem })
+        .from(campaigns)
+        .where(eq(campaigns.id, existing.campaignId))
+        .limit(1)
+        .all();
+      const adapter = ruleSystemAdapter(deathCampaign?.ruleSystem);
+      if (!hpModelForAdapter(adapter).deathSaves) {
+        throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
+      }
+    }
     if (input.deathSaveSuccesses !== undefined) {
       update.deathSaveSuccesses = clampDeathSaveCount(input.deathSaveSuccesses);
     }
@@ -1358,15 +1382,29 @@ export class CharactersService {
       if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
       this.assertCanWrite(fresh, user, role);
 
+      // #1503 — route the death model through the campaign's adapter so a system without 5e
+      // death saves (Starfinder, PF2e, OSR, …) matches the combat engine: a character dropped
+      // to 0 HP is simply "down", never auto-flagged 'dying' by a rule they don't use.
+      const [deathCampaign] = tx
+        .select({ ruleSystem: campaigns.ruleSystem })
+        .from(campaigns)
+        .where(eq(campaigns.id, fresh.campaignId))
+        .limit(1)
+        .all();
+      const hpModel = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem));
+      const deathSavesSupported = hpModel.deathSaves;
+
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;
       const hpCurrent = clampHpCurrent(requested, fresh.hpMax);
       // Issue #711: make recovery/revival transitions explicit on the sheet, the
       // same way the combat engine does. Healing a downed character above 0 HP
       // revives them (deathState -> 'none', death-save counters reset); dropping
-      // a healthy character to 0 HP from a sheet edit puts them 'dying'. This
-      // keeps the persistent death-state echo self-consistent when a DM/player
-      // adjusts HP outside an encounter instead of leaving a stale 'dead' flag
-      // on a healed character or a stale 'none' on a freshly-dropped one.
+      // a healthy character to 0 HP from a sheet edit puts them 'dying' — but only
+      // for a system with 5e death saves (issue #1503): a system without them leaves
+      // the character 'none' at 0 HP, matching applyCombatantHp. This keeps the
+      // persistent death-state echo self-consistent when a DM/player adjusts HP
+      // outside an encounter instead of leaving a stale 'dead' flag on a healed
+      // character or a stale 'none' on a freshly-dropped one.
       const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nowIso() };
       if (hpCurrent > 0 && fresh.deathState !== 'none') {
         hpSet.deathState = 'none';
@@ -1378,9 +1416,29 @@ export class CharactersService {
         // the next encounter's auto-add despite being alive again.
         if (fresh.status === 'dead') hpSet.status = 'active';
       } else if (hpCurrent === 0 && fresh.hpCurrent > 0 && fresh.deathState === 'none') {
-        hpSet.deathState = 'dying';
-        hpSet.deathSaveSuccesses = 0;
-        hpSet.deathSaveFailures = 0;
+        // Systems with 5e death saves flag a freshly-dropped character 'dying' with a cleared
+        // 3-success/3-failure tracker (issue #1503). A system with no downed concept at all
+        // (PF2e/OSR/…) leaves deathState 'none'. A system that models its own dying state without
+        // 5e death saves (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' too — without the
+        // counters — so the sheet agrees with applyCombatantHp and the Starfinder damage path
+        // (Devin review #1812).
+        if (deathSavesSupported) {
+          hpSet.deathState = 'dying';
+          hpSet.deathSaveSuccesses = 0;
+          hpSet.deathSaveFailures = 0;
+        } else {
+          // A system WITHOUT 5e death saves freshly dropped to 0 HP (issue #1503): a system that
+          // models its own dying state (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' so
+          // the sheet agrees with its damage path; a system with no downed concept (PF2e/OSR/…)
+          // keeps deathState 'none'. Either way, clear any leftover 5e death-save marks: a system
+          // without death saves must never carry them, and the sheet UI hides the tracker for
+          // non-5e systems while update() rejects increases — so this drop to 0 HP is the only
+          // cleanup path for stale marks left by a pre-fix row or a campaign switched off 5e
+          // (Devin review #1812).
+          if (hpModel.dyingAtZeroHp) hpSet.deathState = 'dying';
+          hpSet.deathSaveSuccesses = 0;
+          hpSet.deathSaveFailures = 0;
+        }
       }
       const [updated] = tx
         .update(characters)

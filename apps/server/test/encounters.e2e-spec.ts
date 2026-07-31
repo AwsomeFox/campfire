@@ -4052,6 +4052,123 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     }
   });
 
+  it('rejects a death-save counter edit for a ruleset without 5e death saves (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const starfinderCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No 5e death saves (counters)' });
+    expect(starfinderCampaign.status).toBe(201);
+    const starfinderCampaignId = starfinderCampaign.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, starfinderCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${starfinderCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Vesk', hpCurrent: 12, hpMax: 12 })
+      ).status,
+    ).toBe(201);
+    const starfinderEncounter = await request(server)
+      .post(`/api/v1/campaigns/${starfinderCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Zero G', hidden: false });
+    const starfinderEncounterId = starfinderEncounter.body.id as number;
+    const starfinderCombatantId = starfinderEncounter.body.combatants[0].id as number;
+    // A DM/AI attempt to write 5e death-save counters to a Starfinder combatant is rejected up
+    // front — not silently dropped while the override log claims a counter edit (#1503, Devin #1812).
+    const rejectedFailures = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 1 });
+    expect(rejectedFailures.status).toBe(400);
+    expect(rejectedFailures.body.message).toMatch(/Death saves are not supported for the .+ ruleset/);
+    const rejectedSuccesses = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveSuccesses: 2 });
+    expect(rejectedSuccesses.status).toBe(400);
+    // An idempotent snapshot that re-sends the combatant's CURRENT counters (existing 0) does not
+    // change them, so it is allowed — matching the sheet's level-cap-style rule (Devin #1812).
+    const idempotent = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 0, deathSaveSuccesses: 0 });
+    expect(idempotent.status).toBe(200);
+  });
+
+  it('a Starfinder combatant set straight to 0 HP is dying, matching the damage path (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder hpSet dying #1503' });
+    expect(camp.status).toBe(201);
+    const sfCampaignId = camp.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Solarian', hpCurrent: 15, hpMax: 15 })
+      ).status,
+    ).toBe(201);
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${sfCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Asteroid Fight', hidden: false });
+    const encId = enc.body.id as number;
+    const combatantId = enc.body.combatants[0].id as number;
+    // Starfinder models 0 HP as dying (Resolve-Point recovery, not 5e death saves). Setting HP
+    // straight to 0 (hpSet) must reach the same 'dying' state as dealing damage to 0 — the two
+    // routes no longer diverge (Devin review #1812).
+    const dropped = await request(server)
+      .patch(`/api/v1/encounters/${encId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ hpSet: 0 });
+    expect(dropped.status).toBe(200);
+    expect(dropped.body.hpCurrent).toBe(0);
+    expect(dropped.body.deathState).toBe('dying');
+  });
+
+  it('clears leftover death-save counters on a non-5e combatant and only logs a real change (#1503)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder Counter Clear #1503' });
+    expect(camp.status).toBe(201);
+    const sfCampaignId = camp.body.id as number;
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Operative', hpCurrent: 0, hpMax: 10 })
+      ).status,
+    ).toBe(201);
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${sfCampaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Clear Test', hidden: false });
+    const encId = enc.body.id as number;
+    const combatantId = enc.body.combatants[0].id as number;
+    // Seed leftover 5e state (a campaign switched off 5e, or pre-#1503 data) directly on the row.
+    await db.update(combatantsTable).set({ deathSaveFailures: 3, deathSaveSuccesses: 1 }).where(eq(combatantsTable.id, combatantId));
+    // A clear must actually LAND (not return 200 unchanged) and not be rejected — the combatant
+    // path now honours a decrease so it matches the sheet (Devin review #1812).
+    const cleared = await request(server)
+      .patch(`/api/v1/encounters/${encId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 0 });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.deathSaveFailures).toBe(0);
+    expect(cleared.body.deathSaveSuccesses).toBe(1); // untouched (not in the patch)
+    // The counter clear must NOT silently flip an already-down combatant to 'dying' — an
+    // unrelated recompute (no hpSet / negative hpDelta) leaves deathState untouched
+    // (#1503, Devin review #1812). The 'condition' combat-log event only fires for an
+    // explicit patch.deathState, so a silent flip here would be invisible.
+    expect(cleared.body.deathState).toBe('none');
+    const after = await db.select().from(combatantsTable).where(eq(combatantsTable.id, combatantId)).limit(1);
+    expect(after[0]!.deathSaveFailures).toBe(0);
+  });
+
   it('rejects a fresh death save when the encounter ends after preflight but before its keyed transaction', async () => {
     const server = ctx.app.getHttpServer();
     const raceEncounter = await request(server)

@@ -963,6 +963,210 @@ describe('characters (e2e)', () => {
     });
   });
 
+  // Issue #1503: a system without 5e death saves must not auto-flag a character 'dying' when
+  // their HP is dropped to 0 from the sheet — CharactersService.patchHp routes the death model
+  // through the adapter, matching the encounter combat engine.
+  describe('sheet HP drop to 0 honours the rule-system adapter (issue #1503)', () => {
+    it('a PF2e character dropped to 0 HP stays deathState none (no 5e dying flag)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Sheet HP #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Hero', hpCurrent: 10, hpMax: 10 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Dropping a healthy PF2e character to 0 HP from the sheet must NOT write 'dying' — PF2e
+      // has no 5e death saves, so the character is simply "down" (deathState stays 'none').
+      const dropped = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 });
+      expect(dropped.status).toBe(201);
+      expect(dropped.body.hpCurrent).toBe(0);
+      expect(dropped.body.deathState).toBe('none');
+      const fetched = await request(server).get(`/api/v1/characters/${charId}`).set(owner);
+      expect(fetched.status).toBe(200);
+      expect(fetched.body.deathState).toBe('none');
+      expect(fetched.body.deathSaveFailures).toBe(0);
+    });
+
+    it('dropping a non-5e character to 0 HP clears leftover 5e death-save counters (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      // Starfinder models its own dying state (hpModel.dyingAtZeroHp): a drop to 0 flags 'dying'
+      // AND must clear any stale 5e death-save marks, so they cannot linger invisibly on a sheet
+      // whose tracker is hidden for non-5e systems (Devin review #1812).
+      const sfCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder Leftover Clear #1503' });
+      expect(sfCamp.status).toBe(201);
+      const sfCampaignId = sfCamp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+      const sfChar = await request(server)
+        .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Vesk', hpCurrent: 10, hpMax: 10 });
+      expect(sfChar.status).toBe(201);
+      const sfCharId = sfChar.body.id as number;
+      // Stale 5e state on a healthy character (a campaign switched off 5e, or pre-#1503 data).
+      await db.update(characters).set({ deathSaveSuccesses: 2, deathSaveFailures: 1 }).where(eq(characters.id, sfCharId));
+      const sfDropped = await request(server).post(`/api/v1/characters/${sfCharId}/hp`).set(owner).send({ set: 0 });
+      expect(sfDropped.status).toBe(201);
+      expect(sfDropped.body.hpCurrent).toBe(0);
+      expect(sfDropped.body.deathState).toBe('dying');
+      expect(sfDropped.body.deathSaveSuccesses).toBe(0);
+      expect(sfDropped.body.deathSaveFailures).toBe(0);
+      // A fully neutral system (PF2e, no dying model) keeps deathState 'none' at 0 HP but STILL
+      // clears the stale marks — a system without death saves must never carry them.
+      const pfCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Leftover Drop #1503' });
+      expect(pfCamp.status).toBe(201);
+      const pf2eCampaignId = pfCamp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const pfChar = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Stale', hpCurrent: 8, hpMax: 8 });
+      expect(pfChar.status).toBe(201);
+      const pfCharId = pfChar.body.id as number;
+      await db.update(characters).set({ deathSaveSuccesses: 3, deathSaveFailures: 2 }).where(eq(characters.id, pfCharId));
+      const pfDropped = await request(server).post(`/api/v1/characters/${pfCharId}/hp`).set(owner).send({ set: 0 });
+      expect(pfDropped.status).toBe(201);
+      expect(pfDropped.body.hpCurrent).toBe(0);
+      expect(pfDropped.body.deathState).toBe('none');
+      expect(pfDropped.body.deathSaveSuccesses).toBe(0);
+      expect(pfDropped.body.deathSaveFailures).toBe(0);
+    });
+
+    it('a downed PF2e character healed above 0 HP still revives (revive-on-heal parity, #1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Revive #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Reviver', hpCurrent: 10, hpMax: 10 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Drop to 0 first (deathState stays 'none' — no 5e dying flag), then seed a non-'none'
+      // state via DM override. Healing above 0 must revive the PC (deathState -> 'none',
+      // status -> 'active') even though PF2e has no 5e death saves: the revive-on-heal branch is
+      // unconditional, matching applyCombatantHp's no-death-saves branch (Devin #1812).
+      expect((await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 })).status).toBe(201);
+      const markedDead = await dbUpdate(server, dm, charId, { deathState: 'dead', status: 'dead' });
+      expect(markedDead.status).toBe(200);
+      expect(markedDead.body.deathState).toBe('dead');
+      const revived = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 5 });
+      expect(revived.status).toBe(201);
+      expect(revived.body.hpCurrent).toBe(5);
+      expect(revived.body.deathState).toBe('none');
+      expect(revived.body.status).toBe('active');
+    });
+
+    it('a Starfinder character dropped to 0 HP via the sheet is flagged dying, not none (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starfinder Sheet HP #1503' });
+      expect(camp.status).toBe(201);
+      const sfCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, sfCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${sfCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Vesk Marine', hpCurrent: 12, hpMax: 12 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Starfinder models 0 HP as dying (Resolve-Point recovery, not a 5e death-save tracker), so
+      // dropping to 0 via the sheet flags 'dying' — matching applyStarfinderDamage's damage path
+      // instead of leaving the character 'none' (Devin review #1812).
+      const dropped = await request(server).post(`/api/v1/characters/${charId}/hp`).set(owner).send({ set: 0 });
+      expect(dropped.status).toBe(201);
+      expect(dropped.body.hpCurrent).toBe(0);
+      expect(dropped.body.deathState).toBe('dying');
+      // No 5e death-save counters are written for a system without death saves.
+      expect(dropped.body.deathSaveSuccesses).toBe(0);
+      expect(dropped.body.deathSaveFailures).toBe(0);
+    });
+
+    it('rejects a death-save counter PATCH on a non-5e sheet, but still allows deathState (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Counter PATCH #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Counter Target', hpCurrent: 8, hpMax: 8 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // 5e death-save counters cannot be persisted on a system without them — matching the combat
+      // tracker's up-front rejection, so the sheet PATCH no longer silently lands 5e state that
+      // syncActiveCombatants would then mirror onto a live combatant (#1503, Devin #1812).
+      const rejectedFailures = await dbUpdate(server, dm, charId, { deathSaveFailures: 2 });
+      expect(rejectedFailures.status).toBe(400);
+      expect(rejectedFailures.body.message).toMatch(/Death saves are not supported for the .+ ruleset/);
+      const rejectedSuccesses = await dbUpdate(server, dm, charId, { deathSaveSuccesses: 1 });
+      expect(rejectedSuccesses.status).toBe(400);
+      // deathState itself stays writable: a DM may legitimately mark a PC dead on any system.
+      const deadOk = await dbUpdate(server, dm, charId, { deathState: 'dead' });
+      expect(deadOk.status).toBe(200);
+      expect(deadOk.body.deathState).toBe('dead');
+    });
+
+    it('an idempotent sheet save echoing current death-save counters still succeeds on a non-5e table (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Idempotent Save #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Echo', hpCurrent: 6, hpMax: 6 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // A full-sheet snapshot save (notably MCP upsert_character) re-sends the character's current,
+      // unchanged death-save counters — usually 0 — alongside unrelated edits. Because the value
+      // does not change the persisted counter, the save must NOT be rejected: the rename lands and
+      // the rest of the sheet is preserved (Devin review #1812).
+      const saved = await dbUpdate(server, dm, charId, { deathSaveSuccesses: 0, deathSaveFailures: 0, name: 'PF2e Echo Renamed' });
+      expect(saved.status).toBe(200);
+      expect(saved.body.name).toBe('PF2e Echo Renamed');
+      expect(saved.body.deathSaveSuccesses).toBe(0);
+      expect(saved.body.deathSaveFailures).toBe(0);
+    });
+
+    it('clears leftover 5e death-save counters on a non-5e table via the documented revive payload (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Leftover Clear #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Relic', hpCurrent: 0, hpMax: 8 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Simulate leftover 5e state from before this gate (a campaign switched off 5e, or
+      // pre-#1503 data): the UI hides the tracker for non-5e systems, so the sheet revive is the
+      // only cleanup surface. The documented revive payload {deathState:'none', deathSaveFailures:0}
+      // must clear it — a decrease to 0 is allowed, never rejected (Devin review #1812).
+      await db.update(characters).set({ deathState: 'dying', deathSaveFailures: 3 }).where(eq(characters.id, charId));
+      const revived = await dbUpdate(server, dm, charId, { deathState: 'none', deathSaveFailures: 0, hpCurrent: 5 });
+      expect(revived.status).toBe(200);
+      expect(revived.body.deathState).toBe('none');
+      expect(revived.body.deathSaveFailures).toBe(0);
+      expect(revived.body.hpCurrent).toBe(5);
+    });
+  });
+
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —
   // the API always allowed it, and now the owner (not just the dm) can delete their own.
   describe('multi-character ownership & owner delete (issue #129)', () => {

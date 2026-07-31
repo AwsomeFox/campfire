@@ -331,6 +331,11 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',
   presentation: STARFINDER_STATBLOCK_PRESENTATION,
+  // #1503 — Starfinder models 0 HP as 'dying' (recovered via Resolve Points, not a 5e death-save
+  // tracker). The damage path computes the exact dying/dead outcome in applyStarfinderDamage;
+  // declaring dyingAtZeroHp makes the absolute-set (hpSet) path and the character sheet agree, so
+  // a Starfinder combatant reaches 'dying' at 0 HP regardless of how the zero was applied.
+  hpModel: { massiveDamageInstantDeath: false, deathSaves: false, dyingAtZeroHp: true },
   characterSheet: {
     abilityFields: STARFINDER_CHARACTER_ABILITY_FIELDS,
     classField: { label: 'Class', placeholder: 'Class', required: true, visible: true },

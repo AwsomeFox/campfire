@@ -2,7 +2,12 @@ import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schem
 import {
   CombatantTurnState,
   Dnd5eAdapter,
+  DND5E_HP_MODEL,
+  hasDeathSavesForAdapter,
+  hpModelForAdapter,
+  listRuleSystemAdapters,
   MAX_PENDING_CONCENTRATION_CHECKS,
+  NEUTRAL_HP_MODEL,
   Pf2eAdapter,
 } from '@campfire/schema';
 import {
@@ -651,6 +656,179 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
     it('hpSet is clamped to [0, hpMax]', () => {
       expect(applyCombatantHp(charState(), { hpSet: 999 }).hpCurrent).toBe(20);
       expect(applyCombatantHp(charState(), { hpSet: 0 }).deathState).toBe('dying');
+    });
+  });
+
+  describe('adapter HP/death model (issue #1503)', () => {
+    it('defaults to the 5e model when no adapter model is passed (pre-#1503 behaviour)', () => {
+      // No hpModel argument -> DND5E_HP_MODEL -> a 5e character reduced to 0 begins dying.
+      const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 });
+      expect(r.deathState).toBe('dying');
+    });
+
+    it('a system without 5e death saves does NOT begin dying at 0 HP', () => {
+      // A Starforged / Open Legend / OSR character reduced to 0 is simply "down".
+      const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('taking damage while already at 0 accrues NO failure without death saves', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0 }), { hpDelta: -3 }, NEUTRAL_HP_MODEL);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('massive-damage instant death does not apply without death saves', () => {
+      // 45 damage to a 20/20 character is instant death under 5e; without 5e death saves the
+      // character just drops to 0 ("down") — the table's rules, not 5e's.
+      const r = applyCombatantHp(charState({ hpCurrent: 20, hpMax: 20 }), { hpDelta: -45 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+    });
+
+    it('death-save counter patches on a non-5e combatant only ever decrease (never introduce state)', () => {
+      // #1503 (Devin review #1812): a non-death-save system never gains 5e state. An increase is
+      // capped at the current value (a no-op on a 0 baseline); a decrease/clear of leftover
+      // counters lands so the combatant path matches the sheet.
+      // From a 0 baseline, ANY value stays 0 (no new state introduced).
+      const r = applyCombatantHp(
+        charState({ hpCurrent: 0 }),
+        { deathSaveFailures: 3, deathSaveSuccesses: 2 },
+        NEUTRAL_HP_MODEL,
+      );
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+      expect(r.deathSaveSuccesses).toBe(0);
+      // Leftover counters (a campaign switched off 5e) CAN be cleared — a decrease lands.
+      const cleared = applyCombatantHp(
+        charState({ hpCurrent: 0, deathSaveFailures: 3, deathSaveSuccesses: 1 }),
+        { deathSaveFailures: 0 },
+        NEUTRAL_HP_MODEL,
+      );
+      expect(cleared.deathSaveFailures).toBe(0);
+      expect(cleared.deathSaveSuccesses).toBe(1); // untouched (not in the patch)
+      // A partial decrease lands; an increase is capped at the current value.
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathSaveFailures: 3 }), { deathSaveFailures: 1 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(1);
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathSaveFailures: 1 }), { deathSaveFailures: 5 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(1);
+    });
+
+    it('a rolled death save has no effect without death saves', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0 }), { deathSaveRoll: 1 }, NEUTRAL_HP_MODEL);
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('temp HP still absorbs damage first in a system without death saves', () => {
+      // Temp-HP-absorbs-first is a universal damage rule, NOT a 5e death rule, so it is NOT
+      // gated on the adapter's death model.
+      const r = applyCombatantHp(charState({ hpTemp: 5 }), { hpDelta: -8 }, NEUTRAL_HP_MODEL);
+      expect(r.hpTemp).toBe(0);
+      expect(r.hpCurrent).toBe(17);
+    });
+
+    it('concentration checks still fire for a non-5e concentrating character', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: -8 }, NEUTRAL_HP_MODEL);
+      expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
+    });
+
+    it('preserves deathState at 0 HP but revives when healed above 0 (without 5e death saves)', () => {
+      // #1503 review: a non-5e character the table already declared dead/dying is NOT resurrected
+      // by an HP tweak that leaves them at 0 HP — the no-death-saves branch preserves the incoming
+      // state at 0 HP. But regaining HP DOES revive (mirrors the 5e `hpCurrent > 0` clause and the
+      // monster path), so a healed character stops being "down". (Starfinder computes its own
+      // dying/dead; a DM may flag dead.)
+      const dead = charState({ hpCurrent: 0, deathState: 'dead' });
+      const dying = charState({ hpCurrent: 0, deathState: 'dying' });
+      // At 0 HP: a non-healing tweak (temp HP) keeps the system/DM-owned state intact.
+      expect(applyCombatantHp({ ...dead }, { hpTemp: 5 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      // At 0 HP: further damage keeps the state intact.
+      expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(0);
+      // Healing above 0 HP revives a dying character and clears the slate (review of #1503).
+      const revived = applyCombatantHp({ ...dying }, { hpDelta: 5 }, NEUTRAL_HP_MODEL);
+      expect(revived.hpCurrent).toBe(5);
+      expect(revived.deathState).toBe('none');
+      expect(revived.deathSaveSuccesses).toBe(0);
+      expect(revived.deathSaveFailures).toBe(0);
+      // Healing a system/DM-flagged dead character above 0 HP also revives (5e/monster parity).
+      expect(applyCombatantHp({ ...dead }, { hpDelta: 10 }, NEUTRAL_HP_MODEL).deathState).toBe('none');
+    });
+
+    it('a system with its own dying model (Starfinder) flags dying at 0 HP via hpSet, matching the damage path', () => {
+      // #1503 (Devin review #1812): a Starfinder combatant set straight to 0 HP (hpSet) must reach
+      // the same 'dying' state as one damaged to 0 (hpDelta) — its damage path computes dying via
+      // applyStarfinderDamage; applyCombatantHp agrees via hpModel.dyingAtZeroHp on the absolute-set
+      // path, so the two routes no longer diverge.
+      const starfinder = { massiveDamageInstantDeath: false, deathSaves: false, dyingAtZeroHp: true };
+      // Absolute-set path: setting HP straight to 0 -> 'dying' (NOT 'none').
+      const fromSet = applyCombatantHp(charState({ hpCurrent: 6 }), { hpSet: 0 }, starfinder);
+      expect(fromSet.hpCurrent).toBe(0);
+      expect(fromSet.deathState).toBe('dying');
+      // No 5e death-save counters are written for a system without death saves.
+      expect(fromSet.deathSaveSuccesses).toBe(0);
+      expect(fromSet.deathSaveFailures).toBe(0);
+      // Damage path (applyCombatantHp's own view) reaches the same 'dying' state.
+      const fromDelta = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, starfinder);
+      expect(fromDelta.deathState).toBe('dying');
+      // A system/DM-flagged state is still preserved at 0 HP (not overridden to 'dying').
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dead' }), { hpSet: 0 }, starfinder).deathState).toBe('dead');
+      // Healing above 0 still revives.
+      expect(applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { hpSet: 5 }, starfinder).deathState).toBe('none');
+    });
+
+    it('an unrelated HP edit does not silently flip an already-down Starfinder combatant to dying (#1503)', () => {
+      // updateCombatant sets recomputeHp for ANY HP-adjacent field (temp HP, a lowered hpMax, a
+      // leftover-counter clear), so applyCombatantHp runs even when HP did not change. Before the
+      // gate, a Starfinder combatant sitting at 0 HP with deathState 'none' was silently rewritten
+      // to 'dying' by such a bookkeeping patch — and the 'condition' combat-log event only fires
+      // for an explicit patch.deathState, so the transition was invisible (Devin review #1812).
+      // The dyingAtZeroHp flag now fires only when THIS patch actually produced the zero.
+      const starfinder = { massiveDamageInstantDeath: false, deathSaves: false, dyingAtZeroHp: true };
+      const down = charState({ hpCurrent: 0, deathState: 'none' });
+      // Unrelated edits leave an already-down combatant's deathState untouched.
+      expect(applyCombatantHp({ ...down }, { hpTemp: 5 }, starfinder).deathState).toBe('none');
+      expect(applyCombatantHp({ ...down }, { deathSaveFailures: 0 }, starfinder).deathState).toBe('none');
+      // Further damage at 0 (a negative hpDelta) IS a real damage event -> still 'dying'.
+      expect(applyCombatantHp({ ...down }, { hpDelta: -3 }, starfinder).deathState).toBe('dying');
+      // An explicit absolute-set to 0 IS the drop that produced the zero -> 'dying'.
+      expect(applyCombatantHp(charState({ hpCurrent: 6, deathState: 'none' }), { hpSet: 0 }, starfinder).deathState).toBe('dying');
+      // A genuine damage drop to 0 from a healthy state still reaches 'dying'.
+      expect(applyCombatantHp(charState({ hpCurrent: 6, deathState: 'none' }), { hpDelta: -6 }, starfinder).deathState).toBe('dying');
+    });
+
+    // The server-side parity check the issue asked for: for EVERY registered adapter, a
+    // character reduced to 0 HP is "dying" only when the adapter declares 5e death saves, and
+    // never accumulates death-save state otherwise. This is the test that proves the death model
+    // the adapter declares is the one applyCombatantHp honours server-side.
+    const adaptersForHpParity = listRuleSystemAdapters();
+    it.each(adaptersForHpParity.map((a) => a.id))(
+      'adapter %s at 0 HP: dying when the adapter declares death saves OR its own dying model',
+      (id) => {
+        const adapter = adaptersForHpParity.find((a) => a.id === id)!;
+        const model = hpModelForAdapter(adapter);
+        const expected = hasDeathSavesForAdapter(adapter) || model.dyingAtZeroHp ? 'dying' : 'none';
+        const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 }, model);
+        expect(r.deathState).toBe(expected);
+        expect(r.deathSaveSuccesses).toBe(0);
+        expect(r.deathSaveFailures).toBe(0);
+        // The resolution-layer flag agrees with the UI capability for every shipped adapter.
+        expect(model.deathSaves).toBe(hasDeathSavesForAdapter(adapter));
+      },
+    );
+
+    it('the two death-rule authorities agree on a missing adapter too (null → 5e default, #1503)', () => {
+      // ruleSystemAdapter() always returns a resolved adapter (5e fallback), so hpModelForAdapter
+      // never sees null in production — but its signature accepts null, and hasDeathSavesForAdapter
+      // answers `true` for null (a homebrew/unknown campaign shows the 5e tracker). The two must
+      // agree at that boundary so a future caller can't get divergent death handling
+      // (Devin review #1812).
+      expect(hpModelForAdapter(null).deathSaves).toBe(hasDeathSavesForAdapter(null));
+      expect(hpModelForAdapter(undefined).deathSaves).toBe(hasDeathSavesForAdapter(undefined));
+      expect(hpModelForAdapter(null)).toBe(DND5E_HP_MODEL);
     });
   });
 });

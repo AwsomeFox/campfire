@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -3774,6 +3774,18 @@ export class EncountersService {
     // a system with no leveled track (e.g. PF2e) is the negative case, matching the
     // sheet's own handling: nothing here to cap, so nothing is rejected.
     const leveledTrack = leveledConditionTrackFor(adapter.id);
+    // #1503 — a system without 5e death saves has no death-save counters to edit, so a genuine
+    // attempt to write NEW 5e death-save state is rejected up front (matching the death-save roll
+    // path's assertDeathSavesSupportedForCampaign): applyCombatantHp would otherwise silently drop
+    // the fields while the override combat-log event still claimed a counter edit. The rejection
+    // fires only for an INCREASE — matching CharactersService.update's level-cap-style rule — so an
+    // idempotent snapshot (re-sending the current counters) and a decrease/reset to 0 (clearing
+    // leftover 5e state) are allowed, while no new 5e state can be introduced (Devin #1812).
+    const combatantSuccIncrease = patch.deathSaveSuccesses !== undefined && patch.deathSaveSuccesses > existing.deathSaveSuccesses;
+    const combatantFailIncrease = patch.deathSaveFailures !== undefined && patch.deathSaveFailures > existing.deathSaveFailures;
+    if (!hasDeathSavesForAdapter(adapter) && (combatantSuccIncrease || combatantFailIncrease)) {
+      throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
+    }
     const damageMetadataTouched =
       patch.damageType !== undefined || patch.saveOutcome !== undefined || patch.isCrit !== undefined || patch.damageDice !== undefined;
     if (damageMetadataTouched && !adapter.supportsDirectDamageRules) {
@@ -4110,14 +4122,20 @@ export class EncountersService {
             }
             return -final;
           })();
-          const result = applyCombatantHp(state, {
-            hpDelta: effectiveHpDelta,
-            hpSet: patch.hpSet,
-            hpTemp: patch.hpTemp,
-            deathSaveSuccesses: patch.deathSaveSuccesses,
-            deathSaveFailures: patch.deathSaveFailures,
-            deathSaveRoll: patch.deathSaveRoll,
-          });
+          const result = applyCombatantHp(
+            state,
+            {
+              hpDelta: effectiveHpDelta,
+              hpSet: patch.hpSet,
+              hpTemp: patch.hpTemp,
+              deathSaveSuccesses: patch.deathSaveSuccesses,
+              deathSaveFailures: patch.deathSaveFailures,
+              deathSaveRoll: patch.deathSaveRoll,
+            },
+            // #1503 — route the HP/death model through the adapter so a system without 5e
+            // death saves never has them written to its combatants.
+            hpModelForAdapter(adapter),
+          );
           if (patch.deathState !== undefined) {
             result.deathState = patch.deathState as any;
           }
@@ -4419,7 +4437,13 @@ export class EncountersService {
         targetId: targetCombatantId,
         detail: deathSaveRollEventDetail(die, afterSucc, afterFail, beforeDeath, afterDeath),
       });
-    } else if (patch.deathSaveSuccesses !== undefined || patch.deathSaveFailures !== undefined) {
+    } else if (
+      (patch.deathSaveSuccesses !== undefined && afterSucc !== _beforeSucc) ||
+      (patch.deathSaveFailures !== undefined && afterFail !== _beforeFail)
+    ) {
+      // Only log a counter override when the counters actually changed — otherwise a non-5e
+      // table's idempotent snapshot save (or a clear that the no-death-saves branch left untouched)
+      // would log a misleading "counters edited" event (#1503, Devin review #1812).
       await this.appendEvent(encounterId, round, 'override', {
         target: targetName,
         targetId: targetCombatantId,
