@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next';
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionListPage, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
+import type { Session, SessionListItem, SessionListPage, SessionShare, SessionShareCreated, SessionAttendee, Character, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import { RECAP_TEMPLATE, SESSIONS_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -51,6 +51,7 @@ import {
 } from '../../lib/routeBoundRecord';
 import {
   RECAP_BODY_HELP,
+  RECAP_DM_SECRET_HELP,
   RECAP_FIELD_LABELS,
   RECAP_PLAYED_ON_HELP,
   RECAP_TITLE_HELP,
@@ -89,6 +90,8 @@ export default function SessionsPage() {
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
   const fromEncounterId = Number(searchParams.get('fromEncounter'));
+  const rawFromSchedule = Number(searchParams.get('fromSchedule'));
+  const fromScheduleId = Number.isFinite(rawFromSchedule) && rawFromSchedule > 0 ? rawFromSchedule : null;
   const aftermathRecapSeed =
     Number.isFinite(fromEncounterId) && fromEncounterId > 0
       ? consumeEncounterAftermathRecap(cid, fromEncounterId)
@@ -196,15 +199,16 @@ export default function SessionsPage() {
   useEffect(() => {
     // Reconcile browser Back/Forward for a deep-linked form. Local button opens
     // do not change recapAction, so they remain controlled by showAddForm.
-    if (canDmWrite && recapAction === 'new-recap') setShowAddForm(true);
-    else if (recapAction !== 'new-recap') setShowAddForm(false);
-  }, [canDmWrite, recapAction]);
+    if (canDmWrite && (recapAction === 'new-recap' || fromScheduleId !== null)) setShowAddForm(true);
+    else if (recapAction !== 'new-recap' && fromScheduleId === null) setShowAddForm(false);
+  }, [canDmWrite, recapAction, fromScheduleId]);
 
   function clearRecapAction() {
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
         if (next.get('action') === 'new-recap' || next.get('action') === 'edit-recap') next.delete('action');
+        next.delete('fromSchedule');
         return next;
       },
       { replace: true },
@@ -612,6 +616,7 @@ export default function SessionsPage() {
               campaignId={cid}
               nextNumber={nextNumber()}
               seedRecap={aftermathRecapSeed}
+              fromScheduleId={fromScheduleId}
               onCreated={(created) => {
                 setShowAddForm(false);
                 setSearchParams(
@@ -619,6 +624,7 @@ export default function SessionsPage() {
                     const next = new URLSearchParams(prev);
                     next.set('session', String(created.id));
                     next.delete('action');
+                    next.delete('fromSchedule');
                     return next;
                   },
                   { replace: recapAction === 'new-recap' },
@@ -681,7 +687,7 @@ function SessionDetail({
 }) {
   const { t } = useTranslation();
   const { me } = useAuth();
-  const { canDmWrite } = useCampaignAccess();
+  const { isDm, canDmWrite } = useCampaignAccess();
   const [editing, setEditing] = useState(canDmWrite && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
@@ -689,6 +695,7 @@ function SessionDetail({
   const [recap, setRecap] = useState('');
   const [recapLoading, setRecapLoading] = useState(true);
   const [recapDraft, setRecapDraft] = useState('');
+  const [dmSecretDraft, setDmSecretDraft] = useState('');
   const [recapBaseline, setRecapBaseline] = useState<RecapEditorDraft | null>(null);
   const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
   const [linkedEncounters, setLinkedEncounters] = useState<Session['linkedEncounters']>([]);
@@ -715,6 +722,7 @@ function SessionDetail({
     // A's prose editable against B (key= remounts help; sequencer covers races).
     setRecap('');
     setRecapDraft('');
+    setDmSecretDraft('');
     setRecapBaseline(null);
     setLoadedSessionId(null);
     setLinkedEncounters([]);
@@ -736,11 +744,14 @@ function SessionDetail({
         const seededRecap =
           seedRecap && startEditing && !decision.record.recap.trim() ? seedRecap : decision.record.recap;
         setRecapDraft(seededRecap);
+        setDmSecretDraft(decision.record.dmSecret ?? '');
         setRecapBaseline(
           recapEditorDraftFromSession({
             title: decision.record.title,
             playedAt: decision.record.playedAt,
             recap: seededRecap,
+            dmSecret: decision.record.dmSecret ?? '',
+            scheduledSessionId: decision.record.scheduledSessionId ?? null,
           }),
         );
         setLoadedUpdatedAt(decision.record.updatedAt);
@@ -752,6 +763,7 @@ function SessionDetail({
         if (!loadSequencerRef.current.isCurrent(generation, session.id)) return;
         setRecap('');
         setRecapDraft('');
+        setDmSecretDraft('');
         setLoadedUpdatedAt(null);
         setLoadedSessionId(null);
         setLinkedEncounters([]);
@@ -777,10 +789,18 @@ function SessionDetail({
         title: session.title,
         playedAt: toDateInputValue(session.playedAt),
         recap: '',
+        dmSecret: session.dmSecret ?? '',
+        scheduledSessionId: session.scheduledSessionId ?? null,
       },
-    [recapBaseline, session.title, session.playedAt],
+    [recapBaseline, session.title, session.playedAt, session.dmSecret, session.scheduledSessionId],
   );
-  const recapCurrent = { title: titleDraft, playedAt: dateDraft, recap: recapDraft };
+  const recapCurrent = {
+    title: titleDraft,
+    playedAt: dateDraft,
+    recap: recapDraft,
+    dmSecret: dmSecretDraft,
+    scheduledSessionId: session.scheduledSessionId ?? null,
+  };
   const recapDirty =
     editing && detailReady && recapBaseline != null && isRecapEditorDirty(recapCurrent, effectiveRecapBaseline);
   const clearPersistedDraftRef = useRef<() => void>(() => {});
@@ -791,6 +811,7 @@ function SessionDetail({
       title: titleDraft,
       playedAt: dateDraft,
       recap: recapDraft,
+      dmSecret: dmSecretDraft,
     });
     setFieldErrors(nextErrors);
     const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
@@ -807,9 +828,11 @@ function SessionDetail({
         title: titleDraft,
         playedAt: dateDraft ? dateDraft : null,
         recap: recapDraft,
+        dmSecret: dmSecretDraft,
         ...(loadedUpdatedAt ? { expectedUpdatedAt: loadedUpdatedAt } : {}),
       });
       setRecap(updated.recap);
+      setDmSecretDraft(updated.dmSecret ?? '');
       setLoadedUpdatedAt(updated.updatedAt);
       setLoadedSessionId(updated.id);
       setEditing(false);
@@ -835,6 +858,7 @@ function SessionDetail({
     }
   }, [
     dateDraft,
+    dmSecretDraft,
     fieldIds,
     loadedSessionId,
     loadedUpdatedAt,
@@ -859,11 +883,13 @@ function SessionDetail({
       setTitleDraft(restored.title);
       setDateDraft(restored.playedAt);
       setRecapDraft(restored.recap);
+      setDmSecretDraft(restored.dmSecret ?? '');
     },
     onDiscard: () => {
       setTitleDraft(effectiveRecapBaseline.title);
       setDateDraft(effectiveRecapBaseline.playedAt);
       setRecapDraft(effectiveRecapBaseline.recap);
+      setDmSecretDraft(effectiveRecapBaseline.dmSecret ?? '');
       setEditing(false);
       setFieldErrors({});
       setError(null);
@@ -885,11 +911,14 @@ function SessionDetail({
       setDateDraft(toDateInputValue(full.playedAt));
       setRecap(full.recap);
       setRecapDraft(full.recap);
+      setDmSecretDraft(full.dmSecret ?? '');
       setRecapBaseline(
         recapEditorDraftFromSession({
           title: full.title,
           playedAt: full.playedAt,
           recap: full.recap,
+          dmSecret: full.dmSecret ?? '',
+          scheduledSessionId: full.scheduledSessionId ?? null,
         }),
       );
       setLoadedUpdatedAt(full.updatedAt);
@@ -1066,6 +1095,40 @@ function SessionDetail({
                 </p>
               )}
             </div>
+            {canDmWrite && (
+              <div className="min-w-0 space-y-1">
+                <label
+                  htmlFor={fieldIds.dmSecret.controlId}
+                  className="block text-xs font-bold text-amber-400 uppercase tracking-wide break-words"
+                >
+                  <OptionalFieldLabel>{RECAP_FIELD_LABELS.dmSecret}</OptionalFieldLabel>
+                </label>
+                <TextArea
+                  id={fieldIds.dmSecret.controlId}
+                  name="dmSecret"
+                  className="min-w-0 border-amber-500/30"
+                  style={{ minHeight: 100 }}
+                  value={dmSecretDraft}
+                  onChange={(e) => {
+                    setDmSecretDraft(e.target.value);
+                    setFieldErrors((current) => ({ ...current, dmSecret: undefined }));
+                  }}
+                  placeholder="DM-only prep notes, secret curses, hidden npc motivations…"
+                  aria-invalid={fieldErrors.dmSecret ? true : undefined}
+                  aria-describedby={recapDescribedBy(fieldIds.dmSecret, {
+                    error: Boolean(fieldErrors.dmSecret),
+                  })}
+                />
+                <p id={fieldIds.dmSecret.helpId} className="m-0 text-xs text-slate-400 break-words">
+                  {RECAP_DM_SECRET_HELP}
+                </p>
+                {fieldErrors.dmSecret && (
+                  <p id={fieldIds.dmSecret.errorId} role="alert" className="m-0 text-xs text-rose-400">
+                    {fieldErrors.dmSecret}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2 justify-end items-center">
               {protectedRecap.saveStatusLabel ? (
                 <span className="text-xs text-slate-400 mr-auto" role="status" aria-live="polite">
@@ -1086,6 +1149,7 @@ function SessionDetail({
                   setTitleDraft(effectiveRecapBaseline.title);
                   setDateDraft(effectiveRecapBaseline.playedAt);
                   setRecapDraft(effectiveRecapBaseline.recap);
+                  setDmSecretDraft(effectiveRecapBaseline.dmSecret ?? '');
                   setEditing(false);
                   setFieldErrors({});
                   setError(null);
@@ -1115,20 +1179,30 @@ function SessionDetail({
         </PrintOnly>
         </>
       ) : (
-        <Card>
-          {recapLoading ? (
-            <Skeleton lines={4} label="Loading recap…" />
-          ) : recap ? (
-            <Markdown>{recap}</Markdown>
-          ) : (
-            <p className="text-sm text-secondary">No recap written yet.</p>
-          )}
-        </Card>
+        <div className="space-y-3">
+          <Card>
+            {recapLoading ? (
+              <Skeleton lines={4} label="Loading recap…" />
+            ) : recap ? (
+              <Markdown>{recap}</Markdown>
+            ) : (
+              <p className="text-sm text-secondary">No recap written yet.</p>
+            )}
+          </Card>
+          {isDm && (session.dmSecret || dmSecretDraft) ? (
+            <Card className="border border-amber-500/30 bg-amber-500/5">
+              <div className="text-xs font-bold text-amber-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                <span>🔒</span> DM Prep Notes (DM-Only)
+              </div>
+              <Markdown>{session.dmSecret || dmSecretDraft}</Markdown>
+            </Card>
+          ) : null}
+        </div>
       )}
 
       {!editing && (
         <div className="cf-print-hide">
-          <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />
+          <AttendancePanel sessionId={session.id} campaignId={session.campaignId} scheduledSessionId={session.scheduledSessionId} />
         </div>
       )}
 
@@ -1205,7 +1279,15 @@ function SessionDetail({
  * characters played (replace-set PUT). West Marches / rotating-cast tables need
  * this because the party is otherwise all-or-nothing.
  */
-function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+function AttendancePanel({
+  sessionId,
+  campaignId,
+  scheduledSessionId,
+}: {
+  sessionId: number;
+  campaignId: number;
+  scheduledSessionId?: number | null;
+}) {
   const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
@@ -1232,6 +1314,30 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
     try {
       const next = await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`, { signal });
       if (!loadSequencerRef.current.isCurrent(generation, sessionId)) return;
+      if (next.length === 0 && scheduledSessionId) {
+        try {
+          const sch = await api.get<ScheduledSessionWithRsvps>(`${API}/schedule/${scheduledSessionId}`, { signal });
+          const yesUserIds = new Set((sch.rsvps ?? []).filter((r) => r.status === 'yes').map((r) => String(r.userId)));
+          if (yesUserIds.size > 0) {
+            const chars = await api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`, { signal });
+            const matchedIds = chars
+              .filter((c) => c.ownerUserId && yesUserIds.has(String(c.ownerUserId)))
+              .map((c) => c.id);
+            if (matchedIds.length > 0 && canDmWrite) {
+              const seeded = await api.put<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`, {
+                characterIds: matchedIds,
+              });
+              if (loadSequencerRef.current.isCurrent(generation, sessionId)) {
+                setAttendees(seeded);
+                setLoadedForSessionId(sessionId);
+                return;
+              }
+            }
+          }
+        } catch {
+          // ignore auto-seed failures
+        }
+      }
       setAttendees(next);
       setLoadedForSessionId(sessionId);
     } catch (err) {
@@ -1244,7 +1350,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
     } finally {
       if (loadSequencerRef.current.isCurrent(generation, sessionId)) setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, campaignId, scheduledSessionId, canDmWrite]);
 
   useEffect(() => {
     void load();
@@ -1620,31 +1726,57 @@ function AddRecapForm({
   campaignId,
   nextNumber,
   seedRecap,
+  fromScheduleId,
   onCreated,
   onCancel,
 }: {
   campaignId: number;
   nextNumber: number;
   seedRecap?: string | null;
+  fromScheduleId?: number | null;
   onCreated: (session: Session) => void;
   onCancel?: () => void;
 }) {
   const { t } = useTranslation();
   const { me } = useAuth();
+  const { canDmWrite } = useCampaignAccess();
   const [title, setTitle] = useState('');
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
   const dateWasEdited = useRef(false);
   const dateFieldFocusedRef = useRef(false);
   const [recap, setRecap] = useState(() => seedRecap ?? '');
+  const [dmSecret, setDmSecret] = useState('');
+  const [scheduledSessionId, setScheduledSessionId] = useState<number | null>(fromScheduleId ?? null);
+  const [scheduleRsvps, setScheduleRsvps] = useState<SessionRsvp[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
   const fieldIds = newRecapFieldIds();
-  const newRecapDraft = { title, playedAt, recap };
-  const newRecapDirty = title.trim() !== '' || recap.trim() !== '' || dateWasEdited.current;
+  const newRecapDraft = { title, playedAt, recap, dmSecret, scheduledSessionId };
+  const newRecapDirty = title.trim() !== '' || recap.trim() !== '' || dmSecret.trim() !== '' || dateWasEdited.current;
+
+  useEffect(() => {
+    if (!fromScheduleId) return;
+    api
+      .get<ScheduledSessionWithRsvps>(`${API}/schedule/${fromScheduleId}`)
+      .then((sch) => {
+        if (!sch) return;
+        if (sch.title) setTitle(sch.title);
+        if (sch.scheduledAt) {
+          setPlayedAt(sch.scheduledAt.slice(0, 10));
+          dateWasEdited.current = true;
+        }
+        if (sch.notes && !seedRecap) setRecap(sch.notes);
+        setScheduledSessionId(sch.id);
+        setScheduleRsvps(sch.rsvps ?? []);
+      })
+      .catch(() => {
+        // ignore load error for schedule prefill
+      });
+  }, [fromScheduleId, seedRecap]);
 
   const publish = useCallback(async (): Promise<boolean> => {
-    const nextErrors = validateRecapFields({ title, playedAt, recap });
+    const nextErrors = validateRecapFields({ title, playedAt, recap, dmSecret });
     setFieldErrors(nextErrors);
     const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
     if (invalidId) {
@@ -1660,9 +1792,32 @@ function AddRecapForm({
         title: title.trim(),
         playedAt: playedAt || null,
         recap,
+        dmSecret: dmSecret.trim(),
+        scheduledSessionId,
       });
+
+      if (scheduledSessionId && scheduleRsvps.length > 0) {
+        const yesUserIds = new Set(
+          scheduleRsvps.filter((r) => r.status === 'yes').map((r) => String(r.userId)),
+        );
+        if (yesUserIds.size > 0) {
+          try {
+            const characters = await api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`);
+            const matchedIds = characters
+              .filter((c) => c.ownerUserId && yesUserIds.has(String(c.ownerUserId)))
+              .map((c) => c.id);
+            if (matchedIds.length > 0) {
+              await api.put(`${API}/sessions/${created.id}/attendance`, { characterIds: matchedIds });
+            }
+          } catch {
+            // non-fatal attendance seeding error
+          }
+        }
+      }
+
       setTitle('');
       setRecap('');
+      setDmSecret('');
       setFieldErrors({});
       onCreated(created);
       return true;
@@ -1673,7 +1828,7 @@ function AddRecapForm({
     } finally {
       setSaving(false);
     }
-  }, [campaignId, fieldIds, nextNumber, onCreated, playedAt, recap, t, title]);
+  }, [campaignId, dmSecret, fieldIds, nextNumber, onCreated, playedAt, recap, scheduleRsvps, scheduledSessionId, t, title]);
 
   const protectedNewRecap = useProtectedForm({
     formId: 'session-recap-new',
@@ -1688,6 +1843,7 @@ function AddRecapForm({
       setTitle(restored.title);
       setPlayedAt(restored.playedAt);
       setRecap(restored.recap);
+      setDmSecret(restored.dmSecret ?? '');
       dateWasEdited.current = restored.playedAt.trim() !== '';
     },
     onSave: publish,
@@ -1864,6 +2020,40 @@ function AddRecapForm({
             </p>
           )}
         </div>
+        {canDmWrite && (
+          <div className="min-w-0 space-y-1">
+            <label
+              htmlFor={fieldIds.dmSecret.controlId}
+              className="block text-xs font-bold text-amber-400 uppercase tracking-wide break-words"
+            >
+              <OptionalFieldLabel>{RECAP_FIELD_LABELS.dmSecret}</OptionalFieldLabel>
+            </label>
+            <TextArea
+              id={fieldIds.dmSecret.controlId}
+              name="dmSecret"
+              className="min-w-0 border-amber-500/30"
+              style={{ minHeight: 80 }}
+              value={dmSecret}
+              onChange={(e) => {
+                setDmSecret(e.target.value);
+                setFieldErrors((current) => ({ ...current, dmSecret: undefined }));
+              }}
+              placeholder="DM-only prep notes, secret curses, hidden npc motivations…"
+              aria-invalid={fieldErrors.dmSecret ? true : undefined}
+              aria-describedby={recapDescribedBy(fieldIds.dmSecret, {
+                error: Boolean(fieldErrors.dmSecret),
+              })}
+            />
+            <p id={fieldIds.dmSecret.helpId} className="m-0 text-xs text-slate-400 break-words">
+              {RECAP_DM_SECRET_HELP}
+            </p>
+            {fieldErrors.dmSecret && (
+              <p id={fieldIds.dmSecret.errorId} role="alert" className="m-0 text-xs text-rose-400">
+                {fieldErrors.dmSecret}
+              </p>
+            )}
+          </div>
+        )}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <p className="text-[11px] text-slate-400 break-words">
             {protectedNewRecap.saveStatusLabel ? (

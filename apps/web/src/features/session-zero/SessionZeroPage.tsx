@@ -137,7 +137,13 @@ export default function SessionZeroPage() {
       const [c, own, visible] = await Promise.all([
         api.get<SessionZero>(`${API}/campaigns/${cid}/session-zero`),
         api.get<ParticipantSupportPreference | null>(`${API}/campaigns/${cid}/session-zero/support-preferences/me`),
-        api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
+        isDm
+          ? api
+              .get<{ campaignId: number; entries: ParticipantSupportPreference[] }>(
+                `${API}/campaigns/${cid}/session-zero/support-preferences/summary`,
+              )
+              .then((res) => res.entries)
+          : api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
       ]);
       if (sequence !== loadSequence.current) return;
       setCharter(c);
@@ -155,7 +161,7 @@ export default function SessionZeroPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [cid]);
+  }, [cid, isDm]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -517,15 +523,31 @@ export default function SessionZeroPage() {
 
 function SupportSummary({ entries, facilitator }: { entries: ParticipantSupportPreference[]; facilitator: boolean }) {
   const visible = facilitator ? entries : entries.filter((entry) => entry.visibility === 'table');
+  const tableCount = entries.filter((e) => e.visibility === 'table').length;
+  const facilitatorOnlyCount = entries.filter((e) => e.visibility === 'facilitator').length;
+  const aiConsentedCount = entries.filter((e) => e.aiUseConsent).length;
+
   return (
     <Section
       title={facilitator ? 'Facilitator prep / live summary' : 'Table-shared support'}
-      hint={facilitator
-        ? 'A concise view of what participants authorized facilitators to read. AI access remains separately consented.'
-        : 'Only preferences participants chose to share with the entire table.'}
+      hint={
+        facilitator
+          ? 'A concise view of what participants authorized facilitators to read. AI access remains separately consented.'
+          : 'Only preferences participants chose to share with the entire table.'
+      }
     >
+      {facilitator && entries.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3 text-xs">
+          <span className="tag">Total responses: {entries.length}</span>
+          <span className="tag">Table shared: {tableCount}</span>
+          <span className="tag">Facilitator only: {facilitatorOnlyCount}</span>
+          <span className="tag tag-accent">AI consented: {aiConsentedCount}</span>
+        </div>
+      )}
       {visible.length === 0 ? (
-        <span className="text-muted" style={{ fontStyle: 'italic', fontSize: 13 }}>No preferences shared for this view.</span>
+        <span className="text-muted" style={{ fontStyle: 'italic', fontSize: 13 }}>
+          No preferences shared for this view.
+        </span>
       ) : (
         <ul style={{ display: 'flex', flexDirection: 'column', gap: 10, listStyle: 'none', margin: 0, padding: 0 }}>
           {visible.map((entry) => (
@@ -533,6 +555,11 @@ function SupportSummary({ entries, facilitator }: { entries: ParticipantSupportP
               <div style={{ display: 'flex', gap: 7, alignItems: 'baseline', flexWrap: 'wrap' }}>
                 <strong>{entry.ownerName || 'Participant'}</strong>
                 <span className="text-muted">{entry.visibility === 'table' ? 'Entire table' : 'Facilitators only'}</span>
+                {facilitator && (
+                  <span className={`text-xs ${entry.aiUseConsent ? 'text-emerald-400' : 'text-slate-400'}`}>
+                    · {entry.aiUseConsent ? 'AI consented' : 'AI opted out'}
+                  </span>
+                )}
               </div>
               <div style={{ marginTop: 3, whiteSpace: 'pre-wrap' }}>{entry.supportText}</div>
             </li>
