@@ -1071,6 +1071,30 @@ describe('characters (e2e)', () => {
       expect(deadOk.status).toBe(200);
       expect(deadOk.body.deathState).toBe('dead');
     });
+
+    it('an idempotent sheet save echoing current death-save counters still succeeds on a non-5e table (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Idempotent Save #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Echo', hpCurrent: 6, hpMax: 6 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // A full-sheet snapshot save (notably MCP upsert_character) re-sends the character's current,
+      // unchanged death-save counters — usually 0 — alongside unrelated edits. Because the value
+      // does not change the persisted counter, the save must NOT be rejected: the rename lands and
+      // the rest of the sheet is preserved (Devin review #1812).
+      const saved = await dbUpdate(server, dm, charId, { deathSaveSuccesses: 0, deathSaveFailures: 0, name: 'PF2e Echo Renamed' });
+      expect(saved.status).toBe(200);
+      expect(saved.body.name).toBe('PF2e Echo Renamed');
+      expect(saved.body.deathSaveSuccesses).toBe(0);
+      expect(saved.body.deathSaveFailures).toBe(0);
+    });
   });
 
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —

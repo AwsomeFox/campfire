@@ -4086,6 +4086,13 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       .set(dm)
       .send({ deathSaveSuccesses: 2 });
     expect(rejectedSuccesses.status).toBe(400);
+    // An idempotent snapshot that re-sends the combatant's CURRENT counters (existing 0) does not
+    // change them, so it is allowed — matching the sheet's level-cap-style rule (Devin #1812).
+    const idempotent = await request(server)
+      .patch(`/api/v1/encounters/${starfinderEncounterId}/combatants/${starfinderCombatantId}`)
+      .set(dm)
+      .send({ deathSaveFailures: 0, deathSaveSuccesses: 0 });
+    expect(idempotent.status).toBe(200);
   });
 
   it('a Starfinder combatant set straight to 0 HP is dying, matching the damage path (#1503)', async () => {

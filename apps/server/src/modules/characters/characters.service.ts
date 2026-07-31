@@ -1173,13 +1173,17 @@ export class CharactersService {
         }
       }
     }
-    // #1503 — death-save counters are a 5e construct. A sheet PATCH on a campaign whose adapter
-    // has no death saves must not persist them (and then mirror them onto a live combatant),
-    // matching EncountersService.updateCombatant's up-front rejection. existing.campaignId is
-    // already in hand, so the adapter lookup is cheap. deathState itself stays writable — a DM
-    // may legitimately mark a PC dead/dying on any system; only the 5e 3-success/3-failure
-    // counters are gated.
-    if (input.deathSaveSuccesses !== undefined || input.deathSaveFailures !== undefined) {
+    // #1503 — death-save counters are a 5e construct. A genuine attempt to write 5e death-save
+    // state on a campaign whose adapter has no death saves is rejected (matching
+    // EncountersService.updateCombatant). But a full-sheet snapshot save — notably MCP
+    // upsert_character, which advertises both counters — often echoes the character's current,
+    // unchanged counters (usually 0), so the rejection fires only when the supplied value would
+    // actually CHANGE the persisted counter. This mirrors how the same method handles the adapter
+    // level cap just above: only an increase past the cap is rejected, so a sheet editor resending
+    // the current value keeps working (Devin review #1812). deathState stays writable on any system.
+    const succChanges = input.deathSaveSuccesses !== undefined && clampDeathSaveCount(input.deathSaveSuccesses) !== existing.deathSaveSuccesses;
+    const failChanges = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) !== existing.deathSaveFailures;
+    if (succChanges || failChanges) {
       const [deathCampaign] = this.db
         .select({ ruleSystem: campaigns.ruleSystem })
         .from(campaigns)

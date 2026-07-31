@@ -3774,11 +3774,16 @@ export class EncountersService {
     // a system with no leveled track (e.g. PF2e) is the negative case, matching the
     // sheet's own handling: nothing here to cap, so nothing is rejected.
     const leveledTrack = leveledConditionTrackFor(adapter.id);
-    // #1503 — a system without 5e death saves has no death-save counters to edit, so an explicit
-    // counter patch is rejected up front (matching the death-save roll path's
-    // assertDeathSavesSupportedForCampaign). applyCombatantHp would otherwise silently drop the
-    // fields while the override combat-log event still claimed a counter edit (Devin review #1812).
-    if (!hasDeathSavesForAdapter(adapter) && (patch.deathSaveSuccesses !== undefined || patch.deathSaveFailures !== undefined)) {
+    // #1503 — a system without 5e death saves has no death-save counters to edit, so a genuine
+    // attempt to write 5e death-save state is rejected up front (matching the death-save roll
+    // path's assertDeathSavesSupportedForCampaign): applyCombatantHp would otherwise silently drop
+    // the fields while the override combat-log event still claimed a counter edit. The rejection
+    // fires only when the value would actually CHANGE the persisted counter, so an idempotent
+    // snapshot that re-sends the combatant's current counters (usually 0) is allowed — matching
+    // CharactersService.update's level-cap-style rule (Devin review #1812).
+    const combatantSuccChanges = patch.deathSaveSuccesses !== undefined && patch.deathSaveSuccesses !== existing.deathSaveSuccesses;
+    const combatantFailChanges = patch.deathSaveFailures !== undefined && patch.deathSaveFailures !== existing.deathSaveFailures;
+    if (!hasDeathSavesForAdapter(adapter) && (combatantSuccChanges || combatantFailChanges)) {
       throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
     }
     const damageMetadataTouched =
