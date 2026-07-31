@@ -6,6 +6,7 @@ import { inboxSweepItems, inboxSweepJobs } from '../src/db/schema';
 import { nowIso } from '../src/common/time';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 import type { AiProviderConfig } from '../src/modules/ai-dm/providers';
+import { InboxSweepService } from '../src/modules/inbox-sweep/inbox-sweep.service';
 import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import {
   INBOX_SWEEP_CLASSIFIER,
@@ -826,5 +827,81 @@ describe('inbox sweep (e2e)', () => {
     expect(second.status).toBe(201);
     expect(second.body.job.itemsTotal).toBe(0);
     expect(classifier.calls).toHaveLength(callsAfterFirstSweep);
+  });
+
+  it('runs a slow sweep in the background and exposes a pollable result (#1716)', async () => {
+    const campaignId = await newCampaign('Sweep Background');
+    const noteId = await submitInbox(campaignId, 'The party wants a new quest about the haunted lighthouse.');
+    classifier.script.set('The party wants a new quest about the haunted lighthouse.', {
+      action: 'create',
+      entityType: 'quest',
+      targetId: null,
+      fields: { title: 'The Haunted Lighthouse' },
+      reason: 'players raised a new quest hook',
+    });
+
+    // Ensure the fast-path race loses (8s timeout) so the POST returns a running job.
+    classifier.beforeReturn = () => new Promise<void>((resolve) => setTimeout(resolve, 9500));
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.status).toBe('running');
+    expect(res.body.items).toHaveLength(0);
+    const jobId: number = res.body.job.id;
+
+    // GET is gated by DM role and 404s for the wrong campaign.
+    const asPlayer = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox/sweep/${jobId}`).set(player);
+    expect(asPlayer.status).toBe(403);
+
+    const otherCampaign = await newCampaign('Sweep Other Campaign');
+    const wrongCampaign = await request(server)
+      .get(`/api/v1/campaigns/${otherCampaign}/inbox/sweep/${jobId}`)
+      .set(dm);
+    expect(wrongCampaign.status).toBe(404);
+
+    // Poll until the background sweep completes.
+    let result = res.body;
+    for (let i = 0; i < 40 && result.job.status === 'running'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const poll = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox/sweep/${jobId}`).set(dm);
+      expect(poll.status).toBe(200);
+      result = poll.body;
+    }
+
+    expect(result.job.status).toBe('succeeded');
+    expect(result.job.itemsProposed).toBe(1);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ noteId, outcome: 'proposed', entityType: 'quest' });
+
+    classifier.beforeReturn = null;
+  });
+
+  it('reconciles orphaned running inbox sweep jobs on module init (#1716)', async () => {
+    const campaignId = await newCampaign('Sweep Orphaned Reconciliation');
+    await submitInbox(campaignId, 'Add a quest about the cursed well.');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [inserted] = await db
+      .insert(inboxSweepJobs)
+      .values({
+        campaignId,
+        status: 'running',
+        itemsTotal: 1,
+        itemsProposed: 0,
+        itemsSkipped: 0,
+        itemsErrored: 0,
+        detail: 'orphaned for test',
+        createdBy: dm['x-dev-user'],
+        createdAt: nowIso(),
+      })
+      .returning();
+    expect(inserted).toBeDefined();
+
+    const service = ctx.app.get(InboxSweepService);
+    await service.onModuleInit();
+
+    const [after] = await db.select().from(inboxSweepJobs).where(eq(inboxSweepJobs.id, inserted.id!)).limit(1);
+    expect(after.status).toBe('failed');
+    expect(after.detail).toContain('interrupted by server restart');
   });
 });

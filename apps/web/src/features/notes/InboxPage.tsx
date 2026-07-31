@@ -207,11 +207,18 @@ export default function InboxPage() {
   // busy flag: an in-flight sweep's finally block intentionally skips state updates
   // once cidRef.current has moved on, but that leaves sweepBusy stuck true.
   useEffect(() => {
-    sweepTokenRef.current++;
+    const tokenBefore = sweepTokenRef.current;
+    sweepTokenRef.current = tokenBefore + 1;
     setSweepBusy(false);
     setSweepResult(null);
     setSweepItemBodies({});
     setSweepError(null);
+    // #1716: when this page unmounts, cancel any in-flight result polling. The cleanup
+    // also runs on every cid change (before the body above), so it stops the previous
+    // campaign's poll before the new one starts.
+    return () => {
+      sweepTokenRef.current = tokenBefore + 1;
+    };
   }, [cid]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows

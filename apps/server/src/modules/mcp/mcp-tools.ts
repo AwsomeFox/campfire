@@ -3415,34 +3415,49 @@ export class McpToolsService {
       },
     );
 
-    // Issue #1645 — MCP parity for the inbox sweep (#1644). Calls the EXACT SAME
-    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
-    // route uses — no reimplementation, so MCP/REST behavior can never drift apart.
-    // dm role required (same as the REST controller), which also enforces the
-    // archived-campaign read-only gate via requireRole. Although sweep() files PENDING
-    // PROPOSALS for canon changes, it also writes sweep job/ledger rows and resolves
-    // inbox notes, so this is direct-write-only just like the non-@Proposable REST route.
+    // Issue #1645/1716 — MCP parity for the inbox sweep (#1644). Calls the EXACT SAME
+    // InboxSweepService.startInboxSweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // route uses, and exposes the matching GET /campaigns/:id/inbox/sweep/:jobId poll as
+    // `get_inbox_sweep_result` — so MCP/REST behavior cannot drift apart. dm role required
+    // (same as the REST controller), which also enforces the archived-campaign read-only gate
+    // via requireRole. Although startInboxSweep() files PENDING PROPOSALS for canon changes, it
+    // also writes sweep job/ledger rows and resolves inbox notes, so this is direct-write-only
+    // just like the non-@Proposable REST route.
     this.tool(
       server,
       'sweep_inbox',
-      'DM only: sweep the campaign inbox — reads every OPEN inbox item, infers create/update/dismiss per capture ' +
-        '(unsupported cases like objective ticks or HP/combat writes always skip with a stated reason), files each ' +
-        'inferred canon change as a PENDING PROPOSAL (never a direct canon write), records the sweep, and resolves swept ' +
-        'items. Requires direct write authority; propose-only tokens are rejected to match REST. Safe to re-run: an item ' +
-        'already swept is never re-classified or re-proposed. ' +
-        'Returns the recorded job + a per-item outcome (proposed / skipped / errored). Identical behavior to REST ' +
-        'POST /campaigns/:id/inbox/sweep and the web trigger — same orchestration path.',
+      'DM only: start a sweep of the campaign inbox — reads every OPEN inbox item, infers create/update/dismiss ' +
+        'per capture (unsupported cases like objective ticks or HP/combat writes always skip with a stated reason), ' +
+        'files each inferred canon change as a PENDING PROPOSAL (never a direct canon write), records the sweep, and ' +
+        'resolves swept items. Requires direct write authority; propose-only tokens are rejected to match REST. ' +
+        'Safe to re-run: an item already swept is never re-classified or re-proposed. Returns a job row whose status ' +
+        'is initially `running`; poll `get_inbox_sweep_result {campaignId, jobId}` until the status is no longer ' +
+        '`running` to receive the per-item outcomes. Identical behavior to REST POST /campaigns/:id/inbox/sweep.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         assertDirectWriteAllowed(user);
         await this.throttleMcpAiTool(user, 'sweep_inbox');
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.inboxSweep.sweep(campaignId as number, user, role);
+        return this.inboxSweep.startInboxSweep(campaignId as number, user, role);
       },
       true, // mutating — recorded on the DriverTool; not proposal-capable-tagged (no `propose`
       // arg) and NOT in DRIVER_LIVE_PLAY_TOOLS, so the driver seat cannot trigger a bulk sweep
       // mid-session — this is an administrative/out-of-session action, same posture as
       // run_scribe.
+    );
+
+    this.tool(
+      server,
+      'get_inbox_sweep_result',
+      'DM only: get the current result of a previously started inbox sweep job. ' +
+        'Returns the job status and the per-item outcomes recorded so far. Poll repeatedly while `job.status` is ' +
+        '`running`. Identical behavior to REST GET /campaigns/:id/inbox/sweep/:jobId.',
+      { campaignId: CampaignIdArg, jobId: Id.describe('Inbox sweep job id — from sweep_inbox') },
+      async ({ campaignId, jobId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.inboxSweep.getInboxSweepResult(campaignId as number, jobId as number);
+      },
+      false, // read-only
     );
 
     this.writeTool(

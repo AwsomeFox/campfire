@@ -80,8 +80,10 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'POST /attachments/:id/reveal', mcpTool: 'reveal_attachment' },
   { rest: 'POST /attachments/:id/hide', mcpTool: 'hide_attachment' },
   { rest: 'DELETE /attachments/:id', mcpTool: 'delete_attachment' },
-  // inbox sweep (issue #1645) — same InboxSweepService.sweep() orchestration as the REST route
+  // inbox sweep (issue #1645/1716) — same InboxSweepService.startInboxSweep() orchestration as
+  // REST, plus the matching result poll so MCP callers can follow a background sweep to completion.
   { rest: 'POST /campaigns/:id/inbox/sweep', mcpTool: 'sweep_inbox' },
+  { rest: 'GET /campaigns/:id/inbox/sweep/:jobId', mcpTool: 'get_inbox_sweep_result' },
 ] as const;
 
 /** Tool names introduced for issue #683 (subset used by e2e smoke tests). */
