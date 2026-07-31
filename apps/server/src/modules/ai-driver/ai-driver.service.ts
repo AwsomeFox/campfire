@@ -125,8 +125,6 @@ const DEFAULT_STEP_MAX_TOKENS = 1024;
 /** Default / hard ceiling on tool-loop iterations in one turn (stop-condition backstop). */
 const DEFAULT_MAX_STEPS = 6;
 const HARD_MAX_STEPS = 12;
-/** Default number of consecutive tool-call errors the model is allowed before the turn stops (#1497). */
-const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 2;
 
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
@@ -4283,8 +4281,6 @@ export class AiDriverService {
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
-    let consecutiveToolErrors = 0;
-    const maxToolErrors = DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
     /**
@@ -4978,14 +4974,8 @@ export class AiDriverService {
           break;
         }
         if (toolErrored) {
-          consecutiveToolErrors += 1;
-          if (consecutiveToolErrors >= maxToolErrors) {
-            stopReason = 'tool_error';
-            break;
-          }
-          // Otherwise the model is told the error and gets another step to retry.
-        } else {
-          consecutiveToolErrors = 0;
+          stopReason = 'tool_error';
+          break;
         }
 
         if (step === maxSteps - 1) stopReason = 'max_steps';
@@ -5122,8 +5112,15 @@ export class AiDriverService {
       session.status = 'idle';
       slotReleased = true;
     }
-    if (slotReleased && session.status === 'idle' && !session.detached) {
+    // Only persist if this turn actually released the slot; otherwise a human-control / pause
+    // event has taken ownership and should not be overwritten by our post-loop state.
+    if (slotReleased && !session.detached) {
       this.persistControlState(session);
+    }
+    // Drain queued actions unless a newer turn already owns the running slot. A mid-turn pause
+    // leaves `session.status` as `paused` here; the dequeued runTurn will hit the same pause
+    // gate and reject/resolve the queued entry so it does not hang.
+    if (session.status !== 'running' && !session.detached) {
       this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
     }
   }
