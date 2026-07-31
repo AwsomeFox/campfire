@@ -12,8 +12,18 @@ import {
   DRIVER_LIVE_PLAY_TOOL_NAMES,
   DRIVER_GUARDED_LIVE_PLAY_TOOLS,
   DRIVER_UNGUARDED_LIVE_PLAY_TOOLS,
+  DRIVER_LIVE_PLAY_TOOL_ARG_RULES,
   guardDriverLivePlayArgs,
 } from '../../src/modules/ai-driver/ai-driver.service';
+import {
+  AiMapGenerationRequest,
+  AiMapRefineRequest,
+  EncounterCreate,
+  EncounterUpdate,
+  GenerateMapParams,
+  InventoryItemCreate,
+  InventoryItemUpdate,
+} from '@campfire/schema';
 
 const writeTool = (name: string, proposalCapable = false) => ({
   name,
@@ -247,6 +257,53 @@ describe('driver-tool-policy (#474)', () => {
       ];
       for (const { tool, args, assert } of hostileCases) {
         assert(guardDriverLivePlayArgs(tool, args, session));
+      }
+    });
+
+    it('#1792: every guarded tool accounts for every field in its input schema (allow or forbid)', () => {
+      const toolInputSchemaFields: Record<string, string[]> = {
+        'generate_map': ['campaignId', 'encounterId', ...Object.keys(GenerateMapParams.shape)],
+        'generate_ai_map': ['campaignId', 'idempotencyKey', ...Object.keys(AiMapGenerationRequest.shape)],
+        'refine_ai_map': ['campaignId', 'jobId', ...Object.keys(AiMapRefineRequest.shape)],
+        'create_encounter': ['campaignId', ...Object.keys(EncounterCreate.shape)],
+        'update_encounter': ['encounterId', 'expectedUpdatedAt', ...Object.keys(EncounterUpdate.shape)],
+        'adjust_treasury': ['campaignId', 'delta', 'set'],
+        'add_inventory_item': ['campaignId', ...Object.keys(InventoryItemCreate.shape)],
+        'update_inventory_item': ['itemId', ...Object.keys(InventoryItemUpdate.shape)],
+      };
+
+      for (const tool of DRIVER_GUARDED_LIVE_PLAY_TOOLS) {
+        const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES[tool];
+        expect(rule).toBeDefined();
+        if (!rule) continue;
+        const schemaFields = new Set(toolInputSchemaFields[tool]);
+        const accountedFor = new Set([...rule.allowed, ...rule.forbidden]);
+        for (const field of schemaFields) {
+          expect(accountedFor.has(field)).toBe(true);
+        }
+        for (const field of accountedFor) {
+          expect(schemaFields.has(field)).toBe(true);
+        }
+      }
+    });
+
+    it('#1792: the allowlist fails closed on an unknown field for every guarded tool', () => {
+      const session = {
+        driverGeneratedMapIds: [42],
+        generateMapCallsThisTurn: 0,
+        driverAuthoredEncounterIds: [7],
+      };
+      for (const tool of DRIVER_GUARDED_LIVE_PLAY_TOOLS) {
+        const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES[tool];
+        if (!rule) continue;
+        // Build a minimal valid-looking base for the tool so the unknown key is the only reason to fail.
+        const base: Record<string, unknown> = { campaignId: 1 };
+        if (tool === 'update_encounter') base.encounterId = 7;
+        if (tool === 'update_inventory_item') base.itemId = 1;
+        if (tool === 'refine_ai_map') base.jobId = 'job-123';
+        if (tool === 'adjust_treasury') base.delta = { gp: 5 };
+        const result = guardDriverLivePlayArgs(tool, { ...base, __unknown_driver_field: true }, session);
+        expect(result.ok).toBe(false);
       }
     });
   });

@@ -255,6 +255,18 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     });
   });
 
+  it('#1792: rejects newly-widened update_inventory_item fields like equipped / equipSlot / equippedAction', () => {
+    const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
+    for (const unknownField of ['equipped', 'equipSlot', 'equippedAction']) {
+      const result = guardDriverLivePlayArgs(
+        'update_inventory_item',
+        { itemId: 1, qtyDelta: 1, idempotencyKey: 'test', [unknownField]: true },
+        session,
+      );
+      expect(result.ok).toBe(false);
+    }
+  });
+
   it('formatDriverLootCombatLogDetail summarizes treasury and inventory grants for the combat log', () => {
     expect(formatDriverLootCombatLogDetail('adjust_treasury', { delta: { gp: 25, sp: 10 } })).toBe(
       'Granted treasury (+25 gp, +10 sp)',
