@@ -10,6 +10,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useAnnounce } from '../../components/Announcer';
+import { entityHref } from '../../lib/entityLinks';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const MAX_SHOWN = 30;
@@ -193,7 +194,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
               {data.quests.map(({ kind, quest }) => (
                 <li key={`q-${quest.id}`}>
                   <Link
-                    to={`/c/${campaignId}/quests/${quest.id}`}
+                    to={entityHref(campaignId, { type: 'quest', id: quest.id })}
                     className="catch-up-link"
                     style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, textDecoration: 'none', color: 'var(--color-text)' }}
                     aria-label={t('catchUp.kindLabel', { kind: kindLabel(t, kind), title: quest.title })}
@@ -222,7 +223,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
                 return (
                   <li key={`s-${session.id}`}>
                     <Link
-                      to={`/c/${campaignId}/sessions/${session.id}`}
+                      to={entityHref(campaignId, { type: 'session', id: session.id })}
                       className="catch-up-link"
                       style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, textDecoration: 'none', color: 'var(--color-text)' }}
                       aria-label={t('catchUp.kindLabel', { kind: kindLabel(t, kind), title })}
@@ -250,7 +251,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
               {data.timeline.map(({ kind, event }) => (
                 <li key={`tl-${event.id}`}>
                   <Link
-                    to={`/c/${campaignId}/timeline`}
+                    to={entityHref(campaignId, { type: 'timeline', id: event.id })}
                     className="catch-up-link"
                     style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, textDecoration: 'none', color: 'var(--color-text)' }}
                     aria-label={t('catchUp.kindLabel', { kind: kindLabel(t, kind), title: event.title })}
@@ -279,7 +280,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
                 return (
                   <li key={`sch-${schedule.id}`}>
                     <Link
-                      to={`/c/${campaignId}/sessions`}
+                      to={entityHref(campaignId, { type: 'scheduled_session', id: schedule.id })}
                       className="catch-up-link"
                       style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, textDecoration: 'none', color: 'var(--color-text)' }}
                       aria-label={t('catchUp.kindLabel', { kind: kindLabel(t, kind), title })}
