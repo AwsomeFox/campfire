@@ -58,13 +58,16 @@ export interface StatusMenuButtonProps<V extends string> extends DensityProps {
    * immediately without restoring focus, then awaits this in the background.
    */
   onSelect: (value: V) => void | Promise<void>;
+  /** Optional ghost button style for the trigger. */
+  ghost?: boolean;
+  /** Optional unstyled button mode for chip or custom trigger wrappers. */
+  unstyled?: boolean;
   /** Disables the trigger (e.g. while a status save is in flight). */
   disabled?: boolean;
   /** Visible trigger text. Defaults to the selected option's label. */
   triggerText?: React.ReactNode;
   /** Extra classes for the trigger button. */
   className?: string;
-  ghost?: boolean;
   /**
    * Optional announcement emitted to the app live region when a save fails so
    * the user's selection is preserved visibly and the failure is spoken.
@@ -84,6 +87,7 @@ export function StatusMenuButton<V extends string>({
   triggerText,
   className = '',
   ghost,
+  unstyled,
   density,
   announceFailure,
   failureMessage,
@@ -379,6 +383,7 @@ export function StatusMenuButton<V extends string>({
         id={buttonId}
         type="button"
         ghost={ghost}
+        unstyled={unstyled}
         density={density}
         className={className}
         disabled={disabled}

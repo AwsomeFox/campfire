@@ -68,6 +68,7 @@ export function NoteVisibilityMenuButton({
     <div data-testid={`note-visibility-menu-${noteId}`}>
       <StatusMenuButton
         id={`note-vis-${noteId}`}
+        unstyled
         className="cf-chip !bg-transparent !border-0 cursor-pointer !p-0"
         triggerLabel={`${NOTE_VISIBILITY_GROUP_LABEL}: ${meta.label}`}
         triggerDescription={`${NOTE_VISIBILITY_HELP[visibility]} Open the menu to choose who can see this note.`}
