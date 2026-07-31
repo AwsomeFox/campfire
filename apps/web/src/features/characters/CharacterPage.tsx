@@ -2592,29 +2592,38 @@ function StoryBody({
 
   if (editing) {
     return (
-      <div className="space-y-2 cf-print-editor" data-testid="character-story-edit">
-        <Field
-          idPrefix={CHARACTER_STORY_PREFIX}
-          name="notes"
-          as="textarea"
-          label={CHARACTER_STORY_LABEL}
-          labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          placeholder="Markdown supported…"
-          help={CHARACTER_STORY_HELP}
-          minHeight={140}
-          optional
-        />
-        <div className="flex gap-2 justify-end">
-          <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
-            Cancel
-          </Btn>
-          <Btn density="xs" className="text-xs" onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </Btn>
+      <>
+        <div className="space-y-2 cf-print-editor" data-testid="character-story-edit">
+          <Field
+            idPrefix={CHARACTER_STORY_PREFIX}
+            name="notes"
+            as="textarea"
+            label={CHARACTER_STORY_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Markdown supported…"
+            help={CHARACTER_STORY_HELP}
+            minHeight={140}
+            optional
+          />
+          <div className="flex gap-2 justify-end">
+            <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
+              Cancel
+            </Btn>
+            <Btn density="xs" className="text-xs" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
         </div>
-      </div>
+        <div className="space-y-2 cf-print-only">
+          {notes.trim() ? (
+            <Markdown>{notes}</Markdown>
+          ) : (
+            <p className="text-sm text-secondary italic">No story written yet.</p>
+          )}
+        </div>
+      </>
     );
   }
 
