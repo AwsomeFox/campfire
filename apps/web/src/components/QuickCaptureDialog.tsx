@@ -50,7 +50,7 @@ export function QuickCaptureDialog({
 
   return (
     <Dialog
-      title={<span className="block mb-1">{t('keyboard.quickCaptureTitle')}</span>}
+      title={<span className="block mb-0.5">{t('keyboard.quickCaptureTitle')}</span>}
       titleId={titleId}
       titleAs="h2"
       className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white"
