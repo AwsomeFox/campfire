@@ -1044,6 +1044,33 @@ describe('characters (e2e)', () => {
       expect(dropped.body.deathSaveSuccesses).toBe(0);
       expect(dropped.body.deathSaveFailures).toBe(0);
     });
+
+    it('rejects a death-save counter PATCH on a non-5e sheet, but still allows deathState (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Counter PATCH #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Counter Target', hpCurrent: 8, hpMax: 8 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // 5e death-save counters cannot be persisted on a system without them — matching the combat
+      // tracker's up-front rejection, so the sheet PATCH no longer silently lands 5e state that
+      // syncActiveCombatants would then mirror onto a live combatant (#1503, Devin #1812).
+      const rejectedFailures = await dbUpdate(server, dm, charId, { deathSaveFailures: 2 });
+      expect(rejectedFailures.status).toBe(400);
+      expect(rejectedFailures.body.message).toMatch(/Death saves are not supported for the .+ ruleset/);
+      const rejectedSuccesses = await dbUpdate(server, dm, charId, { deathSaveSuccesses: 1 });
+      expect(rejectedSuccesses.status).toBe(400);
+      // deathState itself stays writable: a DM may legitimately mark a PC dead on any system.
+      const deadOk = await dbUpdate(server, dm, charId, { deathState: 'dead' });
+      expect(deadOk.status).toBe(200);
+      expect(deadOk.body.deathState).toBe('dead');
+    });
   });
 
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —

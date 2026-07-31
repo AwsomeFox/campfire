@@ -1173,6 +1173,24 @@ export class CharactersService {
         }
       }
     }
+    // #1503 — death-save counters are a 5e construct. A sheet PATCH on a campaign whose adapter
+    // has no death saves must not persist them (and then mirror them onto a live combatant),
+    // matching EncountersService.updateCombatant's up-front rejection. existing.campaignId is
+    // already in hand, so the adapter lookup is cheap. deathState itself stays writable — a DM
+    // may legitimately mark a PC dead/dying on any system; only the 5e 3-success/3-failure
+    // counters are gated.
+    if (input.deathSaveSuccesses !== undefined || input.deathSaveFailures !== undefined) {
+      const [deathCampaign] = this.db
+        .select({ ruleSystem: campaigns.ruleSystem })
+        .from(campaigns)
+        .where(eq(campaigns.id, existing.campaignId))
+        .limit(1)
+        .all();
+      const adapter = ruleSystemAdapter(deathCampaign?.ruleSystem);
+      if (!hpModelForAdapter(adapter).deathSaves) {
+        throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
+      }
+    }
     if (input.deathSaveSuccesses !== undefined) {
       update.deathSaveSuccesses = clampDeathSaveCount(input.deathSaveSuccesses);
     }
