@@ -1056,4 +1056,55 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     expect(cont.body.state).toBe('human_control');
     expect(cont.body.stuck).toBeNull();
   });
+
+  it('#1500 a length-truncated turn (finishReason length, no tool calls) is truncated, not complete', async () => {
+    const campaignId = await h.createCampaign('Driver Truncated Turn');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // The provider hit the per-step token cap mid-sentence: partial prose, no tool calls.
+    h.script({ text: 'The dragon opens its mout', finishReason: 'length' });
+
+    const res = await h.sendMessage(campaignId, { input: 'What does the dragon do?' });
+    expect(res.status).toBe(201);
+    // NOT 'complete' — the fragment is delivered but the turn is flagged incomplete (#1500).
+    expect(res.body.stopReason).toBe('truncated');
+    expect(res.body.narration).toBe('The dragon opens its mout');
+    expect(res.body.steps).toBe(1);
+
+    // The stuck ladder parks the seat for a human (retry / nudge) on a `truncated` rung.
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck.reason).toBe('truncated');
+
+    // The one scripted turn was consumed exactly once — no echo fallback (no echo-pass).
+    h.assertScriptDrained();
+  });
+
+  it('#1500 the iteration cap ends the loop at max_steps without consuming the next scripted turn', async () => {
+    const campaignId = await h.createCampaign('Driver Step Cap');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // Four scripted turns that each keep the loop going (a tool call, so it never exits via
+    // 'complete'). Drive with maxSteps: 3 — the cap must fire on the third step.
+    const looping = (n: number) => ({
+      text: `working ${n}…`,
+      toolCalls: [{ id: `call_${n}`, name: 'roll_dice', arguments: { campaignId, expr: '1d20' } }],
+    });
+    h.script(looping(1), looping(2), looping(3), looping(4));
+
+    const res = await h.sendMessage(campaignId, { input: 'Keep going.', maxSteps: 3 });
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('max_steps');
+    expect(res.body.steps).toBe(3);
+
+    // Only three provider calls were made — the fourth scripted turn was never consumed.
+    expect(h.mock.received).toHaveLength(3);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck.reason).toBe('max_steps');
+
+    // No echo fallback fired (3 scripted turns consumed, 1 intentionally left over).
+    h.assertScriptDrained();
+  });
 });

@@ -13,7 +13,8 @@
       "dispute": "A ruling was disputed",
       "provider_error": "The AI provider failed",
       "unsupported_claim": "The DM stated something it could not back with a source",
-      "content_withheld": "The reply was withheld before it reached the table"
+      "content_withheld": "The reply was withheld before it reached the table",
+      "truncated": "The reply was cut off mid-sentence"
     },
 
     "tableTools": "Table tools",

@@ -70,6 +70,15 @@ export interface AiEvalHarness {
    */
   script(...responses: MockResponse[]): void;
   /**
+   * #1500 — assert every provider call this turn consumed a scripted response, i.e. the mock
+   * never fell back to its echo reply. A desynced test (the driver made more provider calls
+   * than were scripted) silently echo-passes: the mock returns `echo: <prompt>` with
+   * `finishReason: 'stop'` and no tool calls, so a test asserting only stop reason or
+   * absence-of-effect still passes. Call this after a turn whose scripted provider calls you
+   * want to bound; it throws if the mock echoed.
+   */
+  assertScriptDrained(): void;
+  /**
    * Clear unconsumed scripted turns + the mock's request log. Use in `beforeEach` when a
    * suite shares one harness — early stopReasons (tool_error, budget_exhausted) otherwise
    * leave queued responses that pollute the next test.
@@ -173,9 +182,26 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     mock,
     fallbackMock,
     script(...responses: MockResponse[]): void {
+      // #1500 — refuse to enqueue once the mock already exhausted its queue and echoed. Pushes
+      // would land behind the cursor and be silently dropped (a no-op script is the exact
+      // false-confidence this guard exists to remove), so force the caller to resetMock() first.
+      if (mock.isExhausted) {
+        throw new Error(
+          'ai-eval-harness.script(): the mock already exhausted its scripted queue and echoed ' +
+            'a fallback reply — later pushes are silently dropped. Call resetMock() to re-arm a ' +
+            'fresh queue, or script enough turns up front.',
+        );
+      }
       script.push(...responses);
     },
     scriptFallback(...responses: MockResponse[]): void {
+      if (fallbackMock?.isExhausted) {
+        throw new Error(
+          'ai-eval-harness.scriptFallback(): the fallback mock already exhausted its scripted ' +
+            'queue and echoed a fallback reply — later pushes are silently dropped. Call ' +
+            'resetMock() to re-arm a fresh queue.',
+        );
+      }
       fallbackScript.push(...responses);
     },
     resetMock(): void {
@@ -183,6 +209,21 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
       mock.clearReceived();
       fallbackMock?.clearResponses();
       fallbackMock?.clearReceived();
+    },
+    assertScriptDrained(): void {
+      // #1500 — the mock's echo fallback returns `echo: <prompt>` with finishReason 'stop' and
+      // no tool calls, so a desynced test (more provider calls than scripted) can read it as a
+      // clean `complete` and pass. Fail loudly instead.
+      const echoes = mock.echoFallbacks;
+      if (echoes > 0) {
+        throw new Error(
+          `assertScriptDrained(): the mock served ${echoes} echo fallback repl` +
+            (echoes === 1 ? 'y' : 'ies') +
+            ' after the scripted queue ran out — the driver made more provider calls than were ' +
+            'scripted, so this test is likely echo-passing. Add the missing scripted turn(s) or ' +
+            'raise maxSteps.',
+        );
+      }
     },
     async enableExperimental(): Promise<void> {
       const res = await request(server).patch('/api/v1/settings').set(dm).send({ experimentalAiDm: true });

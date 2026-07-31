@@ -2,30 +2,17 @@ import { describe, it, expect } from '@jest/globals';
 import {
   classifyStuck,
   isMidTurnFrozenState,
-  type AiDmStopReason,
 } from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
- * #1057: Verify that the step loop respects a mid-turn session freeze (pause or
- * human_control) by aborting early with a 'frozen' stop reason rather than
- * continuing to stream narration and execute tool calls.
- *
- * Unit coverage for `isMidTurnFrozenState` and `classifyStuck`; concurrency
- * behavior is covered by ai-dm-driver-security.e2e-spec.ts ("mid-turn pause").
+ * #1057: Unit coverage for the predicates the step loop consults when a mid-turn session freeze
+ * (pause or human_control) lands. The loop itself — aborting an in-flight turn with a 'frozen'
+ * stop reason rather than continuing to stream narration and execute tool calls — is covered
+ * end-to-end by ai-dm-driver-security.e2e-spec.ts ("mid-turn pause") and
+ * ai-dm-driver-stop-controls.e2e-spec.ts; this file only pins the pure helpers.
  */
 
-describe('AI Driver mid-turn freeze check (#1057)', () => {
-  it('"frozen" is a valid AiDmStopReason', () => {
-    const reason: AiDmStopReason = 'frozen';
-    expect(reason).toBe('frozen');
-  });
-
-  it('frozen stop reason is distinct from aborted and provider_error', () => {
-    const frozen: AiDmStopReason = 'frozen';
-    const notFrozen: AiDmStopReason[] = ['aborted', 'provider_error'];
-    expect(notFrozen).not.toContain(frozen);
-  });
-
+describe('AI Driver mid-turn freeze predicates (#1057)', () => {
   it('classifyStuck treats frozen as healthy (not stuck)', () => {
     expect(
       classifyStuck({ stopReason: 'frozen', narration: '', prevNarration: null }),
@@ -46,14 +33,14 @@ describe('AI Driver mid-turn freeze check (#1057)', () => {
     expect(isMidTurnFrozenState('awaiting_players')).toBe(false);
   });
 
-  it('loop guard detects human_control mid-turn via session.state mutation', () => {
+  it('isMidTurnFrozenState reflects a human_control state mutation', () => {
     const session = { state: 'running' as string };
     expect(isMidTurnFrozenState(session.state)).toBe(false);
     session.state = 'human_control';
     expect(isMidTurnFrozenState(session.state)).toBe(true);
   });
 
-  it('loop guard detects paused mid-turn via session.state mutation', () => {
+  it('isMidTurnFrozenState reflects a paused state mutation', () => {
     const session = { state: 'running' as string };
     session.state = 'paused';
     expect(isMidTurnFrozenState(session.state)).toBe(true);
