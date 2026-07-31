@@ -271,17 +271,18 @@ test.describe('Design-system density (#674, #1683)', () => {
   test('.cf-target-24 and .cf-target-44 floors cannot be silently overridden by control aliases (issue #1698)', () => {
     const css = READ(INDEX_CSS);
 
-    // Rule position check: target helpers must be declared after .btn alias in index.css
-    const btnPos = css.indexOf('.btn {');
+    // Rule position check: target helpers must be declared after top-level .btn alias in index.css
+    const btnMatch = css.search(/^\.btn\s*\{/m);
+    expect(btnMatch, 'Top-level .btn rule must exist').toBeGreaterThan(-1);
+
     const target24Pos = css.lastIndexOf('.cf-target-24');
     const target44Pos = css.lastIndexOf('.cf-target-44');
-    expect(btnPos, '.btn rule must exist').toBeGreaterThan(-1);
-    expect(target24Pos, '.cf-target-24 must be declared after .btn').toBeGreaterThan(btnPos);
-    expect(target44Pos, '.cf-target-44 must be declared after .btn').toBeGreaterThan(btnPos);
+    expect(target24Pos, '.cf-target-24 must be declared after top-level .btn alias').toBeGreaterThan(btnMatch);
+    expect(target44Pos, '.cf-target-44 must be declared after top-level .btn alias').toBeGreaterThan(btnMatch);
 
-    // Specificity / compound selector checks
-    expect(css, '.btn.cf-target-24 compound rule must exist').toMatch(/\.btn\.cf-target-24\b/);
-    expect(css, '.btn.cf-target-44 compound rule must exist').toMatch(/\.btn\.cf-target-44\b/);
+    // Specificity / compound selector checks (must match bare .btn compound, not just .cf-btn)
+    expect(css, '.btn.cf-target-24 compound rule must exist').toMatch(/(^|[\s,])\.btn\.cf-target-24\b/m);
+    expect(css, '.btn.cf-target-44 compound rule must exist').toMatch(/(^|[\s,])\.btn\.cf-target-44\b/m);
     expect(css, '.cf-btn.cf-target-24 compound rule must exist').toMatch(/\.cf-btn\.cf-target-24\b/);
     expect(css, '.cf-btn.cf-target-44 compound rule must exist').toMatch(/\.cf-btn\.cf-target-44\b/);
     expect(css, '.input.cf-target-24 compound rule must exist').toMatch(/\.input\.cf-target-24\b/);
