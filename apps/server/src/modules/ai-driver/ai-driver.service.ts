@@ -125,6 +125,8 @@ const DEFAULT_STEP_MAX_TOKENS = 1024;
 /** Default / hard ceiling on tool-loop iterations in one turn (stop-condition backstop). */
 const DEFAULT_MAX_STEPS = 6;
 const HARD_MAX_STEPS = 12;
+/** Default number of consecutive tool-call errors the model is allowed before the turn stops (#1497). */
+const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 3;
 
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
@@ -766,6 +768,12 @@ export interface RunTurnOptions {
    * the prompt. Keeping it out of `input` also keeps it out of the persisted replay input.
    */
   untrustedNote?: string;
+  /**
+   * INTERNAL (#1497): how many consecutive tool-call errors the turn tolerates before stopping
+   * with `tool_error`. Defaults to {@link DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS}. Not a client
+   * setting; the DTO does not expose it.
+   */
+  maxToolErrors?: number;
 }
 
 interface ActionQueueEntry {
@@ -3143,6 +3151,14 @@ export class AiDriverService {
       // and so any late status reads on the orphaned reference do not look "still running".
       if (existing.status === 'running') existing.status = 'idle';
     }
+    // #1497 — reject any queued player actions instead of orphaning their HTTP requests.
+    const queue = this.actionQueues.get(campaignId);
+    if (queue) {
+      this.actionQueues.delete(campaignId);
+      for (const entry of queue) {
+        entry.reject(new ConflictException('AI DM session torn down; queued action rejected.'));
+      }
+    }
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
@@ -4049,6 +4065,7 @@ export class AiDriverService {
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
+    try {
 
     // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
     //
@@ -4174,6 +4191,8 @@ export class AiDriverService {
       promptHistory.digest,
       // #1043: this turn's OWN phase, threaded in rather than read from the shared session.
       promptPhaseFor(opts.lifecycle, session.phase),
+      // #1497: the live session so `scene` is injected into the prompt.
+      session,
     );
 
     // #1499: `speakingAsCharacter` was already resolved AND ownership-checked above
@@ -4261,6 +4280,12 @@ export class AiDriverService {
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
+    let consecutiveToolErrors = 0;
+    const maxToolErrors = clamp(
+      opts.maxToolErrors ?? DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS,
+      1,
+      isDmCaller ? HARD_MAX_STEPS : DEFAULT_MAX_STEPS,
+    );
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
     /**
@@ -4954,8 +4979,14 @@ export class AiDriverService {
           break;
         }
         if (toolErrored) {
-          stopReason = 'tool_error';
-          break;
+          consecutiveToolErrors += 1;
+          if (consecutiveToolErrors >= maxToolErrors) {
+            stopReason = 'tool_error';
+            break;
+          }
+          // Otherwise the model is told the error and gets another step to retry.
+        } else {
+          consecutiveToolErrors = 0;
         }
 
         if (step === maxSteps - 1) stopReason = 'max_steps';
@@ -5068,8 +5099,6 @@ export class AiDriverService {
 
     this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, usageUnknown());
 
-    this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
-
     return {
       narration: finalNarration,
       stopReason,
@@ -5081,6 +5110,15 @@ export class AiDriverService {
       seat: latestSeat,
       grounding,
     };
+  } finally {
+    // #1497 — release the running slot on every exit, including throws before the step loop
+    // or during post-loop bookkeeping, and drain the queue so queued callers always settle.
+    if (session.status === 'running') {
+      session.status = 'idle';
+    }
+    this.persistControlState(session);
+    this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+  }
   }
 
   /**
@@ -7262,11 +7300,14 @@ export class AiDriverService {
      * {@link promptPhaseFor} decides the value; nothing in here consults the session.
      */
     phase: AiDmSessionPhase = 'active',
+    /** #1497 — the in-memory session whose `scene` should be injected into the prompt. */
+    session?: AiDmSessionState,
   ): Promise<string> {
     // #1053 review: the campaign is read FIRST because the grounding preamble is now gated on
     // its rule system — the attack and standalone-save lines differ where the server-side
     // implementations do not speak that system. Everything else about this read is unchanged.
     const campaign = await this.campaigns.getOrThrow(campaignId);
+    const sessionForPrompt = session ?? this.ensureSession(campaignId);
     const parts: string[] = [
       buildGroundingPreamble(campaign.ruleSystem),
       GROUNDING_CITATION_CONTRACT,
@@ -7337,7 +7378,7 @@ export class AiDriverService {
     // carries on), so without this the model would narrate "the blade bites deep for nine
     // damage" while the board never changed — a silent divergence between what the table heard
     // and what is true, which is a worse failure than the autonomy it was meant to remove.
-    if (this.ensureSession(campaignId).collaborative) {
+    if (sessionForPrompt.collaborative) {
       parts.push(
         [
           '## Collaborative handoff (ACTIVE)',
@@ -7418,6 +7459,12 @@ export class AiDriverService {
       const visibleLocationEnv = visibleUntrustedPromptData(locationEnv);
       parts.push(`## Current location / environment\n${wrapUntrustedPromptData(locationEnv)}`);
       if (ledger) harvestRetrievals(ledger, 'get_campaign_summary', undefined, visibleLocationEnv);
+    }
+
+    // #1497 — the table-wide scene is set by the DM and must reach the model so it does not
+    // contradict the framing the table has already agreed on.
+    if (sessionForPrompt.scene) {
+      parts.push(`## Current scene\n${wrapUntrustedPromptData(sessionForPrompt.scene)}`);
     }
 
     // This tool is model-specific by design: it ignores facilitator authority and
