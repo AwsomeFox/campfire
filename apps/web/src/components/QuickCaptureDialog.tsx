@@ -53,18 +53,17 @@ export function QuickCaptureDialog({
       title={t('keyboard.quickCaptureTitle')}
       titleId={titleId}
       titleAs="h2"
-      style={{ padding: '17px 16px' }}
-      className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white [&_.dialog-title]:mb-0"
+      className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white"
       onBackdropClick={() => !saving && onClose()}
       initialFocusRef={inputRef}
       ariaBusy={saving}
       data-keyboard-command-overlay
       afterBody={
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
+          <p className="text-sm text-muted">{t('keyboard.quickCaptureHint')}</p>
           {error && <ErrorNote message={error} />}
           {!isDm && (
-            <div className="flex gap-2 mb-3 text-xs">
+            <div className="flex gap-2 text-xs">
               <button
                 type="button"
                 className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
