@@ -1715,6 +1715,14 @@ function migrateAiScribeTables(sqlite: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign_status_hash ON ai_scribe_jobs(campaign_id, status, source_hash);
+  `);
+}
+
+function migrateAiScribeDedupeIndex1530(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign_status_hash
+      ON ai_scribe_jobs(campaign_id, status, source_hash);
   `);
 }
 
@@ -4915,6 +4923,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // ordinal after merging main (never shipped on any real database as 0150).
   { name: '0152_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
   { name: '0153_ai_driver_aftermath_grant_window_1781', run: migrateAiDriverAftermathGrantWindow1781 },
+  { name: '0156_ai_scribe_jobs_dedupe_1530', run: migrateAiScribeDedupeIndex1530 },
 ];
 
 /**
