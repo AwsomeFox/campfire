@@ -96,19 +96,32 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [quest, setQuest] = useState<QuestWithObjectives | null>(null);
   const [siblingQuests, setSiblingQuests] = useState<Quest[]>([]);
   const [giver, setGiver] = useState<Npc | null>(null);
+  const [npcs, setNpcs] = useState<Npc[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [notFound, setNotFound] = useState(false);
 
   const [editingBody, setEditingBody] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
   const [bodyDraft, setBodyDraft] = useState('');
+  const [rewardDraft, setRewardDraft] = useState('');
+  const [giverNpcIdDraft, setGiverNpcIdDraft] = useState('');
+  const [parentIdDraft, setParentIdDraft] = useState('');
+  const [titleError, setTitleError] = useState<string | null>(null);
   const [savingBody, setSavingBody] = useState(false);
   // Optimistic-concurrency guard (#157/#233): a stale body save 409s instead of
   // clobbering a co-DM's or a connected AI's interleaved edit. `bodyConflict` shows a
   // Reload-latest affordance; `historyNonce` refetches the edit-history panel on save.
   const [bodyConflict, setBodyConflict] = useState(false);
   const [historyNonce, setHistoryNonce] = useState(0);
+
+  const editPrefix = 'quest-edit';
+  const editTitleId = questFieldId(editPrefix, 'title');
+  const editBodyId = questFieldId(editPrefix, 'body');
+  const editRewardId = questFieldId(editPrefix, 'reward');
+  const editGiverId = questFieldId(editPrefix, 'giver');
+  const editParentId = questFieldId(editPrefix, 'parent');
 
   // Propose mode (issue #240): a non-DM member editing the quest body submits the
   // change to the DM's proposal queue (PATCH ?proposed=true) instead of writing directly.
@@ -151,18 +164,31 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     try {
       const q = await api.get<QuestWithObjectives>(`${API}/quests/${questId}`);
       setQuest(q);
+      setTitleDraft(q.title);
       setBodyDraft(q.body);
+      setRewardDraft(q.reward ?? '');
+      setGiverNpcIdDraft(q.giverNpcId ? String(q.giverNpcId) : '');
+      setParentIdDraft(q.parentId ? String(q.parentId) : '');
       setDmSecretDraft(q.dmSecret);
 
-      const campaignQuests = await api.get<Quest[]>(`${API}/campaigns/${campaignId}/quests`);
+      const [campaignQuests, npcList] = await Promise.all([
+        api.get<Quest[]>(`${API}/campaigns/${campaignId}/quests`),
+        api.get<Npc[]>(`${API}/campaigns/${campaignId}/npcs`).catch(() => [] as Npc[]),
+      ]);
       setSiblingQuests(campaignQuests);
+      setNpcs(npcList);
 
       if (q.giverNpcId) {
-        try {
-          const npc = await api.get<Npc>(`${API}/npcs/${q.giverNpcId}`);
-          setGiver(npc);
-        } catch {
-          setGiver(null);
+        const found = npcList.find((n) => n.id === q.giverNpcId);
+        if (found) {
+          setGiver(found);
+        } else {
+          try {
+            const npc = await api.get<Npc>(`${API}/npcs/${q.giverNpcId}`);
+            setGiver(npc);
+          } catch {
+            setGiver(null);
+          }
         }
       } else {
         setGiver(null);
@@ -178,7 +204,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     } finally {
       setLoading(false);
     }
-  }, [campaignId, questId]);
+  }, [campaignId, questId, t]);
 
   useEffect(() => {
     void load();
@@ -189,19 +215,68 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     [siblingQuests, questId],
   );
 
-  async function saveBody() {
+  function startEdit() {
     if (!quest) return;
+    setTitleDraft(quest.title);
+    setBodyDraft(quest.body);
+    setRewardDraft(quest.reward ?? '');
+    setGiverNpcIdDraft(quest.giverNpcId ? String(quest.giverNpcId) : '');
+    setParentIdDraft(quest.parentId ? String(quest.parentId) : '');
+    setTitleError(null);
+    setBodyConflict(false);
+    setError(null);
+    setProposeMode(false);
+    setEditingBody(true);
+  }
+
+  async function save() {
+    if (!quest) return;
+    if (!titleDraft.trim()) {
+      setTitleError(QUEST_TITLE_REQUIRED_ERROR);
+      document.getElementById(editTitleId)?.focus();
+      return;
+    }
+    setTitleError(null);
     setSavingBody(true);
     setError(null);
     setBodyConflict(false);
     try {
       const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+        title: titleDraft.trim(),
         body: bodyDraft,
+        reward: rewardDraft,
+        giverNpcId: giverNpcIdDraft ? Number(giverNpcIdDraft) : null,
+        parentId: parentIdDraft ? Number(parentIdDraft) : null,
         // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
         // of silently overwriting the other author's work.
         ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
       });
       setQuest({ ...quest, ...updated });
+      if (updated.giverNpcId !== quest.giverNpcId) {
+        if (updated.giverNpcId) {
+          const found = npcs.find((n) => n.id === updated.giverNpcId);
+          if (found) {
+            setGiver(found);
+          } else {
+            try {
+              const npc = await api.get<Npc>(`${API}/npcs/${updated.giverNpcId}`);
+              setGiver(npc);
+            } catch {
+              setGiver(null);
+            }
+          }
+        } else {
+          setGiver(null);
+        }
+      }
+      if (updated.parentId !== quest.parentId) {
+        try {
+          const campaignQuests = await api.get<Quest[]>(`${API}/campaigns/${campaignId}/quests`);
+          setSiblingQuests(campaignQuests);
+        } catch {
+          // ignore
+        }
+      }
       setEditingBody(false);
       setHistoryNonce((n) => n + 1);
     } catch (e) {
@@ -224,16 +299,25 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     try {
       const fresh = await api.get<QuestWithObjectives>(`${API}/quests/${questId}`);
       setQuest(fresh);
+      setTitleDraft(fresh.title);
       setBodyDraft(fresh.body);
+      setRewardDraft(fresh.reward ?? '');
+      setGiverNpcIdDraft(fresh.giverNpcId ? String(fresh.giverNpcId) : '');
+      setParentIdDraft(fresh.parentId ? String(fresh.parentId) : '');
     } catch {
       setError(t('quests.loadOneFailed'));
     }
   }
 
-  // Non-DM members suggest a body edit (issue #240) — routed to the DM's proposal queue.
+  // Non-DM members suggest an edit (issue #240) — routed to the DM's proposal queue.
   function startPropose() {
     if (!quest) return;
+    setTitleDraft(quest.title);
     setBodyDraft(quest.body);
+    setRewardDraft(quest.reward ?? '');
+    setGiverNpcIdDraft(quest.giverNpcId ? String(quest.giverNpcId) : '');
+    setParentIdDraft(quest.parentId ? String(quest.parentId) : '');
+    setTitleError(null);
     setProposalError(null);
     setProposalDone(false);
     setProposeMode(true);
@@ -244,14 +328,27 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     setEditingBody(false);
     setProposeMode(false);
     setProposalError(null);
+    setTitleError(null);
   }
 
   async function submitBodyProposal() {
     if (!quest) return;
+    if (!titleDraft.trim()) {
+      setTitleError(QUEST_TITLE_REQUIRED_ERROR);
+      document.getElementById(editTitleId)?.focus();
+      return;
+    }
+    setTitleError(null);
     setSubmittingProposal(true);
     setProposalError(null);
     try {
-      await api.patch(`${API}/quests/${quest.id}?proposed=true`, { body: bodyDraft });
+      await api.patch(`${API}/quests/${quest.id}?proposed=true`, {
+        title: titleDraft.trim(),
+        body: bodyDraft,
+        reward: rewardDraft,
+        giverNpcId: giverNpcIdDraft ? Number(giverNpcIdDraft) : null,
+        parentId: parentIdDraft ? Number(parentIdDraft) : null,
+      });
       setEditingBody(false);
       setProposeMode(false);
       setProposalDone(true);
@@ -475,11 +572,17 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <div className="cf-print-hide"><VisibleToPlayersBar
           visible={!quest.hidden}
           onHide={async () => {
-            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
+            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+              hidden: true,
+              ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
+            });
             setQuest({ ...quest, ...updated });
           }}
           onUndoHide={async () => {
-            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
+            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+              hidden: false,
+              ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
+            });
             setQuest({ ...quest, ...updated });
           }}
         /></div>
@@ -526,11 +629,17 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               hidden={quest.hidden}
               preview={revealPreview}
               onReveal={async () => {
-                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
+                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+                  hidden: false,
+                  ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
+                });
                 setQuest({ ...quest, ...updated });
               }}
               onUndoReveal={async () => {
-                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
+                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+                  hidden: true,
+                  ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
+                });
                 setQuest({ ...quest, ...updated });
               }}
             />
@@ -539,8 +648,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               ghost
               className="text-xs"
               onClick={() => {
-                setBodyDraft(quest.body);
-                setEditingBody((v) => !v);
+                if (editingBody) {
+                  cancelBodyEdit();
+                } else {
+                  startEdit();
+                }
               }}
             >
               {t('quests.editQuest')}
@@ -593,18 +705,94 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <div className="card elev-sm">
             {editingBody ? (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {proposeMode && (
                   <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
                     {t('quests.suggestHint')}
                   </p>
                 )}
-                <TextArea
-                  style={{ minHeight: 140 }}
-                  value={bodyDraft}
-                  onChange={(e) => setBodyDraft(e.target.value)}
-                  placeholder={t('quests.bodyPlaceholder')}
-                />
+                <div className="space-y-1">
+                  <label htmlFor={editTitleId} className="text-xs font-bold text-secondary uppercase tracking-wide">
+                    {QUEST_TITLE_LABEL}
+                  </label>
+                  <TextInput
+                    id={editTitleId}
+                    value={titleDraft}
+                    aria-invalid={titleError != null}
+                    onChange={(e) => {
+                      setTitleDraft(e.target.value);
+                      setTitleError(null);
+                    }}
+                    placeholder={t('quests.titlePlaceholder')}
+                    maxLength={200}
+                  />
+                  {titleError && (
+                    <p role="alert" className="text-xs text-rose-400 m-0">
+                      {titleError}
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor={editBodyId} className="text-xs font-bold text-secondary uppercase tracking-wide">
+                    {QUEST_BODY_LABEL}
+                  </label>
+                  <TextArea
+                    id={editBodyId}
+                    style={{ minHeight: 140 }}
+                    value={bodyDraft}
+                    onChange={(e) => setBodyDraft(e.target.value)}
+                    placeholder={t('quests.bodyPlaceholder')}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor={editRewardId} className="text-xs font-bold text-secondary uppercase tracking-wide">
+                    {QUEST_REWARD_LABEL}
+                  </label>
+                  <TextInput
+                    id={editRewardId}
+                    value={rewardDraft}
+                    onChange={(e) => setRewardDraft(e.target.value)}
+                    placeholder={t('quests.rewardPlaceholder')}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor={editGiverId} className="text-xs font-bold text-secondary uppercase tracking-wide">
+                    {QUEST_GIVER_LABEL}
+                  </label>
+                  <select
+                    id={editGiverId}
+                    className="cf-select"
+                    value={giverNpcIdDraft}
+                    onChange={(e) => setGiverNpcIdDraft(e.target.value)}
+                  >
+                    <option value="">{t('quests.giverNone')}</option>
+                    {npcs.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor={editParentId} className="text-xs font-bold text-secondary uppercase tracking-wide">
+                    {QUEST_PARENT_LABEL}
+                  </label>
+                  <select
+                    id={editParentId}
+                    className="cf-select"
+                    value={parentIdDraft}
+                    onChange={(e) => setParentIdDraft(e.target.value)}
+                  >
+                    <option value="">{t('quests.parentNone')}</option>
+                    {siblingQuests
+                      .filter((q) => q.id !== quest.id)
+                      .map((q) => (
+                        <option key={q.id} value={q.id}>
+                          {q.title}
+                        </option>
+                      ))}
+                  </select>
+                </div>
                 {proposalError && <p className="text-xs text-red-400 m-0">{proposalError}</p>}
                 <div className="flex gap-2 justify-end">
                   {bodyConflict && (
@@ -620,7 +808,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                       {submittingProposal ? t('quests.suggesting') : t('quests.suggestSubmit')}
                     </Btn>
                   ) : (
-                    <Btn density="xs" onClick={saveBody} disabled={savingBody} className="text-xs">
+                    <Btn density="xs" onClick={save} disabled={savingBody} className="text-xs">
                       {savingBody ? t('quests.saving') : t('quests.save')}
                     </Btn>
                   )}

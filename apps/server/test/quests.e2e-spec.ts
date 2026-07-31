@@ -416,6 +416,49 @@ describe('quests (e2e)', () => {
       expect(patchRes.status).toBe(200);
       expect(patchRes.body.giverNpcId).toBe(npcId);
     });
+
+    it('PATCH title, reward, giver, parent with expectedUpdatedAt concurrency guard (#1483)', async () => {
+      const server = ctx.app.getHttpServer();
+      const npcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Lord Blackwood' });
+      const npcId = npcRes.body.id;
+      const parentRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Main Arc' });
+      const parentId = parentRes.body.id;
+
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Initial Quest Title', reward: '100 gp' });
+      expect(createRes.status).toBe(201);
+      const questId = createRes.body.id;
+      const initialUpdatedAt = createRes.body.updatedAt;
+
+      // Updating title, reward, giver, parent with matching expectedUpdatedAt succeeds
+      const patchRes = await request(server)
+        .patch(`/api/v1/quests/${questId}`)
+        .set(dm)
+        .send({
+          title: 'Renamed Quest Title',
+          reward: '500 gp',
+          giverNpcId: npcId,
+          parentId: parentId,
+          expectedUpdatedAt: initialUpdatedAt,
+        });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.title).toBe('Renamed Quest Title');
+      expect(patchRes.body.reward).toBe('500 gp');
+      expect(patchRes.body.giverNpcId).toBe(npcId);
+      expect(patchRes.body.parentId).toBe(parentId);
+
+      // Stale expectedUpdatedAt returns 409 conflict
+      const staleRes = await request(server)
+        .patch(`/api/v1/quests/${questId}`)
+        .set(dm)
+        .send({
+          title: 'Conflict Title',
+          expectedUpdatedAt: initialUpdatedAt,
+        });
+      expect(staleRes.status).toBe(409);
+    });
   });
 
   // #95 — parent cycles (a quest cannot be its own ancestor) must be rejected with 400.

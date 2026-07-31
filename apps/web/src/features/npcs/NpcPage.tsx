@@ -312,6 +312,7 @@ export default function NpcPage() {
     try {
       await api.patch(`${API}/npcs/${id}`, {
         portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+        ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
       });
       await load();
     } catch (err) {
@@ -352,11 +353,17 @@ export default function NpcPage() {
         <div className="cf-print-hide"><VisibleToPlayersBar
           visible={!npc.hidden}
           onHide={async () => {
-            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
+              hidden: true,
+              ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
+            });
             setNpc(updated);
           }}
           onUndoHide={async () => {
-            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
+              hidden: false,
+              ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
+            });
             setNpc(updated);
           }}
         /></div>
@@ -421,11 +428,17 @@ export default function NpcPage() {
                     hidden={npc.hidden}
                     preview={revealPreview}
                     onReveal={async () => {
-                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
+                        hidden: false,
+                        ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
+                      });
                       setNpc(updated);
                     }}
                     onUndoReveal={async () => {
-                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
+                        hidden: true,
+                        ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
+                      });
                       setNpc(updated);
                     }}
                   />
