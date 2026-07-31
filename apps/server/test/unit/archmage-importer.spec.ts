@@ -116,6 +116,17 @@ describe('archmage-importer — statblock vs prose classification (issue #1522)'
     expect(looksLikeMonsterStatblock(proseHtml)).toBe(false);
     expect(parseMonster('Building Combats', proseHtml)).toBeNull();
 
+    const proseWithTableHtml = `
+      <p>When creating a Caster or Leader monster, use this level scaling table:</p>
+      <table border="1">
+        <tr><th>Level</th><th>Damage</th></tr>
+        <tr><td>1st level</td><td>5 damage</td></tr>
+        <tr><td>2nd level</td><td>10 damage</td></tr>
+      </table>
+    `;
+    expect(looksLikeMonsterStatblock(proseWithTableHtml)).toBe(false);
+    expect(parseMonster('Customizing Monsters', proseWithTableHtml)).toBeNull();
+
     const driftedTableHtml = `
       <table border="1">
         <tbody>

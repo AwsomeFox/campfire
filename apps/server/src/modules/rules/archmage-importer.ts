@@ -219,18 +219,22 @@ const INIT_RE = /Initiative:?\s*([+-]?\d+)/i;
 
 /** Weak statblock signatures used to identify a drifted or malformed monster statblock (issue #1522). */
 const WEAK_LEVEL_RE = /\b(?:level\s*\d+|\d+\s*(?:st|nd|rd|th)?\s*level)\b/i;
-const STATBLOCK_KEYWORD_RE =
-  /\b(?:AC|PD|MD|HP|Armor\s+Class|Physical\s+Defense|Mental\s+Defense|Hit\s+Points|Initiative|Troop|Wrecker|Spoiler|Caster|Leader|Mook|Archmage)\b/i;
+const DEFENSE_KEYWORD_RE =
+  /\b(?:AC|PD|MD|HP|Armor\s+Class|Physical\s+Defense|Mental\s+Defense|Hit\s+Points)\b/i;
 const STATBLOCK_ATTACK_RE = /\bvs\.?\s*(?:AC|PD|MD|Armor\s+Class|Physical\s+Defense|Mental\s+Defense)\b/i;
 
 export function looksLikeMonsterStatblock(blockHtml: string): boolean {
-  if (firstTable(blockHtml) !== null) return true;
-  const flat = stripTags(blockHtml);
-  return (
-    WEAK_LEVEL_RE.test(flat) ||
-    STATBLOCK_KEYWORD_RE.test(flat) ||
-    STATBLOCK_ATTACK_RE.test(flat)
-  );
+  const table = firstTable(blockHtml);
+  const targetText = table ? stripTags(table) : stripTags(blockHtml);
+
+  const hasLevel = WEAK_LEVEL_RE.test(targetText);
+  const hasDefensesOrAttacks =
+    DEFENSE_KEYWORD_RE.test(targetText) ||
+    STATBLOCK_ATTACK_RE.test(targetText) ||
+    INIT_RE.test(targetText);
+
+  // Require BOTH a level indicator AND defense/attack/initiative markers to classify as a statblock.
+  return hasLevel && hasDefensesOrAttacks;
 }
 
 /**
