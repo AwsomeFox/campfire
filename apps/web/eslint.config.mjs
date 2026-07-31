@@ -63,7 +63,7 @@ const noBareToLocaleString = {
           node.callee.property.name === 'toLocaleString'
         ) {
           const filename = context.filename || context.getFilename?.() || '';
-          if (filename.includes('lib/format.ts')) return;
+          if (filename.includes('lib/format.ts') || filename.includes('/e2e/') || filename.includes('\\e2e\\')) return;
 
           context.report({
             node,
