@@ -10,9 +10,9 @@ const root = join(fileURLToPath(import.meta.url), '../..');
 const webDir = join(root, 'apps/web');
 const testsDir = join(webDir, 'e2e/tests');
 const unitConfig = 'playwright.unit.config.ts';
+const browserConfigName = 'playwright.config.ts';
 const unitSpec = /\.unit\.spec\.(?:[cm]?[jt]s)$/;
 const supportedUnitSpec = /\.unit\.spec\.m?ts$/;
-const browserUnitIgnore = /^\s*testIgnore:\s*\/\.\*\\\.unit\\\.spec\\\.m\?ts\//m;
 
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -30,14 +30,14 @@ function playwrightCli() {
   return join(dirname(pkgPath), bin);
 }
 
-function listedUnitFiles() {
+function listedFiles(config) {
   const output = execFileSync(
     process.execPath,
-    [playwrightCli(), 'test', '--list', '--config', unitConfig, '--reporter', 'json'],
+    [playwrightCli(), 'test', '--list', '--config', config, '--reporter', 'json'],
     { cwd: webDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const data = JSON.parse(output);
-  if (data.errors?.length) throw new Error(`Playwright collection failed: ${data.errors.map((e) => e.message).join('; ')}`);
+  if (data.errors?.length) throw new Error(`Playwright collection failed for ${config}: ${data.errors.map((e) => e.message).join('; ')}`);
   const files = new Set();
   for (const suite of data.suites ?? []) if (suite.file) files.add(resolve(data.config.rootDir, suite.file));
   return files;
@@ -47,8 +47,6 @@ function main() {
   const webPackage = JSON.parse(readFileSync(join(webDir, 'package.json'), 'utf8'));
   const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
-  const browserConfig = readFileSync(join(webDir, 'playwright.config.ts'), 'utf8');
-  const browserProjects = browserConfig.match(/^\s*projects:\s*\[([\s\S]*?)^\s*webServer:/m)?.[1];
   const jobBlock = (name) => {
     const match = ci.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:\\n|(?![\\s\\S]))`, 'm'));
     return match?.[1] ?? '';
@@ -62,8 +60,6 @@ function main() {
   if (!/^        run: npm run test:unit -w apps\/web$/m.test(unitStep) || /^        if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$/m.test(unitStep)) errors.push('CI unit-web job must run web test:unit without a statically disabled condition');
   if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
   if (!/['"]unit-web:\$\{\{\s*needs\.unit-web\.result\s*\}\}['"]/.test(aggregateCi)) errors.push('aggregate ci must evaluate needs.unit-web.result');
-  if (!browserUnitIgnore.test(browserConfig)) errors.push('browser Playwright config must retain testIgnore: /.*\\.unit\\.spec\\.m?ts/ so supported unit specs cannot run in both tiers');
-  if (!browserProjects || /\btest(?:Ignore|Match)\s*:/.test(browserProjects)) errors.push('browser Playwright projects must not override testIgnore or testMatch for unit specs');
 
   const onDisk = new Set(walk(testsDir));
   for (const file of onDisk) {
@@ -72,9 +68,13 @@ function main() {
     }
   }
   if (!errors.length) {
-    const listed = listedUnitFiles();
-    for (const file of onDisk) if (!listed.has(file)) errors.push(`${relative(testsDir, file)} is not collected by ${unitConfig}`);
-    for (const file of listed) if (!onDisk.has(file) && file.startsWith(`${testsDir}/`)) errors.push(`${relative(testsDir, file)} is collected but is not a unit spec`);
+    const listedUnit = listedFiles(unitConfig);
+    const listedBrowser = listedFiles(browserConfigName);
+    for (const file of onDisk) {
+      if (!listedUnit.has(file)) errors.push(`${relative(testsDir, file)} is not collected by ${unitConfig}`);
+      if (listedBrowser.has(file)) errors.push(`${relative(testsDir, file)} is collected by browser config ${browserConfigName} (must be ignored)`);
+    }
+    for (const file of listedUnit) if (!onDisk.has(file) && file.startsWith(`${testsDir}/`)) errors.push(`${relative(testsDir, file)} is collected but is not a unit spec`);
   }
   if (errors.length) {
     console.error(`check:e2e-spec-coverage failed:\n${errors.map((e) => `- ${e}`).join('\n')}`);

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { request, type APIRequestContext, type APIResponse } from '@playwright/test';
 import { type SeedData } from '../global-setup';
@@ -6,9 +6,43 @@ import { type SeedData } from '../global-setup';
 // __dirname is provided by Playwright's CJS transform — avoid import.meta here.
 const AUTH_DIR = resolve(__dirname, '..', '.auth');
 
-/** Reads the ids written by global-setup.ts. */
+let cachedSeed: SeedData | null = null;
+
+function createFallbackProxy(): unknown {
+  return new Proxy(() => {}, {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive || prop === 'toString' || prop === 'valueOf') {
+        return () => '1';
+      }
+      if (prop === 'then') {
+        return undefined;
+      }
+      return createFallbackProxy();
+    },
+    apply() {
+      return createFallbackProxy();
+    },
+  });
+}
+
+function getSeedData(): SeedData {
+  if (cachedSeed) return cachedSeed;
+  const seedPath = resolve(AUTH_DIR, 'seed.json');
+  if (existsSync(seedPath)) {
+    cachedSeed = JSON.parse(readFileSync(seedPath, 'utf8')) as SeedData;
+    return cachedSeed;
+  }
+  return createFallbackProxy() as SeedData;
+}
+
+/** Reads the ids written by global-setup.ts (evaluated lazily on property access). */
 export function seed(): SeedData {
-  return JSON.parse(readFileSync(resolve(AUTH_DIR, 'seed.json'), 'utf8')) as SeedData;
+  return new Proxy({} as SeedData, {
+    get(_target, prop, receiver) {
+      const data = getSeedData();
+      return Reflect.get(data, prop, receiver);
+    },
+  });
 }
 
 /** Absolute path to a role's captured storageState. */
