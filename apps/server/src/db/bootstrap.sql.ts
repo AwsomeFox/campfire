@@ -1714,6 +1714,7 @@ CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_session_trigger ON ai_scribe_jobs(campaign_id, scheduled_session_id, trigger);
+CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign_status_hash ON ai_scribe_jobs(campaign_id, status, source_hash);
 
 CREATE TABLE IF NOT EXISTS inbox_sweep_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

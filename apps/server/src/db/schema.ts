@@ -1964,26 +1964,34 @@ export const aiScribeConfigs = sqliteTable('ai_scribe_configs', {
   updatedAt: text('updated_at').notNull(),
 });
 
-export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
-  trigger: text('trigger').notNull(), // 'on_demand' | 'post_session' | 'cron'
-  status: text('status').notNull(), // ScribeJobStatus
-  sourceHash: text('source_hash'), // sha256 of assembled source material — idempotency dedupe
-  proposalId: integer('proposal_id'), // the filed recap proposal (status=succeeded)
-  proposalCount: integer('proposal_count').notNull().default(0),
-  tokensUsed: integer('tokens_used').notNull().default(0),
-  provider: text('provider').notNull().default(''),
-  detail: text('detail').notNull().default(''),
-  // Post-session exactly-once binding + archived assembly counts (#499).
-  scheduledSessionId: integer('scheduled_session_id'),
-  sourceStats: text('source_stats'),
-  // Issue #501: same generation provenance as the filed proposal, retained even
-  // for dry-run/no-proposal results.
-  generationProvenance: text('generation_provenance'),
-  createdBy: text('created_by').notNull().default(''),
-  createdAt: text('created_at').notNull(),
-});
+export const aiScribeJobs = sqliteTable(
+  'ai_scribe_jobs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+    trigger: text('trigger').notNull(), // 'on_demand' | 'post_session' | 'cron'
+    status: text('status').notNull(), // ScribeJobStatus
+    sourceHash: text('source_hash'), // sha256 of assembled source material — idempotency dedupe
+    proposalId: integer('proposal_id'), // the filed recap proposal (status=succeeded)
+    proposalCount: integer('proposal_count').notNull().default(0),
+    tokensUsed: integer('tokens_used').notNull().default(0),
+    provider: text('provider').notNull().default(''),
+    detail: text('detail').notNull().default(''),
+    // Post-session exactly-once binding + archived assembly counts (#499).
+    scheduledSessionId: integer('scheduled_session_id'),
+    sourceStats: text('source_stats'),
+    // Issue #501: same generation provenance as the filed proposal, retained even
+    // for dry-run/no-proposal results.
+    generationProvenance: text('generation_provenance'),
+    createdBy: text('created_by').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    campaignIdx: index('idx_ai_scribe_jobs_campaign').on(t.campaignId, t.createdAt),
+    sessionTriggerIdx: index('idx_ai_scribe_jobs_session_trigger').on(t.campaignId, t.scheduledSessionId, t.trigger),
+    campaignStatusHashIdx: index('idx_ai_scribe_jobs_campaign_status_hash').on(t.campaignId, t.status, t.sourceHash),
+  }),
+);
 
 // Inbox sweep (issue #1644) — one row per `POST /campaigns/:id/inbox/sweep` call, the
 // auditable job record the issue requires. Per-item outcomes live in `inboxSweepItems`.

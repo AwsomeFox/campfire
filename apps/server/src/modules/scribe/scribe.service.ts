@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   AiExternalContentPolicy,
@@ -593,37 +593,54 @@ export class ScribeService implements OnApplicationBootstrap {
     const sourcePreview: ScribeSourcePreview = { ...stats, estimatedPromptTokens: estimatePromptTokens(draft) };
 
     if (!force) {
-      const priorSucceeded = await this.db
-        .select()
+      const [pendingJob] = await this.db
+        .select({ proposalId: aiScribeJobs.proposalId })
         .from(aiScribeJobs)
-        .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.status, 'succeeded')))
-        .orderBy(desc(aiScribeJobs.id));
-      for (const prior of priorSucceeded) {
-        if (prior.proposalId === null) continue;
-        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, prior.proposalId)).limit(1);
-        if (prop?.status === 'pending') {
-          return this.record(campaignId, trigger, user, 'skipped', {
-            detail: 'a scribe recap proposal is already pending review',
-            proposalId: prior.proposalId,
-            sourceHash,
-            scope,
-            sourceStats: stats,
-            sourcePreview,
-          });
-        }
+        .innerJoin(proposals, eq(aiScribeJobs.proposalId, proposals.id))
+        .where(
+          and(
+            eq(aiScribeJobs.campaignId, campaignId),
+            eq(aiScribeJobs.status, 'succeeded'),
+            eq(proposals.status, 'pending'),
+          ),
+        )
+        .orderBy(desc(aiScribeJobs.id))
+        .limit(1);
+
+      if (pendingJob && pendingJob.proposalId !== null) {
+        return this.record(campaignId, trigger, user, 'skipped', {
+          detail: 'a scribe recap proposal is already pending review',
+          proposalId: pendingJob.proposalId,
+          sourceHash,
+          scope,
+          sourceStats: stats,
+          sourcePreview,
+        });
       }
-      for (const prior of priorSucceeded) {
-        if (prior.proposalId === null) continue;
-        if (prior.sourceHash === sourceHash) {
-          return this.record(campaignId, trigger, user, 'skipped', {
-            detail: 'identical source already drafted',
-            proposalId: prior.proposalId,
-            sourceHash,
-            scope,
-            sourceStats: stats,
-            sourcePreview,
-          });
-        }
+
+      const [identicalJob] = await this.db
+        .select({ proposalId: aiScribeJobs.proposalId })
+        .from(aiScribeJobs)
+        .where(
+          and(
+            eq(aiScribeJobs.campaignId, campaignId),
+            eq(aiScribeJobs.status, 'succeeded'),
+            eq(aiScribeJobs.sourceHash, sourceHash),
+            isNotNull(aiScribeJobs.proposalId),
+          ),
+        )
+        .orderBy(desc(aiScribeJobs.id))
+        .limit(1);
+
+      if (identicalJob && identicalJob.proposalId !== null) {
+        return this.record(campaignId, trigger, user, 'skipped', {
+          detail: 'identical source already drafted',
+          proposalId: identicalJob.proposalId,
+          sourceHash,
+          scope,
+          sourceStats: stats,
+          sourcePreview,
+        });
       }
     }
 
