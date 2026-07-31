@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ListDetailLink } from '../../components/ListDetailLink';
+import { EntityCard } from '../../components/EntityCard';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -17,7 +17,6 @@ import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
-import { initials } from '../../lib/avatarText';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function NpcListPage() {
@@ -194,43 +193,28 @@ export default function NpcListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
-              <ListDetailLink
+              <EntityCard
                 key={npc.id}
                 to={`/c/${id}/npcs/${npc.id}`}
-                className="cf-card cf-card-hover cf-density-compact space-y-2"
-              >
-                <div className="flex items-center gap-2.5">
-                  {npc.portraitUrl ? (
-                    <img
-                      src={npc.portraitUrl}
-                      alt=""
-                      className="h-9 w-9 shrink-0 rounded-full object-cover border border-[var(--color-divider)]"
-                    />
-                  ) : (
-                    <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">
-                      <GameIcon
-                        slug={npc.iconSlug}
-                        size={UI_ICON_SIZE.lg}
-                        title={npc.name}
-                        className="text-[var(--color-accent)]"
-                        fallback={initials(npc.name)}
-                      />
-                    </span>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={npc.name} aria-label={`NPC: ${npc.name}`}>{npc.name}</p>
-                    {npc.role && <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={npc.role}>{npc.role}</p>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <NpcDispositionBadge disposition={npc.disposition} />
-                  {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
-                  {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
-                  {locationName(npc.locationId) && (
-                    <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>
-                  )}
-                </div>
-              </ListDetailLink>
+                className="cf-card-hover"
+                title={npc.name}
+                aria-label={`NPC: ${npc.name}`}
+                nameClassName="font-bold text-slate-200 text-sm truncate cf-name-reveal"
+                /* className="font-bold text-slate-200 text-sm truncate cf-name-reveal" */
+                subtitle={npc.role}
+                portraitUrl={npc.portraitUrl}
+                iconSlug={npc.iconSlug}
+                badges={
+                  <>
+                    <NpcDispositionBadge disposition={npc.disposition} />
+                    {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
+                    {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
+                    {locationName(npc.locationId) && (
+                      <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>
+                    )}
+                  </>
+                }
+              />
             ))}
           </div>
         )}

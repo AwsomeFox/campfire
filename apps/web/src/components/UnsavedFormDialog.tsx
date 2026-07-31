@@ -5,9 +5,7 @@
  * discard local work, or save before leaving.
  */
 import { useEffect, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Btn } from './ui';
-import { useDialog } from './useDialog';
+import { Btn, Dialog } from './ui';
 import { resolveBusyConfirmLabel } from './confirmDialogLabel';
 
 export function UnsavedFormDialog({
@@ -40,13 +38,6 @@ export function UnsavedFormDialog({
   const busySaveLabel = resolveBusyConfirmLabel(saveLabel, pendingSaveLabel);
   const saveText = busy ? busySaveLabel : saveLabel;
 
-  const dialogRef = useDialog<HTMLDivElement>({
-    onClose: onKeep,
-    disabled: busy,
-    autoFocus: false,
-    inertBackground: true,
-  });
-
   useEffect(() => {
     keepRef.current?.focus();
   }, []);
@@ -59,27 +50,15 @@ export function UnsavedFormDialog({
     wasBusy.current = busy;
   }, [busy, busySaveLabel]);
 
-  return createPortal(
-    <div className="dialog-backdrop" data-overlay="dialog" onClick={() => !busy && onKeep()}>
-      <div
-        ref={dialogRef}
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-busy={busy || undefined}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <p className="dialog-title" id={titleId}>
-          {title}
-        </p>
-        {body && <div className="dialog-body">{body}</div>}
-        {liveStatus ? (
-          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-            {liveStatus}
-          </span>
-        ) : null}
-        <div className="dialog-actions">
+  return (
+    <Dialog
+      title={title}
+      titleId={titleId}
+      onBackdropClick={() => !busy && onKeep()}
+      initialFocusRef={keepRef}
+      ariaBusy={busy}
+      actions={
+        <>
           <Btn ghost ref={keepRef} onClick={onKeep} disabled={busy}>
             {keepLabel}
           </Btn>
@@ -89,9 +68,15 @@ export function UnsavedFormDialog({
           <Btn onClick={onSave} busy={busy} disabled={busy || saveDisabled}>
             {saveText}
           </Btn>
-        </div>
-      </div>
-    </div>,
-    document.body,
+        </>
+      }
+    >
+      {body}
+      {liveStatus ? (
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {liveStatus}
+        </span>
+      ) : null}
+    </Dialog>
   );
 }

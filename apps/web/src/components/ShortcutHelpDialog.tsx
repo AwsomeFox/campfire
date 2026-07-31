@@ -1,5 +1,4 @@
 import { useEffect, useId, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   DEFAULT_KEYBOARD_BINDINGS,
@@ -12,8 +11,7 @@ import {
   type KeyboardCommandId,
   type KeyChord,
 } from '../lib/keyboardCommands/keyboardCommandRegistry';
-import { useDialog } from './useDialog';
-import { Btn } from './ui';
+import { Btn, Dialog } from './ui';
 
 export function ShortcutHelpDialog({
   bindings,
@@ -30,7 +28,6 @@ export function ShortcutHelpDialog({
   const [rebindingId, setRebindingId] = useState<KeyboardCommandId | null>(null);
   const [rebindError, setRebindError] = useState<string | null>(null);
   const titleId = useId();
-  const dialogRef = useDialog<HTMLDivElement>({ onClose, inertBackground: true });
   const conflicts = findBindingConflicts(bindings);
 
   useEffect(() => {
@@ -68,84 +65,16 @@ export function ShortcutHelpDialog({
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [rebindingId, bindings, onSetBinding, t]);
 
-  return createPortal(
-    <div className="dialog-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        data-keyboard-command-overlay
-        className="dialog w-full max-w-2xl max-h-[85vh] overflow-y-auto"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <h2 id={titleId} className="text-lg font-semibold text-white mb-1">
-          {t('keyboard.helpTitle')}
-        </h2>
-        <p className="text-sm text-muted mb-4">{t('keyboard.helpIntro')}</p>
-        {rebindError && (
-          <p className="text-sm text-rose-400 mb-3" role="alert">
-            {rebindError}
-          </p>
-        )}
-        <table className="w-full text-sm mb-4">
-          <thead>
-            <tr className="text-left text-muted border-b border-[var(--color-divider)]">
-              <th className="py-2 pr-3 font-medium">{t('keyboard.helpColumnAction')}</th>
-              <th className="py-2 pr-3 font-medium">{t('keyboard.helpColumnShortcut')}</th>
-              <th className="py-2 font-medium">{t('keyboard.helpColumnChange')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {KEYBOARD_COMMANDS.map((cmd) => {
-              const chord = bindings[cmd.id];
-              const altLabels = (cmd.altChords ?? [])
-                .filter((alt) => !chordsEqual(alt, chord))
-                .map((alt) => formatChordLabel(alt));
-              return (
-                <tr key={cmd.id} className="border-b border-[var(--color-divider)] align-top">
-                  <td className="py-3 pr-3">
-                    <div className="font-medium text-white">{cmd.label}</div>
-                    <div className="text-muted text-xs mt-0.5">{cmd.description}</div>
-                    {cmd.contextHint && (
-                      <div className="text-muted text-xs mt-0.5">{cmd.contextHint}</div>
-                    )}
-                  </td>
-                  <td className="py-3 pr-3 whitespace-nowrap">
-                    <kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-[var(--color-divider)]">
-                      {formatChordLabel(chord)}
-                    </kbd>
-                    {altLabels.length > 0 && (
-                      <span className="text-muted text-xs block mt-1">
-                        {t('keyboard.also')} {altLabels.join(', ')}
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-3">
-                    <Btn density="xs"
-                      type="button"
-                      ghost
-                      className="text-xs"
-                      aria-pressed={rebindingId === cmd.id}
-                      onClick={() => {
-                        setRebindError(null);
-                        setRebindingId((current) => (current === cmd.id ? null : cmd.id));
-                      }}
-                    >
-                      {rebindingId === cmd.id ? t('keyboard.rebindListening') : t('keyboard.rebind')}
-                    </Btn>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {conflicts.size > 0 && (
-          <p className="text-xs text-amber-300 mb-3" role="status">
-            {t('keyboard.conflictWarning')}
-          </p>
-        )}
-        <div className="flex justify-between gap-2">
+  return (
+    <Dialog
+      title={t('keyboard.helpTitle')}
+      titleId={titleId}
+      titleAs="h2"
+      className="w-full max-w-2xl max-h-[85vh] overflow-y-auto"
+      onBackdropClick={onClose}
+      data-keyboard-command-overlay
+      actions={
+        <div className="flex justify-between gap-2 w-full">
           <Btn type="button" ghost onClick={onReset}>
             {t('keyboard.resetDefaults')}
           </Btn>
@@ -153,8 +82,71 @@ export function ShortcutHelpDialog({
             {t('nav.done')}
           </Btn>
         </div>
-      </div>
-    </div>,
-    document.body,
+      }
+    >
+      <p className="text-sm text-muted mb-4">{t('keyboard.helpIntro')}</p>
+      {rebindError && (
+        <p className="text-sm text-rose-400 mb-3" role="alert">
+          {rebindError}
+        </p>
+      )}
+      <table className="w-full text-sm mb-4">
+        <thead>
+          <tr className="text-left text-muted border-b border-[var(--color-divider)]">
+            <th className="py-2 pr-3 font-medium">{t('keyboard.helpColumnAction')}</th>
+            <th className="py-2 pr-3 font-medium">{t('keyboard.helpColumnShortcut')}</th>
+            <th className="py-2 font-medium">{t('keyboard.helpColumnChange')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {KEYBOARD_COMMANDS.map((cmd) => {
+            const chord = bindings[cmd.id];
+            const altLabels = (cmd.altChords ?? [])
+              .filter((alt) => !chordsEqual(alt, chord))
+              .map((alt) => formatChordLabel(alt));
+            return (
+              <tr key={cmd.id} className="border-b border-[var(--color-divider)] align-top">
+                <td className="py-3 pr-3">
+                  <div className="font-medium text-white">{cmd.label}</div>
+                  <div className="text-muted text-xs mt-0.5">{cmd.description}</div>
+                  {cmd.contextHint && (
+                    <div className="text-muted text-xs mt-0.5">{cmd.contextHint}</div>
+                  )}
+                </td>
+                <td className="py-3 pr-3 whitespace-nowrap">
+                  <kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-[var(--color-divider)]">
+                    {formatChordLabel(chord)}
+                  </kbd>
+                  {altLabels.length > 0 && (
+                    <span className="text-muted text-xs block mt-1">
+                      {t('keyboard.also')} {altLabels.join(', ')}
+                    </span>
+                  )}
+                </td>
+                <td className="py-3">
+                  <Btn density="xs"
+                    type="button"
+                    ghost
+                    className="text-xs"
+                    aria-pressed={rebindingId === cmd.id}
+                    onClick={() => {
+                      setRebindError(null);
+                      setRebindingId((current) => (current === cmd.id ? null : cmd.id));
+                    }}
+                  >
+                    {rebindingId === cmd.id ? t('keyboard.rebindListening') : t('keyboard.rebind')}
+                  </Btn>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {conflicts.size > 0 && (
+        <p className="text-xs text-amber-300 mb-3" role="status">
+          {t('keyboard.conflictWarning')}
+        </p>
+      )}
+    </Dialog>
   );
 }

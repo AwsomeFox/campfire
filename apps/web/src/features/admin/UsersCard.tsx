@@ -12,9 +12,8 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ServerRole, User } from '@campfire/schema';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
-import { Card, Btn, TextInput, EmptyState } from '../../components/ui';
+import { Card, Btn, TextInput, EmptyState, Dialog } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { useDialog } from '../../components/useDialog';
 import { useAnnounce } from '../../components/Announcer';
 
 export function UsersCard({ users, onChange }: { users: User[]; onChange: () => void }) {
@@ -137,8 +136,6 @@ function NewUserForm({
   const roleId = `${idPrefix}-role`;
   const roleHelpId = `${idPrefix}-role-help`;
 
-  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel, disabled: saving });
-
   async function create(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (savingRef.current) return;
@@ -193,134 +190,130 @@ function NewUserForm({
   }
 
   return (
-    <div className="dialog-backdrop" style={{ zIndex: 50 }} onClick={() => !saving && onCancel()}>
-      <div
-        ref={dialogRef}
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-        aria-busy={saving}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="dialog-title" id={titleId}>New user</h2>
-        <p className="dialog-body" id={descriptionId}>
-          Create a Campfire account. You can add the user to campaigns after creation.
-        </p>
+    <Dialog
+      title="New user"
+      titleId={titleId}
+      titleAs="h2"
+      descId={descriptionId}
+      backdropStyle={{ zIndex: 50 }}
+      onBackdropClick={() => !saving && onCancel()}
+      ariaBusy={saving}
+      actions={
+        <>
+          <Btn ghost type="button" aria-label="Cancel creating user" onClick={onCancel} disabled={saving}>
+            Cancel
+          </Btn>
+          <Btn type="submit" form="new-user-form" disabled={saving}>
+            {saving ? 'Creating…' : 'Create user'}
+          </Btn>
+        </>
+      }
+    >
+      <p className="text-sm text-slate-400 mb-3" id={descriptionId}>
+        Create a Campfire account. You can add the user to campaigns after creation.
+      </p>
 
-        <form className="space-y-3" onSubmit={create} noValidate>
-          <div className="field">
-            <label htmlFor={usernameId}>Username</label>
-            <TextInput
-              id={usernameId}
-              name="username"
-              value={username}
-              onChange={(e) => {
-                setUsername(e.target.value);
-                setFieldErrors((current) => ({ ...current, username: undefined }));
-              }}
-              autoComplete="username"
-              minLength={2}
-              maxLength={60}
-              pattern="[A-Za-z0-9_.-]+"
-              required
-              aria-invalid={!!fieldErrors.username}
-              aria-describedby={`${usernameHelpId}${fieldErrors.username ? ` ${usernameErrorId}` : ''}`}
-            />
-            <p id={usernameHelpId} className="mt-1 text-xs text-slate-400">
-              2–60 characters; letters, numbers, underscores, periods, and hyphens.
+      <form id="new-user-form" className="space-y-3" onSubmit={create} noValidate>
+        <div className="field">
+          <label htmlFor={usernameId}>Username</label>
+          <TextInput
+            id={usernameId}
+            name="username"
+            value={username}
+            onChange={(e) => {
+              setUsername(e.target.value);
+              setFieldErrors((current) => ({ ...current, username: undefined }));
+            }}
+            autoComplete="username"
+            minLength={2}
+            maxLength={60}
+            pattern="[A-Za-z0-9_.-]+"
+            required
+            aria-invalid={!!fieldErrors.username}
+            aria-describedby={`${usernameHelpId}${fieldErrors.username ? ` ${usernameErrorId}` : ''}`}
+          />
+          <p id={usernameHelpId} className="mt-1 text-xs text-slate-400">
+            2–60 characters; letters, numbers, underscores, periods, and hyphens.
+          </p>
+          {fieldErrors.username && (
+            <p id={usernameErrorId} role="alert" className="mt-1 text-xs text-rose-400">
+              {fieldErrors.username}
             </p>
-            {fieldErrors.username && (
-              <p id={usernameErrorId} role="alert" className="mt-1 text-xs text-rose-400">
-                {fieldErrors.username}
-              </p>
-            )}
-          </div>
+          )}
+        </div>
 
-          <div className="field">
-            <label htmlFor={displayNameId}>
-              Display name <span className="text-slate-400 normal-case tracking-normal">· optional</span>
-            </label>
-            <TextInput
-              id={displayNameId}
-              name="displayName"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              autoComplete="name"
-              maxLength={120}
-              aria-describedby={displayNameHelpId}
-            />
-            <p id={displayNameHelpId} className="mt-1 text-xs text-slate-400">
-              Shown to other Campfire users instead of the username.
+        <div className="field">
+          <label htmlFor={displayNameId}>
+            Display name <span className="text-slate-400 normal-case tracking-normal">· optional</span>
+          </label>
+          <TextInput
+            id={displayNameId}
+            name="displayName"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            autoComplete="name"
+            maxLength={120}
+            aria-describedby={displayNameHelpId}
+          />
+          <p id={displayNameHelpId} className="mt-1 text-xs text-slate-400">
+            Shown to other Campfire users instead of the username.
+          </p>
+        </div>
+
+        <div className="field">
+          <label htmlFor={passwordId}>Temporary password</label>
+          <TextInput
+            id={passwordId}
+            name="password"
+            type="password"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setFieldErrors((current) => ({ ...current, password: undefined }));
+            }}
+            autoComplete="new-password"
+            minLength={8}
+            maxLength={200}
+            required
+            aria-invalid={!!fieldErrors.password}
+            aria-describedby={`${passwordHelpId}${fieldErrors.password ? ` ${passwordErrorId}` : ''}`}
+          />
+          <p id={passwordHelpId} className="mt-1 text-xs text-slate-400">
+            At least 8 characters. The user can change this after signing in.
+          </p>
+          {fieldErrors.password && (
+            <p id={passwordErrorId} role="alert" className="mt-1 text-xs text-rose-400">
+              {fieldErrors.password}
             </p>
-          </div>
+          )}
+        </div>
 
-          <div className="field">
-            <label htmlFor={passwordId}>Temporary password</label>
-            <TextInput
-              id={passwordId}
-              name="password"
-              type="password"
-              value={password}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                setFieldErrors((current) => ({ ...current, password: undefined }));
-              }}
-              autoComplete="new-password"
-              minLength={8}
-              maxLength={200}
-              required
-              aria-invalid={!!fieldErrors.password}
-              aria-describedby={`${passwordHelpId}${fieldErrors.password ? ` ${passwordErrorId}` : ''}`}
-            />
-            <p id={passwordHelpId} className="mt-1 text-xs text-slate-400">
-              At least 8 characters. Share it with the user through a secure channel.
-            </p>
-            {fieldErrors.password && (
-              <p id={passwordErrorId} role="alert" className="mt-1 text-xs text-rose-400">
-                {fieldErrors.password}
-              </p>
-            )}
-          </div>
+        <div className="field">
+          <label htmlFor={roleId}>Server role</label>
+          <select
+            id={roleId}
+            name="serverRole"
+            className="input"
+            value={serverRole}
+            onChange={(e) => setServerRole(e.target.value as ServerRole)}
+            aria-describedby={roleHelpId}
+          >
+            <option value="user">User — campaign membership only</option>
+            <option value="admin">Admin — server configuration and user management</option>
+          </select>
+          <p id={roleHelpId} className="mt-1 text-xs text-slate-400">
+            Admins can manage users, system settings, and server backups.
+          </p>
+        </div>
 
-          <div className="field">
-            <label htmlFor={roleId}>Server role</label>
-            <select
-              id={roleId}
-              name="serverRole"
-              className="cf-select"
-              value={serverRole}
-              onChange={(e) => setServerRole(e.target.value as ServerRole)}
-              aria-describedby={roleHelpId}
-            >
-              <option value="user">User</option>
-              <option value="admin">Admin</option>
-            </select>
-            <p id={roleHelpId} className="mt-1 text-xs text-slate-400">
-              Admins can manage server settings and user accounts.
-            </p>
-          </div>
+        {submitError && (
+          <p role="alert" className="text-xs text-rose-400">
+            {submitError}
+          </p>
+        )}
 
-          {submitError && <p role="alert" className="text-sm text-rose-400">{submitError}</p>}
-
-          <div className="dialog-actions">
-            <Btn
-              ghost
-              type="button"
-              aria-label="Cancel creating user"
-              onClick={onCancel}
-              disabled={saving}
-            >
-              Cancel
-            </Btn>
-            <Btn type="submit" disabled={saving}>
-              {saving ? 'Creating…' : 'Create user'}
-            </Btn>
-          </div>
-        </form>
-      </div>
-    </div>
+      </form>
+    </Dialog>
   );
 }
 

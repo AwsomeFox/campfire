@@ -113,7 +113,7 @@ export function GroundingPanel({ campaignId, isDm }: GroundingPanelProps) {
   return (
     <div
       className="cf-inset p-4 flex flex-col gap-3"
-      style={{ borderColor: '#f59e0b', background: 'color-mix(in srgb, #f59e0b 7%, transparent)' }}
+      style={{ borderColor: 'var(--color-amber, #f59e0b)', background: 'color-mix(in srgb, var(--color-amber, #f59e0b) 7%, transparent)' }}
       role="region"
       aria-label={t('table.grounding.title')}
     >
@@ -139,7 +139,7 @@ export function GroundingPanel({ campaignId, isDm }: GroundingPanelProps) {
                   background:
                     claim.status === 'corrected'
                       ? 'color-mix(in srgb, var(--color-accent) 20%, transparent)'
-                      : 'color-mix(in srgb, #f59e0b 22%, transparent)',
+                      : 'color-mix(in srgb, var(--color-amber, #f59e0b) 22%, transparent)',
                 }}
               >
                 {claim.status === 'corrected' ? t('table.grounding.corrected') : t('table.grounding.unverified')}
