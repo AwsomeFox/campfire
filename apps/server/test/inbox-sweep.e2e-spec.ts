@@ -205,6 +205,9 @@ describe('inbox sweep (e2e)', () => {
     const second = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
     expect(second.status).toBe(201);
     expect(second.body.job.itemsTotal).toBe(0);
+    expect(second.body.job.itemsNewlyProposed).toBe(0);
+    expect(second.body.job.itemsNewlySkipped).toBe(0);
+    expect(second.body.job.itemsNewlyErrored).toBe(0);
     expect(classifier.calls).toHaveLength(1);
 
     const proposals = await request(server).get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`).set(dm);
