@@ -273,6 +273,7 @@ function NewUserForm({
             }}
             autoComplete="new-password"
             minLength={8}
+            maxLength={200}
             required
             aria-invalid={!!fieldErrors.password}
             aria-describedby={`${passwordHelpId}${fieldErrors.password ? ` ${passwordErrorId}` : ''}`}

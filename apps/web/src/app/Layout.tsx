@@ -86,6 +86,10 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (newPassword.length < 8) {
+      setError('New password must be at least 8 characters.');
+      return;
+    }
     if (newPassword !== confirm) {
       setError(t('nav.passwordsDoNotMatch'));
       return;
