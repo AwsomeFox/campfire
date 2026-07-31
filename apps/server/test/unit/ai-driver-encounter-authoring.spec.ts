@@ -70,7 +70,7 @@ describe('AI Driver encounter authoring (#1022)', () => {
   // Creation: visibility is not the seat's to choose
   // ---------------------------------------------------------------------------
 
-  it('defaults hidden:false on create so the encounter is visible to players (#1498)', () => {
+  it('drops hidden arg from create_encounter so private-by-default rule applies (#1498)', () => {
     const s = session();
     const result = guardDriverLivePlayArgs(
       'create_encounter',
@@ -79,15 +79,15 @@ describe('AI Driver encounter authoring (#1022)', () => {
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.args.hidden).toBe(false);
-      expect(result.args).toEqual({ campaignId: 1, name: 'Wandering wolves', hidden: false });
+      expect(result.args.hidden).toBeUndefined();
+      expect(result.args).toEqual({ campaignId: 1, name: 'Wandering wolves' });
     }
   });
 
-  it('preserves explicit hidden:true on create if passed (#1498)', () => {
+  it('drops explicit hidden:true on create if passed (#1498)', () => {
     const result = guardDriverLivePlayArgs('create_encounter', { campaignId: 1, name: 'Ambush', hidden: true }, session());
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.args.hidden).toBe(true);
+    if (result.ok) expect(result.args.hidden).toBeUndefined();
   });
 
   it('leaves the rest of a create untouched — name and links are legitimate on a NEW row', () => {
