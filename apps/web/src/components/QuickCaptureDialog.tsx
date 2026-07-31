@@ -50,10 +50,10 @@ export function QuickCaptureDialog({
 
   return (
     <Dialog
-      title={<span className="text-lg font-semibold text-white">{t('keyboard.quickCaptureTitle')}</span>}
+      title={t('keyboard.quickCaptureTitle')}
       titleId={titleId}
       titleAs="h2"
-      className="w-full max-w-lg"
+      className="w-full max-w-lg [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white [&_.dialog-title]:mb-2"
       onBackdropClick={() => !saving && onClose()}
       initialFocusRef={inputRef}
       ariaBusy={saving}
@@ -63,7 +63,7 @@ export function QuickCaptureDialog({
           <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
           {error && <ErrorNote message={error} />}
           {!isDm && (
-            <div className="flex gap-2 mb-2.5 text-xs">
+            <div className="flex gap-2 mb-2 text-xs">
               <button
                 type="button"
                 className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
