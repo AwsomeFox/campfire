@@ -6527,6 +6527,8 @@ export class EncountersService {
    * (create() only auto-adds 'active' PCs, issue #115). A revived (hp > 0) character is
    * explicitly kept 'active' here so the death doesn't linger past a real revival —
    * revival is a deliberate transition, never a side effect.
+   * Issue #1758: preserve explicit non-active lifecycle statuses (e.g. 'retired', 'inactive', 'draft')
+   * so ending an encounter does not overwrite a caller's deliberate non-active choice.
    */
   async end(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -6551,15 +6553,29 @@ export class EncountersService {
       // structured copy travels with them, stripped to sheet scope.
       conditions: string;
       conditionInstances: string;
-      status: 'active' | 'dead';
+      status: string;
       sheetSyncedUpdatedAt: string | null;
     };
-    const planCharacterWrites = (sourceRows: Array<typeof combatants.$inferSelect>): CharacterWrite[] =>
+    const planCharacterWrites = (
+      sourceRows: Array<typeof combatants.$inferSelect>,
+      priors: Map<number, { status: string }>,
+    ): CharacterWrite[] =>
       sourceRows.flatMap((row) => {
         if (row.kind !== 'character' || row.characterId === null) return [];
+        const priorStatus = priors.get(row.characterId)?.status;
         const dead = row.deathState === 'dead';
-        const revived = !dead && row.hpCurrent > 0;
-        const nextStatus: 'active' | 'dead' | undefined = dead ? 'dead' : revived ? 'active' : undefined;
+        let nextStatus: string;
+        if (dead) {
+          nextStatus = 'dead';
+        } else if (priorStatus === 'dead') {
+          // Revival is deliberate and mirrors the sheet policy: only a positive-HP,
+          // fully-recovered PC leaves 'dead'. dying/stable stay 'dead'.
+          nextStatus = row.hpCurrent > 0 && row.deathState === 'none' ? 'active' : 'dead';
+        } else if (priorStatus && priorStatus !== 'active') {
+          nextStatus = priorStatus;
+        } else {
+          nextStatus = 'active';
+        }
         return [{
           combatantId: row.id,
           characterId: row.characterId,
@@ -6573,7 +6589,7 @@ export class EncountersService {
           deathSaveSuccesses: row.deathSaveSuccesses,
           deathSaveFailures: row.deathSaveFailures,
           ...sheetConditionWriteSetFromInstances(readConditionInstances(row.conditionInstances, row.conditions)),
-          status: nextStatus ?? 'active',
+          status: nextStatus,
           sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
         }];
       });
@@ -6623,10 +6639,9 @@ export class EncountersService {
         });
       }
       rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
-      characterWrites = planCharacterWrites(rows);
       priorById.clear();
-      const freshCharacterIds = characterWrites.map((w) => w.characterId);
-      if (freshCharacterIds.length > 0) {
+      const rawCharacterIds = rows.flatMap((r) => (r.kind === 'character' && r.characterId !== null ? [r.characterId] : []));
+      if (rawCharacterIds.length > 0) {
         const freshPriorRows = tx
           .select({
             id: characters.id,
@@ -6643,10 +6658,11 @@ export class EncountersService {
             deathSaveFailures: characters.deathSaveFailures,
           })
           .from(characters)
-          .where(inArray(characters.id, freshCharacterIds))
+          .where(inArray(characters.id, rawCharacterIds))
           .all();
         for (const row of freshPriorRows) priorById.set(row.id, row);
       }
+      characterWrites = planCharacterWrites(rows, priorById);
       endConflicts = [];
       for (const w of characterWrites) {
         const prior = priorById.get(w.characterId);

@@ -3170,6 +3170,23 @@ describe('encounters — issue #1492: reviving a downed PC from the sheet mirror
     expect(charRes.body.hpCurrent).toBe(1);
     expect(charRes.body.deathSaveFailures).toBe(0);
   });
+
+  it('ending the encounter preserves an explicit non-active status set mid-encounter (#1758)', async () => {
+    await request(server).post(`/api/v1/encounters/${encounterId}/reopen`).set(dm);
+    const patchRes = await request(server)
+      .patch(`/api/v1/characters/${charId}`)
+      .set(dm)
+      .send({ deathState: 'none', hpCurrent: 5, status: 'retired' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.status).toBe('retired');
+
+    const endRes = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+
+    const charRes = await request(server).get(`/api/v1/characters/${charId}`).set(dm);
+    expect(charRes.body.status).toBe('retired');
+    expect(charRes.body.hpCurrent).toBe(5);
+  });
 });
 
 describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e2e)', () => {
