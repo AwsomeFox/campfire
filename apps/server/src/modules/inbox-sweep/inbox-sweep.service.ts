@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Note, Role } from '@campfire/schema';
 import {
   CharacterCreate,
@@ -204,17 +204,16 @@ export class InboxSweepService implements OnModuleInit {
 
   /**
    * #1716 review: a server that is restarted while a background sweep is running never
-   * sees that sweep complete. Reconcile any stale `running` jobs left by a prior process
-   * so clients don't poll them forever. A 10-minute grace period covers the normal fast
-   * path before we declare the job orphaned.
+   * sees that sweep complete. Reconcile any `running` jobs left by a prior process so
+   * clients don't poll them forever. A starting process cannot own a `running` row, so
+   * every one of them is an orphan.
    */
   async onModuleInit(): Promise<void> {
-    const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     try {
       const stale = await this.db
         .select()
         .from(inboxSweepJobs)
-        .where(and(eq(inboxSweepJobs.status, 'running'), lt(inboxSweepJobs.createdAt, cutoff)))
+        .where(eq(inboxSweepJobs.status, 'running'))
         .all();
       for (const job of stale) {
         this.logger.warn(`Reconciling stale inbox sweep job ${job.id} (created ${job.createdAt}) as failed`);
@@ -284,10 +283,23 @@ export class InboxSweepService implements OnModuleInit {
     // cannot be aborted by the 120s write-budget timeout. Fast sweeps still return
     // the full result in the POST response; slower ones return a running job.
     const sweep = this.performInboxSweep(campaignId, user, role, job, openItems);
+    // #1716 review: never leave the background sweep promise unobserved. Once the
+    // request returns, an unhandled rejection in the detached promise could terminate
+    // the whole Node process. Keep the timer handle so the dangling 8s timeout is
+    // cleared if the sweep wins the race.
+    sweep.catch((err) => {
+      this.logger.error(
+        `Background inbox sweep rejected for campaign ${campaignId}, job ${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const fastResult = await Promise.race([
       sweep,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 8000);
+      }),
     ]);
+    if (timer) clearTimeout(timer);
     if (fastResult !== null) return fastResult;
     return this.getInboxSweepResult(campaignId, job.id);
   }

@@ -318,7 +318,6 @@ export default function InboxPage() {
 
       if (result.job.status === 'failed') {
         setSweepError(result.job.detail || t('notes.sweepFailed'));
-        return;
       }
 
       setSweepResult(result);
