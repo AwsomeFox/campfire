@@ -2,7 +2,7 @@
  * Quick manual statblock editor (issue #425) — AC, abilities, actions with inline help.
  * Used in the add-combatant manual tab and inline on existing manual monsters.
  */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { CharacterAction, CombatantStatblock } from '@campfire/schema';
 import {
@@ -33,6 +33,26 @@ export function CombatantStatblockEditor({
 
   const patch = (partial: Partial<CombatantStatblock>) => onChange({ ...statblock, ...partial });
 
+  const [acDraft, setAcDraft] = useState<string>(() => String(statblock.ac ?? 10));
+  const [abilityDrafts, setAbilityDrafts] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const ab of ABILITIES) {
+      initial[ab] = String(statblock.abilityScores[ab] ?? 10);
+    }
+    return initial;
+  });
+
+  useEffect(() => {
+    setAcDraft(String(statblock.ac ?? 10));
+    setAbilityDrafts(() => {
+      const next: Record<string, string> = {};
+      for (const ab of ABILITIES) {
+        next[ab] = String(statblock.abilityScores[ab] ?? 10);
+      }
+      return next;
+    });
+  }, [statblock.ac, statblock.abilityScores]);
+
   const patchAction = (index: number, partial: Partial<CharacterAction>) => {
     const actions = [...statblock.actions];
     actions[index] = { ...actions[index], ...partial };
@@ -52,10 +72,16 @@ export function CombatantStatblockEditor({
           min={0}
           max={40}
           disabled={disabled}
-          value={statblock.ac ?? 10}
+          value={acDraft}
           onChange={(e) => {
-            const parsed = parseLocalizedInteger(e.target.value);
+            const raw = e.target.value;
+            setAcDraft(raw);
+            const parsed = parseLocalizedInteger(raw);
             if (parsed.ok) patch({ ac: parsed.value });
+          }}
+          onBlur={() => {
+            const parsed = parseLocalizedInteger(acDraft);
+            if (!parsed.ok) setAcDraft(String(statblock.ac ?? 10));
           }}
           aria-describedby="statblock-ac-help"
         />
@@ -76,13 +102,21 @@ export function CombatantStatblockEditor({
                 type="number"
                 className="input !min-h-8"
                 disabled={disabled}
-                value={statblock.abilityScores[ab] ?? 10}
+                value={abilityDrafts[ab] ?? String(statblock.abilityScores[ab] ?? 10)}
                 onChange={(e) => {
-                  const parsed = parseLocalizedInteger(e.target.value);
+                  const raw = e.target.value;
+                  setAbilityDrafts((prev) => ({ ...prev, [ab]: raw }));
+                  const parsed = parseLocalizedInteger(raw);
                   if (parsed.ok) {
                     patch({
                       abilityScores: { ...statblock.abilityScores, [ab]: parsed.value },
                     });
+                  }
+                }}
+                onBlur={() => {
+                  const parsed = parseLocalizedInteger(abilityDrafts[ab] ?? '');
+                  if (!parsed.ok) {
+                    setAbilityDrafts((prev) => ({ ...prev, [ab]: String(statblock.abilityScores[ab] ?? 10) }));
                   }
                 }}
               />

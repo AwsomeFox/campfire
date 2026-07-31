@@ -77,7 +77,7 @@ import {
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
-import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
+import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import {
@@ -2736,7 +2736,7 @@ export default function RunSessionPage() {
           message={actionError?.message ?? loadError ?? ''}
           context={
             actionError
-              ? `at ${new Date(actionError.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+              ? `at ${formatTime(actionError.at)}`
               : undefined
           }
           onRetry={() => {

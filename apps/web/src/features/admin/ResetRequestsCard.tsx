@@ -133,7 +133,7 @@ export function ResetRequestsCard() {
                     />
                   </div>
                   <p className="text-[11px] text-secondary">
-                    Expires {new Date(approval.expiresAt).toLocaleTimeString()} · single-use · they set their own
+                    Expires {formatTime(approval.expiresAt)} · single-use · they set their own
                     password at /reset-password.
                   </p>
                 </div>

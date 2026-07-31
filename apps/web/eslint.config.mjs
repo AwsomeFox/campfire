@@ -46,24 +46,27 @@ const noBareToLocaleString = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Disallow .toLocaleString() calls in apps/web/src. Use formatNumber, formatDateTime, or formatDate from src/lib/format.',
+      description:
+        'Disallow .toLocaleString(), .toLocaleTimeString(), and .toLocaleDateString() calls in apps/web/src. Use formatters from src/lib/format.',
     },
     messages: {
-      noBare: 'Do not use .toLocaleString() directly. Use formatNumber, formatDateTime, or formatDate from src/lib/format instead.',
+      noBare:
+        'Do not use .toLocaleString(), .toLocaleTimeString(), or .toLocaleDateString() directly. Use formatNumber, formatDateTime, formatDate, or formatTime from src/lib/format instead.',
     },
     schema: [],
   },
   create(context) {
+    const BANNED_METHODS = new Set(['toLocaleString', 'toLocaleTimeString', 'toLocaleDateString']);
     return {
       CallExpression(node) {
         if (
           node.callee.type === 'MemberExpression' &&
           !node.callee.computed &&
           node.callee.property.type === 'Identifier' &&
-          node.callee.property.name === 'toLocaleString'
+          BANNED_METHODS.has(node.callee.property.name)
         ) {
-          const filename = context.filename || context.getFilename?.() || '';
-          if (filename.includes('lib/format.ts') || filename.includes('/e2e/') || filename.includes('\\e2e\\')) return;
+          const filename = (context.filename || context.getFilename?.() || '').replace(/\\/g, '/');
+          if (filename.includes('lib/format.ts') || filename.includes('/e2e/')) return;
 
           context.report({
             node,

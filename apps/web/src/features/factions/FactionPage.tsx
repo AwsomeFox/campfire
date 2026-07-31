@@ -57,7 +57,7 @@ export default function FactionPage() {
   const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: '', kind: '', body: '', goals: '', dmSecret: '', hidden: false, standing: 'neutral' as FactionStanding, reputation: 0 });
+  const [form, setForm] = useState({ name: '', kind: '', body: '', goals: '', dmSecret: '', hidden: false, standing: 'neutral' as FactionStanding, reputation: 0, reputationText: '0' });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -105,6 +105,7 @@ export default function FactionPage() {
       hidden: faction.hidden,
       standing: faction.standing,
       reputation: faction.reputation,
+      reputationText: String(faction.reputation),
     });
     setSaveError(null);
     setFieldErrors({});
@@ -143,6 +144,12 @@ export default function FactionPage() {
       document.getElementById(labeledFieldIds(FACTION_EDITOR_ID_PREFIX, FACTION_FIELD_NAMES.name).controlId)?.focus();
       return;
     }
+    const repParsed = parseLocalizedInteger(form.reputationText, undefined, { min: -100, max: 100 });
+    if (!repParsed.ok) {
+      setFieldErrors({ reputation: repParsed.error });
+      document.getElementById(labeledFieldIds(FACTION_EDITOR_ID_PREFIX, FACTION_FIELD_NAMES.reputation).controlId)?.focus();
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setFieldErrors({});
@@ -156,7 +163,7 @@ export default function FactionPage() {
         dmSecret: form.dmSecret,
         hidden: form.hidden,
         standing: form.standing,
-        reputation: form.reputation,
+        reputation: repParsed.value,
         // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#440) instead
         // of silently overwriting the other author's work.
         ...(faction?.updatedAt ? { expectedUpdatedAt: faction.updatedAt } : {}),
@@ -198,6 +205,7 @@ export default function FactionPage() {
         hidden: fresh.hidden,
         standing: fresh.standing,
         reputation: fresh.reputation,
+        reputationText: String(fresh.reputation),
       });
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Couldn't reload the latest faction.");
@@ -515,10 +523,24 @@ export default function FactionPage() {
               name={FACTION_FIELD_NAMES.reputation}
               type="number"
               label="Reputation (−100…100)"
-              value={String(form.reputation)}
+              value={form.reputationText}
               onChange={(e) => {
-                const parsed = parseLocalizedInteger(e.target.value, undefined, { min: -100, max: 100 });
-                if (parsed.ok) setForm({ ...form, reputation: parsed.value });
+                const raw = e.target.value;
+                const parsed = parseLocalizedInteger(raw, undefined, { min: -100, max: 100 });
+                setForm((prev) => ({
+                  ...prev,
+                  reputationText: raw,
+                  reputation: parsed.ok ? parsed.value : prev.reputation,
+                }));
+                if (!parsed.ok && raw.trim() !== '') {
+                  setFieldErrors((prev) => ({ ...prev, reputation: parsed.error }));
+                } else {
+                  setFieldErrors((prev) => {
+                    const next = { ...prev };
+                    delete next.reputation;
+                    return next;
+                  });
+                }
               }}
               min={-100}
               max={100}
