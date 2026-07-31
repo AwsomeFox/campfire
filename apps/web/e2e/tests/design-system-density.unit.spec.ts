@@ -314,7 +314,7 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(campaignSettings).not.toMatch(/style=\{\{[^}]*minHeight:\s*0/);
 
     const diceTray = READ(join(ROOT, 'features/dice/DiceTray.tsx'));
-    expect(diceTray).toMatch(/<Btn[^>]*density="xs"/);
+    expect(diceTray).toMatch(/<Btn[^>]*density="compact"/);
   });
 
   test('no source file carries retired geometry drift patterns', () => {

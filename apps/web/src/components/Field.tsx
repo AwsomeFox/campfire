@@ -209,7 +209,7 @@ export function Field(props: FieldProps) {
     const selectProps: SelectHTMLAttributes<HTMLSelectElement> = {
       id: ids.controlId,
       name,
-      className: props.selectClassName ?? `cf-select w-full ${props.density ? densityClass(props.density) : ''}`.trim(),
+      className: `${props.selectClassName ?? 'cf-select w-full'} ${props.density ? densityClass(props.density) : ''}`.trim(),
       value: props.value,
       onChange: props.onChange,
       disabled,
