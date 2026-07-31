@@ -847,7 +847,7 @@ export function DiceTray({
           <Btn
             type="button"
             ghost
-            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            density="xs"
             onClick={() => void undoDelete()}
           >
             {t('dice.undo')}

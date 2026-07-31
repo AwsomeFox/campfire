@@ -24,7 +24,8 @@ import {
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from 'react';
-import { TextArea, TextInput } from './ui';
+import { TextArea, TextInput, type UiDensity } from './ui';
+import { densityClass } from './density';
 
 export type FieldIds = {
   controlId: string;
@@ -106,6 +107,7 @@ type CommonProps = {
   /** Extra ids to append to aria-describedby (e.g. form-level error). */
   describedBy?: string;
   style?: CSSProperties;
+  density?: UiDensity;
 };
 
 type InputFieldProps = CommonProps & {
@@ -202,12 +204,12 @@ export function Field(props: FieldProps) {
       maxLength: props.maxLength,
       style: { minHeight: props.minHeight ?? 90, ...style },
     };
-    control = <TextArea {...textareaProps} />;
+    control = <TextArea density={props.density} {...textareaProps} />;
   } else if (props.as === 'select') {
     const selectProps: SelectHTMLAttributes<HTMLSelectElement> = {
       id: ids.controlId,
       name,
-      className: props.selectClassName ?? 'cf-select w-full',
+      className: props.selectClassName ?? `cf-select w-full ${props.density ? densityClass(props.density) : ''}`.trim(),
       value: props.value,
       onChange: props.onChange,
       disabled,
@@ -261,7 +263,7 @@ export function Field(props: FieldProps) {
       style,
       ...(props.autoComplete != null ? { autoComplete: props.autoComplete } : {}),
     };
-    control = <TextInput {...inputProps} />;
+    control = <TextInput density={props.density} {...inputProps} />;
   }
 
   return (

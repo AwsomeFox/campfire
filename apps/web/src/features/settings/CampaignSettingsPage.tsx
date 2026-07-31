@@ -1673,8 +1673,7 @@ function StatusCard({
         >
           <span>Campaign archived as {STATUS_LABEL[campaign.status]}. Undo?</span>
           <button
-            className="btn btn-secondary"
-            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            className="btn btn-secondary cf-density-xs"
             disabled={undoBusy}
             aria-busy={undoBusy || undefined}
             onClick={() => void undoApply()}
@@ -1682,8 +1681,7 @@ function StatusCard({
             {undoBusy ? 'Restoring…' : 'Undo'}
           </button>
           <button
-            className="btn btn-ghost"
-            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            className="btn btn-ghost cf-density-xs"
             disabled={undoBusy}
             onClick={dismissUndo}
           >

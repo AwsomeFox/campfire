@@ -641,8 +641,8 @@ export function RegionMap({
             : 'Showing an optimised copy made before this map last changed.'}
           {derivatives.stale && canDmWrite && (
             <button
-              className="btn btn-ghost"
-              style={{ fontSize: 11, minHeight: 0, padding: '2px 8px', marginInlineStart: 8 }}
+              className="btn btn-ghost cf-density-xs"
+              style={{ marginInlineStart: 8 }}
               disabled={derivatives.retrying}
               onClick={() => void derivatives.retry()}
             >
@@ -884,15 +884,13 @@ export function RegionMap({
             />
           </div>
           <button
-            className="btn btn-ghost"
-            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            className="btn btn-ghost cf-density-xs"
             onClick={cancelKbMove}
           >
             Cancel
           </button>
           <button
-            className="btn"
-            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            className="btn cf-density-xs"
             disabled={kbSaving}
             onClick={() => void saveKbMove()}
           >
@@ -910,8 +908,7 @@ export function RegionMap({
           {pinned.map((loc) => (
             <button
               key={loc.id}
-              className="btn btn-ghost"
-              style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+              className="btn btn-ghost cf-density-xs"
               aria-label={`Move ${loc.name} pin`}
               onClick={() => startKbMove(loc)}
             >

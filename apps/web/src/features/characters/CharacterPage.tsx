@@ -2532,9 +2532,10 @@ function ConditionsRow({
                 setValue('');
               })}
               {...compositionGate.inputProps}
+              density="xs"
               help={CHARACTER_CONDITION_HELP}
               placeholder="Condition…"
-              style={{ minHeight: 0, padding: '4px 8px', width: '7rem', fontSize: 12 }}
+              style={{ width: '7rem' }}
             />
             <datalist id="cf-condition-vocab">
               {adapter.conditions.map((c) => (
@@ -2549,8 +2550,8 @@ function ConditionsRow({
           <button
             type="button"
             onClick={() => setAdding(true)}
-            className="btn btn-ghost cf-print-hide"
-            style={{ fontSize: 12, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 0, padding: '4px 10px' }}
+            className="btn btn-ghost cf-density-xs cf-print-hide"
+            style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
           >
             + add
           </button>

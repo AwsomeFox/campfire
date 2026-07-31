@@ -127,23 +127,10 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
  * deleting the inline `minHeight: 0` — on a bare `.btn` that snaps to the ramp's
  * 44px default and would visibly wreck a dense map toolbar.
  *
- * This allowlist exists to be removed against #1722, one entry at a time, as each
- * site gets a real fix (a deliberate size via the density API or an explicit
- * bespoke value, not just clearing the pattern) — it is not a permanent exemption.
- * If you are here because #1722 closed and this comment still exists, that is
- * itself a bug: either the fix didn't actually remove the corresponding entry
- * below, or the issue closed without one. Allowlisted here ONLY for this one new
- * pattern, by name, not added to `HEIGHT_SHRINK_ALLOWED` (which is itself keyed
- * by exact match, not by file, for the same reason — see its own comment; none
- * of these files carry any of the className-based patterns above).
+ * Retired against issue #1722 — all 5 pre-existing sites migrated to canonical
+ * density="xs" / cf-density-xs control sizing.
  */
-const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, number> = new Map([
-  [resolve(ROOT, 'features/characters/CharacterPage.tsx'), 1],
-  [resolve(ROOT, 'features/dashboard/RegionMap.tsx'), 4],
-  [resolve(ROOT, 'features/encounters/RunSessionPage.tsx'), 1],
-  [resolve(ROOT, 'features/dice/DiceTray.tsx'), 1],
-  [resolve(ROOT, 'features/settings/CampaignSettingsPage.tsx'), 2],
-]);
+const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, number> = new Map([]);
 
 /**
  * The retired height-shrink idiom (issue #1683): `!min-h-0` and the small
@@ -306,6 +293,28 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(ai).toMatch(/<Btn[^>]*density="compact"/);
     expect(ai).not.toMatch(/cf-card p-/);
     expect(ai).not.toMatch(/cf-btn[^"'\n]*!min-h-0/);
+  });
+
+  test('sites from issue #1722 use density="xs" or cf-density-xs instead of inline minHeight: 0', () => {
+    const regionMap = READ(join(ROOT, 'features/dashboard/RegionMap.tsx'));
+    expect(regionMap).toMatch(/btn btn-ghost cf-density-xs/);
+    expect(regionMap).not.toMatch(/style=\{\{[^}]*minHeight:\s*0/);
+
+    const runSession = READ(join(ROOT, 'features/encounters/RunSessionPage.tsx'));
+    expect(runSession).toMatch(/btn btn-ghost cf-density-xs/);
+
+    const charPage = READ(join(ROOT, 'features/characters/CharacterPage.tsx'));
+    expect(charPage).toMatch(/density="xs"/);
+    expect(charPage).toMatch(/btn btn-ghost cf-density-xs/);
+    expect(charPage).not.toMatch(/style=\{\{[^}]*minHeight:\s*0/);
+
+    const campaignSettings = READ(join(ROOT, 'features/settings/CampaignSettingsPage.tsx'));
+    expect(campaignSettings).toMatch(/btn btn-secondary cf-density-xs/);
+    expect(campaignSettings).toMatch(/btn btn-ghost cf-density-xs/);
+    expect(campaignSettings).not.toMatch(/style=\{\{[^}]*minHeight:\s*0/);
+
+    const diceTray = READ(join(ROOT, 'features/dice/DiceTray.tsx'));
+    expect(diceTray).toMatch(/<Btn[^>]*density="xs"/);
   });
 
   test('no source file carries retired geometry drift patterns', () => {

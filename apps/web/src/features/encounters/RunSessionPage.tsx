@@ -5204,8 +5204,7 @@ export function BattleMap({
               {effectiveCanDmWrite && (mapDerivatives.error || mapDerivatives.stale) && (
                 <button
                   type="button"
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+                  className="btn btn-ghost cf-density-xs"
                   disabled={mapDerivatives.retrying}
                   onClick={() => void mapDerivatives.retry()}
                 >
