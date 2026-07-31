@@ -511,18 +511,29 @@ export class InboxSweepService implements OnModuleInit {
       .where(and(eq(inboxSweepItems.jobId, jobId), eq(inboxSweepItems.campaignId, campaignId)))
       .orderBy(inboxSweepItems.id);
 
+    const items: InboxSweepItemResult[] = itemRows.map((row) => ({
+      noteId: row.noteId,
+      outcome: row.outcome as InboxSweepItemResult['outcome'],
+      entityType: (row.entityType as InboxSweepItemResult['entityType']) ?? null,
+      entityId: row.entityId ?? null,
+      proposalId: row.proposalId ?? null,
+      reason: row.reason,
+      body: row.body ?? undefined,
+    }));
+
     const job = jobToDomain(jobRow as JobRow);
+    const proposedCount = items.filter((i) => i.outcome === 'proposed').length;
+    const skippedCount = items.filter((i) => i.outcome === 'skipped').length;
+    const erroredCount = items.filter((i) => i.outcome === 'errored').length;
+
     return {
-      job,
-      items: itemRows.map((row) => ({
-        noteId: row.noteId,
-        outcome: row.outcome as InboxSweepItemResult['outcome'],
-        entityType: (row.entityType as InboxSweepItemResult['entityType']) ?? null,
-        entityId: row.entityId ?? null,
-        proposalId: row.proposalId ?? null,
-        reason: row.reason,
-        body: row.body ?? undefined,
-      })),
+      job: {
+        ...job,
+        itemsProposed: Math.max(job.itemsProposed, proposedCount),
+        itemsSkipped: Math.max(job.itemsSkipped, skippedCount),
+        itemsErrored: Math.max(job.itemsErrored, erroredCount),
+      },
+      items,
     };
   }
 
