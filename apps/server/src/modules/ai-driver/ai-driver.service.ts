@@ -3527,19 +3527,27 @@ export class AiDriverService {
     try {
       resolver.undo(ref.encounterId, token, user, 'dm');
     } catch (err) {
-      // Classify BEFORE touching the lever. A STALE reference — the chain was already undone
-      // (the model called undo_action itself, or a prior DM undo raced this one and won the
-      // conditional claim, which still throws "already undone"), no longer exists ("unknown
-      // chain"), or belongs to a different encounter — is "nothing left to undo" (404) and must
-      // not leave a dead lever, so clear it. Every OTHER failure is RETRYABLE while the chain is
-      // still undoable: a busy database, an `assertTargetAllowed` target guard, or a missing
-      // encounter row from the transaction-local read. Clearing the lever on those would strand
-      // the DM with no undo button (AiTablePage renders it only while lastUndoableCommit is set)
-      // and a follow-up 404, so keep it armed and rethrow the concrete reason (#1501 review).
-      const stale =
-        err instanceof BadRequestException &&
-        /already undone|unknown chain|different encounter|no chain id/i.test(String(err.message ?? ''));
-      if (stale) {
+      // Classify BEFORE touching the lever. Two failure families mean the lever is DEAD — there is
+      // no reversible action left for it to offer — so it must be cleared (answering 404 "nothing
+      // left to undo") rather than left as a permanently-armed, silently-failing button:
+      //  - STALE reference: the chain was already undone (the model called undo_action itself, or
+      //    a prior DM undo raced this one and won the conditional claim, which still throws
+      //    "already undone"), no longer exists ("unknown chain"), or belongs to a different
+      //    encounter — a BadRequestException carrying one of those messages.
+      //  - GONE reference: `ActionResolverService.undo` throws a NotFoundException when the
+      //    encounter the AI acted in (or its actor combatant) was deleted, so the action can no
+      //    longer be reversed. Keeping the lever armed there leaves a header button that 404s on
+      //    the client and never surfaces an error — the cached session still carries the lever, so
+      //    AiTablePage keeps rendering it and every click is a silent no-op (#1501 review).
+      // Every OTHER failure is RETRYABLE while the chain is still undoable — a busy database or an
+      // `assertTargetAllowed` target guard — so keep the lever armed and rethrow the concrete
+      // reason: clearing it there would strand the DM with no undo button (AiTablePage renders it
+      // only while lastUndoableCommit is set) and a follow-up 404.
+      const dead =
+        (err instanceof BadRequestException &&
+          /already undone|unknown chain|different encounter|no chain id/i.test(String(err.message ?? ''))) ||
+        err instanceof NotFoundException;
+      if (dead) {
         session.lastUndoableCommit = null;
         this.persistControlState(session);
         throw new NotFoundException('The AI seat has no reversible action to undo.');

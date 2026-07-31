@@ -11,16 +11,20 @@ import type { RequestUser } from '../../src/common/user.types';
 /**
  * DM undo of the AI seat's last committed action — the catch-block classification (#1501 review).
  *
- * `undoLastSeatAction` drives `ActionResolverService.undo`, which can fail for two qualitatively
+ * `undoLastSeatAction` drives `ActionResolverService.undo`, which can fail for three qualitatively
  * different reasons, and the lever (`session.lastUndoableCommit`, which is the ONLY thing that
  * keeps the DM's undo button on screen) must react differently to each:
  *
  *  - STALE — the chain was already undone (the model called undo_action itself, a prior DM undo
  *    raced this one and won the conditional claim), no longer exists, or belongs to another
  *    encounter. The lever is dead: clear it and answer 404 "nothing left to undo".
- *  - RETRYABLE — a busy database, an `assertTargetAllowed` target guard, or a missing encounter
- *    row from the resolver's transaction-local read. The chain is STILL undoable, so the lever
- *    must STAY ARMED (the DM can try again) and the concrete error must be rethrown.
+ *  - GONE — `ActionResolverService.undo` throws a NotFoundException when the encounter the AI acted
+ *    in (or its actor combatant) was deleted, so the action can no longer be reversed. The lever is
+ *    dead here too: clear it and answer 404, or the cached session keeps the lever and the header
+ *    button stays on screen as a silent no-op (#1501 review).
+ *  - RETRYABLE — a busy database or an `assertTargetAllowed` target guard. The chain is STILL
+ *    undoable, so the lever must STAY ARMED (the DM can try again) and the concrete error must be
+ *    rethrown.
  *
  * This is a hand-constructed-service unit spec (the pattern of ai-driver-player-modeling.spec.ts)
  * rather than the e2e human-control spec, because the invariant under test is exactly how the
@@ -127,6 +131,29 @@ describe('ai-driver undo lever — catch-block error classification (#1501)', ()
     }
   });
 
+  describe('GONE reference — lever is cleared when the encounter/actor was deleted (#1501 review)', () => {
+    it('clears the lever (and answers 404) when the resolver throws NotFoundException', async () => {
+      const { driver, audit } = makeDriver(resolver);
+      arm(driver);
+      // `ActionResolverService.undo` throws this from `encounterRowOrThrow` when the fight the AI
+      // acted in (or its actor combatant) was deleted. The action can no longer be reversed, so
+      // keeping the lever armed would leave a header button that 404s on the client and never
+      // surfaces an error (the refetched session would still carry the lever). Clear it instead.
+      (resolver.undo as jest.Mock).mockImplementation(() => {
+        throw new NotFoundException('Encounter 42 not found.');
+      });
+
+      await expect(driver.undoLastSeatAction(campaignId, dm)).rejects.toBeInstanceOf(NotFoundException);
+
+      const session = (driver as unknown as { ensureSession: (id: number) => import('../../src/modules/ai-driver/ai-driver.service').AiDmSessionState }).ensureSession(campaignId);
+      // The undo button is driven by the presence of this field — a deleted encounter means there
+      // is nothing left to reverse, so it must be gone (not a permanently-armed dead button).
+      expect(session.lastUndoableCommit).toBeNull();
+      // "Nothing left to undo" is not a successful reversal — never audit it as one.
+      expect(audit.log).not.toHaveBeenCalled();
+    });
+  });
+
   describe('RETRYABLE failure — lever stays ARMED and the concrete error is rethrown', () => {
     it('keeps the lever armed for a target-guard BadRequestException (assertTargetAllowed)', async () => {
       const { driver, audit } = makeDriver(resolver);
@@ -145,12 +172,15 @@ describe('ai-driver undo lever — catch-block error classification (#1501)', ()
       expect(audit.log).not.toHaveBeenCalled();
     });
 
-    it('keeps the lever armed for a non-BadRequest error (e.g. a busy database / missing encounter)', async () => {
+    it('keeps the lever armed for a transient non-NotFound error (e.g. a busy database)', async () => {
       const { driver } = makeDriver(resolver);
       const { chainId } = arm(driver);
-      // A NotFoundException from the resolver transaction-local encounter read, or any other
-      // non-stale throwable, is retryable: the chain may still be undoable on the next attempt.
-      const retryable = new NotFoundException('Encounter 42 not found.');
+      // A transient failure that is NOT a missing reference (here a busy database surfaced as a
+      // ServiceUnavailableException) is retryable: the chain is still undoable on the next attempt,
+      // so the lever must stay armed and the concrete error must be rethrown unchanged. (A missing
+      // encounter/actor is a NotFoundException — that is a GONE reference, covered above, and
+      // clears the lever.)
+      const retryable = new ServiceUnavailableException('The database is busy.');
       (resolver.undo as jest.Mock).mockImplementation(() => {
         throw retryable;
       });

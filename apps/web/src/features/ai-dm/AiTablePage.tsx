@@ -891,7 +891,12 @@ export default function AiTablePage() {
     if (step.pop) {
       setUndoSnackbar(step.pop);
     }
-  }, [session?.lastUndoableCommit, sessionQuery.isFetched]);
+    // `campaignId` is a dep so this re-runs on a table switch. AiTablePage stays mounted across a
+    // /c/:id/table change, and the reset effect above clears the seeded flag on the switch — so
+    // without re-running here, a switch BACK to a table whose session is already cached with
+    // nothing armed (data deps unchanged) would leave `seeded` false and the next armed action
+    // would be absorbed as already-seen (no snackbar) — #1501 review.
+  }, [campaignId, session?.lastUndoableCommit, sessionQuery.isFetched]);
 
   async function undoAiAction(): Promise<void> {
     if (campaignId === undefined) return;

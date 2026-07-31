@@ -141,6 +141,37 @@ test.describe('nextUndoLeverState — undo snackbar seeding (issue #1501)', () =
     expect(bLoaded.seeded).toBe(true);
     expect(bLoaded.seenChainId).toBe('chain-B');
   });
+
+  test('returning to a previously-opened table re-seeds, so the next armed action still pops (#1501)', () => {
+    // AiTablePage stays mounted across a campaign switch, and the lever effect re-runs only when
+    // its dependency array changes. Returning to a table whose session is already cached with
+    // nothing armed leaves the data deps identical, so the effect would be SKIPPED and `seeded`
+    // would stay false after the switch reset — absorbing the next armed action as already-seen
+    // (no snackbar). The component therefore includes `campaignId` in that effect's deps so it
+    // re-runs on the switch-back and re-seeds. This steps the reducer through that switch-back
+    // sequence to pin the post-reset re-seed and the later pop.
+    // A first visit to campaign A seeds the lever from A's empty session (seeded flips true).
+    const firstLoad = nextUndoLeverState({ sessionFetched: true, seeded: false, commit: null, seenChainId: null });
+    expect(firstLoad.seeded).toBe(true);
+
+    // DM leaves A and returns. The reset effect clears the refs on the switch-back, so the lever
+    // effect reads `seeded: false` again — and the campaignId-keyed effect DOES re-run against A's
+    // still-cached, still-empty session, re-seeding (seeded flips true a second time, seen stays null).
+    const reSeed = nextUndoLeverState({ sessionFetched: true, seeded: false, commit: null, seenChainId: null });
+    expect(reSeed.seeded).toBe(true);
+    expect(reSeed.seenChainId).toBeNull();
+
+    // The seat arms a fresh action on A — it MUST pop (seeded is true, seen is null), proving the
+    // switch-back re-seed did not leave the lever pre-seeded-false to swallow the action.
+    const armed = nextUndoLeverState({
+      sessionFetched: true,
+      seeded: reSeed.seeded,
+      commit: commit('chain-A2'),
+      seenChainId: reSeed.seenChainId,
+    });
+    expect(armed.pop?.chainId).toBe('chain-A2');
+    expect(armed.seenChainId).toBe('chain-A2');
+  });
 });
 
 test.describe('resolveUndoPostError — undo POST failure classification (issue #1501)', () => {
