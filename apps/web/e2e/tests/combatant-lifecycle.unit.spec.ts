@@ -141,6 +141,50 @@ test.describe('combatant lifecycle (issue #1469)', () => {
     });
   });
 
+  test('non-5e system (PF2e/OSR) does not predict 5e death saves or dying state at 0 HP (issue #1829)', () => {
+    // PF2e / OSR character dropping to 0 HP stays deathState: 'none' and 0 counters
+    expect(applyOptimisticHpDelta(combatant(), -5, 'pf2e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+      deathSaveSuccesses: 0,
+    });
+    expect(applyOptimisticHpDelta(combatant(), -5, 'osr')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+      deathSaveSuccesses: 0,
+    });
+
+    // Damage while down at 0 HP in a non-5e system does not increment deathSaveFailures
+    expect(
+      applyOptimisticHpDelta(combatant({ hpCurrent: 0, deathState: 'none', deathSaveFailures: 0 }), -5, 'pf2e'),
+    ).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+      deathSaveFailures: 0,
+    });
+
+    // Massive damage in non-5e system does not trigger 5e instant death
+    expect(applyOptimisticHpDelta(combatant({ hpCurrent: 10, hpMax: 20 }), -35, 'pf2e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'none',
+    });
+
+    // 5e character still predicts dying and increments death saves (default or explicit dnd5e)
+    expect(applyOptimisticHpDelta(combatant(), -5, 'dnd5e')).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+    });
+    expect(
+      applyOptimisticHpDelta(combatant({ hpCurrent: 0, deathState: 'dying', deathSaveFailures: 1 }), -5, 'dnd5e'),
+    ).toMatchObject({
+      hpCurrent: 0,
+      deathState: 'dying',
+      deathSaveFailures: 2,
+    });
+  });
+
   test('Starfinder keeps its adapter-derived death state', () => {
     const source = readFileSync(resolve(__dirname, '../../src/features/encounters/optimisticHp.ts'), 'utf8');
     expect(source).toContain('hpCurrent: sfResult.hpCurrent');

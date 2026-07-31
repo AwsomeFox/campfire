@@ -1,4 +1,27 @@
-import type { Combatant } from '@campfire/schema';
+import type { Combatant, HpModel, RuleSystemAdapter } from '@campfire/schema';
+import { hpModelForAdapter, ruleSystemAdapter } from '@campfire/schema';
+
+export function resolveHpModel(
+  ruleSystemOrAdapterOrHpModel?: string | RuleSystemAdapter | HpModel | null,
+): HpModel {
+  if (!ruleSystemOrAdapterOrHpModel) {
+    return hpModelForAdapter(ruleSystemAdapter(null));
+  }
+  if (typeof ruleSystemOrAdapterOrHpModel === 'string') {
+    return hpModelForAdapter(ruleSystemAdapter(ruleSystemOrAdapterOrHpModel));
+  }
+  if (
+    typeof ruleSystemOrAdapterOrHpModel === 'object' &&
+    'massiveDamageInstantDeath' in ruleSystemOrAdapterOrHpModel &&
+    'deathSaves' in ruleSystemOrAdapterOrHpModel
+  ) {
+    return ruleSystemOrAdapterOrHpModel as HpModel;
+  }
+  if (typeof ruleSystemOrAdapterOrHpModel === 'object' && 'hpModel' in ruleSystemOrAdapterOrHpModel) {
+    return hpModelForAdapter(ruleSystemOrAdapterOrHpModel as RuleSystemAdapter);
+  }
+  return hpModelForAdapter(ruleSystemAdapter(null));
+}
 
 /**
  * Apply the small, deterministic part of the server's HP lifecycle rule while
@@ -10,11 +33,19 @@ export function withOptimisticHpLifecycle(
   hpCurrent: number,
   damagedWhileDown = true,
   isInstantDeath = false,
+  ruleSystemOrAdapterOrHpModel?: string | RuleSystemAdapter | HpModel | null,
 ): Combatant {
   if (combatant.kind !== 'character') return { ...combatant, hpCurrent };
+  const hpModel = resolveHpModel(ruleSystemOrAdapterOrHpModel);
+
   if (hpCurrent === 0) {
-    if (isInstantDeath || combatant.deathState === 'dead') {
+    if ((isInstantDeath && hpModel.massiveDamageInstantDeath) || combatant.deathState === 'dead') {
       return { ...combatant, hpCurrent, deathState: 'dead' };
+    }
+    if (!hpModel.deathSaves) {
+      const deathState =
+        hpModel.dyingAtZeroHp && combatant.deathState === 'none' ? 'dying' : combatant.deathState;
+      return { ...combatant, hpCurrent, deathState };
     }
     if (damagedWhileDown && combatant.hpCurrent === 0) {
       const deathSaveFailures = Math.min(3, combatant.deathSaveFailures + 1);
