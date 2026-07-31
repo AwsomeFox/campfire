@@ -53,7 +53,8 @@ export function QuickCaptureDialog({
       title={t('keyboard.quickCaptureTitle')}
       titleId={titleId}
       titleAs="h2"
-      className="w-full max-w-lg p-6 gap-4 [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white [&_.dialog-title]:mb-0"
+      style={{ padding: '17px 16px' }}
+      className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white [&_.dialog-title]:mb-0"
       onBackdropClick={() => !saving && onClose()}
       initialFocusRef={inputRef}
       ariaBusy={saving}
