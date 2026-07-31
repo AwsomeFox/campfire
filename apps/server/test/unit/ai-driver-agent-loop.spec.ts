@@ -2,8 +2,22 @@ import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 import { BadRequestException } from '@nestjs/common';
 import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import { MockAiProvider } from '../../src/modules/ai-dm/providers/mock-provider';
+import { AiDmService, type AiDmTokenReservation } from '../../src/modules/ai-dm/ai-dm.service';
+import { McpToolsService, type DriverToolset } from '../../src/modules/mcp/mcp-tools';
+import { AuditService } from '../../src/modules/audit/audit.service';
+import { AiDmStreamService } from '../../src/modules/ai-driver/ai-driver-stream.service';
+import { NotificationsService } from '../../src/modules/notifications/notifications.service';
+import { SupportPreferencesService } from '../../src/modules/session-zero/support-preferences.service';
+import { CampaignsService } from '../../src/modules/campaigns/campaigns.service';
+import { RulesService } from '../../src/modules/rules/rules.service';
+import { EncountersService } from '../../src/modules/encounters/encounters.service';
+import { MembersService } from '../../src/modules/membership/members.service';
+import { CharactersService } from '../../src/modules/characters/characters.service';
+import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
+import { DriverGroundingService } from '../../src/modules/ai-driver/driver-grounding.service';
+import { type AiProviderResolver } from '../../src/modules/ai-driver/ai-provider-resolver';
 import type { RequestUser } from '../../src/common/user.types';
-import type { AiDmTranscriptEvent } from '@campfire/schema';
+import type { AiDmSeat, AiDmTranscriptEvent } from '@campfire/schema';
 
 /**
  * Issue #1497 — the core AI Driver turn loop had three defects:
@@ -44,8 +58,8 @@ describe('AI Driver agent loop (#1497)', () => {
       ],
     });
 
-    const resolver = {
-      resolveForExecution: jest.fn().mockImplementation(async () => {
+    const resolver: Pick<AiProviderResolver, 'resolveForExecution'> = {
+      resolveForExecution: jest.fn<any>().mockImplementation(async () => {
         resolveForExecutionCalls += 1;
         if (resolveForExecutionCalls === 1) {
           throw new BadRequestException('resolved model is not on the allowlist');
@@ -54,77 +68,94 @@ describe('AI Driver agent loop (#1497)', () => {
       }),
     };
 
-    const transcript = {
-      record: jest.fn().mockImplementation(() => {
+    const transcript: Pick<AiDmTranscriptService, 'record' | 'listForPrompt' | 'promptHistoryDepth'> = {
+      record: jest.fn<any>().mockImplementation(() => {
         recordSeq += 1;
         return recordSeq;
       }),
-      listForPrompt: jest.fn().mockImplementation(() => {
+      listForPrompt: jest.fn<any>().mockImplementation(() => {
         listForPromptCalls += 1;
         return listForPromptCalls === 1 ? [] : transcriptEventsForPrompt;
       }),
-      promptHistoryDepth: jest.fn().mockReturnValue(0),
+      promptHistoryDepth: jest.fn<any>().mockReturnValue(0),
     };
 
-    const SEAT_OK = { tokenBudget: 1000, tokensUsed: 0, budgetRemaining: 1000, actionQueueDepth: 5 };
+    const SEAT_OK = { tokenBudget: 1000, tokensUsed: 0, budgetRemaining: 1000, actionQueueDepth: 5 } as unknown as AiDmSeat;
 
-    const aiDm = {
+    const aiDm: Pick<
+      AiDmService,
+      | 'assertRunnable'
+      | 'assertWithinServerTokenCap'
+      | 'withSpendLock'
+      | 'getSeat'
+      | 'reserveTokenBudget'
+      | 'markReservationUsageUnknown'
+      | 'meterTurn'
+      | 'isExperimentalEnabled'
+      | 'registerDriverSessionTeardown'
+    > = {
       assertRunnable: jest.fn<any>().mockResolvedValue(SEAT_OK),
       assertWithinServerTokenCap: jest.fn<any>().mockResolvedValue(undefined),
-      withSpendLock: jest.fn<any>().mockImplementation(async (_id: any, fn: any) => fn()),
+      withSpendLock: jest.fn<any>().mockImplementation(async (_id: number, fn: () => Promise<unknown>) => fn()),
       getSeat: jest.fn<any>().mockResolvedValue(SEAT_OK),
-      reserveTokenBudget: jest.fn<any>().mockResolvedValue({ tokensReserved: 1000 }),
-      markReservationUsageUnknown: jest.fn<any>().mockResolvedValue({ seat: SEAT_OK, budgetRemaining: 900 }),
+      reserveTokenBudget: jest.fn<any>().mockResolvedValue({ tokensReserved: 1000 } as unknown as AiDmTokenReservation),
+      markReservationUsageUnknown: jest.fn<any>().mockResolvedValue({ seat: SEAT_OK, tokensUnknown: 0, budgetRemaining: 900 } as unknown as {
+        seat: AiDmSeat;
+        tokensUnknown: number;
+        budgetRemaining: number;
+      }),
       meterTurn: jest.fn<any>().mockResolvedValue({
-        seat: { tokenBudget: 1000, tokensUsed: 100, budgetRemaining: 900 },
+        seat: SEAT_OK,
         tokensUsed: 100,
         budgetRemaining: 900,
       }),
       isExperimentalEnabled: jest.fn<any>().mockResolvedValue(true),
-      registerDriverSessionTeardown: jest.fn(),
+      registerDriverSessionTeardown: jest.fn<any>(),
     };
 
-    const mcpTools = {
-      buildToolset: jest.fn().mockReturnValue({
+    const mcpTools: Pick<McpToolsService, 'buildToolset'> = {
+      buildToolset: jest.fn<any>().mockReturnValue({
         tools: [],
-        get: jest.fn(),
-        call: jest.fn(),
-      }),
+        get: jest.fn<any>(),
+        call: jest.fn<any>().mockResolvedValue({ text: '', isError: false }),
+      } as unknown as DriverToolset),
     };
 
-    const audit = { log: jest.fn() };
-    const stream = { emit: jest.fn(), streamFor: jest.fn() };
-    const notifications = {};
-    const supportPreferences = { listForPublicAiNarration: jest.fn<any>().mockResolvedValue([]) };
-    const campaigns = {
+    const audit: Pick<AuditService, 'log'> = { log: jest.fn<any>().mockResolvedValue(undefined) };
+    const stream: Pick<AiDmStreamService, 'emit' | 'streamFor'> = { emit: jest.fn<any>(), streamFor: jest.fn<any>() };
+    const notifications: Pick<NotificationsService, never> = {};
+    const supportPreferences: Pick<SupportPreferencesService, 'listForPublicAiNarration'> = {
+      listForPublicAiNarration: jest.fn<any>().mockResolvedValue([]),
+    };
+    const campaigns: Pick<CampaignsService, 'getOrThrow'> = {
       getOrThrow: jest.fn<any>().mockResolvedValue({
         id: CAMPAIGN_ID,
         ruleSystem: 'dnd5e',
         narrationLanguage: 'en',
       }),
     };
-    const rules = {};
-    const encounters = {
-      listForCampaign: jest.fn<any>().mockResolvedValue([]),
+    const rules: Pick<RulesService, never> = {};
+    const encounters: Pick<EncountersService, 'listForCampaign'> = { listForCampaign: jest.fn<any>().mockResolvedValue([]) };
+    const members: Pick<MembersService, 'listForCampaign'> = { listForCampaign: jest.fn<any>().mockResolvedValue([]) };
+    const characters: Pick<CharactersService, 'getOrThrow'> = {
+      getOrThrow: jest.fn<any>().mockRejectedValue(new Error('not in test')),
     };
-    const members = { listForCampaign: jest.fn<any>().mockResolvedValue([]) };
-    const characters = { getOrThrow: jest.fn() };
 
     driver = new AiDriverService(
-      aiDm as any,
-      mcpTools as any,
-      audit as any,
-      stream as any,
-      notifications as any,
-      supportPreferences as any,
-      resolver as any,
-      campaigns as any,
-      rules as any,
-      encounters as any,
-      members as any,
-      characters as any,
-      transcript as any,
-      { correctionsForPrompt: async () => [] } as any,
+      aiDm as unknown as AiDmService,
+      mcpTools as unknown as McpToolsService,
+      audit as unknown as AuditService,
+      stream as unknown as AiDmStreamService,
+      notifications as unknown as NotificationsService,
+      supportPreferences as unknown as SupportPreferencesService,
+      resolver as unknown as AiProviderResolver,
+      campaigns as unknown as CampaignsService,
+      rules as unknown as RulesService,
+      encounters as unknown as EncountersService,
+      members as unknown as MembersService,
+      characters as unknown as CharactersService,
+      transcript as unknown as AiDmTranscriptService,
+      { correctionsForPrompt: async () => [] } as unknown as DriverGroundingService,
     );
   });
 
@@ -145,10 +176,11 @@ describe('AI Driver agent loop (#1497)', () => {
     expect(session.status).toBe('idle');
     expect(session.scene).toBe('A rainy evening at the Tipsy Troll');
 
-    // The scene set on turn 2 appears in the prompt for turn 3, not on the turn that set it.
+    // The scene set on turn 2 appears in the prompt for that same turn and the next.
     expect(mockProvider.received).toHaveLength(1);
     const turn2Req = mockProvider.received[0];
-    expect(turn2Req.system).not.toContain('## Current scene');
+    expect(turn2Req.system).toContain('## Current scene');
+    expect(turn2Req.system).toContain('A rainy evening at the Tipsy Troll');
     expect(turn2Req.messages).toHaveLength(1);
 
     // ── Turn 3: the player asks a follow-up. The prompt must replay turn 2 and the scene.

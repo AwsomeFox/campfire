@@ -768,12 +768,6 @@ export interface RunTurnOptions {
    * the prompt. Keeping it out of `input` also keeps it out of the persisted replay input.
    */
   untrustedNote?: string;
-  /**
-   * INTERNAL (#1497): how many consecutive tool-call errors the turn tolerates before stopping
-   * with `tool_error`. Defaults to {@link DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS}. Not a client
-   * setting; the DTO does not expose it.
-   */
-  maxToolErrors?: number;
 }
 
 interface ActionQueueEntry {
@@ -4183,6 +4177,13 @@ export class AiDriverService {
       this.logger.warn(`Prompt history unavailable for campaign ${campaignId}: ${String(err)}`);
     }
 
+    // #1499: `scene` is a table-wide broadcast setting — only a DM may change it. The DTO
+    // accepts it from any player (the UI merely hides the field behind `isDm`, which is
+    // client-side only), so a non-DM's value is silently ignored here rather than applied.
+    // Apply it BEFORE `assembleSystemPrompt` so the same message that sets the scene is
+    // answered with the new scene in context (#1497 review).
+    if (opts.scene !== undefined && opts.callerRole === 'dm') session.scene = opts.scene;
+
     const system = await this.assembleSystemPrompt(
       campaignId,
       seat,
@@ -4243,10 +4244,6 @@ export class AiDriverService {
     }
 
     // status is already 'running' (reserved synchronously above, #381).
-    // #1499: `scene` is a table-wide broadcast setting — only a DM may change it. The DTO
-    // accepts it from any player (the UI merely hides the field behind `isDm`, which is
-    // client-side only), so a non-DM's value is silently ignored here rather than applied.
-    if (opts.scene !== undefined && opts.callerRole === 'dm') session.scene = opts.scene;
     this.persistControlState(session);
     resetDriverTurnCounters(session);
     // #572: one correlation id for everything this turn persists, so a client rebuilding
@@ -4281,11 +4278,7 @@ export class AiDriverService {
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
     let consecutiveToolErrors = 0;
-    const maxToolErrors = clamp(
-      opts.maxToolErrors ?? DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS,
-      1,
-      isDmCaller ? HARD_MAX_STEPS : DEFAULT_MAX_STEPS,
-    );
+    const maxToolErrors = DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
     /**
