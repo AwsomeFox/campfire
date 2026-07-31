@@ -11,19 +11,20 @@ import { seed, stateFor } from './seed';
 
 test.use({ storageState: stateFor('dm') });
 
-const REPRESENTATIVE_ROUTES = (campaignId: number) => [
-  { path: '/', label: 'home' },
-  { path: '/preferences', label: 'preferences' },
-  { path: `/c/${campaignId}`, label: 'dashboard' },
-  { path: `/c/${campaignId}/sessions`, label: 'sessions' },
-  { path: `/c/${campaignId}/quests`, label: 'quests' },
-  { path: `/c/${campaignId}/compendium`, label: 'compendium' },
+const REPRESENTATIVE_ROUTES = [
+  { path: () => '/', label: 'home' },
+  { path: () => '/preferences', label: 'preferences' },
+  { path: (c: number) => `/c/${c}`, label: 'dashboard' },
+  { path: (c: number) => `/c/${c}/sessions`, label: 'sessions' },
+  { path: (c: number) => `/c/${c}/quests`, label: 'quests' },
+  { path: (c: number) => `/c/${c}/compendium`, label: 'compendium' },
 ];
 
 test.describe('Representative route contrast (#593, #1778)', () => {
-  for (const { path, label } of REPRESENTATIVE_ROUTES(seed().campaignId)) {
+  for (const { path, label } of REPRESENTATIVE_ROUTES) {
     test(`${label} desktop contrast scan (chrome + main)`, async ({ page }) => {
-      await page.goto(path);
+      const { campaignId } = seed();
+      await page.goto(path(campaignId));
       await page.locator('main').waitFor({ state: 'visible' });
 
       const results = await createAxeBuilder(page)
@@ -34,8 +35,9 @@ test.describe('Representative route contrast (#593, #1778)', () => {
     });
 
     test(`${label} mobile contrast scan (tabbar + main)`, async ({ page }) => {
+      const { campaignId } = seed();
       await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto(path);
+      await page.goto(path(campaignId));
       await page.locator('main').waitFor({ state: 'visible' });
 
       const results = await createAxeBuilder(page)
