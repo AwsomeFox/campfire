@@ -1,5 +1,4 @@
 /** Password recovery is deliberately one task at a time: request, then redeem. */
-import { Card } from '../../components/ui';
 import {
   useLayoutEffect,
   useRef,
@@ -182,8 +181,8 @@ export function ResetPasswordPage() {
         className="flex flex-col gap-4"
         style={{ width: "min(420px, 100%)" }}
       >
-        <Card
-          density="compact" elev="md" as="main"
+        <main
+          className="card elev-md"
           style={{ padding: "28px 26px", gap: 14 }}
           aria-labelledby="reset-page-title"
         >
@@ -464,7 +463,7 @@ export function ResetPasswordPage() {
               )}
             </section>
           )}
-        </Card>
+        </main>
         <p className="text-center" style={{ fontSize: 12 }}>
           <Link to="/login" className="text-muted">
             ← Back to sign in

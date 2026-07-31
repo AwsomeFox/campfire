@@ -7,7 +7,6 @@
  * every viewport. SSO is first when OIDC is configured; local authentication is
  * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
-import { Card } from '../../components/ui';
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -392,7 +391,7 @@ export function LoginPage() {
 
   const authCard = (
     <div className="login-auth-stack">
-      <Card density="compact" elev="md" className="items-center text-center login-auth-card">
+      <div className="card elev-md items-center text-center login-auth-card">
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><BrandMark /></span>
           <div>
@@ -501,7 +500,7 @@ export function LoginPage() {
             New here? Create an account
           </Link>
         )}
-      </Card>
+      </div>
 
       {installHint && (
         <div
