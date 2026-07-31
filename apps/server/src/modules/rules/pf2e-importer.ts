@@ -259,11 +259,58 @@ function num(v: unknown): number | null {
   return typeof v === 'number' ? v : null;
 }
 
+function parseActionItem(item: unknown): Record<string, unknown> | null {
+  if (typeof item === 'string' && item.trim()) {
+    return { name: item.trim(), desc: item.trim() };
+  }
+  if (item && typeof item === 'object') {
+    const obj = item as Record<string, unknown>;
+    const name = typeof obj.name === 'string' && obj.name.trim() ? obj.name.trim() : 'Action';
+    const desc =
+      typeof obj.desc === 'string'
+        ? obj.desc
+        : typeof obj.description === 'string'
+          ? obj.description
+          : typeof obj.text === 'string'
+            ? obj.text
+            : '';
+    return { ...obj, name, desc };
+  }
+  return null;
+}
+
+function actionsOf(src: Record<string, unknown>): Record<string, unknown>[] {
+  const sources = [
+    src.actions,
+    src.action,
+    src.attacks,
+    src.attack,
+    src.strikes,
+    src.strike,
+    src.activities,
+    src.activity,
+    src.special_abilities,
+    src.specialAbilities,
+    src.special,
+  ];
+  const result: Record<string, unknown>[] = [];
+  for (const s of sources) {
+    if (!s) continue;
+    const list = Array.isArray(s) ? s : [s];
+    for (const item of list) {
+      const parsed = parseActionItem(item);
+      if (parsed) result.push(parsed);
+    }
+  }
+  return result;
+}
+
 function mapCreature(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const traits = traitsOf(src);
   const level = num(src.level);
   const rarity = asString(src.rarity);
+  const actions = actionsOf(src);
   return {
     slug: slugOf(src, name),
     name,
@@ -281,6 +328,7 @@ function mapCreature(src: Record<string, unknown>, defaultLicense?: string): Imp
       size: asString(src.size) || null,
       rarity: rarity || null,
       traits,
+      actions,
     }),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),

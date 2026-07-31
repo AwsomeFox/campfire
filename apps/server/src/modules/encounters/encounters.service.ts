@@ -2507,7 +2507,7 @@ export class EncountersService {
         name: row.name,
         entryType: row.type === 'hazard' ? 'hazard' : 'monster',
         cr,
-        xp: crToXp(cr),
+        xp: typeof data.xp === 'number' && data.xp > 0 ? data.xp : typeof data.experience === 'number' && data.experience > 0 ? data.experience : crToXp(cr),
         hpMax: adapter.monsterHitPoints(data),
       });
     }
@@ -2901,10 +2901,7 @@ export class EncountersService {
       const entry = entryById.get(s.ruleEntryId)!;
       const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
       const mapped = adapter.mapStatblock(data);
-      const hp = adapter.monsterHitPoints(data);
-      if (hp === null) {
-        throw new BadRequestException(`"${entry.name}" has no hit points in its statblock — cannot commit it as a combatant. Swap it in the preview.`);
-      }
+      const hp = adapter.monsterHitPoints(data) ?? 0;
       let initMod = 0;
       if (adapter.initiativeModifierOrNull) {
         const resolved = adapter.initiativeModifierOrNull(mapped.abilityScores, mapped.abilityRepresentation);
@@ -3288,7 +3285,7 @@ export class EncountersService {
       // than inlining those field names here, so a non-5e monster statblock maps its own way.
       if (hpMax === undefined) {
         const hp = adapter.monsterHitPoints(data);
-        if (hp !== null) hpMax = hp;
+        hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
       if (mapped.stamina != null && typeof mapped.stamina === 'number') {
@@ -3332,6 +3329,9 @@ export class EncountersService {
 
     if (!name) {
       throw new BadRequestException('Unable to resolve a name for this combatant — provide "name" explicitly');
+    }
+    if (hpMax === undefined && input.kind === 'npc') {
+      hpMax = 0;
     }
     if (hpMax === undefined) {
       throw new BadRequestException('Unable to resolve hpMax for this combatant — provide "hpMax" explicitly');

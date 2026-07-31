@@ -41,6 +41,9 @@ const CREATURES = [
     size: 'Small',
     rarity: 'Common',
     trait: ['Goblin', 'Humanoid'],
+    actions: [
+      { name: 'Shortsword', desc: 'Melee Strike +6 (agile, versatile P), Damage 1d6+1 slashing' },
+    ],
     text: 'Goblin warriors form the bulk of most goblin fighting forces.',
     source: 'Pathfinder Monster Core',
     license: 'ORC',

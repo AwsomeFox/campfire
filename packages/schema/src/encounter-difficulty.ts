@@ -141,8 +141,11 @@ const XP_THRESHOLDS_BY_LEVEL: Record<number, { easy: number; medium: number; har
 export function parseCr(cr: unknown): number | null {
   if (typeof cr === 'number' && Number.isFinite(cr)) return cr;
   if (typeof cr !== 'string') return null;
-  const s = cr.trim();
+  let s = cr.trim();
   if (!s) return null;
+  s = s.replace(/\*+$/g, '').trim();
+  if (!s) return null;
+
   if (s.includes('/')) {
     const [num, den] = s.split('/');
     const n = Number(num);
@@ -150,6 +153,17 @@ export function parseCr(cr: unknown): number | null {
     if (Number.isFinite(n) && Number.isFinite(d) && d !== 0) return n / d;
     return null;
   }
+
+  const match = s.match(/^(\d+(?:\.\d+)?)\s*([+-])\s*(\d+(?:\.\d+)?)$/);
+  if (match) {
+    const base = Number(match[1]);
+    const op = match[2];
+    const mod = Number(match[3]);
+    if (Number.isFinite(base) && Number.isFinite(mod)) {
+      return op === '+' ? base + mod : Math.max(0, base - mod);
+    }
+  }
+
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
