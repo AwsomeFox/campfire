@@ -220,18 +220,33 @@ export default function InboxPage() {
       const storedJobId = localStorage.getItem(`campfire_inbox_sweep_job_${cid}`);
       if (storedJobId && Number.isFinite(Number(storedJobId))) {
         const jobId = Number(storedJobId);
+        setSweepBusy(true);
         void (async () => {
           try {
             const res = await pollInboxSweepResult(cid, jobId, () =>
               cid === cidRef.current && sweepTokenRef.current === currentToken,
             );
             if (cid === cidRef.current && sweepTokenRef.current === currentToken) {
+              if (res.job.status === 'failed') {
+                setSweepError(res.job.detail || t('notes.sweepFailed'));
+              }
               setSweepResult(res);
-              if (res.job.status === 'failed') setSweepError(res.job.detail || t('notes.sweepFailed'));
+              const newlyProposed = res.job.itemsNewlyProposed;
+              if (newlyProposed === undefined) {
+                const delta = res.job.itemsProposed;
+                if (delta > 0 && sweepTokenRef.current === currentToken) bumpPendingProposalsBadge(delta, cid);
+              }
+              const freshOpenTotal = await load();
+              if (cid === cidRef.current && sweepTokenRef.current === currentToken && freshOpenTotal !== undefined) {
+                setInboxCountBadge(freshOpenTotal, cid);
+              }
             }
           } catch {
             // Ignore resume errors
           } finally {
+            if (cid === cidRef.current && sweepTokenRef.current === currentToken) {
+              setSweepBusy(false);
+            }
             try {
               localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`);
             } catch {
