@@ -243,7 +243,7 @@ describe('driver-tool-policy (#474)', () => {
           args: { name: 'Ambush', hidden: false },
           assert: (r) => {
             expect(r.ok).toBe(true);
-            if (r.ok) expect('hidden' in r.args).toBe(false);
+            if (r.ok) expect(r.args.hidden).toBeUndefined();
           },
         },
         { tool: 'update_encounter', args: { encounterId: 1, hidden: true }, assert: (r) => expect(r.ok).toBe(false) },

@@ -777,11 +777,12 @@ export class EncountersService {
    * on navigation/focus refetch instead.
    */
   private emitEncounterEvent(
-    type: 'encounter.updated' | 'encounter.deleted',
+    type: 'encounter.updated' | 'encounter.deleted' | 'encounter.turn_changed',
     campaignId: number,
     encounterId: number,
     /** Fallback when the row is already gone (hard delete) or unavailable. */
     hiddenFallback = false,
+    extraFields?: Record<string, unknown>,
   ): void {
     // A caller that already knows the encounter is hidden (hiddenFallback) must
     // never emit — skip the visibility query entirely on that hot path.
@@ -796,7 +797,7 @@ export class EncountersService {
       .get();
     const hidden = current ? Boolean(current.hidden) : hiddenFallback;
     if (hidden) return;
-    this.events.emit({ type, campaignId, encounterId });
+    this.events.emit({ type, campaignId, encounterId, ...extraFields } as any);
   }
 
   /**
@@ -5252,6 +5253,12 @@ export class EncountersService {
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     this.emitEncounterEvent('encounter.updated', campaignId, encounterId, snapshot.hidden);
+    this.emitEncounterEvent('encounter.turn_changed', campaignId, encounterId, snapshot.hidden, {
+      round: 1,
+      turnIndex,
+      currentCombatantId,
+      combatantKind: first?.kind ?? null,
+    });
 
     return snapshot;
   }
@@ -5431,6 +5438,7 @@ export class EncountersService {
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
     let endedName: string | null = null;
+    let startingKind: string | null = null;
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
@@ -5586,6 +5594,7 @@ export class EncountersService {
         const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
         if (starting) {
           newCurrentName = starting.name;
+          startingKind = starting.kind;
           // When the same combatant both ends and begins the turn, the start-of-turn tick must
           // run against the post-end-tick list, not the stale in-memory copy (issue #1445).
           const startConditionPre =
@@ -5730,6 +5739,11 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    this.emitEncounterEvent('encounter.turn_changed', encounterRow.campaignId, encounterId, encounterRow.hidden, {
+      round: newRound,
+      currentCombatantId: newCurrentId,
+      combatantKind: startingKind,
+    });
 
     const view = await this.getWithCombatantsOrThrow(encounterId, role);
     // Backfill the original response onto the already-committed claim (issue #580) so a

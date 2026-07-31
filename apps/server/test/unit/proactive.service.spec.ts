@@ -48,7 +48,7 @@ describe('ProactiveService', () => {
   it('subscribes to events when startWatching is called with active triggers', () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -60,7 +60,7 @@ describe('ProactiveService', () => {
   it('does not subscribe if no triggers are enabled', () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -72,7 +72,7 @@ describe('ProactiveService', () => {
   it('triggers a proactive turn on matching event', async () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -93,7 +93,7 @@ describe('ProactiveService', () => {
   it('respects cooldown between triggers', async () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -111,7 +111,7 @@ describe('ProactiveService', () => {
 
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -128,7 +128,7 @@ describe('ProactiveService', () => {
 
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -143,7 +143,7 @@ describe('ProactiveService', () => {
   it('does not trigger hpCritical when HP data is missing', async () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: false, hpCritical: true, objectiveCompleted: false },
+      triggers: { encounterEnded: false, hpCritical: true, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     });
@@ -162,7 +162,7 @@ describe('ProactiveService', () => {
   it('respects hourly token budget', async () => {
     service.startWatching(1, {
       enabled: true,
-      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
       cooldownSeconds: 0,
       maxProactiveTokensPerHour: 50, // budget is 50, turn takes 100
     });
@@ -174,6 +174,25 @@ describe('ProactiveService', () => {
     eventStream.next({ type: 'encounter.ended' } as any);
     await new Promise(setImmediate);
     expect(driver.runTurn).toHaveBeenCalledTimes(1); // Second turn blocked
+  });
+
+  it('triggers proactive turn on encounter.turn_changed for NPC combatant', async () => {
+    service.startWatching(1, {
+      enabled: true,
+      triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false, npcTurn: true },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    });
+
+    eventStream.next({ type: 'encounter.turn_changed', combatantKind: 'npc' } as any);
+    await new Promise(setImmediate);
+
+    expect(driver.runTurn).toHaveBeenCalledWith(
+      1,
+      { id: 'system:proactive' },
+      expect.stringContaining('NPC or monster turn'),
+      expect.objectContaining({ proactive: true })
+    );
   });
 
   it('manualTrigger executes immediately', async () => {

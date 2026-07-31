@@ -147,7 +147,7 @@ function defaultSeat(campaignId: number, defaults?: AiDmSeatDefaults): AiDmSeat 
     lastTurnAt: null,
     proactiveSettings: {
       enabled: false,
-      triggers: { encounterEnded: true, hpCritical: true, objectiveCompleted: true },
+      triggers: { encounterEnded: true, hpCritical: true, objectiveCompleted: true, npcTurn: true },
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     },

@@ -80,7 +80,7 @@ describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
         enabled: true,
         proactiveSettings: {
           enabled: true,
-          triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+          triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false, npcTurn: false },
           cooldownSeconds: 300,
           maxProactiveTokensPerHour: 5_000,
         },
@@ -112,7 +112,7 @@ describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
         enabled: true,
         proactiveSettings: {
           enabled: false,
-          triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false },
+          triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false, npcTurn: false },
           cooldownSeconds: 300,
           maxProactiveTokensPerHour: 5_000,
         },

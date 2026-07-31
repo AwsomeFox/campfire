@@ -7282,7 +7282,8 @@ export const AiDmProactiveSettings = z.object({
     encounterEnded: z.boolean().default(true),
     hpCritical: z.boolean().default(true),
     objectiveCompleted: z.boolean().default(true),
-  }).default({ encounterEnded: true, hpCritical: true, objectiveCompleted: true }),
+    npcTurn: z.boolean().default(true),
+  }).default({ encounterEnded: true, hpCritical: true, objectiveCompleted: true, npcTurn: true }),
   cooldownSeconds: z.number().int().min(30).max(3600).default(300),
   maxProactiveTokensPerHour: z.number().int().min(0).max(50_000).default(5_000),
 });
@@ -10723,6 +10724,7 @@ export type RollResult = z.infer<typeof RollResult>;
 export const CampaignEventType = z.enum([
   'encounter.updated',
   'encounter.deleted',
+  'encounter.turn_changed',
   'encounter.ping',
   'schedule.updated',
   'membership.revoked',
@@ -10758,6 +10760,16 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('encounter.updated'),
     campaignId: Id,
     encounterId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('encounter.turn_changed'),
+    campaignId: Id,
+    encounterId: Id,
+    round: z.number().int().min(0).optional(),
+    turnIndex: z.number().int().min(0).optional(),
+    currentCombatantId: Id.nullable().optional(),
+    combatantKind: z.enum(['character', 'npc', 'lair', 'custom']).nullable().optional(),
     at: IsoDate,
   }),
   z.object({
