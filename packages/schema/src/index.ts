@@ -42,7 +42,8 @@ import {
   type AttackRollInput,
   type AttackRollResult,
 } from './action-resolver';
-import { RestModel } from './rest';
+import type { RestModel, RestOptionDef } from './rest';
+export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
@@ -4387,6 +4388,8 @@ export interface RuleSystemAdapter {
    * the fallback adapter.
    */
   readonly restModel?: RestModel;
+  /** OPTIONAL — system-defined rest controls offered in the UI. Defaults via restOptionsForAdapter. */
+  readonly restOptions?: readonly RestOptionDef[];
 }
 
 /** Standard system resource pool definition (issue #422). */

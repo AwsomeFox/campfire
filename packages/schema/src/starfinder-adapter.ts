@@ -19,6 +19,7 @@
 
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
+import { DEFAULT_STARFINDER_REST_OPTIONS } from './rest';
 
 /** Family id of the Starfinder 1e adapter. Matches the rule-pack slug the importer stamps, so a
  *  campaign whose `ruleSystem` is set to the installed Starfinder pack resolves to this adapter. */
@@ -346,6 +347,7 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   initiativeDie: 20,
   // Starfinder 1e caps characters at level 20 (Core Rulebook), the same ceiling as 5e/PF.
   maxLevel: 20,
+  restOptions: DEFAULT_STARFINDER_REST_OPTIONS,
   supportsXpProgression: true,
   xpForLevel: starfinderXpForLevel,
   levelForXp: starfinderLevelForXp,
