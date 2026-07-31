@@ -126,7 +126,7 @@ const DEFAULT_STEP_MAX_TOKENS = 1024;
 const DEFAULT_MAX_STEPS = 6;
 const HARD_MAX_STEPS = 12;
 /** Default number of consecutive tool-call errors the model is allowed before the turn stops (#1497). */
-const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 1;
+const DEFAULT_MAX_CONSECUTIVE_TOOL_ERRORS = 2;
 
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
@@ -4059,6 +4059,9 @@ export class AiDriverService {
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
+    // #1497 review: track whether THIS turn already released the slot so the outer finally
+    // does not clear a newer turn's `running` status after the inner finally yields.
+    let slotReleased = false;
     try {
 
     // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
@@ -4096,7 +4099,10 @@ export class AiDriverService {
     const execution = await resolveProviderForExecution(this.resolver, campaignId);
     if (!execution) {
       // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
-      if (session.status === 'running') session.status = 'idle';
+      if (session.status === 'running') {
+        session.status = 'idle';
+        slotReleased = true;
+      }
       this.persistControlState(session);
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
@@ -5009,7 +5015,10 @@ export class AiDriverService {
       // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
       // silently accept new input, defeating the freeze the table just asked for.
       // Teardown (#1071) already cleared `running` on this detached object; the CAS no-ops.
-      if (session.status === 'running') session.status = 'idle';
+      if (session.status === 'running') {
+        session.status = 'idle';
+        slotReleased = true;
+      }
       // Never write ladder counters onto a detached (replaced) session object.
       if (!session.detached) {
         session.lastNarration = finalNarration || session.lastNarration;
@@ -5106,11 +5115,17 @@ export class AiDriverService {
   } finally {
     // #1497 — release the running slot on every exit, including throws before the step loop
     // or during post-loop bookkeeping, and drain the queue so queued callers always settle.
-    if (session.status === 'running') {
+    // Guard with `slotReleased` so a throw that happens after the inner finally has already
+    // released the slot (and interleaved calls may have reserved it for a newer turn) does not
+    // stomp the newer turn's `running` status and break per-campaign serialization.
+    if (!slotReleased && session.status === 'running') {
       session.status = 'idle';
+      slotReleased = true;
     }
-    this.persistControlState(session);
-    this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+    if (slotReleased && session.status === 'idle' && !session.detached) {
+      this.persistControlState(session);
+      this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+    }
   }
   }
 
