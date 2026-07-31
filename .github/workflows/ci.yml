@@ -191,7 +191,7 @@ jobs:
   # production source file, but executes only test/unit/**/*.spec.ts. Integration
   # and server e2e suites run without instrumentation in `server-tests`.
   coverage:
-    timeout-minutes: 15
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

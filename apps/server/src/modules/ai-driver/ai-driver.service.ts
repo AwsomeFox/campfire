@@ -5015,15 +5015,6 @@ export class AiDriverService {
       });
     } finally {
       this.endGeneration(campaignId, generationHandle);
-      // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
-      // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
-      // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
-      // silently accept new input, defeating the freeze the table just asked for.
-      // Teardown (#1071) already cleared `running` on this detached object; the CAS no-ops.
-      if (session.status === 'running') {
-        session.status = 'idle';
-        slotReleased = true;
-      }
       // Never write ladder counters onto a detached (replaced) session object.
       if (!session.detached) {
         session.lastNarration = finalNarration || session.lastNarration;
