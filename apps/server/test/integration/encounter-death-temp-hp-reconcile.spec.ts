@@ -380,6 +380,45 @@ describe('encounter death/temp-HP reconciliation (real SQLite, service layer)', 
     expect(persisted.deathState).toBe('stable');
   });
 
+  it('ending an encounter preserves an explicit non-active lifecycle status like retired (#1758)', async () => {
+    dataDir = makeTempDataDir();
+    const ctx = seedCharacterFight({ hpCurrent: 5, hpMax: 20, status: 'retired' });
+    // Character is alive with retired status. Ending encounter reconciliation must
+    // preserve 'retired', not overwrite it with 'active'.
+    await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
+
+    const persisted = readCharacter(ctx.orm, ctx.characterId);
+    expect(persisted.hpCurrent).toBe(5);
+    expect(persisted.deathState).toBe('none');
+    expect(persisted.status).toBe('retired');
+  });
+
+  it('ending an encounter preserves explicit inactive or draft lifecycle status (#1758)', async () => {
+    dataDir = makeTempDataDir();
+    const ctx = seedCharacterFight({ hpCurrent: 10, hpMax: 20, status: 'inactive' });
+    await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
+
+    const persisted = readCharacter(ctx.orm, ctx.characterId);
+    expect(persisted.status).toBe('inactive');
+  });
+
+  it('ending an encounter flips explicit retired status to dead if combatant died in fight (#1758)', async () => {
+    dataDir = makeTempDataDir();
+    const ctx = seedCharacterFight({ hpCurrent: 5, hpMax: 20, status: 'retired' });
+    await ctx.encountersService.updateCombatant(
+      ctx.encounterId,
+      ctx.combatantId,
+      { hpSet: 0, deathState: 'dead', deathSaveFailures: 3 },
+      dmUser,
+      'dm',
+    );
+    await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
+
+    const persisted = readCharacter(ctx.orm, ctx.characterId);
+    expect(persisted.deathState).toBe('dead');
+    expect(persisted.status).toBe('dead');
+  });
+
   it('a monster combatant is never reconciled onto a character row (#711)', async () => {
     dataDir = makeTempDataDir();
     const { orm, encountersService } = build();
