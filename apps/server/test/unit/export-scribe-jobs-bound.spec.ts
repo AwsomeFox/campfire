@@ -14,9 +14,8 @@ describe('ExportService — AI scribe jobs bounding (Issue #1529)', () => {
 
   const USER: RequestUser = {
     id: '1',
-    username: 'dm',
-    displayName: 'Dungeon Master',
-    globalRole: 'user',
+    name: 'Dungeon Master',
+    serverRole: 'admin',
   };
 
   beforeEach(() => {
