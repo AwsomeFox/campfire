@@ -845,6 +845,13 @@ describe('encounter difficulty (issue #58)', () => {
       expect(parseCr('1/8')).toBe(0.125);
       expect(parseCr('10')).toBe(10);
     });
+    it('parses OSR N+M and N-M hit dice expressions', () => {
+      expect(parseCr('1+1')).toBe(2);
+      expect(parseCr('1-1')).toBe(0);
+      expect(parseCr('4+1')).toBe(5);
+      expect(parseCr('1+1*')).toBe(2);
+      expect(parseCr('2*')).toBe(2);
+    });
     it('returns null for missing / unparseable CR', () => {
       expect(parseCr(null)).toBeNull();
       expect(parseCr(undefined)).toBeNull();

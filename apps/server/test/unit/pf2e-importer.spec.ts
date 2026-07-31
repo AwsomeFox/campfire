@@ -32,6 +32,9 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(data.abilityMods).toEqual({ strength: 0, dexterity: 3, constitution: 1, intelligence: 0, wisdom: -1, charisma: 1 });
     expect(data.saves).toEqual({ fortitude: 5, reflex: 7, will: 3 });
     expect(data.traits).toEqual(['Goblin', 'Humanoid']);
+    expect(data.actions).toEqual([
+      { name: 'Shortsword', desc: 'Melee Strike +6 (agile, versatile P), Damage 1d6+1 slashing' },
+    ]);
 
     // Adult Red Dragon covers a positive double-digit-adjacent mod set (str 9) + perception.
     const dragon = entries.find((e) => e.name === 'Adult Red Dragon');
