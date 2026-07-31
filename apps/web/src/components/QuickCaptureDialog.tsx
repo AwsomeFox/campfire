@@ -50,10 +50,10 @@ export function QuickCaptureDialog({
 
   return (
     <Dialog
-      title={t('keyboard.quickCaptureTitle')}
+      title={<span className="block mb-1">{t('keyboard.quickCaptureTitle')}</span>}
       titleId={titleId}
       titleAs="h2"
-      className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white [&_.dialog-title]:mb-4"
+      className="w-full max-w-lg [&_.dialog-title]:[font-family:inherit] [&_.dialog-title]:text-lg [&_.dialog-title]:font-semibold [&_.dialog-title]:text-white"
       onBackdropClick={() => !saving && onClose()}
       initialFocusRef={inputRef}
       ariaBusy={saving}
