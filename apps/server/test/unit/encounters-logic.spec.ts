@@ -720,17 +720,27 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
     });
 
-    it('preserves an existing deathState (e.g. a DM-flagged dead) without 5e death saves', () => {
-      // #1503 review: a non-5e character the table already declared dead must NOT be resurrected
-      // by an unrelated HP tweak — the no-death-saves branch preserves the incoming state rather
-      // than inventing 'none'. (Starfinder computes its own dying/dead; a DM may flag dead.)
+    it('preserves deathState at 0 HP but revives when healed above 0 (without 5e death saves)', () => {
+      // #1503 review: a non-5e character the table already declared dead/dying is NOT resurrected
+      // by an HP tweak that leaves them at 0 HP — the no-death-saves branch preserves the incoming
+      // state at 0 HP. But regaining HP DOES revive (mirrors the 5e `hpCurrent > 0` clause and the
+      // monster path), so a healed character stops being "down". (Starfinder computes its own
+      // dying/dead; a DM may flag dead.)
       const dead = charState({ hpCurrent: 0, deathState: 'dead' });
+      const dying = charState({ hpCurrent: 0, deathState: 'dying' });
+      // At 0 HP: a non-healing tweak (temp HP) keeps the system/DM-owned state intact.
       expect(applyCombatantHp({ ...dead }, { hpTemp: 5 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
+      // At 0 HP: further damage keeps the state intact.
       expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
-      // Healing HP does not auto-revive a system/DM-owned dead state either.
-      expect(applyCombatantHp({ ...dead }, { hpDelta: 10 }, NEUTRAL_HP_MODEL).deathState).toBe('dead');
-      // And death-save counters never accumulate for a non-death-save system.
       expect(applyCombatantHp({ ...dead }, { hpDelta: -3 }, NEUTRAL_HP_MODEL).deathSaveFailures).toBe(0);
+      // Healing above 0 HP revives a dying character and clears the slate (review of #1503).
+      const revived = applyCombatantHp({ ...dying }, { hpDelta: 5 }, NEUTRAL_HP_MODEL);
+      expect(revived.hpCurrent).toBe(5);
+      expect(revived.deathState).toBe('none');
+      expect(revived.deathSaveSuccesses).toBe(0);
+      expect(revived.deathSaveFailures).toBe(0);
+      // Healing a system/DM-flagged dead character above 0 HP also revives (5e/monster parity).
+      expect(applyCombatantHp({ ...dead }, { hpDelta: 10 }, NEUTRAL_HP_MODEL).deathState).toBe('none');
     });
 
     // The server-side parity check the issue asked for: for EVERY registered adapter, a

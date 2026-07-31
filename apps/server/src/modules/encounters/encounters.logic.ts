@@ -925,13 +925,20 @@ export function applyCombatantHp(
   if (!hpModel.deathSaves) {
     // A character in a system WITHOUT 5e death saves (issue #1503): the 5e death-save tracker
     // and massive-damage instant death do not apply, so this engine does NOT recompute
-    // deathState — it preserves whatever the system or DM already set. A DM-flagged 'dead'
-    // stays 'dead' (it must not be resurrected by an unrelated HP tweak — review of #1503); a
-    // Starfinder combatant keeps the 'dying'/'dead' its own damage model computed; a combatant
-    // simply reduced to 0 HP keeps the default 'none' and is "down" via hpBand. The death-save
-    // counters cannot accumulate for a non-death-save system (their write paths are gated on
-    // hpModel.deathSaves above), so they are passed through unchanged. Massive damage was
-    // already gated off above, so instantDeath is false here regardless.
+    // deathState from death saves. It DOES still revive on heal: regaining any HP clears a stale
+    // 'dying'/'dead' flag (review of #1503) — exactly the monster path above and the 5e
+    // `hpCurrent > 0` clause below — so a character healed back above 0 HP stops being "down".
+    // At 0 HP, whatever the system or DM already set is preserved: a DM-flagged 'dead' stays
+    // 'dead' (not resurrected by an unrelated HP tweak); a Starfinder combatant keeps the
+    // 'dying'/'dead' its own damage model computed; a combatant simply reduced to 0 HP keeps the
+    // default 'none' and is "down" via hpBand. The death-save counters cannot accumulate for a
+    // non-death-save system (their write paths are gated on hpModel.deathSaves above), and are
+    // zeroed on revive. Massive damage was already gated off above, so instantDeath is false here.
+    if (hpCurrent > 0) {
+      deathState = 'none';
+      succ = 0;
+      fail = 0;
+    }
     const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
