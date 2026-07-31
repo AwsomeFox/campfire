@@ -1,18 +1,18 @@
 {
   "characters": {
     "conditionLevel": {
-      "raise": "زيادة",
-      "lower": "خفض",
-      "level": "{{level}} من {{max}} — مستوى {{name}}",
+      "raise": "Raise",
+      "lower": "Lower",
+      "level": "{{level}} of {{max}} — {{name}} level",
       "count": "{{level}}/{{max}}",
-      "updateError": "تعذّر تحديث {{name}}."
+      "updateError": "تعذّر التحديث {{name}}."
     },
     "resources": {
-      "spend": "إنفاق",
-      "restore": "استعادة",
-      "available": "{{available}} من {{max}} — {{name}} متاح",
+      "spend": "Spend",
+      "restore": "Restore",
+      "available": "{{available}} of {{max}} — {{name}} available",
       "count": "{{available}}/{{max}}",
-      "updateError": "تعذّر تحديث {{name}}."
+      "updateError": "تعذّر التحديث {{name}}."
     }
   }
 }

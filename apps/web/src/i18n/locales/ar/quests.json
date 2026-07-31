@@ -107,6 +107,8 @@
     "revealFailed": "Couldn't reveal this quest.",
     "hideFailed": "Couldn't hide this quest.",
     "saveDmNotesFailed": "تعذّر الحفظ the DM notes.",
+    "deleteObjective": "حذف objective \"{{text}}\"",
+    "deleteObjectiveFailed": "تعذّر الحذف objective.",
     "deleteFailed": "تعذّر الحذف this quest."
   }
 }

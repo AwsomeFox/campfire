@@ -13,11 +13,11 @@
     "pageActionsMenu": "Page actions",
     "noCampaign": "لم يتم اختيار حملة.",
     "saveFeedback": {
-      "dirty": "توجد تغييرات غير محفوظة في {{subject}}.",
-      "saving": "جارٍ حفظ {{subject}}…",
-      "saved": "تم حفظ {{subject}} في {{savedAt}}.",
-      "failure": "فشل حفظ {{subject}}. ما زالت تعديلاتك موجودة؛ حاول مرة أخرى.",
-      "failureWithDetail": "فشل حفظ {{subject}}. {{error}}. ما زالت تعديلاتك موجودة؛ حاول مرة أخرى."
+      "dirty": "{{subject}} has unsaved changes.",
+      "saving": "Saving {{subject}}…",
+      "saved": "{{subject}} saved {{savedAt}}.",
+      "failure": "حفظ failed for {{subject}}. Your edits are still here; try again.",
+      "failureWithDetail": "حفظ failed for {{subject}}. {{error}}. Your edits are still here; try again."
     }
   }
 }

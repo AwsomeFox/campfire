@@ -108,14 +108,38 @@
     "testRollButton": "Test Roll (1d20)",
     "testRollLabel": "Test Roll (1d20)",
     "themes": {
-      "nocturne": { "name": "Nocturne Parchment", "desc": "Classic parchment with obsidian gold borders" },
-      "obsidian_gold": { "name": "Obsidian Gold", "desc": "Dark glass texture with gold filigree & glowing numerals" },
-      "arcane_amethyst": { "name": "Arcane Amethyst", "desc": "Deep purple crystal texture with magenta edge glow" },
-      "dragon_ruby": { "name": "Dragon Ruby", "desc": "Crimson dragon scale gradient with molten gold numerals" },
-      "celestial_pearl": { "name": "Celestial Pearl", "desc": "Iridescent pearl gradient with silver foil & celestial blue" },
-      "cyberpunk_neon": { "name": "Cyberpunk Neon", "desc": "Matte carbon black with dual cyan/magenta neon edge glow" },
-      "eldritch_void": { "name": "Eldritch Void", "desc": "Abyssal cosmic gradient with toxic green edge pulse" },
-      "mahogany_wood": { "name": "Mahogany Wood", "desc": "Warm carved wood grain with dark bronze inset numerals" }
+      "nocturne": {
+        "name": "Nocturne Parchment",
+        "desc": "Classic parchment with obsidian gold borders"
+      },
+      "obsidian_gold": {
+        "name": "Obsidian Gold",
+        "desc": "Dark glass texture with gold filigree & glowing numerals"
+      },
+      "arcane_amethyst": {
+        "name": "Arcane Amethyst",
+        "desc": "Deep purple crystal texture with magenta edge glow"
+      },
+      "dragon_ruby": {
+        "name": "Dragon Ruby",
+        "desc": "Crimson dragon scale gradient with molten gold numerals"
+      },
+      "celestial_pearl": {
+        "name": "Celestial Pearl",
+        "desc": "Iridescent pearl gradient with silver foil & celestial blue"
+      },
+      "cyberpunk_neon": {
+        "name": "Cyberpunk Neon",
+        "desc": "Matte carbon black with dual cyan/magenta neon edge glow"
+      },
+      "eldritch_void": {
+        "name": "Eldritch Void",
+        "desc": "Abyssal cosmic gradient with toxic green edge pulse"
+      },
+      "mahogany_wood": {
+        "name": "Mahogany Wood",
+        "desc": "Warm carved wood grain with dark bronze inset numerals"
+      }
     }
   }
 }

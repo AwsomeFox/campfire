@@ -26,7 +26,7 @@
       "approved": "Action approved.",
       "rejected": "Action rejected.",
       "failed": "Couldn't resolve that. Try again.",
-      "meta": "{{tool}} \u00b7 proposed on turn {{turn}}",
+      "meta": "{{tool}} · proposed on turn {{turn}}",
       "showArgs": "Show arguments",
       "showArgsMore": "Show arguments ({{count}} more not summarised)"
     },
@@ -34,8 +34,8 @@
     "wrapUp": "Wrap Up",
     "lifecycleFailed": "Couldn't change the session phase. Try again.",
     "phaseNote": {
-      "greeting": "The AI is opening the session\u2026",
-      "wrap_up": "The AI is wrapping up the session\u2026",
+      "greeting": "The AI is opening the session…",
+      "wrap_up": "The AI is wrapping up the session…",
       "ended": "This session has ended. Start a new one to keep playing."
     },
     "pauseFailed": "Couldn't change the AI DM's pause state.",
@@ -102,23 +102,22 @@
     "coDmHint": "In Co-DM mode the AI only proposes — every draft waits for a human DM to approve, and nothing changes until then. There's no live table to play at. Switch to Driver mode to let the AI hold the DM seat and act directly.",
     "gatedTitle": "AI DM unavailable",
     "openSettings": "Open AI DM settings",
-
     "grounding": {
       "title": "AI claims to check",
       "titleUnverified_one": "{{count}} unverified AI claim",
       "titleUnverified_other": "{{count}} unverified AI claims",
-      "hint": "The AI stated something as fact that the server could not trace to a source it actually read this turn. The narration is unchanged \u2014 this is a label, not a deletion.",
+      "hint": "The AI stated something as fact that the server could not trace to a source it actually read this turn. The narration is unchanged — this is a label, not a deletion.",
       "unverified": "Unverified",
       "corrected": "Corrected",
       "dmOnlySource": "Source visible to the DM only",
-      "provenance": "Turn {{turn}} \u00b7 {{provider}} \u00b7 {{model}}",
+      "provenance": "Turn {{turn}} · {{provider}} · {{model}}",
       "unknownProvider": "unknown provider",
       "unknownModel": "unknown model",
       "correctionLabel": "Table ruling:",
       "correct": "Correct this",
-      "correctSubmit": "Save correction",
+      "correctSubmit": "حفظ correction",
       "correctPlaceholder": "What is actually true? The AI is told this from the next turn on.",
-      "cancel": "Cancel",
+      "cancel": "إلغاء",
       "showAll": "Show all {{count}}",
       "showFewer": "Show fewer",
       "kind": {

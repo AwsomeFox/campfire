@@ -60,7 +60,7 @@
     "saved": "حفظd.",
     "saveError": "تعذّر الحفظ preferences.",
     "deleteAccount": "حذف account",
-    "deleteBlurb": "Permanently deletes your account and its sessions and tokens. Character sheets you own stay in their campaigns (un-owned); retained campaign history is relabeled “Deleted user”. This cannot be undone.",
+    "deleteBlurb": "Permanently deletes your account and its sessions and tokens. Character sheets you own stay in their campaigns (un-owned); retained campaign history is relabeled “حذفd user”. This cannot be undone.",
     "deleteMyAccountEllipsis": "حذف my account…",
     "deleteConfirmPrompt": "Type your username <0>{{username}}</0> to confirm.",
     "deleteTypeLabel": "Type <0>{{username}}</0> to confirm",

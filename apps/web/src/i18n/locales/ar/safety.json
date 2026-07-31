@@ -12,7 +12,7 @@
     "resolveHint": "Talk it through first. Choose how the table moves on.",
     "resolveSubmit": "Resolve",
     "releaseFailed": "Couldn’t resolve the hold. Try again.",
-    "cancel": "Cancel",
+    "cancel": "إلغاء",
     "recovery": "How does the table move on?",
     "recoveryOption": {
       "resume": "Resume — pick up where we stopped",
