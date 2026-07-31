@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { OidcCheckResult, OidcSettings, OidcTestLoginStart, OidcTestResult } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, ErrorNote } from '../../components/ui';
+import { formatDateTime } from '../../lib/format';
 
 interface OidcDraft {
   providerName: string;
@@ -436,7 +437,7 @@ export function OidcCard() {
               </p>
               <p className="text-slate-400">{testResult.message}</p>
               <p className="text-secondary">
-                Tested {new Date(testResult.testedAt).toLocaleString()} · fingerprint{' '}
+                Tested {formatDateTime(testResult.testedAt)} · fingerprint{' '}
                 <span className="font-mono">{testResult.fingerprint || '—'}</span> · values from{' '}
                 {sourceSummary(testResult)}
               </p>
@@ -469,7 +470,7 @@ export function OidcCard() {
           {cfg.lastE2eTest && (
             <p className="text-[10px] text-secondary">
               Last end-to-end test: {cfg.lastE2eTest.ok ? 'OK' : 'failed'} at{' '}
-              {new Date(cfg.lastE2eTest.testedAt).toLocaleString()} · fingerprint{' '}
+              {formatDateTime(cfg.lastE2eTest.testedAt)} · fingerprint{' '}
               <span className="font-mono">{cfg.lastE2eTest.fingerprint || '—'}</span>
               {e2eFingerprintMatches
                 ? ' (matches current config)'

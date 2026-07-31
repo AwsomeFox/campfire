@@ -38,6 +38,7 @@ import {
   type EncounterWithCombatants,
 } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
+import { formatNumber } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
@@ -1165,12 +1166,12 @@ export default function AiTablePage() {
               {readiness.estimatedCost.estimatedPromptTokens === null ||
               readiness.estimatedCost.estimatedCompletionTokens === null
                 ? t('aiOnboarding.runCost.summaryTotal', {
-                    tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                    tokens: formatNumber(readiness.estimatedCost.estimatedTotalTokens),
                   })
                 : t('aiOnboarding.runCost.summary', {
-                    tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
-                    prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
-                    completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+                    tokens: formatNumber(readiness.estimatedCost.estimatedTotalTokens),
+                    prompt: formatNumber(readiness.estimatedCost.estimatedPromptTokens),
+                    completion: formatNumber(readiness.estimatedCost.estimatedCompletionTokens),
                   })}{' '}
               {/* #1065 — the same money line as the settings card, from the same basis. It
                   used to render `toFixed(4)` against a hardcoded-null figure: five decimal
@@ -1261,7 +1262,7 @@ function BudgetMeter({ used, budget }: { used: number; budget: number }) {
         <div style={{ width: `${pct}%`, height: '100%', background: tone }} />
       </div>
       <div className="text-[10px] text-secondary mt-0.5">
-        {t('table.tokensUsedOf', { used: used.toLocaleString(), budget: budget.toLocaleString() })}
+        {t('table.tokensUsedOf', { used: formatNumber(used), budget: formatNumber(budget) })}
       </div>
     </div>
   );

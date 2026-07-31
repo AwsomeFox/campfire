@@ -22,6 +22,7 @@ import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
+import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
 
@@ -290,7 +291,7 @@ export function TurnWorkspace({
               maxLength={200}
               onChange={(e) => setReadiedDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                if (e.key === 'Enter' && !isImeComposing(e)) {
                   e.preventDefault();
                   const trimmed = readiedDraft.trim();
                   turnState.mutate({ readied: trimmed || null });

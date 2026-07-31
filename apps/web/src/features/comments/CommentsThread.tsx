@@ -32,22 +32,12 @@ import { entityTargetProps } from '../../lib/entityLinks';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { ReportButton } from '../moderation/ReportDialog';
+import { timeAgo, useTimeTick } from '../../lib/format';
 
 interface CommentDraft { body: string }
 const COMMENT_CONFLICT_FIELDS: Array<ConflictField<CommentDraft>> = [{ key: 'body', label: 'Comment', merge: true }];
 
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return '';
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
+
 
 type LoadedThread = CommentThread & {
   /** Replies merged from preview + any load-more pages (deduped by id). */
@@ -108,6 +98,7 @@ export function CommentsThread({
   entityType: EntityType;
   entityId: number;
 }) {
+  useTimeTick();
   const { me } = useAuth();
   const myUserId = me ? String(me.user.id) : null;
   const { isDm, canMemberWrite } = useCampaignAccess();

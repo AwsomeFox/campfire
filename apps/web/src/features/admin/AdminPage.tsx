@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AuditEntry, StorageStats } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
+import { formatNumber, formatDateTime } from '../../lib/format';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { MetricsCard } from './MetricsCard';
 import { RequireServerAdmin } from './RequireServerAdmin';
@@ -95,8 +96,8 @@ function StorageSummaryCard() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <Stat label="On disk" value={formatBytes(stats.diskBytes)} />
-          <Stat label="Attachments" value={stats.fileCount.toLocaleString()} />
-          <Stat label="Campaigns tracked" value={stats.campaigns.length.toLocaleString()} />
+          <Stat label="Attachments" value={formatNumber(stats.fileCount)} />
+          <Stat label="Campaigns tracked" value={formatNumber(stats.campaigns.length)} />
         </div>
       )}
     </Card>
@@ -146,7 +147,7 @@ function RecentAuditCard() {
                     stands out from a campaign-DM's in the overview feed. */}
                 <ActorRoleBadge role={e.actorRole} />
               </span>
-              <span className="text-secondary whitespace-nowrap">{new Date(e.createdAt).toLocaleString()}</span>
+              <span className="text-secondary whitespace-nowrap">{formatDateTime(e.createdAt)}</span>
             </li>
           ))}
         </ul>

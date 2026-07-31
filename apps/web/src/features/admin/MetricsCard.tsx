@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AdminMetrics } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Btn, Card, Skeleton, ErrorNote } from '../../components/ui';
+import { formatNumber, formatDateTime } from '../../lib/format';
 
 const REFRESH_MS = 30_000;
 
@@ -122,9 +123,9 @@ export function MetricsCard() {
         <Stat label="DB file" value={metrics.database.dbFileBytes === null ? 'Unknown' : formatBytes(metrics.database.dbFileBytes)} />
         <Stat label="WAL" value={metrics.database.walBytes === null ? 'None' : formatBytes(metrics.database.walBytes)} />
         <Stat label="Free disk" value={metrics.storage.freeBytes === null ? 'Unknown' : formatBytes(metrics.storage.freeBytes)} />
-        <Stat label="DB pages" value={metrics.database.pageCount.toLocaleString()} />
-        <Stat label="Active sessions" value={metrics.activeSessions.toLocaleString()} />
-        <Stat label="Started" value={new Date(metrics.startedAt).toLocaleString()} />
+        <Stat label="DB pages" value={formatNumber(metrics.database.pageCount)} />
+        <Stat label="Active sessions" value={formatNumber(metrics.activeSessions)} />
+        <Stat label="Started" value={formatDateTime(metrics.startedAt)} />
       </div>
 
       {metrics.storage.status !== 'ok' && (
@@ -133,7 +134,7 @@ export function MetricsCard() {
       <div className="flex items-center gap-2">
         <Btn className="text-xs" disabled={scanning} onClick={() => void runCheck('quick-check')}>Run quick check</Btn>
         <Btn className="text-xs" disabled={scanning} onClick={() => void runCheck('integrity-check')}>Run full integrity check</Btn>
-        <span className="text-[11px] text-secondary">Last quick check: {metrics.storage.quickCheck.checkedAt ? new Date(metrics.storage.quickCheck.checkedAt).toLocaleString() : 'never'}</span>
+        <span className="text-[11px] text-secondary">Last quick check: {metrics.storage.quickCheck.checkedAt ? formatDateTime(metrics.storage.quickCheck.checkedAt) : 'never'}</span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
         <Stat label="Uploads" value={metrics.storage.uploadsBytes === null ? 'Unknown' : formatBytes(metrics.storage.uploadsBytes)} />
@@ -146,7 +147,7 @@ export function MetricsCard() {
         <p className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-2">Records</p>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
           {COUNT_LABELS.map(({ key, label }) => (
-            <Stat key={key} label={label} value={metrics.counts[key].toLocaleString()} />
+            <Stat key={key} label={label} value={formatNumber(metrics.counts[key])} />
           ))}
         </div>
       </div>
@@ -165,7 +166,7 @@ export function MetricsCard() {
                   <span className="text-secondary"> · {a.actor}</span>
                   {a.entityType && <span className="text-secondary"> · {a.entityType}{a.entityId ? ` #${a.entityId}` : ''}</span>}
                 </span>
-                <span className="text-secondary whitespace-nowrap">{new Date(a.createdAt).toLocaleString()}</span>
+                <span className="text-secondary whitespace-nowrap">{formatDateTime(a.createdAt)}</span>
               </li>
             ))}
           </ul>

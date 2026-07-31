@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import { AI_PRICING_MAX_ENTRIES, aiPricingDuplicateIndices, type AiPricingView } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn } from '../../components/ui';
+import { formatDate } from '../../lib/format';
 
 interface Row {
   providerType: string;
@@ -355,7 +356,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
           good as the day someone last checked them, and saying so is the only honest option. */}
       <p className="text-[11px] text-slate-400">
         {t('admin.pricing.referenceAsOf', { date: view.referenceAsOf })}
-        {view.updatedAt && <> {t('admin.pricing.lastSaved', { date: new Date(view.updatedAt).toLocaleDateString() })}</>}
+        {view.updatedAt && <> {t('admin.pricing.lastSaved', { date: formatDate(view.updatedAt) })}</>}
       </p>
     </div>
   );

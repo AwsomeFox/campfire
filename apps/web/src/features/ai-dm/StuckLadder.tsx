@@ -25,6 +25,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CampaignMember } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateAiDm, type AiDmSession } from '../../lib/query';
+import { formatTime } from '../../lib/format';
 import { Btn, TextArea, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
@@ -194,7 +195,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
               {/* Server's player-readable detail — verbatim. */}
               <p className="text-sm text-[var(--color-neutral-200)] mt-0.5">{session.stuck.detail}</p>
               <p className="text-[11px] text-secondary mt-1">
-                {t('ladder.stuckSince', { time: new Date(session.stuck.since).toLocaleTimeString(), turn: session.stuck.turn })}
+                {t('ladder.stuckSince', { time: formatTime(session.stuck.since), turn: session.stuck.turn })}
               </p>
             </div>
           </div>

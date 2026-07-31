@@ -12,20 +12,11 @@ import { GameIcon } from '../../components/GameIcon';
 import { useAnnounce } from '../../components/Announcer';
 import { entityHref } from '../../lib/entityLinks';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { timeAgo, useTimeTick, formatDateTime } from '../../lib/format';
 
 const MAX_SHOWN = 30;
 
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  if (days <= 0) return 'today';
-  if (days === 1) return '1d';
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  return `${months}mo`;
-}
+
 
 function kindLabel(t: (key: string) => string, kind: CatchUpChangeKind): string {
   if (kind === 'new') return t('catchUp.kindNew');
@@ -36,6 +27,7 @@ function kindLabel(t: (key: string) => string, kind: CatchUpChangeKind): string 
 type PeriodMode = 'visit' | 'session';
 
 export function CatchUpPanel({ campaignId }: { campaignId: number }) {
+  useTimeTick();
   const { t } = useTranslation();
   const titleId = useId();
   const announce = useAnnounce();
@@ -103,8 +95,9 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
 
   if (dismissed || !data || data.totalCount === 0) return null;
 
+  const isTodaySince = data.since ? Math.floor((Date.now() - new Date(data.since).getTime()) / (1000 * 60 * 60 * 24)) <= 0 : true;
   const sinceLabel =
-    data.since && timeAgo(data.since) === 'today'
+    data.since && isTodaySince
       ? t('catchUp.today')
       : data.since
         ? t('catchUp.timeAgo', { time: timeAgo(data.since) })
@@ -276,7 +269,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
             </h3>
             <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
               {data.schedules.map(({ kind, schedule }) => {
-                const title = schedule.title || t('catchUp.scheduleAt', { time: new Date(schedule.scheduledAt).toLocaleString() });
+                const title = schedule.title || t('catchUp.scheduleAt', { time: formatDateTime(schedule.scheduledAt) });
                 return (
                   <li key={`sch-${schedule.id}`}>
                     <Link

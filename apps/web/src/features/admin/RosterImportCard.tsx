@@ -3,6 +3,7 @@ import type { RosterImportCommitResult, RosterImportPreview } from '@campfire/sc
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../../lib/format';
 
 export function RosterImportCard() {
   const { t } = useTranslation();
@@ -144,7 +145,7 @@ export function RosterImportCard() {
               <ul className="mt-1 space-y-1">
                 {result.activations.map((a) => (
                   <li key={a.userId} className="font-mono text-slate-200">
-                    {a.username}: {a.activationCode} (expires {new Date(a.expiresAt).toLocaleString()})
+                    {a.username}: {a.activationCode} (expires {formatDateTime(a.expiresAt)})
                   </li>
                 ))}
               </ul>

@@ -19,6 +19,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { InboxSweepItemResult, InboxSweepResult, Note, NoteListPage } from '@campfire/schema';
 import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
+import { formatDate } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { archivedWriteBlockedReason } from '../../app/campaignAccess';
@@ -647,7 +648,7 @@ function entityHref(campaignId: number, item: Note): string | null {
 function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) {
   const { t } = useTranslation();
   const href = entityHref(campaignId, item);
-  const resolvedOn = item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : null;
+  const resolvedOn = item.updatedAt ? formatDate(item.updatedAt) : null;
   return (
     <Card density="default" className="space-y-2.5" {...entityTargetProps('inbox', item.id)}>
       <div className="flex gap-2.5 items-start">

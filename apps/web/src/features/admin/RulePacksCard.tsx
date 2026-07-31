@@ -51,6 +51,7 @@ import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { Card, Btn, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RULE_SYSTEMS, ruleSystemBySource, sectionLabel, SOURCES_REQUIRING_URL } from '../../lib/rules';
+import { timeAgo, useTimeTick } from '../../lib/format';
 
 /**
  * Install is a non-blocking background job (issue #20): POST /rules/packs/install returns
@@ -76,6 +77,7 @@ function selectedPackSlug(source: RulePackInstallSource, osrVariant: OsrInstallS
 }
 
 export function RulePacksCard() {
+  useTimeTick();
   const { t } = useTranslation();
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -496,17 +498,4 @@ function InstallPanel({
   );
 }
 
-function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const diffMs = Date.now() - then;
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  return `${weeks}w ago`;
-}
+

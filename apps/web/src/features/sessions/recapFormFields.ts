@@ -7,6 +7,8 @@
  * forms so accessible names and error focus stay consistent.
  */
 
+import { formatNumber } from '../../lib/format';
+
 export const RECAP_FIELD_LABELS = {
   title: 'Title',
   // Visible copy is "Played on"; the key matches the API/schema field `playedAt`.
@@ -111,7 +113,7 @@ export function validateRecapFields(values: {
     errors.playedAt = 'Enter a valid calendar date.';
   }
   if (values.recap.length > RECAP_BODY_MAX) {
-    errors.recap = `Recap must be at most ${RECAP_BODY_MAX.toLocaleString()} characters.`;
+    errors.recap = `Recap must be at most ${formatNumber(RECAP_BODY_MAX)} characters.`;
   }
   return errors;
 }

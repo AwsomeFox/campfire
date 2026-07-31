@@ -14,6 +14,7 @@ import {
   type ToolEntry,
 } from './transcript';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { formatNumber } from '../../lib/format';
 
 /** game-icons slug for a tool chip's resource family. */
 export const RESOURCE_ICON: Record<ToolResource, string> = {
@@ -74,9 +75,9 @@ export function TranscriptRow({
                 ? t('table.tokensUnknown')
                 : t('table.tokensUsedInline', {
                     count: entry.meta.tokensUsed,
-                    formatted: entry.meta.tokensUsed.toLocaleString(),
+                    formatted: formatNumber(entry.meta.tokensUsed),
                   })}{' '}
-              · {entry.meta.budgetRemaining.toLocaleString()} left
+              · {formatNumber(entry.meta.budgetRemaining)} left
               {entry.meta.errorMessage ? (
                 <span className="block mt-1 text-rose-400/90">{entry.meta.errorMessage}</span>
               ) : null}

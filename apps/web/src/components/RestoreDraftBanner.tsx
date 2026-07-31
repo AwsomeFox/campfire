@@ -2,6 +2,7 @@
  * Restore prompt when a namespaced local draft exists (issue #641).
  */
 import { Btn } from './ui';
+import { formatDateTime } from '../lib/format';
 
 export function RestoreDraftBanner({
   savedAt,
@@ -35,11 +36,5 @@ export function RestoreDraftBanner({
 }
 
 function formatDraftSavedAt(savedAt: string): string {
-  const date = new Date(savedAt);
-  if (Number.isNaN(date.getTime())) return 'earlier';
-  try {
-    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
-  } catch {
-    return date.toLocaleString();
-  }
+  return formatDateTime(savedAt);
 }

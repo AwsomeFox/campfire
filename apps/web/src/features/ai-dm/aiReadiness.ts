@@ -13,12 +13,14 @@
  * the *client* groups them for the active locale (the server would otherwise bake in its
  * own); strings (model ids, provider names) pass through untouched.
  */
+import { formatNumber } from '../../lib/format';
+
 export function localizeDetailParams(
   params: Record<string, string | number> | undefined,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(params ?? {})) {
-    out[key] = typeof value === 'number' ? value.toLocaleString() : value;
+    out[key] = typeof value === 'number' ? formatNumber(value) : value;
   }
   return out;
 }

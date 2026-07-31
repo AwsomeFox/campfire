@@ -101,6 +101,7 @@ function ScheduleCard({
               day: 'numeric',
               hour: 'numeric',
               minute: '2-digit',
+              timeZoneName: 'short',
             })}
             <span className="text-muted" style={{ fontWeight: 400 }}>
               {' '}

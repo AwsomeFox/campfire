@@ -10,6 +10,7 @@ import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 import { useKeyboardCommandHint } from '../../components/KeyboardCommandProvider';
+import { timeAgo, useTimeTick } from '../../lib/format';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
   private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private' },
@@ -18,15 +19,7 @@ const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; lab
   whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper' },
 };
 
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  if (days <= 0) return 'today';
-  if (days === 1) return '1d ago';
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  return `${weeks}w ago`;
-}
+
 
 export function NotesQuickRail({
   campaignId,
@@ -35,6 +28,7 @@ export function NotesQuickRail({
   campaignId: number;
   openInboxCount: number;
 }) {
+  useTimeTick();
   const { isDm, canMemberWrite } = useCampaignAccess();
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);

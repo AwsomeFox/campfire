@@ -21,7 +21,7 @@ import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 
-import { useFormattingLocale, useTimeFormat, formatDateTime } from '../lib/format';
+import { useFormattingLocale, useTimeFormat, formatDateTime, timeAgo } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, Dialog } from '../components/ui';
@@ -252,21 +252,8 @@ function SidebarKeyboardShortcutsButton() {
   );
 }
 
-/**
- * Coarse "x ago" label for the offline banner. Intentionally low-precision
- * (minutes/hours/days): the exact second is noise next to "your data may be
- * stale", and a coarse label avoids the jitter of a ticking clock on a banner
- * that doesn't need to update in place.
- */
 function relativeAgo(at: number, now: number = Date.now()): string {
-  const secs = Math.max(0, Math.round((now - at) / 1000));
-  if (secs < 60) return 'just now';
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} hr ago`;
-  const days = Math.round(hours / 24);
-  return `${days} d ago`;
+  return timeAgo(at, now);
 }
 
 /**

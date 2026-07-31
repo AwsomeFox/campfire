@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { openLegendAttributeDicePool, type ActionRollRequest, type DiceRoll } from '@campfire/schema';
 import { Btn, TextInput } from '../../components/ui';
 import { UIIcon } from '../../components/UIIcon';
@@ -921,7 +922,7 @@ function NamingDialog({
   }, [nameInputRef]);
 
   function onKey(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !isImeComposing(e)) {
       e.preventDefault();
       if (valid) onSubmit();
     }

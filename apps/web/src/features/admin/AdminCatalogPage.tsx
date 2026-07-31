@@ -25,6 +25,7 @@ import type {
   CampaignExportRequestPage,
 } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
+import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { Btn, Card, Chip, ErrorNote, EmptyState, Skeleton, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
@@ -620,7 +621,7 @@ function AdminCatalog() {
               value={draftQuery}
               onChange={(e) => setDraftQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') applyFilters({ q: draftQuery });
+                if (e.key === 'Enter' && !isImeComposing(e)) applyFilters({ q: draftQuery });
               }}
               placeholder={t('admin.catalog.searchPlaceholder')}
             />

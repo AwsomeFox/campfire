@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
+import { formatNumber, formatDateTime } from '../../lib/format';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   AiCostBasis,
@@ -588,25 +589,25 @@ function BudgetSection({
         </div>
         <span className="text-muted" style={{ fontSize: 11 }}>
           {t('settings.aiDm.budget.usageLine', {
-            used: seat.tokensUsed.toLocaleString(),
-            reserved: seat.tokensReserved.toLocaleString(),
-            unknown: seat.tokensUnknown.toLocaleString(),
-            remaining: seat.budgetRemaining.toLocaleString(),
-            budget: seat.tokenBudget.toLocaleString(),
+            used: formatNumber(seat.tokensUsed),
+            reserved: formatNumber(seat.tokensReserved),
+            unknown: formatNumber(seat.tokensUnknown),
+            remaining: formatNumber(seat.budgetRemaining),
+            budget: formatNumber(seat.tokenBudget),
             turns:
               seat.turnCount === 1
                 ? t('settings.aiDm.budget.turnsOne')
                 : t('settings.aiDm.budget.turnsSome', { n: seat.turnCount }),
           })}
           {seat.lastTurnAt
-            ? t('settings.aiDm.budget.lastTurnSuffix', { when: new Date(seat.lastTurnAt).toLocaleString() })
+            ? t('settings.aiDm.budget.lastTurnSuffix', { when: formatDateTime(seat.lastTurnAt) })
             : ''}
         </span>
         {(seat.tokensRefunded > 0 || seat.tokensOverage > 0) && (
           <span className="text-muted" style={{ fontSize: 11 }}>
-            {t('settings.aiDm.budget.refundedLine', { refunded: seat.tokensRefunded.toLocaleString() })}
+            {t('settings.aiDm.budget.refundedLine', { refunded: formatNumber(seat.tokensRefunded) })}
             {seat.tokensOverage > 0
-              ? t('settings.aiDm.budget.overageSuffix', { overage: seat.tokensOverage.toLocaleString() })
+              ? t('settings.aiDm.budget.overageSuffix', { overage: formatNumber(seat.tokensOverage) })
               : ''}
           </span>
         )}

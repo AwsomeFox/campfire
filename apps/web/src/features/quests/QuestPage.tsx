@@ -15,6 +15,7 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { timeAgo, useTimeTick } from '../../lib/format';
 import {
   Card,
   Chip,
@@ -70,6 +71,7 @@ type QuestStatusValue = Quest['status'];
 const STATUS_OPTIONS: QuestStatusValue[] = QuestStatus.options;
 
 export default function QuestPage() {
+  useTimeTick();
   const { campaignId, questId } = useParams<{ campaignId: string; questId: string }>();
   const cid = Number(campaignId);
 
@@ -1149,18 +1151,7 @@ function PageShell({ children }: { campaignId: number; children: React.ReactNode
   );
 }
 
-// "Updated Xd ago", matching QuestListPage / NotesQuickRail phrasing.
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  if (days <= 0) return 'today';
-  if (days === 1) return '1d ago';
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  return `${months}mo ago`;
-}
+
 
 // Localized display word for a quest status, used in trigger labels and
 // announcements so the menu reads "Quest status: Active" instead of the raw

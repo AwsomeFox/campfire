@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../../lib/format';
 import type {
   ModerationActionType,
   ModerationEvidence,
@@ -49,8 +50,7 @@ import {
 
 function shortDate(iso: string | null): string {
   if (!iso) return '—';
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? new Date(ms).toLocaleString() : '—';
+  return formatDateTime(iso);
 }
 
 export default function ModerationQueuePage() {

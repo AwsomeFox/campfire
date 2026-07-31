@@ -12,7 +12,7 @@
  * Issue #634: clock rendering follows the signed-in user's `timeFormat` preference
  * (system / 12h / 24h). Date-only values keep their calendar-day semantics.
  */
-import { useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import {
   DEFAULT_TIME_FORMAT,
   appliesTime,
@@ -140,6 +140,39 @@ export function createLocaleFormatters(
     formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
       return value.toLocaleString(getLocale(), options);
     },
+
+    timeAgo(value: Date | string | number | null | undefined, now: number = Date.now()): string {
+      if (value === null || value === undefined || value === '') return '';
+      const date = toDate(value);
+      const time = date.getTime();
+      if (Number.isNaN(time)) return '';
+
+      const ms = Math.max(0, now - time);
+      const mins = Math.floor(ms / 60_000);
+      if (mins < 1) return 'just now';
+
+      const hours = Math.floor(mins / 60);
+      const days = Math.floor(hours / 24);
+
+      if (days >= 30) {
+        return date.toLocaleDateString(getLocale());
+      }
+
+      if (typeof Intl !== 'undefined' && Intl.RelativeTimeFormat) {
+        try {
+          const rtf = new Intl.RelativeTimeFormat(getLocale(), { numeric: 'always', style: 'narrow' });
+          if (days >= 1) return rtf.format(-days, 'day');
+          if (hours >= 1) return rtf.format(-hours, 'hour');
+          return rtf.format(-mins, 'minute');
+        } catch {
+          // Fall through
+        }
+      }
+
+      if (days >= 1) return `${days}d ago`;
+      if (hours >= 1) return `${hours}h ago`;
+      return `${mins}m ago`;
+    },
   };
 }
 
@@ -153,3 +186,25 @@ export const formatDateTime = formatters.formatDateTime;
 export const formatTime = formatters.formatTime;
 /** Format a number with locale grouping/decimal separators. */
 export const formatNumber = formatters.formatNumber;
+/** Format a relative timestamp (e.g. "just now", "5m ago", "2h ago", "3d ago"). */
+export const timeAgo = formatters.timeAgo;
+
+/** Hook that triggers a re-render every `intervalMs` (default 60s) so relative timestamps update. */
+export function useTimeTick(intervalMs: number = 60_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+  return now;
+}
+
+/** Hook that returns an auto-updating formatted "time ago" string. */
+export function useTimeAgo(
+  value: Date | string | number | null | undefined,
+  intervalMs: number = 60_000,
+): string {
+  const now = useTimeTick(intervalMs);
+  useFormattingLocale();
+  return formatters.timeAgo(value, now);
+}

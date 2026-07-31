@@ -23,6 +23,7 @@ import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
 import { d20Flavor, d20TotalClasses } from '../../lib/d20Flavor';
+import { timeAgo, useTimeTick, formatDateTime } from '../../lib/format';
 import {
   advanceDiceRollAnnouncements,
   DICE_LOG_LIVE_REGION,
@@ -45,17 +46,10 @@ import { useCampaign } from '../../app/CampaignContext';
 
 const POLL_MS = 5000;
 
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(ms / 60000);
-  if (mins < 1) return 'now';
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
+
 
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
+  useTimeTick();
   const { t } = useTranslation();
   const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const campaign = useCampaign(campaignId);
@@ -455,7 +449,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             return (
             <div
               key={r.id}
-              title={new Date(r.createdAt).toLocaleString()}
+              title={formatDateTime(r.createdAt)}
               style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: compact ? 28 : 32 }}
             >
               <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, display: 'flex', gap: 8, alignItems: 'baseline', overflow: 'hidden' }}>

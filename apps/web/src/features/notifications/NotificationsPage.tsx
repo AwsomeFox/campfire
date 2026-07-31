@@ -21,7 +21,7 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { notificationHref } from '../../lib/entityLinks';
-import { useFormattingLocale, useTimeFormat } from '../../lib/format';
+import { timeAgo, useFormattingLocale, useTimeFormat, useTimeTick } from '../../lib/format';
 import { parseCampaignIdParam } from '../../lib/parseCampaignIdParam';
 import {
   rememberCancelledScheduleDetail,
@@ -76,19 +76,6 @@ function typeIcon(type: Notification['type']): string {
   }
 }
 
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return '';
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
-
 function notificationCopy(
   notification: Notification,
   locale: string | undefined,
@@ -122,6 +109,7 @@ const NOTIFICATION_TYPES: { type: NotificationType; label: string }[] = [
 ];
 
 export default function NotificationsPage() {
+  useTimeTick();
   const params = useParams<{ campaignId?: string }>();
   const campaignIdFromParams = parseCampaignIdParam(params.campaignId);
   const navigate = useNavigate();

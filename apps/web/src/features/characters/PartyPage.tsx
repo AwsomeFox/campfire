@@ -19,6 +19,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
+import { formatNumber } from '../../lib/format';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { CampaignCover } from '../../components/CampaignCover';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
@@ -401,7 +402,7 @@ function CharacterCard({
               </p>
             </div>
             {xpProgressionSupported(adapter) && xpQualifiedLevel > character.level && (
-              <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${xpQualifiedLevel}`}>
+              <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${formatNumber(character.xp)} XP — enough for level ${xpQualifiedLevel}`}>
                 ⬆ Level up
               </span>
             )}
@@ -638,9 +639,9 @@ function AwardXpForm({
                         </label>
                       </td>
                       <td className="px-3 py-2">{STATUS_LABEL[character.status]}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{character.xp.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(character.xp)}</td>
                       <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                        {selected && validAmount ? (character.xp + amountNum).toLocaleString() : '—'}
+                        {selected && validAmount ? formatNumber(character.xp + amountNum) : '—'}
                       </td>
                     </tr>
                   );

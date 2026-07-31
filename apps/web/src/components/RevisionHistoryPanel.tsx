@@ -5,6 +5,7 @@ import { Btn, Card, ErrorNote, Skeleton } from './ui';
 import { Markdown } from './Markdown';
 import { useDialog } from './useDialog';
 import { useDisclosure } from './useDisclosure';
+import { formatDateTime } from '../lib/format';
 
 type Snapshot = Record<string, string | string[]>;
 type DialogStep = 'inspect' | 'confirm';
@@ -44,8 +45,7 @@ function fieldLabel(entityType: RevisionEntityType, field: string): string {
 }
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleString();
+  return formatDateTime(value);
 }
 
 /**

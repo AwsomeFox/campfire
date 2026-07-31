@@ -40,6 +40,7 @@ import {
   ruleSystemAdapterLabel,
 } from '../../lib/rules';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { formatDateTime } from '../../lib/format';
 import AiDmCard from './AiDmCard';
 import {
   SETTINGS_SECTIONS,
@@ -1152,7 +1153,7 @@ function CastSessionsCard({ campaign }: { campaign: Campaign }) {
               <div>
                 <p className="m-0 text-sm font-semibold">{session.label || 'Unlabelled cast session'}</p>
                 <p className="m-0 text-xs text-muted">
-                  {session.tokenPrefix} · expires {new Date(session.expiresAt).toLocaleString()} · {session.accessCount} reads
+                  {session.tokenPrefix} · expires {formatDateTime(session.expiresAt)} · {session.accessCount} reads
                 </p>
               </div>
               <button className="btn btn-danger" disabled={busy} onClick={() => void revoke(session.id)}>
