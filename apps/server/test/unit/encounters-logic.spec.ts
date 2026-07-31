@@ -779,6 +779,26 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { hpSet: 5 }, starfinder).deathState).toBe('none');
     });
 
+    it('an unrelated HP edit does not silently flip an already-down Starfinder combatant to dying (#1503)', () => {
+      // updateCombatant sets recomputeHp for ANY HP-adjacent field (temp HP, a lowered hpMax, a
+      // leftover-counter clear), so applyCombatantHp runs even when HP did not change. Before the
+      // gate, a Starfinder combatant sitting at 0 HP with deathState 'none' was silently rewritten
+      // to 'dying' by such a bookkeeping patch — and the 'condition' combat-log event only fires
+      // for an explicit patch.deathState, so the transition was invisible (Devin review #1812).
+      // The dyingAtZeroHp flag now fires only when THIS patch actually produced the zero.
+      const starfinder = { massiveDamageInstantDeath: false, deathSaves: false, dyingAtZeroHp: true };
+      const down = charState({ hpCurrent: 0, deathState: 'none' });
+      // Unrelated edits leave an already-down combatant's deathState untouched.
+      expect(applyCombatantHp({ ...down }, { hpTemp: 5 }, starfinder).deathState).toBe('none');
+      expect(applyCombatantHp({ ...down }, { deathSaveFailures: 0 }, starfinder).deathState).toBe('none');
+      // Further damage at 0 (a negative hpDelta) IS a real damage event -> still 'dying'.
+      expect(applyCombatantHp({ ...down }, { hpDelta: -3 }, starfinder).deathState).toBe('dying');
+      // An explicit absolute-set to 0 IS the drop that produced the zero -> 'dying'.
+      expect(applyCombatantHp(charState({ hpCurrent: 6, deathState: 'none' }), { hpSet: 0 }, starfinder).deathState).toBe('dying');
+      // A genuine damage drop to 0 from a healthy state still reaches 'dying'.
+      expect(applyCombatantHp(charState({ hpCurrent: 6, deathState: 'none' }), { hpDelta: -6 }, starfinder).deathState).toBe('dying');
+    });
+
     // The server-side parity check the issue asked for: for EVERY registered adapter, a
     // character reduced to 0 HP is "dying" only when the adapter declares 5e death saves, and
     // never accumulates death-save state otherwise. This is the test that proves the death model

@@ -941,7 +941,18 @@ export function applyCombatantHp(
       deathState = 'none';
       succ = 0;
       fail = 0;
-    } else if (hpModel.dyingAtZeroHp && deathState === 'none') {
+    } else if (
+      hpModel.dyingAtZeroHp &&
+      deathState === 'none' &&
+      // Only flag 'dying' when THIS patch actually produced the zero — an explicit absolute-set
+      // (hpSet) or real damage (a negative hpDelta). updateCombatant sets recomputeHp for ANY
+      // HP-adjacent field (temp HP, a lowered hpMax, a leftover-counter clear), so without this
+      // gate an unrelated bookkeeping edit would silently flip an already-down combatant to
+      // 'dying' while the 'condition' combat-log event only fires for an explicit patch.deathState
+      // — an invisible transition. Gating on a real drop keeps the hpSet/hpDelta parity the tests
+      // assert and leaves untouched combatants alone (#1503, Devin review #1812).
+      (patch.hpSet !== undefined || (patch.hpDelta !== undefined && patch.hpDelta < 0))
+    ) {
       // A system like Starfinder models its own dying state without 5e death saves: 0 HP from a
       // healthy state ('none') is 'dying', matching its damage path so hpSet and hpDelta agree.
       deathState = 'dying';

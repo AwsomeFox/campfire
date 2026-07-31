@@ -1426,8 +1426,18 @@ export class CharactersService {
           hpSet.deathState = 'dying';
           hpSet.deathSaveSuccesses = 0;
           hpSet.deathSaveFailures = 0;
-        } else if (hpModel.dyingAtZeroHp) {
-          hpSet.deathState = 'dying';
+        } else {
+          // A system WITHOUT 5e death saves freshly dropped to 0 HP (issue #1503): a system that
+          // models its own dying state (Starfinder, hpModel.dyingAtZeroHp) is flagged 'dying' so
+          // the sheet agrees with its damage path; a system with no downed concept (PF2e/OSR/…)
+          // keeps deathState 'none'. Either way, clear any leftover 5e death-save marks: a system
+          // without death saves must never carry them, and the sheet UI hides the tracker for
+          // non-5e systems while update() rejects increases — so this drop to 0 HP is the only
+          // cleanup path for stale marks left by a pre-fix row or a campaign switched off 5e
+          // (Devin review #1812).
+          if (hpModel.dyingAtZeroHp) hpSet.deathState = 'dying';
+          hpSet.deathSaveSuccesses = 0;
+          hpSet.deathSaveFailures = 0;
         }
       }
       const [updated] = tx

@@ -4160,6 +4160,11 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(cleared.status).toBe(200);
     expect(cleared.body.deathSaveFailures).toBe(0);
     expect(cleared.body.deathSaveSuccesses).toBe(1); // untouched (not in the patch)
+    // The counter clear must NOT silently flip an already-down combatant to 'dying' — an
+    // unrelated recompute (no hpSet / negative hpDelta) leaves deathState untouched
+    // (#1503, Devin review #1812). The 'condition' combat-log event only fires for an
+    // explicit patch.deathState, so a silent flip here would be invisible.
+    expect(cleared.body.deathState).toBe('none');
     const after = await db.select().from(combatantsTable).where(eq(combatantsTable.id, combatantId)).limit(1);
     expect(after[0]!.deathSaveFailures).toBe(0);
   });
