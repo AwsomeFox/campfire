@@ -4,10 +4,9 @@ import {
   Combatant,
   CombatantTurnState,
   DND5E_ACTION_ECONOMY,
-  Dnd5eAdapter,
   EMPTY_TURN_STATE,
-  OpenLegendAdapter,
   actionEconomyForAdapter,
+  listRuleSystemAdapters,
 } from '@campfire/schema';
 import {
   advanceTurn,
@@ -69,18 +68,23 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
 }
 
 describe('adapter action economy (issue #413)', () => {
-  it('5e defines action / bonus / reaction / movement', () => {
-    const model = actionEconomyForAdapter(Dnd5eAdapter);
-    expect(model.slots.map((s) => s.key)).toEqual(['action', 'bonus', 'reaction', 'movement']);
-    expect(model).toBe(DND5E_ACTION_ECONOMY);
-  });
-
-  it('an adapter without action economy falls back to the neutral single Action, not 5e', () => {
-    // OpenLegend does not define one — it must NOT inherit 5e bonus/reaction slots.
-    const model = actionEconomyForAdapter(OpenLegendAdapter);
-    expect(model.slots).toHaveLength(1);
-    expect(model.slots[0].key).toBe('action');
-  });
+  it.each(listRuleSystemAdapters().map((a) => [a.id, a] as const))(
+    '%s adapter provides defined action economy model',
+    (id, adapter) => {
+      const model = actionEconomyForAdapter(adapter);
+      expect(model.slots.length).toBeGreaterThan(0);
+      if (id === 'dnd5e') {
+        expect(model.slots.map((s) => s.key)).toEqual(['action', 'bonus', 'reaction', 'movement']);
+        expect(model).toBe(DND5E_ACTION_ECONOMY);
+      } else if (id === 'pf2e' || id === 'sf2e') {
+        expect(model.slots.map((s) => s.key)).toEqual(['actions', 'reaction']);
+        expect(model.slots.find((s) => s.key === 'actions')?.max).toBe(3);
+      } else {
+        expect(model.slots).toHaveLength(1);
+        expect(model.slots[0].key).toBe('action');
+      }
+    },
+  );
 });
 
 describe('retreatTurn (undo advance, issue #413)', () => {

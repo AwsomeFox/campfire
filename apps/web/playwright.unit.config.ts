@@ -7,6 +7,9 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e/tests',
   testMatch: /.*\.unit\.spec\.(js|ts|mjs|mts)/,
+  // Pure-data unit snapshots carry no OS-dependent font or rasterization rendering.
+  // Using an explicit template without `{platform}` keeps snapshot files platform-agnostic.
+  snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{arg}{ext}',
   fullyParallel: true,
   workers: 1,
   reporter: [['list']],

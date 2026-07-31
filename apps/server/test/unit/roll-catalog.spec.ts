@@ -2,11 +2,8 @@ import {
   Dnd5eAdapter,
   Pf2eAdapter,
   Sf2eAdapter,
-  OpenLegendAdapter,
-  Pathfinder1eAdapter,
-  StarfinderAdapter,
-  Archmage13aAdapter,
-  OsrAdapter,
+  listRuleSystemAdapters,
+  ruleSystemAdapter,
   checkCatalogForAdapter,
   findCheckInCatalog,
   neutralCheckCatalog,
@@ -140,32 +137,26 @@ describe('roll catalog — fixtures for every supported ruleset', () => {
     saveProficiencies: ['DEX'],
     skills: { Stealth: 'proficient' },
   };
-  const adapters: Array<[string, RuleSystemAdapter]> = [
-    ['5e', Dnd5eAdapter],
-    ['PF2e', Pf2eAdapter],
-    ['PF1e', Pathfinder1eAdapter],
-    ['Starfinder', StarfinderAdapter],
-    ['Open Legend', OpenLegendAdapter],
-    ['OSR', OsrAdapter],
-    ['13th Age', Archmage13aAdapter],
-  ];
 
-  it.each(adapters)('%s produces a non-empty catalog with initiative, ability checks, and saves', (_name, adapter) => {
-    const catalog = checkCatalogForAdapter(adapter, char);
-    expect(catalog.length).toBeGreaterThan(0);
-    expect(catalog.some((c) => c.category === 'initiative')).toBe(true);
-    expect(catalog.some((c) => c.category === 'ability')).toBe(true);
-    expect(catalog.some((c) => c.category === 'save')).toBe(true);
-    // Every entry carries a transparent breakdown that sums to its modifier (unless flagged incomplete).
-    for (const c of catalog) {
-      if (c.incomplete) continue;
-      const sum = c.breakdown.reduce((acc, b) => acc + b.value, 0);
-      expect(sum).toBe(c.modifier);
-    }
-  });
+  it.each(listRuleSystemAdapters().map((adapter) => [adapter.label, adapter] as const))(
+    '%s produces a non-empty catalog with initiative, ability checks, and saves',
+    (_name, adapter) => {
+      const catalog = checkCatalogForAdapter(adapter, char);
+      expect(catalog.length).toBeGreaterThan(0);
+      expect(catalog.some((c) => c.category === 'initiative')).toBe(true);
+      expect(catalog.some((c) => c.category === 'ability')).toBe(true);
+      expect(catalog.some((c) => c.category === 'save')).toBe(true);
+      // Every entry carries a transparent breakdown that sums to its modifier (unless flagged incomplete).
+      for (const c of catalog) {
+        if (c.incomplete) continue;
+        const sum = c.breakdown.reduce((acc, b) => acc + b.value, 0);
+        expect(sum).toBe(c.modifier);
+      }
+    },
+  );
 });
 
-describe('roll catalog — neutral/configurable fallback for unknown systems', () => {
+describe('roll catalog — characterizes synthetic adapters with no buildCheckCatalog', () => {
   const homebrew: RuleSystemAdapter = {
     id: 'homebrew',
     label: 'Homebrew',
@@ -214,6 +205,14 @@ describe('roll catalog — neutral/configurable fallback for unknown systems', (
   it('uses the adapter initiative modifier', () => {
     const init = neutralCheckCatalog(homebrew, char).find((c) => c.category === 'initiative')!;
     expect(init.modifier).toBe(1);
+  });
+
+  it('characterizes real unregistered/unknown slugs: ruleSystemAdapter("homebrew") resolves to Dnd5eAdapter and produces 5e catalog', () => {
+    const adapter = ruleSystemAdapter('homebrew');
+    expect(adapter.id).toBe('dnd5e');
+    const catalog = checkCatalogForAdapter(adapter, char);
+    const abilities = catalog.filter((c) => c.category === 'ability').map((c) => c.ability).sort();
+    expect(abilities).toEqual(['CHA', 'CON', 'DEX', 'INT', 'STR', 'WIS']);
   });
 });
 

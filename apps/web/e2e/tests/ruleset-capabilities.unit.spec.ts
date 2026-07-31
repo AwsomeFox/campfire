@@ -78,4 +78,25 @@ test.describe('ruleset capability disclosures (#508)', () => {
       ]),
     ).toMatchObject({ isHomebrew: false, slug: 'open5e-srd' });
   });
+
+  test('cepheus-srd (in picker list but no schema adapter) reports fallback status for mechanics', () => {
+    const profile = rulePackCapabilities({
+      slug: 'cepheus-srd',
+      name: 'Cepheus Engine SRD',
+      entryCount: 50,
+    });
+
+    expect(profile.capabilities.find((c) => c.key === 'characterMath')).toMatchObject({
+      status: 'fallback',
+    });
+    expect(profile.capabilities.find((c) => c.key === 'combatMath')).toMatchObject({
+      status: 'fallback',
+    });
+    expect(profile.capabilities.find((c) => c.key === 'difficulty')).toMatchObject({
+      status: 'fallback',
+    });
+    expect(profile.capabilities.find((c) => c.key === 'actions')).toMatchObject({
+      status: 'fallback',
+    });
+  });
 });
