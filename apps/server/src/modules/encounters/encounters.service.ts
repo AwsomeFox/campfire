@@ -3775,15 +3775,15 @@ export class EncountersService {
     // sheet's own handling: nothing here to cap, so nothing is rejected.
     const leveledTrack = leveledConditionTrackFor(adapter.id);
     // #1503 — a system without 5e death saves has no death-save counters to edit, so a genuine
-    // attempt to write 5e death-save state is rejected up front (matching the death-save roll
+    // attempt to write NEW 5e death-save state is rejected up front (matching the death-save roll
     // path's assertDeathSavesSupportedForCampaign): applyCombatantHp would otherwise silently drop
     // the fields while the override combat-log event still claimed a counter edit. The rejection
-    // fires only when the value would actually CHANGE the persisted counter, so an idempotent
-    // snapshot that re-sends the combatant's current counters (usually 0) is allowed — matching
-    // CharactersService.update's level-cap-style rule (Devin review #1812).
-    const combatantSuccChanges = patch.deathSaveSuccesses !== undefined && patch.deathSaveSuccesses !== existing.deathSaveSuccesses;
-    const combatantFailChanges = patch.deathSaveFailures !== undefined && patch.deathSaveFailures !== existing.deathSaveFailures;
-    if (!hasDeathSavesForAdapter(adapter) && (combatantSuccChanges || combatantFailChanges)) {
+    // fires only for an INCREASE — matching CharactersService.update's level-cap-style rule — so an
+    // idempotent snapshot (re-sending the current counters) and a decrease/reset to 0 (clearing
+    // leftover 5e state) are allowed, while no new 5e state can be introduced (Devin #1812).
+    const combatantSuccIncrease = patch.deathSaveSuccesses !== undefined && patch.deathSaveSuccesses > existing.deathSaveSuccesses;
+    const combatantFailIncrease = patch.deathSaveFailures !== undefined && patch.deathSaveFailures > existing.deathSaveFailures;
+    if (!hasDeathSavesForAdapter(adapter) && (combatantSuccIncrease || combatantFailIncrease)) {
       throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
     }
     const damageMetadataTouched =

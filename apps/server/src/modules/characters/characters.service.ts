@@ -1173,17 +1173,18 @@ export class CharactersService {
         }
       }
     }
-    // #1503 — death-save counters are a 5e construct. A genuine attempt to write 5e death-save
-    // state on a campaign whose adapter has no death saves is rejected (matching
-    // EncountersService.updateCombatant). But a full-sheet snapshot save — notably MCP
-    // upsert_character, which advertises both counters — often echoes the character's current,
-    // unchanged counters (usually 0), so the rejection fires only when the supplied value would
-    // actually CHANGE the persisted counter. This mirrors how the same method handles the adapter
-    // level cap just above: only an increase past the cap is rejected, so a sheet editor resending
-    // the current value keeps working (Devin review #1812). deathState stays writable on any system.
-    const succChanges = input.deathSaveSuccesses !== undefined && clampDeathSaveCount(input.deathSaveSuccesses) !== existing.deathSaveSuccesses;
-    const failChanges = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) !== existing.deathSaveFailures;
-    if (succChanges || failChanges) {
+    // #1503 — death-save counters are a 5e construct. A genuine attempt to write NEW 5e
+    // death-save state on a campaign whose adapter has no death saves is rejected (matching
+    // EncountersService.updateCombatant). The rejection fires only for an INCREASE — mirroring
+    // the adapter level cap just above (only an increase past the cap is rejected) — so an
+    // idempotent snapshot save (e.g. MCP upsert_character echoing the current counters, usually 0)
+    // succeeds, and a DECREASE or reset to 0 clears leftover 5e state (a campaign switched off 5e,
+    // or pre-#1503 data): that is the only cleanup surface, since the UI hides the tracker for these
+    // systems, so a DM reviving such a character with {deathState:'none', deathSaveFailures:0} is
+    // not blocked (Devin review #1812). deathState stays writable on any system.
+    const succIncrease = input.deathSaveSuccesses !== undefined && clampDeathSaveCount(input.deathSaveSuccesses) > existing.deathSaveSuccesses;
+    const failIncrease = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) > existing.deathSaveFailures;
+    if (succIncrease || failIncrease) {
       const [deathCampaign] = this.db
         .select({ ruleSystem: campaigns.ruleSystem })
         .from(campaigns)

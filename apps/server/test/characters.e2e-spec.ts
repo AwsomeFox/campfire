@@ -1095,6 +1095,31 @@ describe('characters (e2e)', () => {
       expect(saved.body.deathSaveSuccesses).toBe(0);
       expect(saved.body.deathSaveFailures).toBe(0);
     });
+
+    it('clears leftover 5e death-save counters on a non-5e table via the documented revive payload (#1503)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Leftover Clear #1503' });
+      expect(camp.status).toBe(201);
+      const pf2eCampaignId = camp.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Relic', hpCurrent: 0, hpMax: 8 });
+      expect(char.status).toBe(201);
+      const charId = char.body.id as number;
+      // Simulate leftover 5e state from before this gate (a campaign switched off 5e, or
+      // pre-#1503 data): the UI hides the tracker for non-5e systems, so the sheet revive is the
+      // only cleanup surface. The documented revive payload {deathState:'none', deathSaveFailures:0}
+      // must clear it — a decrease to 0 is allowed, never rejected (Devin review #1812).
+      await db.update(characters).set({ deathState: 'dying', deathSaveFailures: 3 }).where(eq(characters.id, charId));
+      const revived = await dbUpdate(server, dm, charId, { deathState: 'none', deathSaveFailures: 0, hpCurrent: 5 });
+      expect(revived.status).toBe(200);
+      expect(revived.body.deathState).toBe('none');
+      expect(revived.body.deathSaveFailures).toBe(0);
+      expect(revived.body.hpCurrent).toBe(5);
+    });
   });
 
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —
