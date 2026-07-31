@@ -22,10 +22,10 @@ describe('jest coverageThreshold (#562)', () => {
     if (global === undefined) {
       throw new Error('coverageThreshold.global must be defined');
     }
-    expect(global.statements).toBeGreaterThanOrEqual(28);
-    expect(global.branches).toBeGreaterThanOrEqual(21);
-    expect(global.functions).toBeGreaterThanOrEqual(25);
-    expect(global.lines).toBeGreaterThanOrEqual(28);
+    expect(global.statements).toBeGreaterThanOrEqual(40);
+    expect(global.branches).toBeGreaterThanOrEqual(30);
+    expect(global.functions).toBeGreaterThanOrEqual(35);
+    expect(global.lines).toBeGreaterThanOrEqual(40);
   });
 
   it('keeps each floor below its measured baseline so normal variance has headroom', () => {
@@ -34,9 +34,9 @@ describe('jest coverageThreshold (#562)', () => {
     if (global === undefined) {
       throw new Error('coverageThreshold.global must be defined');
     }
-    expect(global.statements).toBeLessThan(29.91);
-    expect(global.branches).toBeLessThan(23.46);
-    expect(global.functions).toBeLessThan(27.65);
-    expect(global.lines).toBeLessThan(30.4);
+    expect(global.statements).toBeLessThan(40.8);
+    expect(global.branches).toBeLessThan(32.13);
+    expect(global.functions).toBeLessThan(41.44);
+    expect(global.lines).toBeLessThan(42.52);
   });
 });
