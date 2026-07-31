@@ -794,6 +794,21 @@ function ScheduleItem({
             <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(true)}>
               Edit
             </Btn>
+            {schedule.sessionId == null ? (
+              <Link
+                to={`/c/${campaignId}/sessions?action=new-recap&fromSchedule=${schedule.id}`}
+                className="btn btn-ghost text-xs cf-density-xs"
+              >
+                Log session recap
+              </Link>
+            ) : (
+              <Link
+                to={`/c/${campaignId}/sessions?session=${schedule.sessionId}`}
+                className="btn btn-ghost text-xs cf-density-xs"
+              >
+                View session recap
+              </Link>
+            )}
             <Btn density="xs" danger ghost className="text-xs" onClick={() => setConfirmingCancel(true)} busy={busy}>
               Cancel session
             </Btn>

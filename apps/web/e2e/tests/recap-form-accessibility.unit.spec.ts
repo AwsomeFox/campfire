@@ -21,11 +21,12 @@ import {
  */
 
 test.describe('recap form field contract (issue #859)', () => {
-  test('uses consistent Title / Played on / Recap labels', () => {
+  test('uses consistent Title / Played on / Recap / DM prep notes labels', () => {
     expect(RECAP_FIELD_LABELS).toEqual({
       title: 'Title',
       playedAt: 'Played on',
       recap: 'Recap',
+      dmSecret: 'DM prep notes',
     });
   });
 
@@ -45,6 +46,11 @@ test.describe('recap form field contract (issue #859)', () => {
         controlId: 'new-recap-body',
         helpId: 'new-recap-body-help',
         errorId: 'new-recap-body-error',
+      },
+      dmSecret: {
+        controlId: 'new-recap-dm-secret',
+        helpId: 'new-recap-dm-secret-help',
+        errorId: 'new-recap-dm-secret-error',
       },
       formErrorId: 'new-recap-form-error',
     });
@@ -66,6 +72,11 @@ test.describe('recap form field contract (issue #859)', () => {
         controlId: 'session-42-recap',
         helpId: 'session-42-recap-help',
         errorId: 'session-42-recap-error',
+      },
+      dmSecret: {
+        controlId: 'session-42-dm-secret',
+        helpId: 'session-42-dm-secret-help',
+        errorId: 'session-42-dm-secret-error',
       },
       formErrorId: 'session-42-form-error',
     });
