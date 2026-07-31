@@ -3166,6 +3166,15 @@ export class AiDriverService {
       // and so any late status reads on the orphaned reference do not look "still running".
       if (existing.status === 'running') existing.status = 'idle';
     }
+    // #1497 — reject any queued player actions instead of orphaning their HTTP requests.
+    const queue = this.actionQueues.get(campaignId);
+    if (queue) {
+      (queue as any).flushed = true;
+      this.actionQueues.delete(campaignId);
+      for (const entry of queue) {
+        entry.reject(new ConflictException('AI DM session torn down; queued action rejected.'));
+      }
+    }
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
@@ -3672,7 +3681,12 @@ export class AiDriverService {
    */
   private flushActionQueue(campaignId: number): void {
     const queue = this.actionQueues.get(campaignId);
-    if (!queue || queue.length === 0) return;
+    if (!queue) return;
+    // #1497 review: mark and remove the queue FIRST, even if it is currently empty. An empty
+    // but installed queue is exactly the state a runTurn caller leaves while awaiting
+    // getActionQueueDepth, and without this marker that caller falls through and starts a turn
+    // after a hold/pause that should have refused it.
+    (queue as any).flushed = true;
     this.actionQueues.delete(campaignId);
     for (const entry of queue) {
       entry.reject(
@@ -3885,6 +3899,43 @@ export class AiDriverService {
   }
 
   /**
+   * Stop-condition gates for a new turn. Called synchronously at the top of `runTurn` and
+   * again after any yield in the queueing path, because pause / safety hold / human takeover
+   * / lifecycle phase can change while a caller is suspended in `getActionQueueDepth`.
+   */
+  private assertTurnAdmissible(campaignId: number, session: AiDmSessionState, opts: RunTurnOptions): void {
+    // #599: the safety hold is checked FIRST and against the durable row, not against session
+    // state. It must outrank `human_control` — a human at the seat is not a reason to keep
+    // taking input after someone stopped the table.
+    if (this.safety?.isHeld(campaignId)) {
+      throw new ServiceUnavailableException(
+        'The table is paused by a safety hold. A facilitator must resolve it before the AI DM takes input again.',
+      );
+    }
+    if (session.state === 'human_control') {
+      throw new ServiceUnavailableException(
+        `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
+      );
+    }
+    if (session.status === 'paused') {
+      throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
+    }
+    // #1043. `ended` refuses every new turn EXCEPT a lifecycle transition.
+    if (session.phase === 'ended' && !opts.lifecycle) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_ENDED',
+        message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
+      });
+    }
+    if (session.phase === 'wrap_up' && !opts.lifecycle) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_WRAPPING_UP',
+        message: 'The AI is wrapping up the session. Wait for the closing summary before sending anything else.',
+      });
+    }
+  }
+
+  /**
    * Run one driver turn for `input` (a player action). Streams narration + executes
    * tool calls in a loop until the model stops, the budget is exhausted, a tool errors,
    * or the step ceiling is hit. `triggeredBy` is the member who submitted the input —
@@ -3937,73 +3988,10 @@ export class AiDriverService {
     const seat = await this.aiDm.assertRunnable(campaignId);
 
     const session = this.ensureSession(campaignId);
-    // #599: the safety hold is checked FIRST and against the durable row, not against session
-    // state. Two reasons. It must outrank `human_control` — a human at the seat is not a reason
-    // to keep taking input after someone stopped the table. And reading the row rather than
-    // `session.status` closes the window where the hold is written but the freeze hook has not
-    // yet landed on this session object: the input gate should never be the last thing to hear.
-    // The distinct message matters too, because "resume it" is wrong advice here — the seat's
-    // resume refuses while a hold stands.
-    if (this.safety?.isHeld(campaignId)) {
-      throw new ServiceUnavailableException(
-        'The table is paused by a safety hold. A facilitator must resolve it before the AI DM takes input again.',
-      );
-    }
-    if (session.state === 'human_control') {
-      throw new ServiceUnavailableException(
-        `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
-      );
-    }
-    if (session.status === 'paused') {
-      throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
-    }
-    // #1043. `ended` refuses every new turn EXCEPT a lifecycle transition.
-    //
-    // The exemption is keyed on `opts.lifecycle`, NOT on `opts.proactive`. `proactive` means only
-    // "no player action sits behind this turn", and `ProactiveService` sets it too — for campaign
-    // event watchers and `POST /ai-dm/trigger`. Exempting on it let an event watcher start a full
-    // provider-and-tools turn at a table that had wrapped up: tokens spent and narration streamed
-    // into a closed session, which is precisely the thing this gate exists to stop, arriving from
-    // the one direction nobody was watching. Only a greeting (reopening) or a wrap-up replay has
-    // any business running here, and both carry `lifecycle`.
-    //
-    // This is the one place the lifecycle has teeth beyond prompt text, and it is deliberate: a
-    // phase that changed nothing but tone would be decoration. It is also deliberately the ONLY
-    // place, and it is recoverable by any player in one request — the error names the endpoint —
-    // so a closed session is a speed bump, never a lockout that needs a DM to clear.
-    if (session.phase === 'ended' && !opts.lifecycle) {
-      throw new ConflictException({
-        code: 'AI_DM_SESSION_ENDED',
-        message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
-      });
-    }
-    // #1043 — a wrap-up IN PROGRESS refuses ordinary player input too, rather than queueing it.
-    //
-    // The mirror of the reject-not-defer rule one gate below: an action queued behind a session
-    // punctuation mark is not the same action when it drains. A wrap-up lands in `ended`, so by the
-    // time the queue drains, the gate above either refuses the action outright or — depending on
-    // drain scheduling — it starts as the phase changes and is answered under the closing-summary
-    // direction. Either way the table was told the action was ACCEPTED: a `player.action` row was
-    // persisted and broadcast to everyone, and then the action vanished or was answered as if the
-    // session had closed. A phantom row in the shared log is exactly the silent divergence #572
-    // exists to prevent.
-    //
-    // `greeting` deliberately does NOT refuse. It lands in `active`, so an action queued behind a
-    // greeting drains into an ordinary turn and is answered normally — nothing is lost, and a table
-    // should be able to start typing while the AI is welcoming them.
-    //
-    // Recoverable in seconds and self-describing, like every other lifecycle refusal: a wrap-up is
-    // one turn, and the message says to wait for it.
-    //
-    // Keyed on `opts.lifecycle` for the same reason as the gate above: an autonomous trigger is
-    // no more entitled to talk over a closing summary than a player is, and `proactive` does not
-    // distinguish the two. Only the wrap-up turn itself needs through, and it carries `lifecycle`.
-    if (session.phase === 'wrap_up' && !opts.lifecycle) {
-      throw new ConflictException({
-        code: 'AI_DM_SESSION_WRAPPING_UP',
-        message: 'The AI is wrapping up the session. Wait for the closing summary before sending anything else.',
-      });
-    }
+    // Stop-condition gates. Re-evaluated after every yield because the session can be paused,
+    // handed to a human, or wrapped up while a would-be caller is in the queueing await.
+    this.assertTurnAdmissible(campaignId, session, opts);
+
     // Serialize turns per campaign (#381): reject a concurrent POST /message while a turn is
     // already streaming. Two interleaved turns would splice their narration.delta events onto the
     // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
@@ -4049,29 +4037,79 @@ export class AiDriverService {
         this.actionQueues.set(campaignId, queue);
       }
       const maxDepth = await this.getActionQueueDepth(campaignId);
-      if (queue.length >= maxDepth) {
-        throw new ConflictException(
-          `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
-        );
+      // #1497 review — re-validate after the yield:
+      // 1. Stop conditions can change while we await getActionQueueDepth (pause, safety hold,
+      //    human takeover, wrap-up). Re-run admission gates FIRST so safety holds throw 503 instead of 409.
+      this.assertTurnAdmissible(campaignId, session, opts);
+      // 2. If teardownSession or flushActionQueue ran while we yielded, this queue was flushed.
+      if ((queue as any).flushed) {
+        throw new ConflictException('AI DM session was torn down while queueing; please retry.');
       }
-      // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
-      // sees who queued what while the current turn is still narrating (#572). Recording it
-      // only when it dequeues would recreate the original bug for queued actions.
-      const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
-      return new Promise((resolve, reject) => {
-        // Carry the seq forward: when this entry is finally dequeued the row is buried under
-        // the narration of the turn that was running, so it can no longer be found by position.
-        const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
-        // `queue` is already the array installed in the map above (created here, or handed
-        // back by a concurrent caller's `.get()`) — push onto it directly. No `.set()` needed:
-        // mutating the array in place is visible to every holder of the same reference,
-        // and re-`.set()`-ing here is exactly the statement whose race this fix removes.
-        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
-      });
+      // 3. If the turn finished naturally while we yielded:
+      if (session.status !== 'running') {
+        if (queue.length === 0) {
+          if (this.actionQueues.get(campaignId) === queue) {
+            this.actionQueues.delete(campaignId);
+          }
+          // Fall through to run turn directly (no queueing needed).
+        } else {
+          // Other entries were queued (e.g. A, B). Push this entry onto the queue so no item is dropped.
+          const targetQueue = this.actionQueues.get(campaignId) ?? queue;
+          if (targetQueue.length >= maxDepth) {
+            throw new ConflictException(
+              `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
+            );
+          }
+          const queuedActionSeq = opts.dequeued
+            ? (opts.actionSeq ?? null)
+            : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+          return new Promise((resolve, reject) => {
+            const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+            targetQueue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
+          });
+        }
+      } else {
+        // session.status IS still 'running'
+        let targetQueue = this.actionQueues.get(campaignId);
+        if (!targetQueue) {
+          // drainQueue shifted the last item and deleted the map entry while the turn was running; re-install a queue array.
+          targetQueue = [];
+          this.actionQueues.set(campaignId, targetQueue);
+        }
+        if (targetQueue.length >= maxDepth) {
+          throw new ConflictException(
+            `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
+          );
+        }
+        const queuedActionSeq = opts.dequeued
+          ? (opts.actionSeq ?? null)
+          : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+        return new Promise((resolve, reject) => {
+          const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+          targetQueue!.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
+        });
+      }
     }
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
+    // Re-verify admissibility after any post-yield fallthrough (e.g. queueing yield).
+    this.assertTurnAdmissible(campaignId, session, opts);
     session.status = 'running';
+    let slotReleased = false;
+    let turnStarted = false;
+    let turnEndEmitted = false;
+    let totalTokens = 0;
+    let budgetRemaining: number | null = seat.budgetRemaining;
+    let finalNarration = '';
+    let steps = 0;
+    let providerError: AiProviderError | undefined;
+    let stopReason: AiDmStopReason = 'complete';
+    let usageUnknownAccum = false;
+    const markUsageUnknown = (unknown: boolean | undefined): void => {
+      usageUnknownAccum = usageUnknownAccum || unknown === true;
+    };
+    const usageUnknown = (): boolean => usageUnknownAccum;
+    try {
 
     // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
     //
@@ -4108,7 +4146,10 @@ export class AiDriverService {
     const execution = await resolveProviderForExecution(this.resolver, campaignId);
     if (!execution) {
       // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
-      if (session.status === 'running') session.status = 'idle';
+      if (session.status === 'running') {
+        session.status = 'idle';
+        slotReleased = true;
+      }
       this.persistControlState(session);
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
@@ -4189,6 +4230,13 @@ export class AiDriverService {
       this.logger.warn(`Prompt history unavailable for campaign ${campaignId}: ${String(err)}`);
     }
 
+    // #1499: `scene` is a table-wide broadcast setting — only a DM may change it. The DTO
+    // accepts it from any player (the UI merely hides the field behind `isDm`, which is
+    // client-side only), so a non-DM's value is silently ignored here rather than applied.
+    // Apply it BEFORE `assembleSystemPrompt` so the same message that sets the scene is
+    // answered with the new scene in context (#1497 review).
+    if (opts.scene !== undefined && opts.callerRole === 'dm') session.scene = opts.scene;
+
     const system = await this.assembleSystemPrompt(
       campaignId,
       seat,
@@ -4197,6 +4245,8 @@ export class AiDriverService {
       promptHistory.digest,
       // #1043: this turn's OWN phase, threaded in rather than read from the shared session.
       promptPhaseFor(opts.lifecycle, session.phase),
+      // #1497: the live session so `scene` is injected into the prompt.
+      session,
     );
 
     // #1499: `speakingAsCharacter` was already resolved AND ownership-checked above
@@ -4247,10 +4297,6 @@ export class AiDriverService {
     }
 
     // status is already 'running' (reserved synchronously above, #381).
-    // #1499: `scene` is a table-wide broadcast setting — only a DM may change it. The DTO
-    // accepts it from any player (the UI merely hides the field behind `isDm`, which is
-    // client-side only), so a non-DM's value is silently ignored here rather than applied.
-    if (opts.scene !== undefined && opts.callerRole === 'dm') session.scene = opts.scene;
     this.persistControlState(session);
     resetDriverTurnCounters(session);
     // #572: one correlation id for everything this turn persists, so a client rebuilding
@@ -4261,6 +4307,7 @@ export class AiDriverService {
       campaignId,
       ...(opts.proactive ? { trigger: 'proactive' } : {}),
     });
+    turnStarted = true;
 
     // #1499: a non-DM caller's step/token caps are clamped to the campaign DEFAULT rather than
     // the DM's HARD ceiling. Letting any player dial both knobs to their max (HARD_MAX_STEPS x
@@ -4269,9 +4316,9 @@ export class AiDriverService {
     const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, isDmCaller ? HARD_MAX_STEPS : DEFAULT_MAX_STEPS);
     const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, isDmCaller ? 4096 : DEFAULT_STEP_MAX_TOKENS);
 
-    let totalTokens = 0;
-    let budgetRemaining = seat.budgetRemaining;
-    let finalNarration = '';
+    totalTokens = 0;
+    budgetRemaining = seat.budgetRemaining;
+    finalNarration = '';
     // #577 — the last step's parsed reply. `finalNarration` always holds the STRIPPED prose
     // (what the table saw) and `turnGrounding` the machine-readable claims that came with it,
     // so the two can never drift apart no matter which exit path the turn takes.
@@ -4281,32 +4328,12 @@ export class AiDriverService {
       finalNarration = turnGrounding.narration;
     };
     let latestSeat = seat;
-    let stopReason: AiDmStopReason = 'complete';
+    stopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
-    let steps = 0;
+    steps = 0;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
-    let providerError: AiProviderError | undefined;
-    /**
-     * #1052 — "any part of this turn's spend was unmeasured", accumulated across every attempt
-     * and every step.
-     *
-     * WRITE-ONLY-THROUGH-A-HELPER, ON PURPOSE. This started as a plain `let` with a comment
-     * saying it is never cleared, and then a terminal exit fifty lines below cleared it by
-     * writing the obvious thing — `tokensUsageUnknown = spend.usageUnknown` — which reassigns a
-     * per-TURN accumulator from a per-STEP fact. Three of the four terminal branches combined
-     * correctly and one did not, so the invariant held everywhere except the exit nobody
-     * re-read. A comment stating a rule that a later edit can silently break is the same shape
-     * as the false compile-guarantee this PR already removed from driver-retry.ts.
-     *
-     * So there is no longer a variable to assign to: `markUsageUnknown` only ever ORs, and
-     * `usageUnknown()` only reads. A future exit that wants to record unmeasured usage has one
-     * way to do it, and it is the correct one.
-     */
-    let usageUnknownAccum = false;
-    const markUsageUnknown = (unknown: boolean | undefined): void => {
-      usageUnknownAccum = usageUnknownAccum || unknown === true;
-    };
-    const usageUnknown = (): boolean => usageUnknownAccum;
+    providerError = undefined;
+    usageUnknownAccum = false;
     /**
      * #1052 — how the last step's attempt loop ended. `attempts` counts provider calls made
      * for that step (1 when nothing was retried); `gaveUp` names why no further attempt was
@@ -5003,12 +5030,11 @@ export class AiDriverService {
       });
     } finally {
       this.endGeneration(campaignId, generationHandle);
-      // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
-      // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
-      // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
-      // silently accept new input, defeating the freeze the table just asked for.
-      // Teardown (#1071) already cleared `running` on this detached object; the CAS no-ops.
-      if (session.status === 'running') session.status = 'idle';
+      // Compare-and-set (#381): release the seat once generation completes.
+      if (session.status === 'running') {
+        session.status = 'idle';
+        slotReleased = true;
+      }
       // Never write ladder counters onto a detached (replaced) session object.
       if (!session.detached) {
         session.lastNarration = finalNarration || session.lastNarration;
@@ -5051,6 +5077,7 @@ export class AiDriverService {
       // nobody counted). Being detached says nothing about whether the spend was measured, and
       // omitting the argument used to claim it was.
       this.emitTurnEnd(campaignId, detachedStopReason, finalNarration, steps, totalTokens, budgetRemaining, undefined, usageUnknown());
+      turnEndEmitted = true;
       return {
         narration: finalNarration,
         stopReason: detachedStopReason,
@@ -5090,8 +5117,7 @@ export class AiDriverService {
     });
 
     this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, usageUnknown());
-
-    this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+    turnEndEmitted = true;
 
     return {
       narration: finalNarration,
@@ -5104,6 +5130,44 @@ export class AiDriverService {
       seat: latestSeat,
       grounding,
     };
+  } finally {
+    // #1497 — ensure turn.end is ALWAYS emitted if an unhandled throw occurs after turn start
+    if (turnStarted && !turnEndEmitted) {
+      const fallbackStopReason: AiDmStopReason =
+        stopReason !== 'complete' ? stopReason : (providerError ? 'provider_error' : 'aborted');
+      this.emitTurnEnd(
+        campaignId,
+        fallbackStopReason,
+        finalNarration || '',
+        steps,
+        totalTokens,
+        budgetRemaining ?? 0,
+        providerError,
+        usageUnknown(),
+      );
+      turnEndEmitted = true;
+    }
+    // #1497 — release the running slot on every exit, including throws before the step loop
+    // or during post-loop bookkeeping, and drain the queue so queued callers always settle.
+    // Guard with `slotReleased` so a throw that happens after the inner finally has already
+    // released the slot (and interleaved calls may have reserved it for a newer turn) does not
+    // stomp the newer turn's `running` status and break per-campaign serialization.
+    if (!slotReleased && session.status === 'running') {
+      session.status = 'idle';
+      slotReleased = true;
+    }
+    // Only persist if this turn actually released the slot; otherwise a human-control / pause
+    // event has taken ownership and should not be overwritten by our post-loop state.
+    if (slotReleased && !session.detached) {
+      this.persistControlState(session);
+    }
+    // Drain queued actions unless a newer turn already owns the running slot. A mid-turn pause
+    // leaves `session.status` as `paused` here; the dequeued runTurn will hit the same pause
+    // gate and reject/resolve the queued entry so it does not hang.
+    if (session.status !== 'running' && !session.detached) {
+      this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+    }
+  }
   }
 
   /**
@@ -7286,11 +7350,14 @@ export class AiDriverService {
      * {@link promptPhaseFor} decides the value; nothing in here consults the session.
      */
     phase: AiDmSessionPhase = 'active',
+    /** #1497 — the in-memory session whose `scene` should be injected into the prompt. */
+    session?: AiDmSessionState,
   ): Promise<string> {
     // #1053 review: the campaign is read FIRST because the grounding preamble is now gated on
     // its rule system — the attack and standalone-save lines differ where the server-side
     // implementations do not speak that system. Everything else about this read is unchanged.
     const campaign = await this.campaigns.getOrThrow(campaignId);
+    const sessionForPrompt = session ?? this.ensureSession(campaignId);
     const parts: string[] = [
       buildGroundingPreamble(campaign.ruleSystem),
       GROUNDING_CITATION_CONTRACT,
@@ -7361,7 +7428,7 @@ export class AiDriverService {
     // carries on), so without this the model would narrate "the blade bites deep for nine
     // damage" while the board never changed — a silent divergence between what the table heard
     // and what is true, which is a worse failure than the autonomy it was meant to remove.
-    if (this.ensureSession(campaignId).collaborative) {
+    if (sessionForPrompt.collaborative) {
       parts.push(
         [
           '## Collaborative handoff (ACTIVE)',
@@ -7442,6 +7509,12 @@ export class AiDriverService {
       const visibleLocationEnv = visibleUntrustedPromptData(locationEnv);
       parts.push(`## Current location / environment\n${wrapUntrustedPromptData(locationEnv)}`);
       if (ledger) harvestRetrievals(ledger, 'get_campaign_summary', undefined, visibleLocationEnv);
+    }
+
+    // #1497 — the table-wide scene is set by the DM and must reach the model so it does not
+    // contradict the framing the table has already agreed on.
+    if (sessionForPrompt.scene) {
+      parts.push(`## Current scene\n${wrapUntrustedPromptData(sessionForPrompt.scene)}`);
     }
 
     // This tool is model-specific by design: it ignores facilitator authority and
