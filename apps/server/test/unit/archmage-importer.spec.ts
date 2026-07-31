@@ -3,10 +3,12 @@ import {
   decodeEntities,
   htmlToMarkdown,
   slugify,
+  parseMonster,
+  looksLikeMonsterStatblock,
   ARCHMAGE_LICENSE,
   ARCHMAGE_SOURCE,
 } from '../../src/modules/rules/archmage-importer';
-import { startFakeArchmage, type FakeArchmage } from '../fake-archmage';
+import { startFakeArchmage, startFakeArchmageDrifting, type FakeArchmage } from '../fake-archmage';
 
 /**
  * Sample test for the 13th Age (Archmage Engine) importer (issue #298), the HTML analogue
@@ -75,6 +77,23 @@ describe('archmage-importer — section fetch/parse', () => {
     expect(direData).toMatchObject({ level: 4, size: 'Large', ac: 19, pd: 19, md: 14, hp: 130, initiative: 7 });
   });
 
+  it('counts drifted statblocks into skippedCount when statblock markup drifts (issue #1522)', async () => {
+    const driftingFake = await startFakeArchmageDrifting();
+    try {
+      driftingFake.drift();
+      const { entries, skippedCount } = await fetchArchmageSection(driftingFake.baseUrl, 'monsters', {
+        warn() {},
+        info() {},
+      });
+
+      // Bear parses; Dire Bear has drifted defense labels and is counted into skippedCount.
+      expect(entries.map((e) => e.name)).toEqual(['Bear']);
+      expect(skippedCount).toBe(1);
+    } finally {
+      await driftingFake.close();
+    }
+  });
+
   it('parses the Conditions section (scoped to <h4> entries, excluding sibling <h3> prose)', async () => {
     const { entries } = await fetchArchmageSection(fake.baseUrl, 'conditions', { warn() {}, info() {} });
 
@@ -88,5 +107,32 @@ describe('archmage-importer — section fetch/parse', () => {
     }
     const fear = entries.find((e) => e.slug === 'fear')!;
     expect(fear.body).toContain('escalation die');
+  });
+});
+
+describe('archmage-importer — statblock vs prose classification (issue #1522)', () => {
+  it('distinguishes prose headings from drifted statblocks', () => {
+    const proseHtml = '<p>A battle is balanced when the total value of the monsters roughly matches the party.</p>';
+    expect(looksLikeMonsterStatblock(proseHtml)).toBe(false);
+    expect(parseMonster('Building Combats', proseHtml)).toBeNull();
+
+    const driftedTableHtml = `
+      <table border="1">
+        <tbody>
+          <tr>
+            <td><p><b>4<sup>th</sup> level</b></p></td>
+            <td><p>Initiative: +7</p><p>Bite +8 vs. Armor Class</p></td>
+            <td><p><b>Armor Class</b></p><p><b>Hit Points</b></p></td>
+            <td><p>19</p><p>130</p></td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+    expect(looksLikeMonsterStatblock(driftedTableHtml)).toBe(true);
+    expect(parseMonster('Drifted Bear', driftedTableHtml)).toBe('error');
+
+    const nonTableDriftedHtml = '<p><b>Level 3 Troop</b></p><p>Initiative +5</p><p>Armor Class 18, Hit Points 50</p>';
+    expect(looksLikeMonsterStatblock(nonTableDriftedHtml)).toBe(true);
+    expect(parseMonster('Non Table Drift', nonTableDriftedHtml)).toBe('error');
   });
 });

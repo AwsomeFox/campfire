@@ -217,62 +217,85 @@ function pairDefenses(labelLines: string[], valueLines: string[]): Record<string
 const LEVEL_RE = /(\d+)\s*(?:st|nd|rd|th)\b\s*level/i;
 const INIT_RE = /Initiative:?\s*([+-]?\d+)/i;
 
+/** Weak statblock signatures used to identify a drifted or malformed monster statblock (issue #1522). */
+const WEAK_LEVEL_RE = /\b(?:level\s*\d+|\d+\s*(?:st|nd|rd|th)?\s*level)\b/i;
+const STATBLOCK_KEYWORD_RE =
+  /\b(?:AC|PD|MD|HP|Armor\s+Class|Physical\s+Defense|Mental\s+Defense|Hit\s+Points|Initiative|Troop|Wrecker|Spoiler|Caster|Leader|Mook|Archmage)\b/i;
+const STATBLOCK_ATTACK_RE = /\bvs\.?\s*(?:AC|PD|MD|Armor\s+Class|Physical\s+Defense|Mental\s+Defense)\b/i;
+
+export function looksLikeMonsterStatblock(blockHtml: string): boolean {
+  if (firstTable(blockHtml) !== null) return true;
+  const flat = stripTags(blockHtml);
+  return (
+    WEAK_LEVEL_RE.test(flat) ||
+    STATBLOCK_KEYWORD_RE.test(flat) ||
+    STATBLOCK_ATTACK_RE.test(flat)
+  );
+}
+
 /**
  * Parse a single 13th Age monster statblock block (heading text = name, block html holds the
  * table) into an ImportedEntry, or null if it carries no recognizable statblock (a prose
- * `<h3>` that isn't a monster).
+ * `<h3>` that isn't a monster), or 'error' if it looks like a statblock but failed strict parsing (issue #1522).
  */
-function parseMonster(name: string, blockHtml: string): ImportedEntry | null {
+export function parseMonster(name: string, blockHtml: string): ImportedEntry | null | 'error' {
   const table = firstTable(blockHtml);
-  if (!table) return null;
-  const flat = stripTags(table);
-  const levelMatch = LEVEL_RE.exec(flat);
-  // Require the level + defense signature so non-monster headings are skipped, not mis-imported.
-  if (!levelMatch || !/\bAC\b\s+PD\s+MD\s+HP/i.test(flat)) return null;
+  if (table) {
+    const flat = stripTags(table);
+    const levelMatch = LEVEL_RE.exec(flat);
+    // Require the level + defense signature so non-monster headings are skipped, not mis-imported.
+    if (levelMatch && /\bAC\b\s+PD\s+MD\s+HP/i.test(flat)) {
+      const cells = tableCellsHtml(table);
+      const headerLines = cellLines(cells[0] ?? '');
+      const attacksCellRaw = cells[1] ?? '';
+      const labelsIdx = cells.findIndex((c) => /\bAC\b[\s\S]*PD[\s\S]*MD[\s\S]*HP/i.test(c));
+      const labelLines = labelsIdx >= 0 ? cellLines(cells[labelsIdx]) : [];
+      const valueLines = labelsIdx >= 0 ? cellLines(cells[labelsIdx + 1] ?? '') : [];
 
-  const cells = tableCellsHtml(table);
-  const headerLines = cellLines(cells[0] ?? '');
-  const attacksCellRaw = cells[1] ?? '';
-  const labelsIdx = cells.findIndex((c) => /\bAC\b[\s\S]*PD[\s\S]*MD[\s\S]*HP/i.test(c));
-  const labelLines = labelsIdx >= 0 ? cellLines(cells[labelsIdx]) : [];
-  const valueLines = labelsIdx >= 0 ? cellLines(cells[labelsIdx + 1] ?? '') : [];
+      const level = Number(levelMatch[1]);
+      // Header lines, e.g. ["Normal", "2 nd level", "Troop", "Beast"] → size/role/type around the level.
+      const levelLineIdx = headerLines.findIndex((t) => LEVEL_RE.test(t));
+      const size = levelLineIdx > 0 ? headerLines[0] : '';
+      const role = levelLineIdx >= 0 ? headerLines[levelLineIdx + 1] ?? '' : '';
+      const creatureType = levelLineIdx >= 0 ? headerLines[levelLineIdx + 2] ?? '' : '';
 
-  const level = Number(levelMatch[1]);
-  // Header lines, e.g. ["Normal", "2 nd level", "Troop", "Beast"] → size/role/type around the level.
-  const levelLineIdx = headerLines.findIndex((t) => LEVEL_RE.test(t));
-  const size = levelLineIdx > 0 ? headerLines[0] : '';
-  const role = levelLineIdx >= 0 ? headerLines[levelLineIdx + 1] ?? '' : '';
-  const creatureType = levelLineIdx >= 0 ? headerLines[levelLineIdx + 2] ?? '' : '';
+      const initMatch = INIT_RE.exec(stripTags(attacksCellRaw)) ?? INIT_RE.exec(flat);
+      const initiative = initMatch ? Number(initMatch[1]) : null;
+      const defenses = pairDefenses(labelLines, valueLines);
+      const attacks = htmlToMarkdown(attacksCellRaw);
 
-  const initMatch = INIT_RE.exec(stripTags(attacksCellRaw)) ?? INIT_RE.exec(flat);
-  const initiative = initMatch ? Number(initMatch[1]) : null;
-  const defenses = pairDefenses(labelLines, valueLines);
-  const attacks = htmlToMarkdown(attacksCellRaw);
+      return {
+        slug: slugify(name),
+        name: decodeEntities(name),
+        type: 'monster',
+        summary: truncate(
+          [size, `level ${level}`, [role, creatureType].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
+          300,
+        ),
+        body: htmlToMarkdown(table),
+        dataJson: JSON.stringify({
+          level,
+          size: size || null,
+          role: role || null,
+          creatureType: creatureType || null,
+          initiative,
+          ac: defenses.ac ?? null,
+          pd: defenses.pd ?? null,
+          md: defenses.md ?? null,
+          hp: defenses.hp ?? null,
+          attacks: attacks || null,
+        }),
+        license: ARCHMAGE_LICENSE,
+        source: ARCHMAGE_SOURCE,
+      };
+    }
+  }
 
-  return {
-    slug: slugify(name),
-    name: decodeEntities(name),
-    type: 'monster',
-    summary: truncate(
-      [size, `level ${level}`, [role, creatureType].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
-      300,
-    ),
-    body: htmlToMarkdown(table),
-    dataJson: JSON.stringify({
-      level,
-      size: size || null,
-      role: role || null,
-      creatureType: creatureType || null,
-      initiative,
-      ac: defenses.ac ?? null,
-      pd: defenses.pd ?? null,
-      md: defenses.md ?? null,
-      hp: defenses.hp ?? null,
-      attacks: attacks || null,
-    }),
-    license: ARCHMAGE_LICENSE,
-    source: ARCHMAGE_SOURCE,
-  };
+  if (looksLikeMonsterStatblock(blockHtml)) {
+    return 'error';
+  }
+
+  return null;
 }
 
 function parseMonsterSection(html: string, logger: ArchmageImportLogger): ArchmageSectionResult {
@@ -297,7 +320,7 @@ function parseConditionSection(html: string, logger: ArchmageImportLogger): Arch
       block: b,
       entry: safeParse(() => {
         const body = htmlToMarkdown(b.html);
-        if (!body) return null;
+        if (!body) return 'error';
         return {
           slug: slugify(b.name),
           name: decodeEntities(b.name),
@@ -313,7 +336,7 @@ function parseConditionSection(html: string, logger: ArchmageImportLogger): Arch
   return collect(entries, 'conditions', logger);
 }
 
-function safeParse(fn: () => ImportedEntry | null): ImportedEntry | null | 'error' {
+function safeParse(fn: () => ImportedEntry | null | 'error'): ImportedEntry | null | 'error' {
   try {
     return fn();
   } catch {
