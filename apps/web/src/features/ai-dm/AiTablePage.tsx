@@ -53,6 +53,7 @@ import {
 import type { DriverLastUndoableCommit } from '@campfire/schema';
 import { useAiDmStream } from '../../lib/useAiDmStream';
 import { aiDmPauseRequest } from './aiDmPause';
+import { nextUndoLeverState } from './aiDmUndoLever';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import {
   transcriptReducer,
@@ -193,6 +194,10 @@ export default function AiTablePage() {
   const [undoSnackbar, setUndoSnackbar] = useState<DriverLastUndoableCommit | null>(null);
   const [undoError, setUndoError] = useState<string | null>(null);
   const seenUndoChainRef = useRef<string | null>(null);
+  // `nextUndoLeverState` seeds `seenUndoChainRef` from the FIRST loaded session so a lever that
+  // pre-existed when the DM (re)opened the table (prior visit, or react-query cache rehydration)
+  // doesn't pop a stale undo; only actions armed after mount pop. Sticky once set.
+  const undoLeverSeededRef = useRef(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -848,18 +853,24 @@ export default function AiTablePage() {
     }
   }
 
-  // #1501 — when the seat commits a new reversible action, surface the standard UndoSnackbar so a
-  // DM has the same one-click "X — Undo" affordance every soft-delete in the app offers. A commit
-  // we have already shown (or that rehydrated on load) does not re-pop.
+  // #1501 — when the seat arms a NEW reversible action (after the first session load), surface the
+  // standard UndoSnackbar so a DM has the same one-click "X — Undo" affordance every soft-delete in
+  // the app offers. The decision (including seeding the "seen" chain id from the first loaded
+  // session so a lever that pre-existed on mount doesn't pop a stale undo) lives in `nextUndoLeverState`.
   useEffect(() => {
     const commit = session?.lastUndoableCommit ?? null;
-    if (commit && commit.chainId !== seenUndoChainRef.current) {
-      seenUndoChainRef.current = commit.chainId;
-      setUndoSnackbar(commit);
-    } else if (!commit) {
-      seenUndoChainRef.current = null;
+    const step = nextUndoLeverState({
+      sessionFetched: sessionQuery.isFetched,
+      seeded: undoLeverSeededRef.current,
+      commit,
+      seenChainId: seenUndoChainRef.current,
+    });
+    undoLeverSeededRef.current = step.seeded;
+    seenUndoChainRef.current = step.seenChainId;
+    if (step.pop) {
+      setUndoSnackbar(step.pop);
     }
-  }, [session?.lastUndoableCommit]);
+  }, [session?.lastUndoableCommit, sessionQuery.isFetched]);
 
   async function undoAiAction(): Promise<void> {
     if (campaignId === undefined) return;
