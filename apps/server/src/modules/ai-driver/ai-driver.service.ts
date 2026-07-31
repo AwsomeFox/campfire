@@ -100,13 +100,11 @@ import {
 // in driver-grounding.ts so it is unit-testable without a provider or a database; the persistence
 // + human-correction half lives in driver-grounding.service.ts.
 import {
-  driverExpectedUpdatedAt,
   evaluateGrounding,
   GROUNDING_CITATION_CONTRACT,
   GroundingDeltaFilter,
   harvestRetrievals,
   parseGroundingBlock,
-  recordDriverReadVersions,
   RetrievalLedger,
   type GroundingVerdict,
   type ParsedGrounding,
@@ -621,16 +619,10 @@ export interface AiDmSessionState {
   /**
    * The seat's last reversible action commit, exposed so a DM can undo the AI's last action
    * (#1501) without holding the client undo token. Null when nothing undoable was committed.
-   * Public (DM-only enforced at the undo endpoint): the chain id alone carries no secret.
+   * DM-only in projection (see {@link toPublicAiDmSessionStateForRole}): the encounterId could
+   * reference a DM-only hidden fight, so it is never serialized to non-DM members.
    */
   lastUndoableCommit?: DriverLastUndoableCommit | null;
-  /**
-   * Per-entity `updatedAt` the seat last observed in a read this session (#1501), keyed
-   * `${type}:${id}`. Carried as `expectedUpdatedAt` on the seat's direct writes so a concurrent
-   * human edit can win a compare-and-set instead of the AI silently overwriting it. Internal
-   * bookkeeping only — never serialized to members, never persisted across restart.
-   */
-  driverReadVersions?: Record<string, string>;
   /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
@@ -650,7 +642,9 @@ type AiDmSessionPrivateGuardFields =
   | 'pendingToolConfirmations'
   | 'detached'
   | 'aftermathGrantWindow'
-  | 'driverReadVersions';
+  // DM-only (#1501): the encounterId could name a DM-only hidden fight, so this is stripped by
+  // default and re-added only for DMs in {@link toPublicAiDmSessionStateForRole}.
+  | 'lastUndoableCommit';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
@@ -675,10 +669,29 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
     aftermathGrantWindow: _aftermathGrantWindow,
-    driverReadVersions: _driverReadVersions,
+    lastUndoableCommit: _lastUndoableCommit,
     ...rest
   } = session;
   return rest;
+}
+
+/**
+ * DM-only session projection (#1501): the public state plus `lastUndoableCommit`, which is
+ * stripped by default because its encounterId could name a DM-only hidden fight. Only the DM
+ * (who can already see hidden prep) gets the undo lever's reference; every other member gets the
+ * plain {@link toPublicAiDmSessionState}.
+ */
+export function toPublicAiDmSessionStateForRole(
+  session: AiDmSessionState,
+  role: Role,
+): AiDmPublicSessionState & { lastUndoableCommit?: DriverLastUndoableCommit | null } {
+  const base = toPublicAiDmSessionState(session);
+  // A DM always sees the lever — the armed commit, or `null` once it is consumed/cleared — so the
+  // client can reliably distinguish "nothing to undo" from "lever withheld by role". Non-DMs never
+  // receive the field: its encounterId could name a DM-only hidden fight (#1501 secrecy).
+  return role === 'dm'
+    ? { ...base, lastUndoableCommit: session.lastUndoableCommit ?? null }
+    : base;
 }
 
 /**
@@ -6143,22 +6156,15 @@ export class AiDriverService {
       if (canPropose && call.name !== 'add_session_recap') args.propose = true;
       const proposed = canPropose && args.propose === true;
 
-      // #1501 — optimistic concurrency on the seat's DIRECT writes. Canon writes (npc/location/
-      // quest/…) are forced to `propose` above, so they are DM-reviewed and cannot silently
-      // overwrite a concurrent human edit. The live-play DIRECT writes are the real race surface;
-      // `update_encounter` is the one that already supports `expectedUpdatedAt`, so when the model
-      // omits it we inject the `updatedAt` the seat last observed for that encounter. A concurrent
-      // human save in between then 409s the AI instead of being silently clobbered. Combatant CAS
-      // is deferred (see #1501 PR: combatants have no `updatedAt` and the combat tracker writes
-      // them from ~30 paths).
-      if (
-        call.name === 'update_encounter' &&
-        args.expectedUpdatedAt === undefined &&
-        typeof args.encounterId === 'number'
-      ) {
-        const expected = driverExpectedUpdatedAt(session.driverReadVersions, 'encounter', args.encounterId);
-        if (expected) args.expectedUpdatedAt = expected;
-      }
+      // #1501 §3 note: the seat does NOT auto-inject `expectedUpdatedAt` on its direct writes.
+      // Canon writes (npc/location/quest/…) are forced to `propose` just above, so they are
+      // DM-reviewed and cannot silently overwrite a concurrent human edit. The remaining
+      // direct-write surface is the encounter, whose `updatedAt` is high-churn — it bumps on
+      // every turn advance and combat op — so a read-then-write CAS keyed on it makes the AI's
+      // OWN later edits spuriously 409 (after it advances a turn). A correct combatant/encounter
+      // CAS needs a stable per-write version that survives turn advances, which is a separate
+      // change; deferred (see PR #1813). The MCP tools still honor a model-supplied
+      // `expectedUpdatedAt` opt-in, unchanged.
 
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
@@ -6261,12 +6267,6 @@ export class AiDriverService {
       // entity behind a narrow secret-read approval (#557). Such an id stays citeable — the
       // model genuinely read it — but is projected out of every non-DM view (#825).
       harvestRetrievals(ledger, call.name, args, visibleCleanedText, !res.isError, useSeatPrincipal);
-      // #1501 — track the `updatedAt` this read (or, for an update, this write) returned per
-      // entity, so the seat's next direct write can carry it as `expectedUpdatedAt`. A successful
-      // update refreshes the entry from its result, so sequential seat writes compose.
-      if (!res.isError) {
-        recordDriverReadVersions((session.driverReadVersions ??= {}), call.name, args, cleanedText);
-      }
       const identity = await this.resolveToolResourceIdentity(
         campaignId,
         call.name,

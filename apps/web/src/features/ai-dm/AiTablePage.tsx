@@ -186,10 +186,12 @@ export default function AiTablePage() {
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
   // #1501 — DM undo of the AI's last reversible action. `undoSnackbar` holds the commit a fresh
-  // snackbar is offering (cleared on undo, dismiss, or once a different commit supersedes it);
-  // `seenUndoChainRef` stops a page reload that rehydrates an existing commit from re-popping it.
+  // snackbar is offering; `seenUndoChainRef` stops a reload that rehydrates a commit from
+  // re-popping it. A failed undo is surfaced via `undoError` rather than swallowed, EXCEPT a 404
+  // (the lever is already gone — superseded or reversed), which just dismisses the snackbar.
   const [undoBusy, setUndoBusy] = useState(false);
   const [undoSnackbar, setUndoSnackbar] = useState<DriverLastUndoableCommit | null>(null);
+  const [undoError, setUndoError] = useState<string | null>(null);
   const seenUndoChainRef = useRef<string | null>(null);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
@@ -862,15 +864,20 @@ export default function AiTablePage() {
   async function undoAiAction(): Promise<void> {
     if (campaignId === undefined) return;
     setUndoBusy(true);
+    setUndoError(null);
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
       setUndoSnackbar(null);
       invalidateAiDm(queryClient, campaignId);
-    } catch {
-      // A 404/400 here means there is nothing left to undo (already reversed, or superseded) —
-      // the server is the authority, so just dismiss the snackbar rather than surfacing a stale
-      // error for a lever that no longer exists.
-      setUndoSnackbar(null);
+    } catch (err) {
+      // A 404 means there is nothing left to undo (already reversed or superseded) — the server is
+      // the authority, so just dismiss the snackbar. Any other failure is surfaced so the DM knows
+      // the AI's action was NOT reversed (issue #1501 review).
+      if (err instanceof ApiError && err.status === 404) {
+        setUndoSnackbar(null);
+      } else {
+        setUndoError(translateApiError(err, t) || t('table.undoAiFailed'));
+      }
     } finally {
       setUndoBusy(false);
     }
@@ -1056,6 +1063,7 @@ export default function AiTablePage() {
           </p>
         )}
         {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
+        {undoError && <p className="text-xs text-rose-400 mt-2">{undoError}</p>}
         {lifecycleError && <p className="text-xs text-rose-400 mt-2">{lifecycleError}</p>}
       </Card>
 

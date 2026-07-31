@@ -28,7 +28,7 @@ import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService, toPublicAiDmSessionState, toPublicAiDmToolConfirmation, type AiDmTurnRunResult } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState, toPublicAiDmSessionStateForRole, toPublicAiDmToolConfirmation, type AiDmTurnRunResult } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
@@ -303,8 +303,9 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 200, description: 'The session state.' })
   async session(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, id);
-    return toPublicAiDmSessionState(this.driver.getSession(id));
+    const role = await this.access.requireMember(user, id);
+    // #1501: lastUndoableCommit is DM-only — its encounterId could name a hidden fight.
+    return toPublicAiDmSessionStateForRole(this.driver.getSession(id), role);
   }
 
   @Post('pause')
