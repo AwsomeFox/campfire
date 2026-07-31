@@ -153,7 +153,7 @@ export default function SharedRecapPage() {
         <div className="space-y-3">
           <div className="flex items-baseline gap-2.5 flex-wrap">
             <span className="tag tag-accent">Session {recap.sessionNumber}</span>
-            <PageTitle className="text-xl font-extrabold text-white m-0" style={{ fontSize: 'inherit' }}>
+            <PageTitle className="text-xl text-white m-0" style={{ fontSize: 'inherit' }}>
               {recap.title || 'Untitled session'}
             </PageTitle>
             <span className="text-muted text-xs">{formatDate(recap.playedAt)}</span>

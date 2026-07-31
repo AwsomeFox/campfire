@@ -71,7 +71,7 @@ function AdminUsers() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <PageTitle className="flex items-center gap-2 text-xl font-extrabold text-white">
+      <PageTitle className="flex items-center gap-2 text-xl text-white">
         <GameIcon slug="person" size={UI_ICON_SIZE.md} aria-hidden /> {t('nav.adminUsers')}
       </PageTitle>
       {error && <ErrorNote message={error} onRetry={load} />}

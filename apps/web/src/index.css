@@ -2443,15 +2443,17 @@ a:hover .cf-name-reveal {
   flex: 1 1 12rem;
   min-width: 0;
   margin: 0;
-  font-weight: 800;
+  font-family: var(--font-display);
+  font-weight: var(--font-display-weight);
   font-size: clamp(1.125rem, 2.5vw, 1.5rem);
   line-height: 1.2;
+  letter-spacing: -0.02em;
   color: var(--color-text, #fff);
   overflow-wrap: anywhere;
 }
 .cf-page-header--card .cf-page-header__title {
   font-size: 1.125rem;
-  font-weight: 700;
+  font-weight: var(--font-display-weight);
 }
 .cf-page-header__icon {
   display: inline-flex;

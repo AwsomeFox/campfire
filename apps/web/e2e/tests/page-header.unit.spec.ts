@@ -39,6 +39,14 @@ test.describe('PageHeader source contracts (issue #707)', () => {
     expect(css).toMatch(/env\(safe-area-inset-right/);
   });
 
+  test('PageHeader title uses canonical display typeface and weight tokens (issue #1714)', () => {
+    const css = readFileSync(INDEX_CSS, 'utf8');
+    expect(css).toMatch(/\.cf-page-header__title\s*\{[\s\S]*?font-family:\s*var\(--font-display\)/s);
+    expect(css).toMatch(/\.cf-page-header__title\s*\{[\s\S]*?font-weight:\s*var\(--font-display-weight\)/s);
+    expect(css).toMatch(/\.cf-page-header__title\s*\{[\s\S]*?letter-spacing:\s*-0\.02em/s);
+    expect(css).toMatch(/\.cf-page-header--card\s+\.cf-page-header__title\s*\{[\s\S]*?font-weight:\s*var\(--font-display-weight\)/s);
+  });
+
   test('PageHeader exposes title, primary, and secondary/overflow slots', () => {
     const source = readFileSync(PAGE_HEADER, 'utf8');
     expect(source).toMatch(/export function PageHeader/);

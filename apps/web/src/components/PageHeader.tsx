@@ -1,10 +1,11 @@
 /**
- * Responsive page header (issue #707).
+ * Responsive page header (issue #707, #1714).
  *
  * List/hub screens used to pack the title and several compact actions into a
  * single non-wrapping row, overriding the design-system 44px touch target
  * (`!min-h-0 !py-1.5`). This shared header:
- *  - keeps the title and primary action visible
+ *  - keeps the title and primary action visible, using the canonical display font
+ *    (`--font-display` and `--font-display-weight`) aligned with `<PageTitle>` (#1714)
  *  - stacks the action row under the title on narrow viewports / high zoom
  *  - moves secondary actions into an accessible overflow menu below the
  *    stacking breakpoint, while showing them inline on wider layouts
