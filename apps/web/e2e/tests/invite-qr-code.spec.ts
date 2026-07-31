@@ -149,8 +149,10 @@ test.describe('issue #822 — invite QR code card', () => {
     const { campaignId } = seed();
     await page.route('**/api/v1/campaigns', async (route) => {
       if (route.request().method() !== 'GET') return route.continue();
-      const res = await route.fetch();
-      const list = (await res.json()) as Array<{ id: number; publicInvitesEnabled?: boolean }>;
+      const res = await route.fetch().catch(() => null);
+      if (!res) return route.continue();
+      const list = (await res.json().catch(() => null)) as Array<{ id: number; publicInvitesEnabled?: boolean }> | null;
+      if (!list) return route.continue();
       const updated = list.map((c) =>
         c.id === campaignId ? { ...c, publicInvitesEnabled: false } : c,
       );
@@ -163,6 +165,7 @@ test.describe('issue #822 — invite QR code card', () => {
     await expect(qrCard).toHaveAttribute('data-invite-active', 'false');
     await expect(qrCard.getByTestId('qr-inactive-overlay')).toContainText('Suspended');
     await expect(qrCard.getByRole('button', { name: 'Show QR code full screen' })).toBeDisabled();
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 
   test('full-screen display toggles on button click and closes with Escape', async ({ page }) => {

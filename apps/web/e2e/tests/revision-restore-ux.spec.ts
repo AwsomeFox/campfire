@@ -194,8 +194,10 @@ test.describe('revision restore preview and confirmation', () => {
 
     let restored = false;
     await page.route(`**/api/v1/quests/${navigation.questId}`, async (route) => {
-      const response = await route.fetch();
-      const body = (await response.json()) as Quest;
+      const response = await route.fetch().catch(() => null);
+      if (!response) return route.continue();
+      const body = (await response.json().catch(() => null)) as Quest | null;
+      if (!body) return route.continue();
       await route.fulfill({ response, json: restored ? { ...body, body: RECOVERED_BODY } : body });
     });
     await page.getByRole('button', { name: 'Restore this version' }).click();
@@ -208,6 +210,7 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByRole('status').filter({ hasText: /Restored the version/ })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'The recovered crossing' })).toBeVisible();
     await expect(panelTrigger).toHaveAttribute('aria-expanded', 'true');
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 
   test('recovers from history-load and restore failures without changing the current content', async ({ page }) => {

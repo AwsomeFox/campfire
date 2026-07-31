@@ -90,8 +90,10 @@ test.describe('shared-editor stale-write recovery — #881', () => {
     let sequence = 0;
     await page.route(`**/api/v1/campaigns/${campaignId}/session-zero`, async (route) => {
       const requestSequence = ++sequence;
-      const response = await route.fetch();
-      const body = await response.json() as SessionZero;
+      const response = await route.fetch().catch(() => null);
+      if (!response) return route.continue();
+      const body = (await response.json().catch(() => null)) as SessionZero | null;
+      if (!body) return route.continue();
       if (requestSequence === 1) {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -112,5 +114,6 @@ test.describe('shared-editor stale-write recovery — #881', () => {
     await page.waitForTimeout(350);
     await expect(page.getByText('Newest response')).toBeVisible();
     await expect(page.getByText('Delayed older response')).toHaveCount(0);
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
   });
 });

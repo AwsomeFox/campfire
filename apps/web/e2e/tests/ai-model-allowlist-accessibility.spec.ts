@@ -14,8 +14,10 @@ async function mockAllowlist(page: Page, initialAllowedModels: string[]) {
       await route.continue();
       return;
     }
-    const response = await route.fetch();
-    const body = (await response.json()) as AiOverview;
+    const response = await route.fetch().catch(() => null);
+    if (!response) return route.continue();
+    const body = (await response.json().catch(() => null)) as AiOverview | null;
+    if (!body) return route.continue();
     overview = { ...body, allowedModels: effectiveAllowedModels };
     await route.fulfill({ response, json: overview });
   });
@@ -40,6 +42,10 @@ async function mockAllowlist(page: Page, initialAllowedModels: string[]) {
 
 test.describe('AI model allowlist editor accessibility', () => {
   test.use({ storageState: stateFor('admin') });
+
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
 
   test('names and describes the editor, normalizes supported separators, and saves by keyboard', async ({ page }) => {
     const { requests } = await mockAllowlist(page, []);
