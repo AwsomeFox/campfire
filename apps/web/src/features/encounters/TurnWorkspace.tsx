@@ -20,7 +20,6 @@ import { useEffect, useMemo, useState } from 'react';
 import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useKeyedMutation } from '../../lib/keyedMutation';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { useAnnounce } from '../../components/Announcer';
@@ -44,6 +43,11 @@ interface TurnWorkspaceProps {
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   /** Issue #425: DM uses a suggested monster action from the turn workspace. */
   onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
+  /** Issue #1456: the parent owns the single end-turn mutation so errors surface once.
+   *  The workspace passes the combatant id from the /turn response it is rendering, which
+   *  is authoritative when the parent's encounter cache is briefly stale. */
+  onEndTurn?: (expectedCurrentCombatantId: number) => void;
+  endTurnBusy?: boolean;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -76,10 +80,10 @@ function SlotChip({
       </div>
       <p className="text-[11px] text-muted m-0 leading-tight">{slot.help}</p>
       <div className="flex gap-1">
-        <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={disabled} onClick={onUse}>
+        <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled} onClick={onUse}>
           {isMovement ? '+5 ft' : 'Use'}
         </button>
-        <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={disabled || slot.used <= 0} onClick={onRelease}>
+        <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled || slot.used <= 0} onClick={onRelease}>
           {isMovement ? '-5 ft' : 'Undo'}
         </button>
       </div>
@@ -99,6 +103,8 @@ export function TurnWorkspace({
   isCombatantPending,
   onRollDeathSave,
   onUseSuggestedAction,
+  onEndTurn,
+  endTurnBusy = false,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -122,26 +128,6 @@ export function TurnWorkspace({
     invalidateEncounter(queryClient, encounterId);
     void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(encounterId) });
   };
-
-  // Issue #580: the workspace's "End turn" is the same non-idempotent advance as the
-  // tracker's, so it takes the same protection — one operation id per click, carried
-  // unchanged through the automatic retry, alongside the existing expected-combatant CAS.
-  const endTurn = useKeyedMutation({
-    mutationFn: ({ idempotencyKey }: { idempotencyKey: string }) => {
-      // Use the combatant id from the SAME response the UI is rendering (not the parent
-      // prop, which can be briefly stale/null). Hard-fail rather than POST to /null or send
-      // a null guard (which would disable the server's double-advance protection).
-      const cid = turn?.current?.combatantId;
-      if (cid == null) throw new Error('No current combatant to end the turn for — refresh and try again.');
-      return api.post(`${API}/encounters/${encounterId}/end-turn`, {
-        expectedCurrentCombatantId: cid,
-        idempotencyKey,
-      });
-    },
-    onMutate: () => setError(null),
-    onError: (err) => setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })),
-    onSettled: settle,
-  });
 
   const turnState = useMutation({
     mutationFn: (patch: Record<string, unknown>) => {
@@ -183,7 +169,7 @@ export function TurnWorkspace({
   }, [turn?.suggestedActions, actionFilter]);
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
-  const busy = endTurn.isPending || turnState.isPending;
+  const busy = endTurnBusy || turnState.isPending;
   const controlsDisabled = busy || actionsDisabled;
   const isDying = turn.current.deathState === 'dying';
 
@@ -273,7 +259,7 @@ export function TurnWorkspace({
           Concentration:{' '}
           <span className="text-white">{turn.concentration ?? 'none'}</span>
           {turn.concentration && (
-            <button type="button" className="btn btn-ghost text-[11px] ml-1 cf-density-xs" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
+            <button type="button" className="btn btn-ghost text-[11px] ml-1 cf-target-44" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
               clear
             </button>
           )}
@@ -287,7 +273,7 @@ export function TurnWorkspace({
           <div className="flex gap-2 flex-wrap items-center">
             <button
               type="button"
-              className="btn btn-ghost"
+              className="btn btn-ghost cf-target-44"
               disabled={controlsDisabled}
               data-testid="workspace-delay-toggle"
               onClick={() => turnState.mutate({ delaying: !currentTurnState?.delaying })}
@@ -296,7 +282,7 @@ export function TurnWorkspace({
             </button>
             <input
               type="text"
-              className="input"
+              className="input cf-target-44"
               placeholder="Ready action trigger…"
               aria-label="Readied action trigger"
               value={readiedDraft}
@@ -314,7 +300,7 @@ export function TurnWorkspace({
             />
             <button
               type="button"
-              className="btn btn-ghost"
+              className="btn btn-ghost cf-target-44"
               disabled={controlsDisabled}
               data-testid="workspace-readied-set"
               onClick={() => {
@@ -327,7 +313,7 @@ export function TurnWorkspace({
             {currentTurnState?.readied && (
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost cf-target-44"
                 disabled={controlsDisabled}
                 data-testid="workspace-readied-clear"
                 onClick={() => {
@@ -355,7 +341,7 @@ export function TurnWorkspace({
                 <span className="text-white">{e.name}</span>
                 {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} rd</span>}
                 {e.saveAbility && <span className="text-[11px]">save: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
-                <button type="button" className="btn btn-ghost text-[11px] cf-density-xs" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
+                <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
                   remove
                 </button>
               </li>
@@ -413,7 +399,7 @@ export function TurnWorkspace({
                 {a.resolvable && onUseSuggestedAction && a.actionIndex != null && a.spec && (
                   <button
                     type="button"
-                    className="btn btn-secondary !min-h-8 text-xs shrink-0"
+                    className="btn btn-secondary cf-target-44 text-xs shrink-0"
                     disabled={actionsDisabled}
                     data-testid="suggested-action-use"
                     onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
@@ -431,7 +417,11 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate({})} data-testid="workspace-end-turn">
+          <Btn
+            disabled={controlsDisabled}
+            onClick={() => onEndTurn?.(turn.current!.combatantId)}
+            data-testid="workspace-end-turn"
+          >
             {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (

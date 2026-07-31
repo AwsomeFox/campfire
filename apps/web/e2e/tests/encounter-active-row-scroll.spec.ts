@@ -52,7 +52,8 @@ test.describe('run session active row scroll (issue #636)', () => {
       await page.setViewportSize({ width: 900, height: 360 });
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByRole('heading', { name: 'Tall scroll drill' })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
+      const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
+      await expect(nextTurnBtn).toBeVisible();
 
       // Pin the window at the top so lower initiative rows start below the fold.
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -63,7 +64,7 @@ test.describe('run session active row scroll (issue #636)', () => {
         const nextTurn = page.waitForResponse(
           (response) => response.url().includes('/next-turn') && response.ok(),
         );
-        await page.getByRole('button', { name: 'Next turn →' }).click();
+        await nextTurnBtn.click();
         await nextTurn;
         await expect(page.getByText('Running', { exact: false }).first()).toBeVisible();
       }

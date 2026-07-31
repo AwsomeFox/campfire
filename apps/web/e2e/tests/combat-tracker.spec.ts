@@ -49,8 +49,9 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveValue(String(boss.initiative));
     await expect(page.getByLabel(`Initiative for ${skirmisher.name}`)).toHaveValue(String(skirmisher.initiative));
 
-    // DM-only run controls exist.
-    await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
+    // DM-only run controls exist. Scope to the header Next turn button because the
+    // workspace also exposes an end-of-turn Next turn button (issue #1456).
+    await expect(page.getByTestId('encounter-header-next-turn')).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
@@ -174,7 +175,7 @@ test.describe('combat tracker — non-DM views', () => {
         await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveCount(0);
 
         // None of the DM-only run controls render.
-        await expect(page.getByRole('button', { name: 'Next turn →' })).toHaveCount(0);
+        await expect(page.getByTestId('encounter-header-next-turn')).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'End', exact: true })).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Cast', exact: true })).toHaveCount(0);
       });

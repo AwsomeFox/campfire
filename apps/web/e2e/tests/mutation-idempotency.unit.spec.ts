@@ -97,7 +97,8 @@ test.describe('mutation idempotency client seam (#580)', () => {
     expect(src).toContain('const nextTurnMut = useKeyedMutation(');
     // next-turn must also carry the cross-device CAS, not only the retry key.
     expect(src).toContain('expectedCurrentCombatantId');
-    expect(readFileSync(TURN_WORKSPACE, 'utf8')).toContain('const endTurn = useKeyedMutation(');
+    // Issue #1456: end-turn now lives once in the parent and is passed down.
+    expect(readFileSync(TURN_WORKSPACE, 'utf8')).toContain('onEndTurn');
   });
 
   test('the combat surfaces route ambiguous failures into the gate, not the error banner', () => {

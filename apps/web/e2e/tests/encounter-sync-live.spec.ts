@@ -48,7 +48,7 @@ test('encounter run session pauses risky actions while SSE is down and resyncs o
     await expect(syncChip).toBeVisible();
     await expect(syncChip).toHaveText('Live');
 
-    const nextTurn = page.getByRole('button', { name: /Next turn/i });
+    const nextTurn = page.getByTestId('encounter-header-next-turn');
     await expect(nextTurn).toBeEnabled();
 
     await reader.setOffline(true);

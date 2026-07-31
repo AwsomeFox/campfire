@@ -99,7 +99,7 @@ test('DM can roll initiative, start, and advance turns after confirming the over
     await expect(page.getByTestId('encounter-sync-override-active')).toBeVisible();
 
     const currentTurnBefore = await page.locator('[data-current-turn="true"]').getAttribute('data-testid');
-    const nextTurnBtn = page.getByRole('button', { name: /Next turn/i });
+    const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
     await expect(nextTurnBtn).toBeEnabled();
     await nextTurnBtn.click();
     await expect(page.locator('[data-current-turn="true"]')).not.toHaveAttribute('data-testid', currentTurnBefore ?? '');
@@ -161,7 +161,7 @@ test('an overridden turn advance against a server whose turn already moved surfa
     await page.getByTestId('encounter-sync-override-confirm').click();
     await expect(page.getByTestId('encounter-sync-override-active')).toBeVisible();
 
-    const nextTurnBtn = page.getByRole('button', { name: /Next turn/i });
+    const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
     await expect(nextTurnBtn).toBeEnabled();
 
     // Someone else — another device, a co-DM, the AI DM seat — advances the turn

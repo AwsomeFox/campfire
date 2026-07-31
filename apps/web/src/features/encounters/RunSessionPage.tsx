@@ -2938,6 +2938,7 @@ export default function RunSessionPage() {
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn
+                  data-testid="encounter-header-next-turn"
                   disabled={headerBusy || riskyBlocked}
                   onClick={nextTurn}
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
@@ -3282,6 +3283,10 @@ export default function RunSessionPage() {
                 }
               : undefined
           }
+          onEndTurn={(expectedCurrentCombatantId) =>
+            endTurn.mutate({ expectedCurrentCombatantId })
+          }
+          endTurnBusy={endTurn.isPending}
         />
       )}
 
@@ -3559,23 +3564,6 @@ export default function RunSessionPage() {
                   onReleaseLegendary={
                     canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
                       ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
-                      : undefined
-                  }
-                  canEndMyTurn={
-                    c.id === currentCombatantId &&
-                    turnWorkspace?.canEndTurn === true &&
-                    turnWorkspace.isYourTurn === true
-                  }
-                  onEndMyTurn={
-                    c.id === currentCombatantId
-                      ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
-                      : undefined
-                  }
-                  onPatchTurnState={
-                    // Permission-only mount (issue #1746): the delay/ready controls stay in the
-                    // tree and are disabled via `syncBlocked` instead of disappearing.
-                    canEditCombatantPermission(c) && c.id === currentCombatantId && encounter.status === 'running'
-                      ? (patch) => patchCombatantTurnState(c.id, patch)
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
@@ -6473,8 +6461,17 @@ function ApplyDamageBar({
         damageDice: isCrit && diceTotal !== undefined ? diceTotal : undefined,
       }
     : {};
+  const ref = useRef<HTMLDivElement>(null);
+  const announce = useAnnounce();
+  useEffect(() => {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    ref.current?.focus({ preventScroll: true });
+    announce(`Apply ${amount} ${label}. Pick a target.`);
+  }, [amount, label, announce]);
   return (
     <div
+      ref={ref}
+      tabIndex={-1}
       className="cf-inset"
       role="group"
       aria-label={`Apply ${amount} rolled ${label}`}
@@ -6513,17 +6510,17 @@ function ApplyDamageBar({
           <label className="text-muted" style={{ fontSize: 11.5 }}>
             Type{' '}
             {damageTypes.length > 0 ? (
-              <select value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type">
+              <select className="input cf-target-44" style={{ width: 'auto' }} value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type">
                 <option value="">untyped</option>
                 {damageTypes.map((type) => <option key={type} value={type}>{type}</option>)}
               </select>
             ) : (
-              <input value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type" placeholder="untyped" maxLength={24} />
+              <input className="input cf-target-44" style={{ width: 'auto' }} value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type" placeholder="untyped" maxLength={24} />
             )}
           </label>
           <label className="text-muted" style={{ fontSize: 11.5 }}>
             Save{' '}
-            <select value={saveOutcome} onChange={(event) => setSaveOutcome(event.target.value as DamageSaveOutcome)} aria-label="Save outcome">
+            <select className="input cf-target-44" style={{ width: 'auto' }} value={saveOutcome} onChange={(event) => setSaveOutcome(event.target.value as DamageSaveOutcome)} aria-label="Save outcome">
               <option value="full">full damage</option>
               <option value="half">saved — half</option>
             </select>
@@ -6624,6 +6621,8 @@ function ApplyDamageBar({
                     <label key={c.id} className="text-muted" style={{ fontSize: 11.5 }}>
                       {c.name}{' '}
                       <select
+                        className="input cf-target-44"
+                        style={{ width: 'auto' }}
                         value={aoeSaveOutcomes[c.id] ?? saveOutcome}
                         onChange={(event) => {
                           const outcome = event.target.value as DamageSaveOutcome;
@@ -6698,9 +6697,6 @@ function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
-  canEndMyTurn,
-  onEndMyTurn,
-  onPatchTurnState,
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
@@ -6775,11 +6771,6 @@ function CombatantRow({
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
-  /** Issue #487: player may end their own turn from the active combatant row. */
-  canEndMyTurn?: boolean;
-  onEndMyTurn?: () => void;
-  /** Issue #487: delay / ready action controls on the current turn. */
-  onPatchTurnState?: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
   const { t } = useTranslation();
@@ -6796,16 +6787,12 @@ function CombatantRow({
   const [nameDraft, setNameDraft] = useState(combatant.name);
   const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
   const [tempDraft, setTempDraft] = useState('');
-  const [readiedDraft, setReadiedDraft] = useState(combatant.turnState?.readied ?? '');
   const [conditionDraft, setConditionDraft] = useState<ConditionDraft>(() => emptyConditionDraft(defaultConditionSourceCombatantId));
   const [editingConditionId, setEditingConditionId] = useState<string | null>(null);
   useEffect(() => {
     setNameDraft(combatant.name);
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
   }, [combatant.name, combatant.hpMax]);
-  useEffect(() => {
-    setReadiedDraft(combatant.turnState?.readied ?? '');
-  }, [combatant.turnState?.readied]);
   useEffect(() => {
     setConditionDraft((prev) =>
       prev.sourceCombatantId
@@ -6919,6 +6906,7 @@ function CombatantRow({
         <div className="flex items-center" style={{ gap: 2 }}>
           <input
             type="number"
+            className="input cf-target-44"
             aria-label={`Initiative for ${combatant.name}`}
             title="Set initiative"
             value={initDraft}
@@ -6939,12 +6927,11 @@ function CombatantRow({
               }
             }}
             style={{
-              width: 34,
-              height: 30,
+              width: 44,
+              minWidth: 44,
+              height: 44,
+              minHeight: 44,
               flex: 'none',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--color-divider)',
-              background: 'transparent',
               textAlign: 'center',
               fontSize: 13,
               fontFamily: 'var(--font-heading)',
@@ -6954,6 +6941,7 @@ function CombatantRow({
           {combatant.initiative !== null && (
             <button
               type="button"
+              className="btn btn-ghost cf-target-44"
               aria-label={`Clear ${combatant.name} roll order`}
               title={runningReorderNote}
               disabled={busy}
@@ -6962,16 +6950,8 @@ function CombatantRow({
                 onClearInitiative();
               }}
               style={{
-                width: 22,
-                height: 30,
                 flex: 'none',
                 padding: 0,
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-divider)',
-                background: 'transparent',
-                cursor: busy ? 'default' : 'pointer',
-                color: 'var(--color-neutral-500)',
-                lineHeight: 1,
               }}
             >
               <UIIcon name="close" size="xs" />
@@ -7151,12 +7131,12 @@ function CombatantRow({
             {canEditIdentity && (
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost cf-target-44"
                 aria-label={`Rename ${combatant.name} or edit its max HP`}
                 title="Rename / edit max HP"
                 disabled={busy}
                 onClick={() => setEditingIdentity(true)}
-                style={{ fontSize: 'var(--type-label)', minHeight: 20, padding: '1px 6px' }}
+                style={{ fontSize: 'var(--type-label)' }}
               >
                 ✎
               </button>
@@ -7230,6 +7210,7 @@ function CombatantRow({
                     <>
                       <button
                         type="button"
+                        className="cf-target-44"
                         aria-label={`Edit ${inst.name}`}
                         aria-describedby={syncBlockedDescribedBy}
                         onClick={() => {
@@ -7247,12 +7228,16 @@ function CombatantRow({
                           padding: 0,
                           font: 'inherit',
                           color: 'inherit',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
                         }}
                       >
                         <span aria-hidden="true">edit</span>
                       </button>
                       <button
                         type="button"
+                        className="cf-target-44"
                         aria-label={`Remove ${inst.name}`}
                         aria-describedby={syncBlockedDescribedBy}
                         onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
@@ -7266,6 +7251,9 @@ function CombatantRow({
                           padding: 0,
                           font: 'inherit',
                           color: 'inherit',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
                         }}
                       >
                         <span aria-hidden="true">x</span>
@@ -7284,6 +7272,7 @@ function CombatantRow({
                 {canEditPermission && (
                   <button
                     type="button"
+                    className="cf-target-44"
                     aria-label={`Remove ${cond}`}
                     aria-describedby={syncBlockedDescribedBy}
                     onClick={() => onRemoveCondition(cond)}
@@ -7297,6 +7286,9 @@ function CombatantRow({
                       padding: 0,
                       font: 'inherit',
                       color: 'inherit',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
                     <UIIcon name="close" size="xs" />
@@ -7306,95 +7298,7 @@ function CombatantRow({
             ))}
           </div>
         ) : null}
-        {isCurrentTurn && onPatchTurnState && (
-          <div
-            className="flex gap-2 flex-wrap items-center"
-            style={{ marginTop: 6 }}
-            data-testid={`turn-actions-${combatant.id}`}
-          >
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy || syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              data-testid={`delay-toggle-${combatant.id}`}
-              onClick={() => onPatchTurnState({ delaying: !combatant.turnState?.delaying })}
-              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
-            >
-              {combatant.turnState?.delaying ? 'Resume turn' : 'Delay turn'}
-            </button>
-            <label className="sr-only" htmlFor={`readied-${combatant.id}`}>
-              Readied action trigger for {combatant.name}
-            </label>
-            <input
-              id={`readied-${combatant.id}`}
-              type="text"
-              className="input"
-              placeholder="Ready action trigger…"
-              value={readiedDraft}
-              disabled={busy || syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              maxLength={200}
-              onChange={(e) => setReadiedDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  const trimmed = readiedDraft.trim();
-                  onPatchTurnState({ readied: trimmed || null });
-                }
-              }}
-              style={{ maxWidth: 220, minHeight: 28, fontSize: 12, padding: '2px 8px' }}
-            />
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy || syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              data-testid={`readied-set-${combatant.id}`}
-              onClick={() => {
-                const trimmed = readiedDraft.trim();
-                onPatchTurnState({ readied: trimmed || null });
-              }}
-              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
-            >
-              Set ready
-            </button>
-            {combatant.turnState?.readied && (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={busy || syncBlocked}
-                title={syncBlockedReason}
-                aria-describedby={syncBlockedDescribedBy}
-                data-testid={`readied-clear-${combatant.id}`}
-                onClick={() => {
-                  setReadiedDraft('');
-                  onPatchTurnState({ readied: null });
-                }}
-                style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
-              >
-                Clear ready
-              </button>
-            )}
-          </div>
-        )}
-        {canEndMyTurn && onEndMyTurn && (
-          <div style={{ marginTop: 6 }}>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy}
-              data-testid={`end-my-turn-${combatant.id}`}
-              onClick={onEndMyTurn}
-              style={{ minHeight: 32, fontSize: 13 }}
-            >
-              End my turn →
-            </button>
-          </div>
-        )}
+
         {canEditPermission && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
@@ -7402,6 +7306,7 @@ function CombatantRow({
                 onSubmit={submitConditionDraft}
                 className="flex gap-2 flex-wrap items-end"
                 style={{
+                  boxSizing: 'border-box',
                   width: '100%',
                   padding: 8,
                   border: '1px dashed var(--color-divider)',
@@ -7416,7 +7321,7 @@ function CombatantRow({
                   <label htmlFor={`condition-name-${combatant.id}`}>Condition</label>
                   <input
                     id={`condition-name-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     list={`condition-vocab-${combatant.id}`}
                     value={conditionDraft.name}
                     maxLength={40}
@@ -7435,7 +7340,7 @@ function CombatantRow({
                   <label htmlFor={`condition-source-${combatant.id}`}>Source</label>
                   <input
                     id={`condition-source-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     value={conditionDraft.source}
                     maxLength={160}
                     disabled={busy}
@@ -7450,7 +7355,8 @@ function CombatantRow({
                     value={conditionDraft.sourceCombatantId}
                     disabled={busy}
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, sourceCombatantId: e.target.value }))}
-                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                    className="input cf-target-44"
+                    style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
                   >
                     <option value="">None</option>
                     {conditionSourceOptions.map((source) => (
@@ -7460,11 +7366,11 @@ function CombatantRow({
                     ))}
                   </select>
                 </div>
-                <div className="field" style={{ width: 86 }}>
+                <div className="field" style={{ minWidth: 64, flex: '1 1 80px' }}>
                   <label htmlFor={`condition-rule-${combatant.id}`}>Rule ID</label>
                   <input
                     id={`condition-rule-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     type="number"
                     min={1}
                     value={conditionDraft.ruleEntryId}
@@ -7473,11 +7379,11 @@ function CombatantRow({
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, ruleEntryId: e.target.value }))}
                   />
                 </div>
-                <div className="field" style={{ width: 86 }}>
+                <div className="field" style={{ minWidth: 64, flex: '1 1 80px' }}>
                   <label htmlFor={`condition-duration-${combatant.id}`}>Rounds</label>
                   <input
                     id={`condition-duration-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     type="number"
                     min={1}
                     max={999}
@@ -7494,7 +7400,8 @@ function CombatantRow({
                     value={conditionDraft.timing}
                     disabled={busy || conditionDraft.durationRounds.trim() === ''}
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, timing: e.target.value as ConditionTiming }))}
-                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                    className="input cf-target-44"
+                    style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
                   >
                     {CONDITION_TIMING_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -7508,18 +7415,19 @@ function CombatantRow({
                     value={conditionDraft.saveTiming}
                     disabled={busy}
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveTiming: e.target.value as ConditionTiming }))}
-                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                    className="input cf-target-44"
+                    style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
                   >
                     {SAVE_TIMING_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
                     ))}
                   </select>
                 </div>
-                <div className="field" style={{ width: 74 }}>
+                <div className="field" style={{ minWidth: 56, flex: '1 1 64px' }}>
                   <label htmlFor={`condition-save-ability-${combatant.id}`}>Save</label>
                   <input
                     id={`condition-save-ability-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     value={conditionDraft.saveAbility}
                     maxLength={24}
                     disabled={busy || conditionDraft.saveTiming === 'none'}
@@ -7527,11 +7435,11 @@ function CombatantRow({
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveAbility: e.target.value }))}
                   />
                 </div>
-                <div className="field" style={{ width: 72 }}>
+                <div className="field" style={{ minWidth: 56, flex: '1 1 64px' }}>
                   <label htmlFor={`condition-save-dc-${combatant.id}`}>DC</label>
                   <input
                     id={`condition-save-dc-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     type="number"
                     min={1}
                     value={conditionDraft.saveDc}
@@ -7539,11 +7447,11 @@ function CombatantRow({
                     onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveDc: e.target.value }))}
                   />
                 </div>
-                <div className="field" style={{ width: 70 }}>
+                <div className="field" style={{ minWidth: 56, flex: '1 1 64px' }}>
                   <label htmlFor={`condition-stacks-${combatant.id}`}>Stacks</label>
                   <input
                     id={`condition-stacks-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     type="number"
                     min={1}
                     max={99}
@@ -7576,7 +7484,7 @@ function CombatantRow({
                   <label htmlFor={`condition-notes-${combatant.id}`}>Notes</label>
                   <input
                     id={`condition-notes-${combatant.id}`}
-                    className="input"
+                    className="input cf-target-44"
                     value={conditionDraft.notes}
                     maxLength={300}
                     disabled={busy}
@@ -7591,7 +7499,7 @@ function CombatantRow({
                       type="button"
                       className="btn btn-ghost"
                       disabled={busy}
-                      style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+                      style={{ fontSize: 'var(--type-label)' }}
                       onClick={() => setConditionDraft((prev) => ({ ...prev, name: s }))}
                     >
                       {s}
@@ -7628,7 +7536,7 @@ function CombatantRow({
               <button
                 type="button"
                 className="btn btn-ghost"
-                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                 disabled={syncBlocked}
                 title={syncBlockedReason}
                 aria-describedby={syncBlockedDescribedBy}
@@ -7652,7 +7560,7 @@ function CombatantRow({
                 title={syncBlockedReason ?? ((combatant.rpCurrent ?? 0) < 1 ? 'Requires at least 1 Resolve Point' : '10-minute Stamina Rest: spends 1 RP to restore full SP')}
                 aria-describedby={syncBlockedDescribedBy}
                 onClick={() => onPatchCombatant({ spSet: combatant.spMax, rpDelta: -1 })}
-                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                 data-testid="stamina-rest-btn"
               >
                 ⛺ Stamina Rest (1 RP → Full SP)
@@ -7669,7 +7577,7 @@ function CombatantRow({
                   title={syncBlockedReason ?? 'Stabilize combatant at 0 HP'}
                   aria-describedby={syncBlockedDescribedBy}
                   onClick={() => onPatchCombatant({ deathState: 'stable' })}
-                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                 >
                   Stabilize
                 </button>
@@ -7682,7 +7590,7 @@ function CombatantRow({
                       title={syncBlockedReason ?? 'Spend 1 RP to stabilize'}
                       aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ deathState: 'stable', rpDelta: -1 })}
-                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                     >
                       Stabilize (1 RP)
                     </button>
@@ -7693,7 +7601,7 @@ function CombatantRow({
                       title={syncBlockedReason ?? 'Spend 1 RP to revive at 1 HP'}
                       aria-describedby={syncBlockedDescribedBy}
                       onClick={() => onPatchCombatant({ hpSet: 1, deathState: 'none', rpDelta: -1 })}
-                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                     >
                       Revive 1 HP (1 RP)
                     </button>
@@ -7942,7 +7850,7 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
         className="btn btn-ghost"
         {...buttonProps}
         onClick={toggle}
-        style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+        style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
       >
         <span aria-hidden="true">{open ? '▾' : '▸'}</span> Statblock
       </button>
@@ -8391,6 +8299,7 @@ function AddCombatantPanel({
               tabIndex={selectedTab ? 0 : -1}
               onClick={() => selectAddTab(t)}
               onKeyDown={onAddTabKeyDown}
+              className="cf-target-44"
               style={{
                 padding: '7px 13px',
                 font: 'inherit',
@@ -8400,7 +8309,6 @@ function AddCombatantPanel({
                 cursor: 'pointer',
                 color: selectedTab ? 'var(--color-accent)' : 'var(--color-text)',
                 boxShadow: selectedTab ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-                minHeight: 32,
               }}
             >
               {ADD_TAB_LABELS[t]}

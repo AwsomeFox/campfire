@@ -95,6 +95,13 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
           data: { hpSet: 0, deathSaveSuccesses: 1, deathSaveFailures: 1 },
         });
         expect(hpRes.ok(), `drop HP: ${await hpRes.text()}`).toBeTruthy();
+
+        // Add a simple condition so the condition chip remove button can be measured.
+        const condRes = await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${combatant!.id}`, {
+          data: { addConditions: ['Prone'] },
+        });
+        expect(condRes.ok(), `add condition: ${await condRes.text()}`).toBeTruthy();
+
         await dm.post(`/api/v1/encounters/${enc.id}/start`).catch(() => undefined);
 
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -131,6 +138,35 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(page.getByTestId('map-tool-move'), 'map Move tool');
         await assertMinTarget(page.getByTestId('map-tool-ping'), 'map Ping tool');
         await assertMinTarget(page.getByTestId('map-tool-reveal'), 'map Reveal tool');
+
+        // Initiative input + clear roll order.
+        await assertMinTarget(charRow.getByRole('spinbutton', { name: `Initiative for ${charName}` }), 'initiative input');
+        await assertMinTarget(charRow.getByRole('button', { name: `Clear ${charName} roll order` }), 'clear initiative');
+
+        // Condition chip remove (Prone added before page load).
+        await assertMinTarget(charRow.getByRole('button', { name: 'Remove Prone' }), 'condition chip remove');
+
+        // Action-economy use/undo controls in the turn workspace.
+        const workspace = page.getByTestId('turn-workspace');
+        await assertMinTarget(workspace.getByRole('button', { name: 'Use' }).first(), 'action-economy use');
+        await assertMinTarget(workspace.getByRole('button', { name: 'Undo' }).first(), 'action-economy undo');
+
+        // Add-combatant tab bar — each tab must be a 44×44 target.
+        const addTabs = page.getByTestId('add-combatant-tabs').locator('button');
+        const tabCount = await addTabs.count();
+        expect(tabCount).toBeGreaterThanOrEqual(2);
+        for (let i = 0; i < tabCount; i++) {
+          await assertMinTarget(addTabs.nth(i), `add-combatant tab ${i}`);
+        }
+
+        // Condition editor: opening it should fit within the viewport at 320px.
+        await charRow.getByRole('button', { name: '+ condition' }).click();
+        const conditionForm = page.getByText('Add a structured condition instance.').first().locator('..');
+        await expect(conditionForm).toBeVisible();
+        const formBox = await conditionForm.boundingBox();
+        expect(formBox).not.toBeNull();
+        expect(formBox!.x, 'condition editor left edge').toBeGreaterThanOrEqual(0);
+        expect(formBox!.x + formBox!.width, 'condition editor right edge').toBeLessThanOrEqual(viewport.width);
       } finally {
         // End before delete so a failed DELETE cannot leave a RUNNING fight that
         // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
