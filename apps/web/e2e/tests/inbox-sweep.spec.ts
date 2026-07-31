@@ -60,11 +60,11 @@ test.describe('scribe inbox sweep control', () => {
             id: 999,
             campaignId,
             status: 'succeeded',
-            itemsTotal: 2,
-            itemsProposed: 1,
+            itemsTotal: 3,
+            itemsProposed: 2,
             itemsSkipped: 1,
             itemsErrored: 0,
-            detail: 'swept 2 item(s): 1 proposed, 1 skipped, 0 errored',
+            detail: 'swept 3 item(s): 2 proposed, 1 skipped, 0 errored',
             createdBy: 'user:dm',
             createdAt: new Date().toISOString(),
           },
@@ -84,6 +84,15 @@ test.describe('scribe inbox sweep control', () => {
               entityId: null,
               proposalId: null,
               reason: skipReason,
+            },
+            {
+              noteId: 7575,
+              outcome: 'proposed',
+              entityType: 'npc',
+              entityId: null,
+              proposalId: 4243,
+              reason: 'filed as create proposal #4243: new NPC introduced',
+              body: 'Item 75 beyond initial page',
             },
           ],
         }),
@@ -112,11 +121,12 @@ test.describe('scribe inbox sweep control', () => {
 
     // Outcome summary + per-item reasons — the force-skip reason must reach the DM
     // verbatim, not be summarized away.
-    await expect(page.getByText(/Swept 2 item\(s\): 1 proposed, 1 skipped, 0 errored/)).toBeVisible();
+    await expect(page.getByText(/Swept 3 item\(s\): 2 proposed, 1 skipped, 0 errored/)).toBeVisible();
     const outcomeList = page.getByRole('list').filter({ hasText: proposeReason });
     await expect(outcomeList.getByText(proposeReason)).toBeVisible();
     await expect(outcomeList.getByText(skipReason)).toBeVisible();
     await expect(outcomeList.getByText(body)).toBeVisible(); // the proposed item's own body, via the noteId lookup
+    await expect(outcomeList.getByText('Item 75 beyond initial page')).toBeVisible(); // item beyond initial page with server-provided body
     await expect(outcomeList.getByText(`Note #${fakeSkippedNoteId}`)).toBeVisible(); // fallback label path
 
     // The proposals-queue badge reflects the newly filed proposal without a route change.
