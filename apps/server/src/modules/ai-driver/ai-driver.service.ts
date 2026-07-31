@@ -4080,6 +4080,12 @@ export class AiDriverService {
     let finalNarration = '';
     let steps = 0;
     let providerError: AiProviderError | undefined;
+    let stopReason: AiDmStopReason = 'complete';
+    let usageUnknownAccum = false;
+    const markUsageUnknown = (unknown: boolean | undefined): void => {
+      usageUnknownAccum = usageUnknownAccum || unknown === true;
+    };
+    const usageUnknown = (): boolean => usageUnknownAccum;
     try {
 
     // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
@@ -4299,32 +4305,12 @@ export class AiDriverService {
       finalNarration = turnGrounding.narration;
     };
     let latestSeat = seat;
-    let stopReason: AiDmStopReason = 'complete';
+    stopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     steps = 0;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     providerError = undefined;
-    /**
-     * #1052 — "any part of this turn's spend was unmeasured", accumulated across every attempt
-     * and every step.
-     *
-     * WRITE-ONLY-THROUGH-A-HELPER, ON PURPOSE. This started as a plain `let` with a comment
-     * saying it is never cleared, and then a terminal exit fifty lines below cleared it by
-     * writing the obvious thing — `tokensUsageUnknown = spend.usageUnknown` — which reassigns a
-     * per-TURN accumulator from a per-STEP fact. Three of the four terminal branches combined
-     * correctly and one did not, so the invariant held everywhere except the exit nobody
-     * re-read. A comment stating a rule that a later edit can silently break is the same shape
-     * as the false compile-guarantee this PR already removed from driver-retry.ts.
-     *
-     * So there is no longer a variable to assign to: `markUsageUnknown` only ever ORs, and
-     * `usageUnknown()` only reads. A future exit that wants to record unmeasured usage has one
-     * way to do it, and it is the correct one.
-     */
-    let usageUnknownAccum = false;
-    const markUsageUnknown = (unknown: boolean | undefined): void => {
-      usageUnknownAccum = usageUnknownAccum || unknown === true;
-    };
-    const usageUnknown = (): boolean => usageUnknownAccum;
+    usageUnknownAccum = false;
     /**
      * #1052 — how the last step's attempt loop ended. `attempts` counts provider calls made
      * for that step (1 when nothing was retried); `gaveUp` names why no further attempt was
@@ -5124,15 +5110,17 @@ export class AiDriverService {
   } finally {
     // #1497 — ensure turn.end is ALWAYS emitted if an unhandled throw occurs after turn start
     if (turnStarted && !turnEndEmitted) {
+      const fallbackStopReason: AiDmStopReason =
+        stopReason !== 'complete' ? stopReason : (providerError ? 'provider_error' : 'aborted');
       this.emitTurnEnd(
         campaignId,
-        providerError ? 'provider_error' : 'aborted',
+        fallbackStopReason,
         finalNarration || '',
         steps,
         totalTokens,
         budgetRemaining ?? 0,
         providerError,
-        false,
+        usageUnknown(),
       );
       turnEndEmitted = true;
     }
