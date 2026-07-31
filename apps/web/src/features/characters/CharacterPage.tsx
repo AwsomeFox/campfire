@@ -1429,8 +1429,8 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                 disabled={roller.rolling}
                 className="cf-target-44 w-full"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}
-                title={`Roll ${def.label}${def.category === 'save' && !def.label.toLowerCase().includes('save') ? ' save' : ''} (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
-                aria-label={`Roll ${def.label}${def.category === 'save' && !def.label.toLowerCase().includes('save') ? ' save' : ''} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
+                title={`Roll ${def.label} ${k ? `(${k.toUpperCase()}) ` : ''}${def.category === 'save' && !def.label.toLowerCase().includes('save') ? 'save' : ''} (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
+                aria-label={`Roll ${def.label} ${k ? `(${k.toUpperCase()}) ` : ''}${def.category === 'save' && !def.label.toLowerCase().includes('save') ? 'save' : ''} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
                 <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
