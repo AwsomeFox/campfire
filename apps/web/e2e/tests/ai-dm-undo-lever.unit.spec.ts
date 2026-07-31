@@ -113,6 +113,34 @@ test.describe('nextUndoLeverState — undo snackbar seeding (issue #1501)', () =
     });
     expect(step.pop?.chainId).toBe('chain-C');
   });
+
+  test('switching campaigns resets "seen", so the new table\'s pre-existing lever does NOT pop (#1501)', () => {
+    // AiTablePage stays mounted across a campaign switch, so the refs from the previous table would
+    // survive. The component resets them on a [campaignId] change; this steps the reducer through
+    // the full switch sequence to prove the reset drops the stale seed and re-absorbs the new
+    // table's pre-existing lever (no stale undo, no wrong-table reversal).
+    let seeded = false;
+    let seen: string | null = null;
+
+    // Campaign A mounts with no lever, then arms an action (pops).
+    const aMount = nextUndoLeverState({ sessionFetched: true, seeded, commit: null, seenChainId: seen });
+    seeded = aMount.seeded;
+    seen = aMount.seenChainId;
+    const armed = nextUndoLeverState({ sessionFetched: true, seeded, commit: commit('chain-A'), seenChainId: seen });
+    expect(armed.pop?.chainId).toBe('chain-A');
+    expect(armed.seenChainId).toBe('chain-A'); // now seen = 'chain-A'; seeded is already true
+
+    // DM navigates to campaign B — the refs RESET (the component's [campaignId] effect).
+    seeded = false;
+    seen = null;
+
+    // Campaign B's table loads already carrying a pre-existing lever (chain-B): absorbed as B's
+    // first load, NOT popped — exactly like a fresh mount.
+    const bLoaded = nextUndoLeverState({ sessionFetched: true, seeded, commit: commit('chain-B'), seenChainId: seen });
+    expect(bLoaded.pop).toBeNull();
+    expect(bLoaded.seeded).toBe(true);
+    expect(bLoaded.seenChainId).toBe('chain-B');
+  });
 });
 
 test.describe('resolveUndoPostError — undo POST failure classification (issue #1501)', () => {

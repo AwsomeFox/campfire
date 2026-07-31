@@ -859,6 +859,21 @@ export default function AiTablePage() {
     }
   }
 
+  // #1501 — reset the undo-lever state whenever the page switches to a different campaign.
+  // AiTablePage stays mounted across a campaign switch (same route, different :campaignId — see
+  // router.tsx), so without this the seeded flag, seen chain id, open snackbar, and busy/error
+  // state from the PREVIOUS table survive. The newly-opened table's pre-existing lever would
+  // immediately pop a stale undo the DM never asked for (or a stale snackbar would post to the
+  // wrong campaign). Declared before the lever effect so it runs first on the switch render. A
+  // first visit is unaffected: the refs already start false/null and the state is already clear.
+  useEffect(() => {
+    undoLeverSeededRef.current = false;
+    seenUndoChainRef.current = null;
+    setUndoSnackbar(null);
+    setUndoError(null);
+    setUndoBusy(false);
+  }, [campaignId]);
+
   // #1501 — when the seat arms a NEW reversible action (after the first session load), surface the
   // standard UndoSnackbar so a DM has the same one-click "X — Undo" affordance every soft-delete in
   // the app offers. The decision (including seeding the "seen" chain id from the first loaded
