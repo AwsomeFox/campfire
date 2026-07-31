@@ -5021,6 +5021,11 @@ export class AiDriverService {
       });
     } finally {
       this.endGeneration(campaignId, generationHandle);
+      // Compare-and-set (#381): release the seat once generation completes.
+      if (session.status === 'running') {
+        session.status = 'idle';
+        slotReleased = true;
+      }
       // Never write ladder counters onto a detached (replaced) session object.
       if (!session.detached) {
         session.lastNarration = finalNarration || session.lastNarration;
