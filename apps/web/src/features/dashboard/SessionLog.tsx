@@ -9,6 +9,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { Markdown } from '../../components/Markdown';
+import { entityHref } from '../../lib/entityLinks';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
@@ -310,7 +311,7 @@ export function SessionLog({
         latest3.map((s) => (
           <Link
             key={s.id}
-            to={`/c/${campaignId}/sessions`}
+            to={entityHref(campaignId, { type: 'session', id: s.id })}
             style={{
               display: 'flex',
               gap: 12,
