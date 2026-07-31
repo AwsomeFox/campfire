@@ -17,7 +17,7 @@ export function resolveHpModel(
   ) {
     return ruleSystemOrAdapterOrHpModel as HpModel;
   }
-  if (typeof ruleSystemOrAdapterOrHpModel === 'object' && 'hpModel' in ruleSystemOrAdapterOrHpModel) {
+  if (typeof ruleSystemOrAdapterOrHpModel === 'object' && 'id' in ruleSystemOrAdapterOrHpModel) {
     return hpModelForAdapter(ruleSystemOrAdapterOrHpModel as RuleSystemAdapter);
   }
   return hpModelForAdapter(ruleSystemAdapter(null));
