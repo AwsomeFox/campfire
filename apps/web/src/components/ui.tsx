@@ -14,7 +14,7 @@ export type { ChipVariant } from './chipVariants';
 export type { UiDensity, UiElevation } from './density';
 export { EntityCard, type EntityCardProps } from './EntityCard';
 
-type DensityProps = { density?: UiDensity };
+export type DensityProps = { density?: UiDensity };
 
 export function Card({
   children,

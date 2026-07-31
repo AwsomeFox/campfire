@@ -658,7 +658,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               {t('quests.editQuest')}
             </Btn>
             <StatusMenuButton
-              className="cf-btn cf-btn-ghost cf-density-compact text-xs"
+              ghost
+              density="compact"
+              className="text-xs"
               triggerLabel={t('quests.statusMenuLabel', { status: questStatusWord(t, quest.status) })}
               triggerDescription={t('quests.statusMenuHint')}
               value={quest.status}

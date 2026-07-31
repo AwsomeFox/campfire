@@ -617,7 +617,9 @@ export default function LocationPage() {
                     ✎ Edit
                   </Btn>
                   <StatusMenuButton
-                    className="cf-btn cf-btn-ghost cf-density-compact text-xs"
+                    ghost
+                    density="compact"
+                    className="text-xs"
                     triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
                     triggerDescription="DM: set status directly"
                     value={location.status}
