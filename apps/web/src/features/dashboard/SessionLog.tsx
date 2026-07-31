@@ -72,7 +72,7 @@ function ScheduleCard({
       }}
     >
       <Link
-        to={entityHref(campaignId, { type: 'scheduled_session', id: schedule.id })}
+        to={`/c/${campaignId}/sessions?tab=schedule`}
         style={{
           display: 'grid',
           gridTemplateColumns: 'minmax(0, 1fr) auto',
