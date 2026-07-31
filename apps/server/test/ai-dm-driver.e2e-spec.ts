@@ -1107,4 +1107,28 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     // No echo fallback fired (3 scripted turns consumed, 1 intentionally left over).
     h.assertScriptDrained();
   });
+
+  it('#1500 the eval-harness guards fail loudly once the mock echo-passes (no silent green)', async () => {
+    const campaignId = await h.createCampaign('Driver Echo Guard');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // Script nothing for this turn: the driver's single provider call overshoots the canned queue
+    // and the mock serves its echo fallback (`echo: <prompt>`, finishReason 'stop', no tool calls) —
+    // the exact shape a desynced test silently reads as a clean `complete` (#1500 §3).
+    const res = await h.sendMessage(campaignId, { input: 'Unscripted turn.' });
+    expect(res.status).toBe(201);
+    // The echo genuinely looks finished ...
+    expect(res.body.stopReason).toBe('complete');
+    expect(h.mock.echoFallbacks).toBeGreaterThanOrEqual(1);
+    expect(h.mock.isExhausted).toBe(true);
+    // ... so the harness guard must fail loudly instead of echo-passing.
+    expect(() => h.assertScriptDrained()).toThrow(/echo fallback/);
+    // And a later script() push is refused — it would land behind the cursor and be silently dropped.
+    expect(() => h.script({ text: 'too late' })).toThrow(/silently dropped/);
+
+    // resetMock() re-arms a fresh queue: scripting works again and the guard is clean.
+    h.resetMock();
+    expect(() => h.script({ text: 'fresh' })).not.toThrow();
+    expect(() => h.assertScriptDrained()).not.toThrow();
+  });
 });
