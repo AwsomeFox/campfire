@@ -513,6 +513,7 @@ export class ExportService {
         createdBy: row.createdBy,
         createdAt: row.createdAt,
       })),
+      aiScribeJobsTruncated,
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl, ' +
