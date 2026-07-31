@@ -124,6 +124,15 @@ test.describe('close-glyph vocabulary (issue #1715 Part 2)', () => {
     }
     expect(liveCallSites).toBeGreaterThan(0);
   });
+
+  test('UI_ICON_SIZE enforces the canonical 4-value scale (xs: 14, sm: 16, md: 20, lg: 24)', () => {
+    expect(UI_ICON_SIZE).toEqual({
+      xs: 14,
+      sm: 16,
+      md: 20,
+      lg: 24,
+    });
+  });
 });
 
 test.describe('chrome-icon sizing (issue #1715 Part 1)', () => {
