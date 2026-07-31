@@ -63,6 +63,8 @@
     "moveDown": "Move \"{{text}}\" down",
     "newObjectivePlaceholder": "New objective…",
     "addObjective": "+ objective",
+    "deleteObjective": "Delete objective \"{{text}}\"",
+    "deleteObjectiveFailed": "Couldn't delete objective.",
     "subquests": "Subquests",
     "addSubquest": "+ sub-quest",
     "dmOnly": "DM only — hidden from players",
@@ -107,8 +109,6 @@
     "revealFailed": "Couldn't reveal this quest.",
     "hideFailed": "Couldn't hide this quest.",
     "saveDmNotesFailed": "تعذّر الحفظ the DM notes.",
-    "deleteObjective": "حذف objective \"{{text}}\"",
-    "deleteObjectiveFailed": "تعذّر الحذف objective.",
     "deleteFailed": "تعذّر الحذف this quest."
   }
 }
