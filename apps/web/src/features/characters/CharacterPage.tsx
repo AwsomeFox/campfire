@@ -383,7 +383,7 @@ export default function CharacterPage() {
             )}
           </p>
         </div>
-        {isOwner && <Chip variant="dm">You can edit</Chip>}
+        {isOwner && <Chip variant="dm" className="cf-print-hide">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
           {!editingSheet && (
             <PrintControl
@@ -529,7 +529,7 @@ export default function CharacterPage() {
               </div>
             )}
             {canEdit && (
-              <div className="space-y-2">
+              <div className="space-y-2 cf-print-hide">
                 <HpEditor character={character} onChange={load} onError={setActionError} />
                 <RestControls character={character} onChange={load} onError={setActionError} adapter={adapter} />
               </div>
@@ -690,15 +690,31 @@ export default function CharacterPage() {
           >
             <Card className="items-center text-center py-6 space-y-1.5">
               {canEdit ? (
-                <ImageUpload
-                  campaignId={cid}
-                  kind="portrait"
-                  shape="circle"
-                  previewUrl={character.portraitUrl ?? undefined}
-                  label="Portrait"
-                  onUploaded={savePortrait}
-                  onError={setActionError}
-                />
+                <>
+                  <div className="cf-print-hide">
+                    <ImageUpload
+                      campaignId={cid}
+                      kind="portrait"
+                      shape="circle"
+                      previewUrl={character.portraitUrl ?? undefined}
+                      label="Portrait"
+                      onUploaded={savePortrait}
+                      onError={setActionError}
+                    />
+                  </div>
+                  {character.portraitUrl ? (
+                    <img
+                      src={character.portraitUrl}
+                      alt=""
+                      className="cf-print-only h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+                    />
+                  ) : (
+                    <span className="cf-print-only h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
+                      Portrait
+                    </span>
+                  )}
+                  <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
+                </>
               ) : character.portraitUrl ? (
                 <img
                   src={character.portraitUrl}
@@ -710,7 +726,6 @@ export default function CharacterPage() {
                   Portrait
                 </span>
               )}
-              {canEdit && <span className="text-[length:var(--type-label)] text-secondary">Click or drop to change</span>}
             </Card>
           </section>
           <section
@@ -1222,7 +1237,7 @@ function XpCard({
               : `${formatNumber(nextThreshold! - character.xp)} XP to level ${character.level + 1}.`}
       </p>
       {canEdit && (
-        <div className="flex gap-2 flex-wrap items-end">
+        <div className="flex gap-2 flex-wrap items-end cf-print-hide">
           {/* Labeled XP award (issue #448): associated label/help/error so the
               control is not an unnamed spinbutton/textbox. type="text" +
               inputMode="numeric" (issue #633) preserves locale digits. */}
@@ -1292,7 +1307,7 @@ function XpCard({
         </div>
       )}
       {canEdit && levellingUp && (
-        <div className="cf-inset p-3 space-y-2.5">
+        <div className="cf-inset p-3 space-y-2.5 cf-print-hide">
           <p className="text-sm font-bold text-white">
             Level {character.level} → {character.level + 1}
           </p>
@@ -1406,16 +1421,18 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
       <div className="flex items-center gap-2 flex-wrap">
         <h2 id={`${characterSheetSectionId('saves')}-heading`} className="card-kicker mb-0">Saving throws</h2>
         <span className="text-[11px] text-secondary">proficiency {signed(pb)}</span>
-        <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+        <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
           {rollModeSummary(mode)}
         </span>
       </div>
-      <RollModeChooser
-        value={mode}
-        onChange={setMode}
-        disabled={roller.rolling}
-        aria-label="Saving throw roll mode"
-      />
+      <div className="cf-print-hide">
+        <RollModeChooser
+          value={mode}
+          onChange={setMode}
+          disabled={roller.rolling}
+          aria-label="Saving throw roll mode"
+        />
+      </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {saves.map((def) => {
           const k = (def.ability ?? def.id.replace('save:', '')) as Ability;
@@ -1437,18 +1454,25 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
               </button>
               {canEdit ? (
-                <button
-                  type="button"
-                  onClick={() => void toggle(k)}
-                  disabled={busy}
-                  aria-pressed={proficient}
-                  aria-label={saveProficiencyLabel(k, proficient)}
-                  className="cf-target-44 absolute top-0.5 right-0.5"
-                  style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
-                  title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
-                >
-                  <span aria-hidden="true">{proficient ? '●' : '○'}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void toggle(k)}
+                    disabled={busy}
+                    aria-pressed={proficient}
+                    aria-label={saveProficiencyLabel(k, proficient)}
+                    className="cf-target-44 absolute top-0.5 right-0.5 cf-print-hide"
+                    style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                    title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
+                  >
+                    <span aria-hidden="true">{proficient ? '●' : '○'}</span>
+                  </button>
+                  {proficient && (
+                    <span className="cf-print-only absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                      ●
+                    </span>
+                  )}
+                </>
               ) : (
                 proficient && (
                   <span className="absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
@@ -1461,7 +1485,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
         })}
       </div>
       <p className="text-[11px] text-secondary">
-        Tap a save to roll a d20{canEdit ? '; tap the ● to toggle proficiency' : ''}. Pick a mode above; shift-click for a one-tap advantage, alt-click for disadvantage.
+        Tap a save to roll a d20{canEdit ? <span className="cf-print-hide">; tap the ● to toggle proficiency</span> : ''}. Pick a mode above; shift-click for a one-tap advantage, alt-click for disadvantage.
       </p>
     </Card>
   );
@@ -1503,18 +1527,20 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
       <div className="flex items-center gap-2 flex-wrap">
         <h2 id={`${characterSheetSectionId('skills')}-heading`} className="card-kicker mb-0">Skills</h2>
         <span className="text-[11px] text-secondary">
-          tap a skill to roll{canEdit ? '; tap the ○/●/★ to cycle proficiency' : ''}
+          tap a skill to roll{canEdit ? <span className="cf-print-hide">; tap the ○/●/★ to cycle proficiency</span> : ''}
         </span>
-        <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+        <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
           {rollModeSummary(mode)}
         </span>
       </div>
-      <RollModeChooser
-        value={mode}
-        onChange={setMode}
-        disabled={roller.rolling}
-        aria-label="Skill check roll mode"
-      />
+      <div className="cf-print-hide">
+        <RollModeChooser
+          value={mode}
+          onChange={setMode}
+          disabled={roller.rolling}
+          aria-label="Skill check roll mode"
+        />
+      </div>
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {skillChecks.map((def) => {
           const name = def.label;
@@ -1527,18 +1553,27 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
           return (
             <div key={def.id} className="flex items-center gap-1.5 text-[13px] min-h-11">
               {canEdit ? (
-                <button
-                  type="button"
-                  onClick={() => void cycle(name)}
-                  disabled={busy}
-                  aria-label={skillProficiencyLabel(name, (character.skills[name] as SkillProficiencyRank) ?? (rank as SkillProficiencyRank) ?? 'none')}
-                  aria-pressed={isProf}
-                  className="cf-target-44 shrink-0 text-center"
-                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
-                  title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
-                >
-                  <span aria-hidden="true">{marker}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void cycle(name)}
+                    disabled={busy}
+                    aria-label={skillProficiencyLabel(name, (character.skills[name] as SkillProficiencyRank) ?? (rank as SkillProficiencyRank) ?? 'none')}
+                    aria-pressed={isProf}
+                    className="cf-target-44 shrink-0 text-center cf-print-hide"
+                    style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                    title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
+                  >
+                    <span aria-hidden="true">{marker}</span>
+                  </button>
+                  <span
+                    className="w-4 shrink-0 text-center cf-print-only"
+                    style={{ color: isProf ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
+                    aria-hidden
+                  >
+                    {marker}
+                  </span>
+                </>
               ) : (
                 <span
                   className="w-4 shrink-0 text-center"
@@ -1678,23 +1713,25 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       <div className="flex items-center gap-2 flex-wrap">
         <h2 id={`${characterSheetSectionId('actions')}-heading`} className="card-kicker mb-0">Actions</h2>
         {hasAttackRoll && (
-          <span className="cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+          <span className="cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
             {rollModeSummary(mode)}
           </span>
         )}
         {canEdit && !adding && editingIndex == null && (
-          <Btn density="xs" ghost className="text-xs ml-auto" onClick={() => { resetForm(); setAdding(true); }}>
+          <Btn density="xs" ghost className="text-xs ml-auto cf-print-hide" onClick={() => { resetForm(); setAdding(true); }}>
             + Add
           </Btn>
         )}
       </div>
       {hasAttackRoll && (
-        <RollModeChooser
-          value={mode}
-          onChange={setMode}
-          disabled={roller.rolling}
-          aria-label="Attack roll mode"
-        />
+        <div className="cf-print-hide">
+          <RollModeChooser
+            value={mode}
+            onChange={setMode}
+            disabled={roller.rolling}
+            aria-label="Attack roll mode"
+          />
+        </div>
       )}
       {character.actions.length === 0 && !adding && (
         <p className="text-xs text-secondary">
@@ -1778,7 +1815,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
               {action.notes && <p className="text-[11px] text-secondary mt-0.5">{action.notes}</p>}
             </div>
             {canEdit && (
-              <div className="flex items-center gap-1 shrink-0">
+              <div className="flex items-center gap-1 shrink-0 cf-print-hide">
                 <button
                   type="button"
                   className="cf-target-44"
@@ -2055,7 +2092,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
       <div className="flex items-center gap-2">
         <h2 id={`${characterSheetSectionId('slots')}-heading`} className="card-kicker mb-0">Spell slots</h2>
         {canEdit && !editing && (
-          <Btn density="xs" ghost className="text-xs ml-auto" onClick={startEdit}>
+          <Btn density="xs" ghost className="text-xs ml-auto cf-print-hide" onClick={startEdit}>
             ✎ Edit slots
           </Btn>
         )}
@@ -2116,7 +2153,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
                   {available}/{slot.max}
                 </span>
                 {canEdit && (
-                  <span className="inline-flex gap-1 ml-auto">
+                  <span className="inline-flex gap-1 ml-auto cf-print-hide">
                     <Btn density="xs" ghost className="text-xs" disabled={busy || available === 0} onClick={() => adjust(lvl, 1)}>
                       Use
                     </Btn>
@@ -2209,7 +2246,7 @@ function AdapterResourceCard({
         </span>
         <span className="text-[11px] text-secondary">{t('characters.resources.count', { available, max })}</span>
         {canEdit && (
-          <span className="inline-flex gap-1 ml-auto">
+          <span className="inline-flex gap-1 ml-auto cf-print-hide">
             <Btn density="xs" ghost className="text-xs" disabled={busy || available === 0} onClick={() => void adjust(1)}>
               {t('characters.resources.spend')}
             </Btn>
@@ -2273,7 +2310,7 @@ function HpEditor({
   const { name, hpCurrent, hpMax } = character;
   return (
     <div
-      className="flex gap-2 flex-wrap"
+      className="flex gap-2 flex-wrap cf-print-hide"
       role="group"
       aria-label={`${name} hit points`}
       data-testid="character-hp-editor"
@@ -2355,7 +2392,7 @@ function ConditionLevelRow({
       </span>
       <span className="text-[11px] text-secondary">{t('characters.conditionLevel.count', { level, max: track.max })}</span>
       {canEdit && (
-        <span className="inline-flex gap-1 ml-auto">
+        <span className="inline-flex gap-1 ml-auto cf-print-hide">
           <Btn density="xs" ghost className="text-xs" disabled={busy || level === 0} onClick={() => void adjust(-1)}>
             {t('characters.conditionLevel.lower')}
           </Btn>
@@ -2450,7 +2487,7 @@ function ConditionsRow({
           {canEdit && (
             <button
               type="button"
-              className="cf-target-44"
+              className="cf-target-44 cf-print-hide"
               aria-label={`Remove ${cond}`}
               onClick={() => removeCondition(cond)}
               disabled={busy}
@@ -2475,7 +2512,7 @@ function ConditionsRow({
       {canEdit &&
         (adding ? (
           <form
-            className="inline-flex items-end gap-1"
+            className="inline-flex items-end gap-1 cf-print-hide"
             onSubmit={compositionSafeFormSubmit(compositionGate, () => {
               void addCondition();
             })}
@@ -2512,7 +2549,7 @@ function ConditionsRow({
           <button
             type="button"
             onClick={() => setAdding(true)}
-            className="btn btn-ghost"
+            className="btn btn-ghost cf-print-hide"
             style={{ fontSize: 12, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 0, padding: '4px 10px' }}
           >
             + add
@@ -2555,7 +2592,7 @@ function StoryBody({
 
   if (editing) {
     return (
-      <div className="space-y-2" data-testid="character-story-edit">
+      <div className="space-y-2 cf-print-editor" data-testid="character-story-edit">
         <Field
           idPrefix={CHARACTER_STORY_PREFIX}
           name="notes"
@@ -2591,7 +2628,7 @@ function StoryBody({
       {canEdit && (
         <Btn density="xs"
           ghost
-          className="text-xs"
+          className="text-xs cf-print-hide"
           onClick={() => {
             setNotes(character.notes);
             setEditing(true);
@@ -2726,7 +2763,7 @@ function RestControls({
   if (options.length === 0) return null;
 
   return (
-    <div className="flex gap-2 items-center flex-wrap pt-1" data-testid="rest-controls">
+    <div className="flex gap-2 items-center flex-wrap pt-1 cf-print-hide" data-testid="rest-controls">
       {options.map((opt) => {
         const isDisabled = busy || (opt.type === 'stamina' && character.rpCurrent < 1);
         return (
@@ -2783,7 +2820,7 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
         <span className="text-right text-secondary">
           Created manually
           {canEdit && (
-            <span className="block text-[11px] text-secondary">
+            <span className="block text-[11px] text-secondary cf-print-hide">
               Import from a public sheet on the party page.
             </span>
           )}
@@ -2831,7 +2868,7 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
               title="Copy D&D Beyond character id"
               showFailureMessage={false}
               unstyled
-              className="underline hover:text-[var(--color-neutral-300)] ml-1"
+              className="underline hover:text-[var(--color-neutral-300)] ml-1 cf-print-hide"
               style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
               successAnnouncement="D&D Beyond character id copied to clipboard."
               failureAnnouncement="Copy failed. Clipboard blocked — copy the id manually."

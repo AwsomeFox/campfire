@@ -25,7 +25,7 @@ export function CharacterCompletionBanner({
   const doneCount = checklist.filter((item) => item.done).length;
 
   return (
-    <Card className="space-y-3 border-amber-700/40 bg-amber-950/20" data-testid="character-draft-banner">
+    <Card className="space-y-3 border-amber-700/40 bg-amber-950/20 cf-print-hide" data-testid="character-draft-banner">
       <div className="space-y-1">
         <h2 className="font-bold text-amber-200 text-sm">Draft character</h2>
         <p className="text-xs text-amber-100/80">
