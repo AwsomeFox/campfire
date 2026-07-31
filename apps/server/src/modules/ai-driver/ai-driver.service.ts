@@ -1677,7 +1677,7 @@ export interface DriverLivePlayToolArgRule {
 
 export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLivePlayToolArgRule>> = {
   'generate_map': {
-    allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit', 'mapAlignment']),
+    allowed: new Set(['campaignId', 'encounterId', 'kind', 'size', 'complexity', 'seed', 'theme', 'gridScale', 'gridUnit']),
     forbidden: new Set(),
   },
   'generate_ai_map': {
@@ -1874,16 +1874,8 @@ export function guardDriverLivePlayArgs(
           'quest/session links on encounters it created this session. Rejected: mapAlignment.',
       };
     }
-    const otherForbidden = Object.keys(args).filter((k) => rule.forbidden.has(k));
-    if (otherForbidden.length > 0) {
-      return {
-        ok: false,
-        code: 'forbidden_encounter_field',
-        message:
-          'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
-          `quest/session links on encounters it created this session. Rejected: ${otherForbidden.join(', ')}.`,
-      };
-    }
+    // `rule.forbidden` only lists `hidden` and `mapAlignment`, both handled above with explicit
+    // error codes; future forbidden fields should be checked before `unknownArgKeys`.
     const unknown = unknownArgKeys(args, rule);
     if (unknown.length > 0) {
       return {
