@@ -246,6 +246,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           // handler (#1558); React Query deduplicates, so both surfaces invalidating
           // on the same key is a no-op extra.
           invalidateAiDmToolConfirmations(queryClient, campaignId);
+          // #1501: mirror AiTablePage — an approved mechanical commit arms the undo lever
+          // server-side, so refetch the session to surface it. See AiTablePage for the full why.
+          if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||

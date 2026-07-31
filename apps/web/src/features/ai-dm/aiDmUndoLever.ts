@@ -52,3 +52,33 @@ export function nextUndoLeverState(args: {
   }
   return { pop: null, seeded: true, seenChainId: args.commit ? args.seenChainId : null };
 }
+
+/**
+ * How the DM's undo POST failed (#1501). Two outcomes matter and they are qualitatively different:
+ *  - 404: the server says there is nothing left to reverse. The lever is ALREADY cleared on the
+ *    server, so the cached session MUST be refetched or the header control keeps offering a
+ *    reversal that fails every time until some unrelated refresh dismisses it. The snackbar is
+ *    dismissed ("nothing left to undo" is not a failure the DM needs to act on) and no error is
+ *    surfaced.
+ *  - any other status, or a non-ApiError: the AI's action was NOT reversed. Surface the error so
+ *    the DM knows; leave the snackbar and the cached lever untouched (the chain may still be
+ *    undoable on a retry).
+ *
+ * Extracted as a pure function so the 404-refetch rule is unit-testable without mounting the
+ * component, mirroring {@link nextUndoLeverState} and the other #1501 helpers.
+ */
+export interface UndoPostErrorOutcome {
+  /** Dismiss the undo snackbar — the server settled the lever (the success path does this directly). */
+  dismissSnackbar: boolean;
+  /** Refetch the session so a lever the server already cleared drops out of the react-query cache. */
+  invalidateSession: boolean;
+  /** A user-facing error message, or `null` when the undo legitimately settled (a 404). */
+  errorMessage: string | null;
+}
+
+export function resolveUndoPostError(status: number | undefined, fallbackMessage: string): UndoPostErrorOutcome {
+  if (status === 404) {
+    return { dismissSnackbar: true, invalidateSession: true, errorMessage: null };
+  }
+  return { dismissSnackbar: false, invalidateSession: false, errorMessage: fallbackMessage };
+}

@@ -53,7 +53,7 @@ import {
 import type { DriverLastUndoableCommit } from '@campfire/schema';
 import { useAiDmStream } from '../../lib/useAiDmStream';
 import { aiDmPauseRequest } from './aiDmPause';
-import { nextUndoLeverState } from './aiDmUndoLever';
+import { nextUndoLeverState, resolveUndoPostError } from './aiDmUndoLever';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import {
   transcriptReducer,
@@ -477,6 +477,12 @@ export default function AiTablePage() {
           // only update on its poll, and "the AI is waiting on you" would arrive up to 30s late
           // in the one situation where the delay is the whole problem.
           invalidateAiDmToolConfirmations(queryClient, campaignId);
+          // #1501: a DM-APPROVED mechanical commit arms the undo lever server-side on this path
+          // (collaborative handoff promotes resolve_action/apply_action to `confirm`), but an
+          // approval emits a tool-confirmation frame — not a tool/state frame — so the session
+          // invalidation those paths drive never fires, and useAiDmSession has no poll. Refetch the
+          // session on approval so the just-armed "undo the AI's last action" control appears.
+          if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -881,14 +887,18 @@ export default function AiTablePage() {
       setUndoSnackbar(null);
       invalidateAiDm(queryClient, campaignId);
     } catch (err) {
-      // A 404 means there is nothing left to undo (already reversed or superseded) — the server is
-      // the authority, so just dismiss the snackbar. Any other failure is surfaced so the DM knows
-      // the AI's action was NOT reversed (issue #1501 review).
-      if (err instanceof ApiError && err.status === 404) {
-        setUndoSnackbar(null);
-      } else {
-        setUndoError(translateApiError(err, t) || t('table.undoAiFailed'));
-      }
+      // A 404 means the server has nothing left to undo (already reversed or superseded) — it is
+      // the authority, so the cached session MUST be refetched or the header control keeps offering
+      // a reversal that fails every time. Any other failure is surfaced so the DM knows the AI's
+      // action was NOT reversed (issue #1501 review). The 404-refetch rule lives in the pure
+      // helper so it is unit-testable (mirrors nextUndoLeverState / aiDmPauseRequest).
+      const outcome = resolveUndoPostError(
+        err instanceof ApiError ? err.status : undefined,
+        translateApiError(err, t) || t('table.undoAiFailed'),
+      );
+      if (outcome.dismissSnackbar) setUndoSnackbar(null);
+      if (outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
+      if (outcome.errorMessage) setUndoError(outcome.errorMessage);
     } finally {
       setUndoBusy(false);
     }

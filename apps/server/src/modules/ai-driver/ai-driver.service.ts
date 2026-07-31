@@ -6940,6 +6940,40 @@ export class AiDriverService {
       }
     }
 
+    // #1501 — a DM-APPROVED mechanical commit arms the undo lever too. Collaborative handoff
+    // (#1051) promotes resolve_action/apply_action from `auto` to `confirm`, so on those tables
+    // EVERY mechanical commit reaches this approval path rather than executeToolCalls — without
+    // capturing the undoToken here, the DM "undo the AI's last action" control would never arm
+    // on the very tables it matters most for. Mirrors the capture in executeToolCalls: chainId is
+    // the lookup key `undo()` re-reads its snapshot from, taken from the RESULT (the server-issued
+    // token), never from the model's arguments. Persisted at once so a restart keeps the lever.
+    if (!res.isError && (pending.tool === 'resolve_action' || pending.tool === 'apply_action')) {
+      try {
+        const parsed = JSON.parse(res.text) as {
+          undoToken?: { chainId?: unknown; actionName?: unknown; actorCombatantId?: unknown } | null;
+        };
+        const token = parsed.undoToken;
+        const chainId = typeof token?.chainId === 'string' ? token.chainId : null;
+        const encounterId =
+          typeof executionArgs.encounterId === 'number'
+            ? executionArgs.encounterId
+            : Number(executionArgs.encounterId);
+        const actorCombatantId = typeof token?.actorCombatantId === 'number' ? token.actorCombatantId : 0;
+        if (chainId && Number.isFinite(encounterId)) {
+          recordDriverUndoableCommit(
+            session,
+            encounterId,
+            actorCombatantId,
+            chainId,
+            typeof token?.actionName === 'string' ? token.actionName : '',
+          );
+          this.persistControlState(session);
+        }
+      } catch {
+        // Non-JSON tool payload — nothing to capture.
+      }
+    }
+
     await this.audit.log({
       actor: pending.actor,
       actorRole: 'dm',

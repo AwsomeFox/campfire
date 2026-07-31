@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { nextUndoLeverState } from '../../src/features/ai-dm/aiDmUndoLever';
+import { nextUndoLeverState, resolveUndoPostError } from '../../src/features/ai-dm/aiDmUndoLever';
 import type { DriverLastUndoableCommit } from '@campfire/schema';
 
 /**
@@ -112,5 +112,32 @@ test.describe('nextUndoLeverState — undo snackbar seeding (issue #1501)', () =
       seenChainId: consumed.seenChainId,
     });
     expect(step.pop?.chainId).toBe('chain-C');
+  });
+});
+
+test.describe('resolveUndoPostError — undo POST failure classification (issue #1501)', () => {
+  // The DM's undo control is driven by the cached `session.lastUndoableCommit`. When the undo POST
+  // 404s the server has ALREADY cleared the lever, so the cached session must be refetched or the
+  // header keeps offering a reversal that fails every time. A genuine failure (any other status)
+  // leaves the cached lever in place (the chain may still be undoable) and surfaces the error.
+  test('a 404 (nothing left to undo) invalidates the cached session and dismisses the snackbar', () => {
+    const outcome = resolveUndoPostError(404, 'Undo failed');
+    expect(outcome.invalidateSession).toBe(true);
+    expect(outcome.dismissSnackbar).toBe(true);
+    expect(outcome.errorMessage).toBeNull();
+  });
+
+  test('a non-404 failure surfaces an error and leaves the cached lever in place', () => {
+    const outcome = resolveUndoPostError(500, 'Undo failed');
+    expect(outcome.invalidateSession).toBe(false);
+    expect(outcome.dismissSnackbar).toBe(false);
+    expect(outcome.errorMessage).toBe('Undo failed');
+  });
+
+  test('a thrown non-ApiError (undefined status) is treated as a genuine failure', () => {
+    // A network drop or a thrown string has no HTTP status — it is NOT a server-cleared lever.
+    const outcome = resolveUndoPostError(undefined, 'Undo failed');
+    expect(outcome.invalidateSession).toBe(false);
+    expect(outcome.errorMessage).toBe('Undo failed');
   });
 });

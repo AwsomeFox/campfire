@@ -4,6 +4,7 @@ import {
   AiDriverService,
   recordDriverUndoableCommit,
 } from '../../src/modules/ai-driver/ai-driver.service';
+import { pendingConfirmationKey } from '../../src/modules/ai-driver/driver-tool-policy';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
 import type { RequestUser } from '../../src/common/user.types';
 
@@ -186,5 +187,128 @@ describe('ai-driver undo lever — catch-block error classification (#1501)', ()
       expect(entry).toMatchObject({ action: 'ai-dm.driver.undo', actorRole: 'dm' });
       expect(stream.emit).toHaveBeenCalled();
     });
+  });
+});
+
+describe('ai-driver undo lever — armed on a DM-APPROVED action (collaborative handoff, #1501)', () => {
+  /**
+   * Collaborative handoff (#1051) promotes resolve_action/apply_action from `auto` to `confirm`,
+   * so on those tables EVERY mechanical commit reaches `resolveToolConfirmation` rather than
+   * executeToolCalls. The lever must arm on that approval path too, or the DM "undo the AI's last
+   * action" control never appears on the very tables it matters most for. The seat-toolset double
+   * returns an apply_action result carrying an undoToken, exactly as the real resolver would.
+   */
+  type Ctor = ConstructorParameters<typeof AiDriverService>;
+  const confirmationId = 'conf-1';
+  const toolCallId = 'call-1';
+  const encounterId = 42;
+
+  function makeDriverForConfirmation(
+    callImpl: () => Promise<{ text: string; isError: boolean }>,
+  ): { driver: AiDriverService; mcpCall: jest.Mock; audit: { log: jest.Mock }; stream: { emit: jest.Mock } } {
+    const audit = { log: jest.fn(async () => undefined) };
+    const stream = { emit: jest.fn() };
+    const mcpCall = jest.fn(callImpl);
+    const mcpTools = { buildToolset: () => ({ call: mcpCall }) };
+    const encounters = {
+      listForCampaign: jest.fn(async () => []),
+      appendActiveEncounterNote: jest.fn(async () => undefined),
+    };
+    const driver = new AiDriverService(
+      { registerDriverSessionTeardown: jest.fn() } as unknown as Ctor[0],
+      mcpTools as unknown as Ctor[1],
+      audit as unknown as Ctor[2],
+      stream as unknown as Ctor[3],
+      {} as unknown as Ctor[4],
+      {} as unknown as Ctor[5],
+      {} as unknown as Ctor[6],
+      {} as unknown as Ctor[7],
+      {} as unknown as Ctor[8],
+      encounters as unknown as Ctor[9],
+      {} as unknown as Ctor[10],
+      {} as unknown as Ctor[11],
+      {} as unknown as Ctor[12],
+      { correctionsForPrompt: async () => [] } as unknown as Ctor[13],
+      undefined as unknown as Ctor[14], // db absent → in-memory session, persistence no-op
+      undefined as unknown as Ctor[15],
+      {} as unknown as Ctor[16], // actionResolver unused on the approval path
+    );
+    return { driver, mcpCall, audit, stream };
+  }
+
+  function queueApplyActionConfirmation(driver: AiDriverService): void {
+    const session = (
+      driver as unknown as { ensureSession: (id: number) => import('../../src/modules/ai-driver/ai-driver.service').AiDmSessionState }
+    ).ensureSession(campaignId);
+    session.pendingToolConfirmations = {
+      [pendingConfirmationKey('apply_action', toolCallId)]: {
+        id: confirmationId,
+        tool: 'apply_action',
+        toolCallId,
+        args: { encounterId, chainId: 'chain-in' },
+        profile: 'live',
+        policy: 'confirm',
+        requestedAt: '2026-07-31T00:00:00.000Z',
+        actor: 'ai-dm-seat:1',
+        triggeredBy: 'player-1',
+        turnNumber: 1,
+      },
+    };
+  }
+
+  function sessionOf(driver: AiDriverService) {
+    return (
+      driver as unknown as { ensureSession: (id: number) => import('../../src/modules/ai-driver/ai-driver.service').AiDmSessionState }
+    ).ensureSession(campaignId);
+  }
+
+  it('arms the lever from the result undoToken when a DM approves an apply_action', async () => {
+    const { driver, mcpCall } = makeDriverForConfirmation(async () => ({
+      text: JSON.stringify({
+        undoToken: { chainId: 'chain-approved', actionName: 'Practice Strike', actorCombatantId: 7 },
+      }),
+      isError: false,
+    }));
+    queueApplyActionConfirmation(driver);
+
+    const outcome = await driver.resolveToolConfirmation(campaignId, dm, confirmationId, 'approve');
+
+    // The approved action actually ran under the seat principal.
+    expect(mcpCall).toHaveBeenCalledWith('apply_action', expect.objectContaining({ encounterId, chainId: 'chain-in' }));
+    expect(outcome.result?.isError).toBe(false);
+    // The lever armed from the RESULT's undoToken — exactly what executeToolCalls does for an
+    // autonomous apply_action — so the DM undo control appears on a collaborative table too.
+    expect(sessionOf(driver).lastUndoableCommit).toMatchObject({
+      encounterId,
+      actorCombatantId: 7,
+      chainId: 'chain-approved',
+      actionName: 'Practice Strike',
+    });
+  });
+
+  it('leaves the lever clear when a DM rejects the confirmation (tool never runs)', async () => {
+    const { driver, mcpCall } = makeDriverForConfirmation(async () => ({
+      text: JSON.stringify({ undoToken: { chainId: 'chain-approved' } }),
+      isError: false,
+    }));
+    queueApplyActionConfirmation(driver);
+
+    await driver.resolveToolConfirmation(campaignId, dm, confirmationId, 'reject');
+
+    expect(mcpCall).not.toHaveBeenCalled();
+    // A fresh in-memory session leaves the lever unset (undefined) until a commit arms it.
+    expect(sessionOf(driver).lastUndoableCommit).toBeFalsy();
+  });
+
+  it('leaves the lever clear when the approved action errors (no usable undoToken)', async () => {
+    const { driver } = makeDriverForConfirmation(async () => ({
+      text: JSON.stringify({ error: 'encounter not found' }),
+      isError: true,
+    }));
+    queueApplyActionConfirmation(driver);
+
+    await driver.resolveToolConfirmation(campaignId, dm, confirmationId, 'approve');
+
+    expect(sessionOf(driver).lastUndoableCommit).toBeFalsy();
   });
 });
