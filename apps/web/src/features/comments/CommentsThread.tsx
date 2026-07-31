@@ -395,6 +395,21 @@ function CommentCard({
   const accountLabel = comment.authorName || comment.authorUserId;
   const characterLabel = comment.inCharacter ? comment.characterName?.trim() : null;
 
+  const [restoring, setRestoring] = useState(false);
+
+  async function restoreComment() {
+    setRestoring(true);
+    setError(null);
+    try {
+      await api.post(`${API}/comments/${comment.id}/restore`);
+      onChanged();
+    } catch {
+      setError("Couldn't restore the comment.");
+    } finally {
+      setRestoring(false);
+    }
+  }
+
   async function save() {
     // Server rejects identical bodies with 400; treat an unchanged draft as a
     // successful no-op so Save never surfaces a spurious error toast.
@@ -496,35 +511,46 @@ function CommentCard({
       )}
       {!editing && (
         <div className="flex gap-3 text-xs">
-          {onReply && (
-            <button onClick={onReply} className="text-secondary hover:text-[var(--color-neutral-300)]">
-              Reply
-            </button>
-          )}
-          {canModerate && (
-            <button
-              onClick={() => {
-                setDraft(comment.body);
-                setBase({ body: comment.body });
-                setExpectedUpdatedAt(comment.updatedAt);
-                setConflict(null);
-                setEditing(true);
-              }}
-              className="text-secondary hover:text-[var(--color-neutral-300)]"
-            >
-              Edit
-            </button>
-          )}
-          {canModerate && (
-            <button onClick={onDelete} className="text-rose-400 hover:text-rose-300">
-              Delete
-            </button>
-          )}
-          {/* Issue #601 — the report affordance. Offered on live comments only:
-              there is nothing to report about a comment already removed or
-              withheld, and the evidence for those is captured elsewhere. */}
-          {comment.deletedAt === null && comment.quarantinedAt === null && (
-            <ReportButton campaignId={campaignId} targetType="comment" targetId={comment.id} />
+          {comment.deletedAt !== null ? (
+            canModerate && (
+              <button
+                onClick={restoreComment}
+                disabled={restoring}
+                className="text-[var(--color-accent)] hover:underline font-semibold disabled:opacity-50"
+              >
+                {restoring ? 'Restoring…' : 'Restore'}
+              </button>
+            )
+          ) : (
+            <>
+              {onReply && (
+                <button onClick={onReply} className="text-secondary hover:text-[var(--color-neutral-300)]">
+                  Reply
+                </button>
+              )}
+              {canModerate && (
+                <button
+                  onClick={() => {
+                    setDraft(comment.body);
+                    setBase({ body: comment.body });
+                    setExpectedUpdatedAt(comment.updatedAt);
+                    setConflict(null);
+                    setEditing(true);
+                  }}
+                  className="text-secondary hover:text-[var(--color-neutral-300)]"
+                >
+                  Edit
+                </button>
+              )}
+              {canModerate && (
+                <button onClick={onDelete} className="text-rose-400 hover:text-rose-300">
+                  Delete
+                </button>
+              )}
+              {comment.quarantinedAt === null && (
+                <ReportButton campaignId={campaignId} targetType="comment" targetId={comment.id} />
+              )}
+            </>
           )}
         </div>
       )}

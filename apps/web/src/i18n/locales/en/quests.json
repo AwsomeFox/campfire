@@ -107,6 +107,8 @@
     "revealFailed": "Couldn't reveal this quest.",
     "hideFailed": "Couldn't hide this quest.",
     "saveDmNotesFailed": "Couldn't save the DM notes.",
+    "deleteObjective": "Delete objective \"{{text}}\"",
+    "deleteObjectiveFailed": "Couldn't delete objective.",
     "deleteFailed": "Couldn't delete this quest."
   }
 }
