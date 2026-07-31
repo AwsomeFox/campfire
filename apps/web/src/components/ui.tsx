@@ -51,7 +51,7 @@ export const Card = forwardRef(function Card<E extends ElementType = 'section'>(
   return (
     <Component
       ref={ref}
-      className={`cf-card ${densityClass(density)} ${flush ? 'cf-card-flush' : ''} ${elevClass(elev)} ${hover ? 'cf-card-hover' : ''} ${className}`.trim()}
+      className={`card cf-card ${densityClass(density)} ${flush ? 'cf-card-flush' : ''} ${elevClass(elev)} ${hover ? 'cf-card-hover' : ''} ${className}`.trim()}
       {...props}
     >
       {children}
