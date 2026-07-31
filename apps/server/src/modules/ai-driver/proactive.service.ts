@@ -17,6 +17,7 @@ const TRIGGER_EVENT_MAP: Record<string, string[]> = {
   encounterEnded: ['encounter.ended'],
   hpCritical: ['character.updated'],  // Filtered further by HP threshold
   objectiveCompleted: ['quest.objective_completed', 'quest.completed'],
+  npcTurn: ['encounter.turn_changed'],
 };
 
 // Proactive prompt templates per trigger type
@@ -44,6 +45,13 @@ const PROACTIVE_PROMPTS: Record<string, string> = {
     '- Revealing what comes next in the story',
     '- Offering new quest hooks or branching paths',
     'Respond naturally in character as the DM.',
+  ].join('\n'),
+  npcTurn: [
+    'It is now an NPC or monster turn in the encounter.',
+    'As the DM, take their combat turn:',
+    '- Resolve their action, movement, or spell using tools',
+    '- Narrate the action briefly and clearly',
+    '- Advance to the next turn when finished using end_turn',
   ].join('\n'),
 };
 
@@ -217,6 +225,12 @@ export class ProactiveService implements OnModuleDestroy {
     if (((event.type as string) === 'quest.objective_completed' || (event.type as string) === 'quest.completed') &&
         settings.triggers.objectiveCompleted) {
       return 'objectiveCompleted';
+    }
+    if (event.type === 'encounter.turn_changed' && settings.triggers.npcTurn) {
+      const kind = (event as any).combatantKind;
+      if (kind && kind !== 'character') {
+        return 'npcTurn';
+      }
     }
     return null;
   }

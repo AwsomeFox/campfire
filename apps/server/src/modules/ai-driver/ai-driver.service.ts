@@ -1404,6 +1404,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_initiative',
   'roll_death_save',
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
+  'roll_check',
+  'request_check',
+  'resolve_check_request',
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
   //
@@ -1455,6 +1458,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'begin_encounter',
   'end_encounter',
   'next_turn',
+  'end_turn',
+  'set_turn_state',
+  'undo_turn',
   'set_escalation_die',
   'add_combatant',
   'update_combatant',
@@ -1512,6 +1518,8 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
+  // session recap
+  'add_session_recap',
 ]);
 
 /**
@@ -1571,10 +1579,16 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_initiative',
   'roll_death_save',
   'saving_throw',
+  'roll_check',
+  'request_check',
+  'resolve_check_request',
   'commit_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',
+  'end_turn',
+  'set_turn_state',
+  'undo_turn',
   'set_escalation_die',
   'add_combatant',
   'update_combatant',
@@ -1597,6 +1611,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_location_discovery',
   'whisper_to_player',
   'add_note',
+  'add_session_recap',
 ]);
 
 export {
@@ -1715,8 +1730,8 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
     forbidden: new Set(),
   },
   'create_encounter': {
-    allowed: new Set(['campaignId', 'name', 'locationId', 'questId', 'sessionId']),
-    forbidden: new Set(['hidden']),
+    allowed: new Set(['campaignId', 'name', 'locationId', 'questId', 'sessionId', 'hidden']),
+    forbidden: new Set(),
   },
   'update_encounter': {
     allowed: new Set([
@@ -1854,10 +1869,9 @@ export function guardDriverLivePlayArgs(
           `Rejected: ${unknown.join(', ')}.`,
       };
     }
-    // `hidden` is dropped rather than refused: the resulting args are indistinguishable from the
-    // model having omitted it, so EncountersService's private-by-default rule (#754) applies.
+    // `hidden` defaults to false for driver-created encounters so players and the driver can see them.
     const safe = { ...args };
-    delete safe.hidden;
+    safe.hidden = typeof args.hidden === 'boolean' ? args.hidden : false;
     return { ok: true, args: filterAllowedArgs(safe, rule.allowed) };
   }
 
@@ -2142,7 +2156,6 @@ const DRIVER_DM_ONLY_AGGREGATE_TOOLS: ReadonlySet<string> = new Set([
   'list_arcs', // DM-only: the branching plan of FUTURE beats — never visible to players
   'get_arc', // DM-only: one such arc with its beats + branches
   'get_beat', // DM-only: one such beat with its branches
-  'draft_session_recap', // DM-only: raw encounter/inbox source material
   'run_scribe', // DM-only: triggers a paid AI write that returns filed canon drafts
   'read_inbox', // DM-only: player inbox items (private messages to the DM)
 ]);
@@ -2157,7 +2170,7 @@ const DRIVER_DM_ONLY_AGGREGATE_TOOLS: ReadonlySet<string> = new Set([
  * data and intentionally included. Membership/scheduling/inventory reads carry no canon
  * secrets either.
  */
-const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
+export const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   // bootstrap
   'list_campaigns',
   'get_campaign_summary', // player-scoped: hidden/dmSecret/redacted by the summary builder
@@ -2186,6 +2199,13 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   'get_encounter_difficulty',
   'generate_encounter',
   'list_encounters',
+  'get_turn',
+  'list_usable_actions',
+  'preview_encounter',
+  'list_encounter_events',
+  'get_encounter_aftermath',
+  'list_checks',
+  'list_check_requests',
   // membership / scheduling (no canon secrets)
   'list_members',
   'list_scheduled_sessions',
@@ -2211,6 +2231,8 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   'list_proposals',
   // AI DM seat config (instructions redacted for non-DM by getSeatForRole, #261)
   'get_ai_dm_seat',
+  // recap source
+  'draft_session_recap',
 ]);
 
 /**
@@ -2263,7 +2285,7 @@ export function isDriverApprovableEntityRead(toolName: string): boolean {
  */
 export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>): boolean {
   if (isDriverForbiddenToolName(tool.name)) return false;
-  if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
+  if (!tool.mutating) return classifyDriverRead(tool.name) !== 'blocked';
   if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
   return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
 }
@@ -4116,7 +4138,7 @@ export class AiDriverService {
     // policy server-side so a hallucinated or injection-induced forbidden call never runs.
     const toolSchemas: AiToolSchema[] = seatToolset.tools
       .filter((t) => {
-        if (!isDriverToolAllowed(t) || DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name)) return false;
+        if (!isDriverToolAllowed(t) || (!t.mutating && classifyDriverRead(t.name) === 'blocked')) return false;
         // #1043 — a lifecycle turn is NARRATION ONLY, and that is enforced by the schema, not by
         // the phase direction's prose. The directions tell the model not to resolve scenes; a
         // model that ignored them would otherwise reach the ordinary live-play toolset and
@@ -5927,15 +5949,37 @@ export class AiDriverService {
             useSeatPrincipal = true;
           }
         }
+        const isEncounterRead = [
+          'get_encounter',
+          'get_turn',
+          'list_usable_actions',
+          'preview_encounter',
+          'list_encounter_events',
+          'get_encounter_aftermath',
+        ].includes(call.name);
+        if (isEncounterRead) {
+          const encId = typeof args.encounterId === 'number' ? (args.encounterId as number) : null;
+          if (encId !== null) {
+            try {
+              const encRow = await this.encounters.getRowOrThrow(encId);
+              if (encRow && encRow.status === 'running') {
+                useSeatPrincipal = true;
+              }
+            } catch {
+              // Non-existent or deleted encounter
+            }
+          }
+        }
       }
 
       // (3) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
       // proposal-capable tool onto the proposal path, ignoring any model-supplied `propose` value.
       // The old `args.propose === undefined` guard let a prompt-injected model emit `propose:false`
       // to overwrite campaign canon with no DM review; coercing unconditionally closes that.
+      // add_session_recap is an exception: direct seat-authored recaps are allowed in Driver mode (#1498).
       const canPropose = tool?.proposalCapable ?? false;
-      if (canPropose) args.propose = true;
-      const proposed = canPropose;
+      if (canPropose && call.name !== 'add_session_recap') args.propose = true;
+      const proposed = canPropose && args.propose === true;
 
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);

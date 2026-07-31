@@ -158,6 +158,8 @@ export const DRIVER_COLLABORATIVE_DEFER_TOOLS: ReadonlySet<string> = new Set([
   'roll_death_save',
   // Who is on the board, and whose turn it is.
   'next_turn',
+  'end_turn',
+  'set_turn_state',
   'add_combatant',
   'update_combatant',
   'set_escalation_die',
