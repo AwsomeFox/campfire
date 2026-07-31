@@ -205,6 +205,19 @@ export function invalidationKeysForResource(resource: ToolResource, ctx: ToolAct
 }
 
 /**
+ * Tools that arm or clear the DM's "undo the AI's last action" lever
+ * (`AiDmSessionState.lastUndoableCommit`, #1501). The seat records a new commit on a
+ * successful `resolve_action` (commit) / `apply_action`, and clears it on `undo_action`.
+ * The `tool` stream frame for these is emitted AFTER the server has updated the lever, so
+ * invalidating the ai-dm session read here is what surfaces the DM-only header button +
+ * `UndoSnackbar` at the moment the action lands. Without it the cached session keeps
+ * `lastUndoableCommit` stale until an unrelated refresh, and the snackbar's 7s window opens
+ * long after the moment it was meant to cover. The lever stays DM-only in projection
+ * (`toPublicAiDmSessionStateForRole`); this only triggers a permission-checked refetch.
+ */
+const UNDO_LEVER_TOOLS = new Set<ToolStreamEvent['name']>(['resolve_action', 'apply_action', 'undo_action']);
+
+/**
  * Refetch every read affected by one `tool` SSE event. Call this from the AI-DM stream
  * handler so the tracker, party sheet, map, and proposal queue reconcile against server
  * truth the instant the AI acts — exactly like the encounter SSE channel does for humans.
@@ -219,6 +232,12 @@ export function invalidateForToolEvent(client: QueryClient, event: ToolStreamEve
   });
   // A canon edit routed to the proposal queue: refresh proposals too, regardless of resource.
   if (event.proposed) keys.push(queryKeys.campaignProposals(ctx.campaignId));
+  // #1501 — a tool that armed/cleared the DM undo lever moved the thin session truth
+  // (lastUndoableCommit). Refetch so the DM-only control + UndoSnackbar reconcile. Only on
+  // success: an errored resolve/apply/undo leaves the lever untouched.
+  if (!event.isError && UNDO_LEVER_TOOLS.has(event.name)) {
+    keys.push(queryKeys.aiDmSession(ctx.campaignId));
+  }
   for (const key of keys) {
     void client.invalidateQueries({ queryKey: key });
   }
