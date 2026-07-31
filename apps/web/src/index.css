@@ -1200,20 +1200,12 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /*
- * Issue #428 — WCAG 2.2 target-size helpers for encounter combat / map controls.
+ * Issue #428 / Issue #1698 — WCAG 2.2 target-size helpers for encounter combat / map controls.
  * Primary combat actions use the 44×44 enhanced size; secondary controls still meet
  * the 24×24 AA minimum. Visual glyphs can stay compact inside the larger hit area.
+ * Declarations live below control base rules (.btn, .cf-btn, .input) so target helpers win.
  */
-.cf-target-44 {
-  box-sizing: border-box;
-  min-width: 44px;
-  min-height: 44px;
-}
-.cf-target-24 {
-  box-sizing: border-box;
-  min-width: 24px;
-  min-height: 24px;
-}
+
 .cf-map-tool {
   box-sizing: border-box;
   display: inline-flex;
@@ -1546,11 +1538,6 @@ h1, h2, h3, h4, h5, h6 {
   font-size: var(--type-control);
   border-radius: var(--radius-md);
 }
-/* Issue #1456: when an input also has the 44×44 target-size helper, keep the larger floor. */
-.input.cf-target-44 {
-  min-width: 44px;
-  min-height: 44px;
-}
 .cf-input:hover {
   border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
 }
@@ -1601,6 +1588,43 @@ h1, h2, h3, h4, h5, h6 {
   outline: 2px solid var(--color-accent);
   outline-offset: -1px;
 }
+
+/*
+ * Issue #428 / Issue #1698 — WCAG 2.2 target-size helpers for encounter combat / map / UI controls.
+ * Primary combat actions use the 44×44 enhanced size; secondary controls still meet
+ * the 24×24 AA minimum. Visual glyphs can stay compact inside the larger hit area.
+ * Placed after control base rules (.btn, .cf-btn, .input, .cf-textarea, .cf-select) so target-size
+ * helpers take precedence over default or density-aliased control sizes.
+ */
+.cf-target-44 {
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+}
+.btn.cf-target-44,
+.cf-btn.cf-target-44,
+.input.cf-target-44,
+.cf-textarea.cf-target-44,
+.cf-select.cf-target-44 {
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+}
+.cf-target-24 {
+  box-sizing: border-box;
+  min-width: 24px;
+  min-height: 24px;
+}
+.btn.cf-target-24,
+.cf-btn.cf-target-24,
+.input.cf-target-24,
+.cf-textarea.cf-target-24,
+.cf-select.cf-target-24 {
+  box-sizing: border-box;
+  min-width: 24px;
+  min-height: 24px;
+}
+
 
 /* DM-only panel — always accent-tinted, always labeled, visually distinct
    from ordinary cards. */
