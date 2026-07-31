@@ -270,15 +270,18 @@ export class InboxSweepService implements OnModuleInit {
       );
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const fastResult = await Promise.race([
-      sweep,
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), 8000);
-      }),
-    ]);
-    if (timer) clearTimeout(timer);
-    if (fastResult !== null) return fastResult;
-    return this.getInboxSweepResult(campaignId, job.id);
+    try {
+      const fastResult = await Promise.race([
+        sweep.catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 8000);
+        }),
+      ]);
+      if (fastResult !== null) return fastResult;
+      return await this.getInboxSweepResult(campaignId, job.id);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async performInboxSweep(
@@ -429,18 +432,41 @@ export class InboxSweepService implements OnModuleInit {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Inbox sweep failed for campaign ${campaignId}, job ${job.id}: ${message}`, err instanceof Error ? err.stack : undefined);
-      const failedJob = await this.updateJob(job.id, {
-        status: 'failed',
-        itemsTotal: openItems.length,
-        itemsProposed: counts.proposed,
-        itemsSkipped: counts.skipped,
-        itemsErrored: counts.errored,
-        detail: `sweep failed: ${message}`,
-        snapshot: this.buildResultSnapshot(results, counts),
-      });
+      try {
+        const failedJob = await this.updateJob(job.id, {
+          status: 'failed',
+          itemsTotal: openItems.length,
+          itemsProposed: counts.proposed,
+          itemsSkipped: counts.skipped,
+          itemsErrored: counts.errored,
+          detail: `sweep failed: ${message}`,
+          snapshot: this.buildResultSnapshot(results, counts),
+        });
+        if (failedJob) {
+          return {
+            job: {
+              ...jobToDomain(failedJob),
+              itemsNewlyProposed: counts.newlyProposed,
+              itemsNewlySkipped: counts.newlySkipped,
+              itemsNewlyErrored: counts.newlyErrored,
+            },
+            items: results,
+          };
+        }
+      } catch (updateErr) {
+        this.logger.error(
+          `Failed to update sweep job ${job.id} to failed: ${updateErr instanceof Error ? updateErr.message : String(updateErr)}`,
+        );
+      }
       return {
         job: {
-          ...jobToDomain(failedJob),
+          ...jobToDomain(job),
+          status: 'failed',
+          detail: `sweep failed: ${message}`,
+          itemsTotal: openItems.length,
+          itemsProposed: counts.proposed,
+          itemsSkipped: counts.skipped,
+          itemsErrored: counts.errored,
           itemsNewlyProposed: counts.newlyProposed,
           itemsNewlySkipped: counts.newlySkipped,
           itemsNewlyErrored: counts.newlyErrored,

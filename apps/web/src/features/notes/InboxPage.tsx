@@ -208,18 +208,45 @@ export default function InboxPage() {
   // once cidRef.current has moved on, but that leaves sweepBusy stuck true.
   useEffect(() => {
     const tokenBefore = sweepTokenRef.current;
-    sweepTokenRef.current = tokenBefore + 1;
+    const currentToken = tokenBefore + 1;
+    sweepTokenRef.current = currentToken;
     setSweepBusy(false);
     setSweepResult(null);
     setSweepItemBodies({});
     setSweepError(null);
+
+    // #1716: Resume polling if a background sweep job was running for this campaign before navigation/unmount
+    try {
+      const storedJobId = localStorage.getItem(`campfire_inbox_sweep_job_${cid}`);
+      if (storedJobId && Number.isFinite(Number(storedJobId))) {
+        const jobId = Number(storedJobId);
+        void (async () => {
+          try {
+            const res = await pollInboxSweepResult(cid, jobId, () =>
+              cid === cidRef.current && sweepTokenRef.current === currentToken,
+            );
+            if (cid === cidRef.current && sweepTokenRef.current === currentToken) {
+              setSweepResult(res);
+              if (res.job.status === 'failed') setSweepError(res.job.detail || t('notes.sweepFailed'));
+            }
+          } catch {
+            // Ignore resume errors
+          } finally {
+            try { localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`); } catch {}
+          }
+        })();
+      }
+    } catch {
+      // Ignore localStorage read errors
+    }
+
     // #1716: when this page unmounts, cancel any in-flight result polling. The cleanup
     // also runs on every cid change (before the body above), so it stops the previous
     // campaign's poll before the new one starts.
     return () => {
       sweepTokenRef.current++;
     };
-  }, [cid]);
+  }, [cid, t]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
@@ -314,12 +341,16 @@ export default function InboxPage() {
       // #1716 — the POST now starts a background job and returns immediately. Poll the
       // result endpoint until the job is no longer running, so a long sweep cannot be
       // lost when the HTTP write budget (120s) aborts the client connection.
+      if (started.job.status === 'running') {
+        try { localStorage.setItem(`campfire_inbox_sweep_job_${sweepCid}`, String(started.job.id)); } catch {}
+      }
       const result =
         started.job.status === 'running'
           ? await pollInboxSweepResult(sweepCid, started.job.id, () =>
               sweepCid === cidRef.current && sweepToken === sweepTokenRef.current,
             )
           : started;
+      try { localStorage.removeItem(`campfire_inbox_sweep_job_${sweepCid}`); } catch {}
 
       if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
 
