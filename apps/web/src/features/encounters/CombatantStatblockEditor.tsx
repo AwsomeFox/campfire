@@ -11,6 +11,7 @@ import {
   isResolvableSpec,
 } from '@campfire/schema';
 import { Btn } from '../../components/ui';
+import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 
 const ABILITIES = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
 
@@ -52,7 +53,10 @@ export function CombatantStatblockEditor({
           max={40}
           disabled={disabled}
           value={statblock.ac ?? 10}
-          onChange={(e) => patch({ ac: Number(e.target.value) })}
+          onChange={(e) => {
+            const parsed = parseLocalizedInteger(e.target.value);
+            if (parsed.ok) patch({ ac: parsed.value });
+          }}
           aria-describedby="statblock-ac-help"
         />
         <span id="statblock-ac-help" className="text-[11px] text-muted m-0">
@@ -73,11 +77,14 @@ export function CombatantStatblockEditor({
                 className="input !min-h-8"
                 disabled={disabled}
                 value={statblock.abilityScores[ab] ?? 10}
-                onChange={(e) =>
-                  patch({
-                    abilityScores: { ...statblock.abilityScores, [ab]: Number(e.target.value) },
-                  })
-                }
+                onChange={(e) => {
+                  const parsed = parseLocalizedInteger(e.target.value);
+                  if (parsed.ok) {
+                    patch({
+                      abilityScores: { ...statblock.abilityScores, [ab]: parsed.value },
+                    });
+                  }
+                }}
               />
             </label>
           ))}

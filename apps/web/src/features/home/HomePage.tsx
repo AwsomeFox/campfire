@@ -28,6 +28,7 @@ import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
 import { PageTitle } from '../../components/PageTitle';
 import { CampaignCover } from '../../components/CampaignCover';
+import { timeAgo, useTimeTick } from '../../lib/format';
 import { UIIcon } from '../../components/UIIcon';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
@@ -247,20 +248,7 @@ function CampaignTile({
   );
 }
 
-/** Best-effort "how long ago" label from an ISO timestamp, for the Trash list. */
-function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return '';
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
-  if (secs < 60) return 'just now';
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  return `${days}d ago`;
-}
+
 
 /**
  * Campaign Trash (issue #116) — the recoverable other half of the now-soft DELETE.
@@ -392,6 +380,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
 }
 
 export function HomePage() {
+  useTimeTick();
   const { t } = useTranslation();
   const { me, roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();

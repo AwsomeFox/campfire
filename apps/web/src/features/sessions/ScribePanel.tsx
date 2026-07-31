@@ -28,6 +28,7 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
+import { timeAgo, useTimeTick, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
@@ -79,21 +80,7 @@ function jobBadge(job: ScribeJob): { cls: string; label: string } {
   }
 }
 
-/** Loose "an hour ago" formatter — mirrors ProposalsPage's local helper. */
-function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const diffMs = Date.now() - then;
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  return `${weeks}w ago`;
-}
+
 
 type Outcome = { kind: 'info' | 'error' | 'success'; text: string; href?: string; hrefLabel?: string };
 
@@ -102,6 +89,7 @@ type Outcome = { kind: 'info' | 'error' | 'success'; text: string; href?: string
 const GATE_FAILURE_STATUSES: ScribeJobStatus[] = ['disabled', 'over_budget', 'no_provider'];
 
 export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  useTimeTick();
   const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const seatQuery = useAiDmSeat(campaignId);
@@ -320,7 +308,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           {!isDm && config && (
             <p className="text-[11px] text-secondary m-0">
               Post-session: {config.postSession ? 'on' : 'off'} · Cron: {config.cron ? 'on' : 'off'} · Budget per run:{' '}
-              {config.budgetPerRun.toLocaleString()} tokens
+              {formatNumber(config.budgetPerRun)} tokens
             </p>
           )}
 
@@ -520,7 +508,7 @@ function JobHistory({ campaignId, jobs }: { campaignId: number; jobs: ScribeJob[
               {badge.label}
             </span>
             <span className="text-muted">{TRIGGER_LABEL[job.trigger]}</span>
-            {job.tokensUsed > 0 && <span className="text-muted">· {job.tokensUsed.toLocaleString()} tokens</span>}
+            {job.tokensUsed > 0 && <span className="text-muted">· {formatNumber(job.tokensUsed)} tokens</span>}
             <span className="text-muted">· {timeAgo(job.createdAt)}</span>
             {job.proposalId && (
               <Link to={`/c/${campaignId}/proposals`} className="text-purple-400 hover:underline">

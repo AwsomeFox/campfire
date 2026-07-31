@@ -22,7 +22,7 @@ import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
 import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
-import { useFormattingLocale } from '../../lib/format';
+import { useFormattingLocale, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
@@ -347,8 +347,8 @@ export function AddItemForm({
   const [qtyError, setQtyError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
   const qtyHelp = t('inventory.quantityHelp', {
-    min: ITEM_QTY_MIN.toLocaleString(formatLocale ?? 'en-US'),
-    max: ITEM_QTY_MAX.toLocaleString(formatLocale ?? 'en-US'),
+    min: formatNumber(ITEM_QTY_MIN),
+    max: formatNumber(ITEM_QTY_MAX),
     step: ITEM_QTY_STEP,
   });
 

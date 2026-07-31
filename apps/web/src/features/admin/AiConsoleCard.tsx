@@ -27,11 +27,12 @@ import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema'
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
+import { formatNumber } from '../../lib/format';
 import { AiPricingEditor } from './AiPricingEditor';
 import { useSaveFeedback } from '../../components/SaveFeedback';
 
 function fmt(n: number): string {
-  return n.toLocaleString();
+  return formatNumber(n);
 }
 
 const ALLOWLIST_MAX_MODELS = 200;

@@ -23,6 +23,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
 import { buildFactionRevealPreview } from '../../components/entityRevealPreview';
 import { GameIcon } from '../../components/GameIcon';
+import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import {
   DmPrivacyGroup,
@@ -515,9 +516,10 @@ export default function FactionPage() {
               type="number"
               label="Reputation (−100…100)"
               value={String(form.reputation)}
-              onChange={(e) =>
-                setForm({ ...form, reputation: Math.max(-100, Math.min(100, Number(e.target.value) || 0)) })
-              }
+              onChange={(e) => {
+                const parsed = parseLocalizedInteger(e.target.value, undefined, { min: -100, max: 100 });
+                if (parsed.ok) setForm({ ...form, reputation: parsed.value });
+              }}
               min={-100}
               max={100}
               help="Numeric standing score from −100 to 100."

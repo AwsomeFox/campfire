@@ -11,6 +11,7 @@ import { chipIconSlug, chipVariantColor } from './chipEmoji';
 import { GameIcon } from '../../components/GameIcon';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { timeAgo, useTimeTick } from '../../lib/format';
 
 /** "AI DM is at the table" presence pill — shown wherever the seat is in Driver mode. */
 export function AiDmPresenceTag({ turnActive }: { turnActive: boolean }) {
@@ -41,23 +42,16 @@ export function AiDmPresenceTag({ turnActive }: { turnActive: boolean }) {
   );
 }
 
-function timeAgoShort(at: number): string {
-  const secs = Math.round((Date.now() - at) / 1000);
-  if (secs < 5) return 'just now';
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.round(secs / 60);
-  return `${mins}m ago`;
-}
-
 /** One resolved tool-activity line: icon, label, optional deep-link, relative time. */
 export function AiDmToolActivityRow({ chip, at }: { chip: ToolChip; at: number }) {
+  useTimeTick();
   const color = chipVariantColor(chip.variant);
   const content = (
     <span className="flex items-center gap-2" style={{ fontSize: 12, color: color ?? 'var(--color-neutral-300)' }}>
       <span aria-hidden="true" className="flex"><GameIcon slug={chipIconSlug(chip.icon)} size={UI_ICON_SIZE.xs} /></span>
       <span className="min-w-0 truncate">The AI DM {chip.label.toLowerCase()}</span>
       <span className="shrink-0" style={{ fontSize: 10.5, color: 'var(--color-text-secondary)' }}>
-        {timeAgoShort(at)}
+        {timeAgo(at)}
       </span>
     </span>
   );

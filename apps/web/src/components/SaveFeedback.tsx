@@ -1,11 +1,12 @@
 import { useId, useReducer } from 'react';
 import { useTranslation } from 'react-i18next';
 import { initialSaveFeedback, reduceSaveFeedback, type SaveFeedbackState } from './saveFeedbackState';
+import { formatDateTime } from '../lib/format';
 
 export type { SaveFeedbackState } from './saveFeedbackState';
 
 export function formatSavedAt(at: Date): string {
-  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return formatDateTime(at);
 }
 
 export interface SaveFailureCopy {

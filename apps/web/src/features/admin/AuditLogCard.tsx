@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AuditEntry, AuditPruneJob, AuditRetentionStatus } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Skeleton } from '../../components/ui';
+import { formatDateTime } from '../../lib/format';
 import { ActorRoleBadge } from './ActorRoleBadge';
 
 export function AuditLogCard() {
@@ -255,7 +256,7 @@ export function AuditLogCard() {
             <tbody className="divide-y divide-slate-800">
               {entries.map((e) => (
                 <tr key={e.id}>
-                  <td className="py-2 pr-4 whitespace-nowrap text-slate-400">{new Date(e.createdAt).toLocaleString()}</td>
+                  <td className="py-2 pr-4 whitespace-nowrap text-slate-400">{formatDateTime(e.createdAt)}</td>
                   <td className="pr-4 text-slate-300">
                     <span className="inline-flex items-center gap-1.5">
                       {e.actor}

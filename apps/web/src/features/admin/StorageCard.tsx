@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { StorageStats, StorageCleanupResult } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
+import { formatNumber } from '../../lib/format';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -116,8 +117,8 @@ export function StorageCard() {
         <Stat label="Committed" value={formatBytes(stats.committedBytes)} />
         <Stat label="Reserved" value={formatBytes(stats.reservedBytes)} />
         <Stat label="On disk" value={formatBytes(stats.diskBytes)} />
-        <Stat label="Committed files" value={stats.fileCount.toLocaleString()} />
-        <Stat label="Orphans" value={orphanCount.toLocaleString()} />
+        <Stat label="Committed files" value={formatNumber(stats.fileCount)} />
+        <Stat label="Orphans" value={formatNumber(orphanCount)} />
       </div>
 
       {/* Per-campaign usage + quotas */}
@@ -259,9 +260,9 @@ function QuotaRow({
         {campaign.overQuota && <span className="cf-chip cf-chip-failed ml-2 !py-0 !text-[9px]">over</span>}
       </td>
       <td className="pr-4 text-slate-400">
-        {campaign.fileCount.toLocaleString()}
+        {formatNumber(campaign.fileCount)}
         {campaign.reservedFileCount > 0 && (
-          <span className="text-amber-400"> +{campaign.reservedFileCount.toLocaleString()}</span>
+          <span className="text-amber-400"> +{formatNumber(campaign.reservedFileCount)}</span>
         )}
       </td>
       <td className="pr-4 text-slate-300">{formatBytes(campaign.committedBytes)}</td>

@@ -39,6 +39,7 @@ import type {
   LeveledConditionTrack,
   AdapterResourceDef,
 } from '@campfire/schema';
+import { formatNumber, useFormattingLocale } from '../../lib/format';
 import {
   abilityLabelForAdapter,
   xpProgressForCharacter,
@@ -56,6 +57,7 @@ import {
   compositionSafeEscapeHandler,
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
+  isImeComposing,
 } from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import { useProtectedForm } from '../../lib/useProtectedForm';
@@ -140,7 +142,6 @@ import {
   skillRankLabel,
   type SkillProficiencyRank,
 } from './characterSheetA11y';
-import { useFormattingLocale } from '../../lib/format';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -1200,9 +1201,9 @@ function XpCard({
       )}
       <div className="flex items-center gap-3.5 flex-wrap">
         <span className="font-heading text-[34px] leading-none">
-          {character.xp.toLocaleString()}
+          {formatNumber(character.xp)}
           <span className="text-base text-secondary">
-            {supported && nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
+            {supported && nextThreshold != null ? ` / ${formatNumber(nextThreshold)} XP` : ' XP'}
           </span>
         </span>
         {supported && (
@@ -1218,7 +1219,7 @@ function XpCard({
             ? 'XP tracked — level up when your DM says so.'
             : ready
               ? `Enough XP for level ${character.level + 1}!`
-              : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
+              : `${formatNumber(nextThreshold! - character.xp)} XP to level ${character.level + 1}.`}
       </p>
       {canEdit && (
         <div className="flex gap-2 flex-wrap items-end">
@@ -1241,7 +1242,7 @@ function XpCard({
                 setAmountError(null);
               }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') void addXp();
+                if (e.key === 'Enter' && !isImeComposing(e)) void addXp();
               }}
               placeholder="XP…"
               // No cf-density-xs (issue #1692 review — Devin): same shape as the

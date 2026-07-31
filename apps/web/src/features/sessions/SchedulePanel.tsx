@@ -19,6 +19,8 @@ import { api, API, ApiError, isStaleWrite, translateApiError } from '../../lib/a
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
+import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, Dialog, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -689,7 +691,7 @@ function ScheduleItem({
                   if (noteError) setNoteError(null);
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && noteDirty && !noteTooLong) {
+                  if (e.key === 'Enter' && !isImeComposing(e) && noteDirty && !noteTooLong) {
                     e.preventDefault();
                     void saveNote();
                   }
@@ -1057,7 +1059,8 @@ function ScheduleForm({
 
   async function save() {
     const parsed = Date.parse(when);
-    const minutes = Number(duration);
+    const durationParsed = parseLocalizedInteger(duration);
+    const minutes = durationParsed.ok ? durationParsed.value : NaN;
     if (Number.isNaN(parsed)) {
       setError('Pick a date and time.');
       return;
@@ -1355,6 +1358,7 @@ function formatWhen(iso: string): string {
     year: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    timeZoneName: 'short',
   });
 }
 

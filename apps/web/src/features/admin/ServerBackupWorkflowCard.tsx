@@ -10,6 +10,7 @@ import { useAuth } from '../../app/auth';
 import { clearApiCache } from '../../lib/swCache';
 import { translateApiError } from '../../lib/api';
 import { Card, Btn, ErrorNote } from '../../components/ui';
+import { formatNumber, formatDateTime } from '../../lib/format';
 import { PasswordInput } from '../../components/PasswordInput';
 import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 import {
@@ -42,12 +43,11 @@ function formatBytes(bytes: number): string {
 
 function formatTimestamp(iso: string | null): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return formatDateTime(iso);
 }
 
 function formatPolicyNumber(value: number | null, suffix = ''): string {
-  return value === null ? 'disabled' : `${value.toLocaleString()}${suffix}`;
+  return value === null ? 'disabled' : `${formatNumber(value)}${suffix}`;
 }
 
 function operatorLabel(displayName: string, username: string): string {
@@ -75,7 +75,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
         <div>
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Schema version</dt>
           <dd className="font-semibold text-white">
-            {result.schemaVersion === null ? '—' : result.schemaVersion.toLocaleString()}
+            {result.schemaVersion === null ? '—' : formatNumber(result.schemaVersion)}
           </dd>
         </div>
         <div>
@@ -100,7 +100,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
             {result.aiKeySource}
             {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
             {result.aiCredentialCount !== null
-              ? ` · ${result.aiCredentialCount.toLocaleString()} stored credential(s)`
+              ? ` · ${formatNumber(result.aiCredentialCount)} stored credential(s)`
               : ''}
           </dd>
         </div>
@@ -114,7 +114,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
 
       <div>
         <p id={uploadsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
-          Upload contents ({result.uploads.length.toLocaleString()} · manifest count {result.uploadCount.toLocaleString()})
+          Upload contents ({formatNumber(result.uploads.length)} · manifest count {formatNumber(result.uploadCount)})
         </p>
         {result.uploads.length === 0 ? (
           <p className="text-xs text-secondary">No upload files in this archive.</p>
@@ -135,7 +135,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
       {result.attachmentChecksums.length > 0 && (
         <div>
           <p id={checksumsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
-            Attachment checksums ({result.attachmentChecksums.length.toLocaleString()})
+            Attachment checksums ({formatNumber(result.attachmentChecksums.length)})
           </p>
           <ul
             className="max-h-40 overflow-y-auto text-[11px] text-slate-300 font-mono divide-y divide-slate-800 border border-slate-800 rounded"
@@ -487,9 +487,9 @@ export function ServerBackupWorkflowCard() {
                 <div>
                   <dt className="text-[10px] uppercase tracking-widest text-secondary">Failures / skips</dt>
                   <dd className="font-semibold text-white">
-                    {(status.cadence.consecutiveFailures ?? 0).toLocaleString()} consecutive
+                    {formatNumber(status.cadence.consecutiveFailures ?? 0)} consecutive
                     {status.cadence.metrics
-                      ? ` · ${status.cadence.metrics.failureCount.toLocaleString()} total`
+                      ? ` · ${formatNumber(status.cadence.metrics.failureCount)} total`
                       : ''}
                   </dd>
                 </div>
@@ -523,8 +523,8 @@ export function ServerBackupWorkflowCard() {
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-secondary">Retention metrics</p>
                 <p className="font-semibold text-white">
-                  {status.retention.archiveCount.toLocaleString()} archive(s), {formatBytes(status.retention.totalBytes)} · pruned{' '}
-                  {status.retention.pruneCount.toLocaleString()} ({formatBytes(status.retention.prunedBytes)})
+                  {formatNumber(status.retention.archiveCount)} archive(s), {formatBytes(status.retention.totalBytes)} · pruned{' '}
+                  {formatNumber(status.retention.pruneCount)} ({formatBytes(status.retention.prunedBytes)})
                 </p>
               </div>
             </div>
@@ -651,7 +651,7 @@ export function ServerBackupWorkflowCard() {
           <div className="cf-inset p-3 space-y-2 text-xs" role="status">
             <p className="text-emerald-400 font-semibold">
               Restore completed at {formatTimestamp(restoreResult.restoredAt)} — database{' '}
-              {formatBytes(restoreResult.dbBytes)}, {restoreResult.uploadCount.toLocaleString()} upload(s).
+              {formatBytes(restoreResult.dbBytes)}, {formatNumber(restoreResult.uploadCount)} upload(s).
             </p>
             {healthResult && (
               <p className={healthResult.ready ? 'text-slate-300' : 'text-amber-400'}>

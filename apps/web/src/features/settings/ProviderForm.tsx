@@ -23,6 +23,7 @@ import {
 import { api, ApiError, API } from '../../lib/api';
 import { AiProviderPrivacyNotice } from '../../components/AiProviderPrivacyNotice';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { formatDateTime } from '../../lib/format';
 import { SkeletonConditionalRegion } from '../../components/ui';
 import { useSaveFeedback } from '../../components/SaveFeedback';
 
@@ -479,7 +480,7 @@ export function ProviderForm({
               <dd style={{ margin: 0 }}>{testedCredentialLabel[testResult.credentialSource]}</dd>
               <dt>Tested</dt>
               <dd style={{ margin: 0 }}>
-                <time dateTime={testResult.testedAt}>{new Date(testResult.testedAt).toLocaleString()}</time>
+                <time dateTime={testResult.testedAt}>{formatDateTime(testResult.testedAt)}</time>
               </dd>
             </dl>
           </div>

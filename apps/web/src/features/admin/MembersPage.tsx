@@ -33,6 +33,7 @@ import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../com
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 import { CopyControl } from '../../components/CopyControl';
+import { formatDateTime } from '../../lib/format';
 import { GameIcon } from '../../components/GameIcon';
 import { AuditEntryRow } from './campaignAuditDisplay';
 import { firstGrapheme } from '../../lib/avatarText';
@@ -285,24 +286,24 @@ function describeExpiry(preset: ExpiryPreset, customDate: string): string {
     case 'end-of-today': {
       const eod = new Date();
       eod.setHours(23, 59, 59, 999);
-      return `End of today (${eod.toLocaleString()} ${tz})`;
+      return `End of today (${formatDateTime(eod)} ${tz})`;
     }
     case '24h': {
       const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      return `24 hours (${d.toLocaleString()} ${tz})`;
+      return `24 hours (${formatDateTime(d)} ${tz})`;
     }
     case '7d': {
       const d = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-      return `7 days (${d.toLocaleString()} ${tz})`;
+      return `7 days (${formatDateTime(d)} ${tz})`;
     }
     case '30d': {
       const d = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      return `30 days (${d.toLocaleString()} ${tz})`;
+      return `30 days (${formatDateTime(d)} ${tz})`;
     }
     case 'custom': {
       if (!customDate) return 'Select a date';
       const d = new Date(customDate);
-      return `${d.toLocaleString()} ${tz}`;
+      return `${formatDateTime(d)} ${tz}`;
     }
   }
 }
@@ -828,7 +829,7 @@ function GuestDmGrantsCard({
           <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest m-0">Preview</p>
           <p className="text-[12px] text-slate-300 m-0">
             {selectedMember ? memberDisplayName(selectedMember) : 'Selected member'} receives {scopes.map((scope) => GRANT_SCOPE_LABEL[scope]).join(', ')}
-            {' '}until {new Date(previewExpiry).toLocaleString()}.
+            {' '}until {formatDateTime(previewExpiry)}.
           </p>
           <p className={`text-[11px] m-0 ${safeDefault ? 'text-emerald-400' : 'text-amber-300'}`}>
             {safeDefault
@@ -853,7 +854,7 @@ function GuestDmGrantsCard({
               <div key={grant.id} className="flex items-center gap-2 flex-wrap text-[12px] border-t border-slate-800 pt-2">
                 <span className="font-semibold text-white">{grant.displayName || grant.username || `User ${grant.granteeUserId}`}</span>
                 <span className="text-secondary">{status}</span>
-                <span className="text-muted">until {new Date(grant.expiresAt).toLocaleString()}</span>
+                <span className="text-muted">until {formatDateTime(grant.expiresAt)}</span>
                 <span className="text-muted">{grant.scopes.map((scope) => GRANT_SCOPE_LABEL[scope]).join(', ')}</span>
                 {activeOrUpcoming && (
                   <button

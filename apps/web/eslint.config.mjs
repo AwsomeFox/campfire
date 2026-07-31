@@ -42,6 +42,39 @@ const noDuplicateImportSpecifiers = {
   },
 };
 
+const noBareToLocaleString = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description: 'Disallow .toLocaleString() calls in apps/web/src. Use formatNumber, formatDateTime, or formatDate from src/lib/format.',
+    },
+    messages: {
+      noBare: 'Do not use .toLocaleString() directly. Use formatNumber, formatDateTime, or formatDate from src/lib/format instead.',
+    },
+    schema: [],
+  },
+  create(context) {
+    return {
+      CallExpression(node) {
+        if (
+          node.callee.type === 'MemberExpression' &&
+          !node.callee.computed &&
+          node.callee.property.type === 'Identifier' &&
+          node.callee.property.name === 'toLocaleString'
+        ) {
+          const filename = context.filename || context.getFilename?.() || '';
+          if (filename.includes('lib/format.ts')) return;
+
+          context.report({
+            node,
+            messageId: 'noBare',
+          });
+        }
+      },
+    };
+  },
+};
+
 export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'playwright-report/**', 'test-results/**'] },
   js.configs.recommended,
@@ -57,6 +90,7 @@ export default tseslint.config(
       campfire: {
         rules: {
           'no-duplicate-import-specifiers': noDuplicateImportSpecifiers,
+          'no-bare-tolocalestring': noBareToLocaleString,
         },
       },
     },
@@ -83,6 +117,7 @@ export default tseslint.config(
       // see repeated specifiers inside one declaration. This catches the exact
       // TS2300 shape from issue #1702 before merge.
       'campfire/no-duplicate-import-specifiers': 'error',
+      'campfire/no-bare-tolocalestring': 'error',
     },
   },
   {

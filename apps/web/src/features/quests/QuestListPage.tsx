@@ -22,20 +22,9 @@ import { PageHeader, type PageHeaderSecondaryAction } from '../../components/Pag
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { timeAgo, useTimeTick } from '../../lib/format';
 
-// "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
-// times read consistently across the app.
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
-  if (days <= 0) return 'today';
-  if (days === 1) return '1d ago';
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  return `${months}mo ago`;
-}
+
 
 // What changed since the last session (#66): the /quests/changes endpoint returns
 // the reference instant plus the changed quests. A quest created at/after that
@@ -69,6 +58,7 @@ function ChangeBadge({ quest, kind }: { quest: Quest; kind: ChangeKind | undefin
 }
 
 export default function QuestListPage() {
+  useTimeTick();
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);

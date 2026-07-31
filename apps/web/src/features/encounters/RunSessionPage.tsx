@@ -19,6 +19,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
+import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { UIIcon } from '../../components/UIIcon';
 import type {
   ActionSpec,
@@ -6915,7 +6916,7 @@ function CombatantRow({
             onChange={(e) => setInitDraft(e.target.value)}
             onBlur={commitInitiative}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') {
+              if (e.key === 'Enter' && !isImeComposing(e)) {
                 e.preventDefault();
                 (e.target as HTMLInputElement).blur();
               }
@@ -6988,7 +6989,7 @@ function CombatantRow({
                 autoFocus
                 onChange={(e) => setNameDraft(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); commitIdentity(); }
+                  if (e.key === 'Enter' && !isImeComposing(e)) { e.preventDefault(); commitIdentity(); }
                   if (e.key === 'Escape') { setEditingIdentity(false); setNameDraft(combatant.name); }
                 }}
               />
@@ -7002,7 +7003,7 @@ function CombatantRow({
                 disabled={busy}
                 onChange={(e) => setHpMaxDraft(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); commitIdentity(); }
+                  if (e.key === 'Enter' && !isImeComposing(e)) { e.preventDefault(); commitIdentity(); }
                   if (e.key === 'Escape') { setEditingIdentity(false); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }
                 }}
               />
@@ -7751,7 +7752,7 @@ function CombatantRow({
               onChange={(e) => setTempDraft(e.target.value)}
               onBlur={commitTempHp}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                if (e.key === 'Enter' && !isImeComposing(e)) { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
               }}
               style={{
                 width: 60,

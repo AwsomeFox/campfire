@@ -13,6 +13,7 @@ import { api, API, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { Card, Btn } from '../../components/ui';
 import { CopyControl } from '../../components/CopyControl';
+import { formatDateTime, formatTime } from '../../lib/format';
 
 export function ResetRequestsCard() {
   const { t } = useTranslation();
@@ -93,9 +94,9 @@ export function ResetRequestsCard() {
                     {r.displayName && <span className="text-secondary font-normal"> · {r.displayName}</span>}
                   </p>
                   <p className="text-[11px] text-secondary">
-                    Requested {new Date(r.requestedAt).toLocaleString()}
+                    Requested {formatDateTime(r.requestedAt)}
                     {r.status === 'approved' && r.expiresAt && (
-                      <> · code expires {new Date(r.expiresAt).toLocaleTimeString()}</>
+                      <> · code expires {formatTime(r.expiresAt)}</>
                     )}
                   </p>
                 </div>

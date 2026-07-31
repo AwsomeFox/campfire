@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { AI_COST_BASIS_UNKNOWN, aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
+import { formatNumber } from '../../lib/format';
 import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
 import { localizeDetailParams } from './aiReadiness';
@@ -153,12 +154,12 @@ export function AiSetupChecklist({
           {readiness.estimatedCost.estimatedPromptTokens === null ||
           readiness.estimatedCost.estimatedCompletionTokens === null
             ? t('aiOnboarding.checklist.costTokensTotal', {
-                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                tokens: formatNumber(readiness.estimatedCost.estimatedTotalTokens),
               })
             : t('aiOnboarding.checklist.costTokens', {
-                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
-                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
-                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+                tokens: formatNumber(readiness.estimatedCost.estimatedTotalTokens),
+                prompt: formatNumber(readiness.estimatedCost.estimatedPromptTokens),
+                completion: formatNumber(readiness.estimatedCost.estimatedCompletionTokens),
               })}
         </p>
         <CostDisclosure

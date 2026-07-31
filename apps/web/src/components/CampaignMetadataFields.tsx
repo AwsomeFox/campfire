@@ -19,6 +19,7 @@
  * changes CTA) while the inputs themselves are byte-for-byte identical.
  */
 import type { Campaign, DangerLevel } from '@campfire/schema';
+import { formatNumber } from '../lib/format';
 
 export const CAMPAIGN_NAME_MAX = 120;
 export const CAMPAIGN_DESC_MAX = 10_000;
@@ -123,7 +124,7 @@ export function CampaignMetadataFields({
           disabled={disabled}
         />
         <p id={descHelpId} className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-          {description.length.toLocaleString()}/{CAMPAIGN_DESC_MAX.toLocaleString()} characters.
+          {formatNumber(description.length)}/{formatNumber(CAMPAIGN_DESC_MAX)} characters.
         </p>
       </div>
 

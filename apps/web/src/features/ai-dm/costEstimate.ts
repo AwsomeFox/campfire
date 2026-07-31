@@ -29,10 +29,12 @@ import { estimateUsdRange, type AiCostBasis, type AiCostUnknownReason } from '@c
  * significant digits to be readable at all. Always prefixed "≈" — there is no path here that
  * produces an exact-looking number, because there is no exact number to produce.
  */
+import { formatNumber } from '../../lib/format';
+
 export function formatApproxUsd(usd: number): string {
   const v = Math.max(0, usd);
   if (v === 0) return '≈$0.00';
-  if (v >= 10) return `≈$${Math.round(v).toLocaleString()}`;
+  if (v >= 10) return `≈$${formatNumber(Math.round(v))}`;
   if (v >= 1) return `≈$${v.toFixed(1)}`;
   if (v >= 0.01) return `≈$${v.toFixed(2)}`;
   // Below a cent, two significant figures — `toFixed(2)` alone would render "$0.00".
