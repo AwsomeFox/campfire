@@ -6568,7 +6568,9 @@ export class EncountersService {
         if (dead) {
           nextStatus = 'dead';
         } else if (priorStatus === 'dead') {
-          nextStatus = row.deathState !== 'dead' ? 'active' : 'dead';
+          // Revival is deliberate and mirrors the sheet policy: only a positive-HP,
+          // fully-recovered PC leaves 'dead'. dying/stable stay 'dead'.
+          nextStatus = row.hpCurrent > 0 && row.deathState === 'none' ? 'active' : 'dead';
         } else if (priorStatus && priorStatus !== 'active') {
           nextStatus = priorStatus;
         } else {
