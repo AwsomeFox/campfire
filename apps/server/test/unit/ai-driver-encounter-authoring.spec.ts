@@ -98,7 +98,7 @@ describe('AI Driver encounter authoring (#1022)', () => {
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.args).toEqual({ campaignId: 1, name: 'Reed ambush', locationId: 4, questId: 9, sessionId: 2, hidden: false });
+      expect(result.args).toEqual({ campaignId: 1, name: 'Reed ambush', locationId: 4, questId: 9, sessionId: 2 });
     }
   });
 
