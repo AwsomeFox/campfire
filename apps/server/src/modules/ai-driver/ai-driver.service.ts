@@ -1869,9 +1869,10 @@ export function guardDriverLivePlayArgs(
           `Rejected: ${unknown.join(', ')}.`,
       };
     }
-    // `hidden` defaults to false for driver-created encounters so players and the driver can see them.
+    // `hidden` is dropped rather than refused: the resulting args are indistinguishable from the
+    // model having omitted it, so EncountersService's private-by-default rule (#754) applies.
     const safe = { ...args };
-    safe.hidden = typeof args.hidden === 'boolean' ? args.hidden : false;
+    delete safe.hidden;
     return { ok: true, args: filterAllowedArgs(safe, rule.allowed) };
   }
 
@@ -2285,7 +2286,7 @@ export function isDriverApprovableEntityRead(toolName: string): boolean {
  */
 export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>): boolean {
   if (isDriverForbiddenToolName(tool.name)) return false;
-  if (!tool.mutating) return classifyDriverRead(tool.name) !== 'blocked';
+  if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
   if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
   return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
 }
@@ -5947,27 +5948,6 @@ export class AiDriverService {
           if (approval) {
             approvedSecret = approval;
             useSeatPrincipal = true;
-          }
-        }
-        const isEncounterRead = [
-          'get_encounter',
-          'get_turn',
-          'list_usable_actions',
-          'preview_encounter',
-          'list_encounter_events',
-          'get_encounter_aftermath',
-        ].includes(call.name);
-        if (isEncounterRead) {
-          const encId = typeof args.encounterId === 'number' ? (args.encounterId as number) : null;
-          if (encId !== null) {
-            try {
-              const encRow = await this.encounters.getRowOrThrow(encId);
-              if (encRow && encRow.status === 'running') {
-                useSeatPrincipal = true;
-              }
-            } catch {
-              // Non-existent or deleted encounter
-            }
           }
         }
       }
