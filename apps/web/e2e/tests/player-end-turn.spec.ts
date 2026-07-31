@@ -81,7 +81,7 @@ test.describe('player end turn (issue #487)', () => {
 
       const endTurnBtn = page.getByTestId('workspace-end-turn');
       await expect(endTurnBtn).toBeVisible();
-      await expect(endTurnBtn).toHaveText(/Next turn/);
+      await expect(endTurnBtn).toHaveText(/End (?:my )?turn/);
 
       await endTurnBtn.click();
       await expect(page.getByTestId(`combatant-row-${dummy.id}`)).toHaveAttribute('data-current-turn', 'true');
