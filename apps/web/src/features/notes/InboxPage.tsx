@@ -31,6 +31,7 @@ import { TermHelp } from '../../components/TermHelp';
 import { firstGrapheme } from '../../lib/avatarText';
 import { ENTITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { entityHref as targetHref, entityTargetProps } from '../../lib/entityLinks';
+import { buildNoteBodiesMap, resolveSweepItemBody } from './inboxSweepLookup';
 
 interface InboxListState {
   items: Note[];
@@ -298,9 +299,9 @@ export default function InboxPage() {
     setSweepResult(null);
     // Snapshot bodies for the items about to be swept — the sweep call resolves them,
     // so by the time the result comes back they've fallen out of openList (the reload
-    // below moves them to history). Keeping this snapshot is what lets the outcome
-    // panel show "which capture" a reason applies to, not just a bare note id.
-    setSweepItemBodies(Object.fromEntries(openList.items.map((n) => [n.id, n.body])));
+    // below moves them to history). Keeping this snapshot across both open and history
+    // lists provides fallback titles when an item outcome lacks a server body.
+    setSweepItemBodies(buildNoteBodiesMap(openList.items, historyList.items));
     try {
       const result = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
       if (sweepCid !== cidRef.current || sweepToken !== sweepTokenRef.current) return;
@@ -420,6 +421,7 @@ export default function InboxPage() {
           campaignId={cid}
           result={sweepResult}
           itemBodies={sweepItemBodies}
+          knownNotes={buildNoteBodiesMap(openList.items, historyList.items)}
           onDismiss={() => setSweepResult(null)}
         />
       )}
@@ -567,11 +569,13 @@ function SweepResultCard({
   campaignId,
   result,
   itemBodies,
+  knownNotes,
   onDismiss,
 }: {
   campaignId: number;
   result: InboxSweepResult;
-  itemBodies: Record<number, string>;
+  itemBodies?: Record<number, string>;
+  knownNotes?: Record<number, string>;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
@@ -618,7 +622,7 @@ function SweepResultCard({
         <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
           {items.map((item) => {
             const tag = SWEEP_OUTCOME_TAG[item.outcome];
-            const body = item.body ?? itemBodies[item.noteId];
+            const body = resolveSweepItemBody(item, itemBodies, knownNotes);
             return (
               <li key={item.noteId} className="cf-inset p-2.5 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
