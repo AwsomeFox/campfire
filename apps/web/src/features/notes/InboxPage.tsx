@@ -248,7 +248,10 @@ export default function InboxPage() {
               setSweepBusy(false);
             }
             try {
-              localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`);
+              const currentStored = localStorage.getItem(`campfire_inbox_sweep_job_${cid}`);
+              if (currentStored === String(jobId)) {
+                localStorage.removeItem(`campfire_inbox_sweep_job_${cid}`);
+              }
             } catch {
               // Ignore localStorage write errors
             }
@@ -642,10 +645,10 @@ async function pollInboxSweepResult(
   jobId: number,
   isStillRelevant: () => boolean,
   intervalMs = 2000,
-  maxAttempts = 180,
   deadlineMs = 10 * 60 * 1000,
 ): Promise<InboxSweepResult> {
   const startedAt = Date.now();
+  const maxAttempts = Math.ceil(deadlineMs / intervalMs);
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0 && !isStillRelevant()) throw new Error('Sweep polling cancelled');
     const result = await api.get<InboxSweepResult>(`${API}/campaigns/${campaignId}/inbox/sweep/${jobId}`);
