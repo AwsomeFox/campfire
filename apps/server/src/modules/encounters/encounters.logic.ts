@@ -1128,6 +1128,7 @@ export interface ConcentrationCascadeResult {
 export function cascadeConcentrationLoss(
   combatants: Array<{ id: number; conditionInstances: ConditionInstance[] }>,
   casterCombatantId: number,
+  effectName?: string | null,
 ): ConcentrationCascadeResult {
   const updatedCombatants = new Map<number, ConditionInstance[]>();
   const removed: { combatantId: number; condition: ConditionInstance }[] = [];
@@ -1136,7 +1137,11 @@ export function cascadeConcentrationLoss(
     const kept: ConditionInstance[] = [];
     let changed = false;
     for (const cond of combatant.conditionInstances ?? []) {
-      if (cond.isConcentration && cond.sourceCombatantId === casterCombatantId) {
+      if (
+        cond.isConcentration &&
+        cond.sourceCombatantId === casterCombatantId &&
+        (effectName == null || cond.source === effectName || cond.source == null)
+      ) {
         removed.push({ combatantId: combatant.id, condition: cond });
         changed = true;
       } else {

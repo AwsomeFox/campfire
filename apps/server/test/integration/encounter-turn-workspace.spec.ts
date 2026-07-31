@@ -1654,4 +1654,138 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'actions', remaining: 0, max: 3 });
     });
   });
+
+  describe('concentration break (issue #1452)', () => {
+    const holdPersonInstance = (sourceCombatantId: number) =>
+      JSON.stringify([{ id: 'paralyzed', name: 'Paralyzed', isConcentration: true, sourceCombatantId, stacks: 1 }]);
+
+    function setupConcentration(orm: ReturnType<typeof build>['orm'], encounterId: number, c1: number, c2: number, c3?: number) {
+      orm
+        .update(combatants)
+        .set({ turnState: JSON.stringify({ concentration: 'Hold Person' }) })
+        .where(eq(combatants.id, c1))
+        .run();
+      orm
+        .update(combatants)
+        .set({ conditionInstances: holdPersonInstance(c1), conditions: JSON.stringify(['Paralyzed']) })
+        .where(eq(combatants.id, c2))
+        .run();
+      if (c3 != null) {
+        orm
+          .update(combatants)
+          .set({ conditionInstances: holdPersonInstance(c1), conditions: JSON.stringify(['Paralyzed']) })
+          .where(eq(combatants.id, c3))
+          .run();
+      }
+    }
+
+    it('caster drops to 0 HP removes the sustained condition from every target, clears concentration, and logs it', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      setupConcentration(orm, encounterId, c1, c2);
+      orm.update(combatants).set({ hpCurrent: 10, hpMax: 10 }).where(eq(combatants.id, c1)).run();
+
+      await service.updateCombatant(encounterId, c1, { hpDelta: -10 }, dmUser, 'dm');
+
+      const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      const [caster] = orm.select().from(combatants).where(eq(combatants.id, c1)).all();
+      expect(JSON.parse(target.conditionInstances ?? '[]')).toEqual([]);
+      expect(JSON.parse(caster.turnState ?? '{}').concentration).toBeNull();
+      const log = orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all();
+      expect(log.some((e) => e.type === 'condition' && e.targetId === c2 && e.detail.includes('concentration broken'))).toBe(true);
+    });
+
+    it('caster killed outright removes the sustained condition', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      setupConcentration(orm, encounterId, c1, c2);
+      orm.update(combatants).set({ hpCurrent: 10, hpMax: 10 }).where(eq(combatants.id, c1)).run();
+
+      await service.updateCombatant(encounterId, c1, { hpDelta: -30 }, dmUser, 'dm');
+
+      const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      const [caster] = orm.select().from(combatants).where(eq(combatants.id, c1)).all();
+      expect(caster.deathState).toBe('dead');
+      expect(JSON.parse(target.conditionInstances ?? '[]')).toEqual([]);
+      expect(JSON.parse(caster.turnState ?? '{}').concentration).toBeNull();
+    });
+
+    it('removing the caster from the encounter breaks concentration on all targets', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      setupConcentration(orm, encounterId, c1, c2);
+
+      await service.removeCombatant(encounterId, c1, dmUser, 'dm');
+
+      const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      expect(JSON.parse(target.conditionInstances ?? '[]')).toEqual([]);
+      const log = orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all();
+      expect(log.some((e) => e.type === 'condition' && e.targetId === c2 && e.detail.includes('concentration broken'))).toBe(true);
+    });
+
+    it('replacing concentration via turn workspace drops the previous effect and keeps the new one', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      setupConcentration(orm, encounterId, c1, c2);
+
+      const updated = await service.updateCombatantTurnState(
+        encounterId,
+        c1,
+        { concentration: 'Haste' },
+        player1,
+        'player',
+      );
+      expect(updated.turnState.concentration).toBe('Haste');
+      const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      expect(JSON.parse(target.conditionInstances ?? '[]')).toEqual([]);
+    });
+
+    it('healing a broken caster back above 0 does not restore the broken concentration', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      setupConcentration(orm, encounterId, c1, c2);
+      orm.update(combatants).set({ hpCurrent: 10, hpMax: 10 }).where(eq(combatants.id, c1)).run();
+
+      await service.updateCombatant(encounterId, c1, { hpDelta: -10 }, dmUser, 'dm');
+      const revived = await service.updateCombatant(encounterId, c1, { hpDelta: 5 }, dmUser, 'dm');
+
+      expect(revived.hpCurrent).toBe(5);
+      expect(revived.turnState.concentration).toBeNull();
+      const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      expect(JSON.parse(target.conditionInstances ?? '[]')).toEqual([]);
+    });
+
+    it('multi-target concentration clears every target, not just the first', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, c2 } = seed(orm);
+      const [c3] = orm
+        .insert(combatants)
+        .values({
+          encounterId,
+          kind: 'monster',
+          name: 'Ogre 2',
+          initiative: 5,
+          hpCurrent: 30,
+          hpMax: 30,
+          sortOrder: 2,
+        })
+        .returning()
+        .all();
+      setupConcentration(orm, encounterId, c1, c2, c3.id);
+      orm.update(combatants).set({ hpCurrent: 10, hpMax: 10 }).where(eq(combatants.id, c1)).run();
+
+      await service.updateCombatant(encounterId, c1, { hpDelta: -10 }, dmUser, 'dm');
+
+      const [target1] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+      const [target2] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).all();
+      expect(JSON.parse(target1.conditionInstances ?? '[]')).toEqual([]);
+      expect(JSON.parse(target2.conditionInstances ?? '[]')).toEqual([]);
+    });
+  });
 });
