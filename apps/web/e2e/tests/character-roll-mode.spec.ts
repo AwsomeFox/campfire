@@ -61,14 +61,14 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
     await expect(savesCard).toBeVisible({ timeout: 20000 });
 
-    // The first button inside saves card is a RollContextMenu button
-    const rollBtn = savesCard.locator('button').first();
-    await expect(rollBtn).toBeVisible();
+    // Target a RollContextMenu button by its aria-label pattern "Roll ... save (...)"
+    const rollBtn = savesCard.locator('button[aria-label*="save"]').first();
+    await expect(rollBtn).toBeVisible({ timeout: 10000 });
 
     // Right-click opens the context menu (portalled to body with role="menu")
     await rollBtn.click({ button: 'right' });
     const menu = page.locator('[role="menu"]');
-    await expect(menu).toBeVisible();
+    await expect(menu).toBeVisible({ timeout: 5000 });
 
     // Options include Advantage and Disadvantage menuitem buttons
     await expect(menu.locator('[role="menuitem"]', { hasText: /Advantage/i })).toBeVisible();
@@ -82,8 +82,9 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
     await expect(savesCard).toBeVisible({ timeout: 20000 });
 
-    const rollBtn = savesCard.locator('button').first();
-    await expect(rollBtn).toBeVisible();
+    // Target a RollContextMenu button by its aria-label pattern
+    const rollBtn = savesCard.locator('button[aria-label*="save"]').first();
+    await expect(rollBtn).toBeVisible({ timeout: 10000 });
 
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
