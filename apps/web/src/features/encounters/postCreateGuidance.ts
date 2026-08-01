@@ -124,7 +124,7 @@ export function activeLifecycleStepId(
   if (status === 'ended') return 'ended';
   if (status === 'running') return 'running';
   if (status === 'preparing') {
-    if (rosterState && ((rosterState.enemyCombatantCount ?? 0) > 0 || (rosterState.needsInitiativeCount ?? 0) > 0)) {
+    if (rosterState && (rosterState.enemyCombatantCount ?? 0) > 0) {
       return 'initiative';
     }
     return 'preparing';

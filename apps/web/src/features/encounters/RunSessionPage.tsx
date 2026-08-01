@@ -3211,12 +3211,16 @@ export default function RunSessionPage() {
       />
 
       {(() => {
-        const partyCombatantCount = encounter.combatants.filter((c) => c.kind === 'character').length;
-        const enemyCombatantCount = encounter.combatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length;
+        const visibleGuidanceCombatants = isDm
+          ? encounter.combatants
+          : filterPlayerSafeCombatants(encounter.combatants);
+        const partyCombatantCount = visibleGuidanceCombatants.filter((c) => c.kind === 'character').length;
+        const enemyCombatantCount = visibleGuidanceCombatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length;
+        const needsInitCount = visibleGuidanceCombatants.filter((c) => c.initiative === null || c.initiative === undefined).length;
         const activeStepId = activeLifecycleStepId(encounter.status, {
           partyCombatantCount,
           enemyCombatantCount,
-          needsInitiativeCount,
+          needsInitiativeCount: needsInitCount,
         });
         return (
           <div

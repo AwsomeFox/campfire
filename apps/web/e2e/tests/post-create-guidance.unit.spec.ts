@@ -70,8 +70,8 @@ test.describe('post-create encounter guidance (issue #431 & #1470)', () => {
   });
 
   test('activeLifecycleStepId maps encounter status and roster state to step ids (issue #1470)', () => {
-    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 0 })).toBe('preparing');
-    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 2 })).toBe('initiative');
+    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 0, needsInitiativeCount: 3 })).toBe('preparing');
+    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 2, needsInitiativeCount: 5 })).toBe('initiative');
     expect(activeLifecycleStepId('running')).toBe('running');
     expect(activeLifecycleStepId('ended')).toBe('ended');
   });
