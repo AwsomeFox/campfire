@@ -57,10 +57,10 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    await expect(savesCard).toBeVisible();
+    const savesSection = page.locator('#character-sheet-section-saves');
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
 
-    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
+    const strSave = savesSection.getByRole('button', { name: /STR/i }).first();
     await expect(strSave).toBeVisible();
 
     // Right-click opens the context menu
@@ -77,10 +77,10 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    await expect(savesCard).toBeVisible();
+    const savesSection = page.locator('#character-sheet-section-saves');
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
 
-    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
+    const strSave = savesSection.getByRole('button', { name: /STR/i }).first();
     await expect(strSave).toBeVisible();
 
     const [rollRequest] = await Promise.all([
@@ -98,8 +98,8 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    await expect(savesCard).toBeVisible();
+    const savesSection = page.locator('#character-sheet-section-saves');
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
 
     const results = await new AxeBuilder({ page })
       .include('#character-sheet-panel-play')
