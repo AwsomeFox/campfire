@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 
 /**
  * Stuck ladder (#314) — detection + player levers + human hand-off, tested end-to-end and
@@ -53,7 +54,7 @@ describe('ai-dm stuck ladder — detection (e2e)', () => {
     await h.configureSeat(campaignId, seat);
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     h.script(TOOL_ERROR_TURN);
@@ -151,7 +152,7 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     expect((await h.getDriverSession(campaignId)).body.state).toBe('awaiting_players');
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // A player nudges with a hint; the replayed turn narrates cleanly and clears the stuck state.

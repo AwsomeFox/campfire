@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import {
   GROUNDING_BLOCK_END,
   GROUNDING_BLOCK_START,
@@ -138,7 +139,7 @@ describe('ai-dm driver — grounding: creative narration vs. factual claims (#57
   it('emits a grounding SSE frame carrying provenance, and never streams the citation block', async () => {
     const campaignId = await armedCampaign('Grounding SSE');
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     h.script({
@@ -511,7 +512,7 @@ describe('ai-dm driver — grounding: creative narration vs. factual claims (#57
   it('the stored narration is exactly the prose the table watched stream by stream', async () => {
     const campaignId = await armedCampaign('Grounding narration parity');
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // A model that emits the fence token inside its prose before the real block. The streaming

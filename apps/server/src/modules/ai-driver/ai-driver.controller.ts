@@ -35,7 +35,7 @@ import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { GroundingProjectionInterceptor, markHttpProjected, type HttpProjected } from './grounding-projection.interceptor';
-import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
+
 
 /**
  * `AiDmTurnRunResult` carries `grounding?: GroundingVerdict` (#1639). This controller's
@@ -731,55 +731,5 @@ export class AiDriverController {
   ) {
     const role = await this.access.requireRole(user, id, 'dm');
     return this.groundingStore.correct(id, body.claimId, user, role, body.correction);
-  }
-
-  @Sse('stream')
-  @ApiOperation({
-    summary: 'Subscribe to AI DM narration (SSE)',
-    description:
-      'Requires campaign membership. Server-sent stream of AiDmStreamEvent JSON in `data`: turn.start, narration.delta ' +
-      '(token-by-token), narration.message, tool (thin signals with optional encounterId for encounter mutations — ' +
-      'refetch through REST; hidden encounter ids are stripped for non-DMs, #825), narration.withheld (a provider ' +
-      'content filter or refusal ended the turn — no narration.message will follow, and clients MUST discard the ' +
-      'deltas they have buffered for the open bubble, #598), and turn.end. Periodic ' +
-      '`{"type":"ping"}` keepalives should be ignored. The stream closes automatically when the subscriber is removed ' +
-      'from the campaign (issue #527); a reconnect then receives 403.',
-  })
-  @ApiProduces('text/event-stream')
-  @ApiResponse({ status: 200, description: 'text/event-stream of AiDmStreamEvent JSON.' })
-  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
-  async streamNarration(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: RequestUser,
-  ): Promise<Observable<MessageEvent>> {
-    const role = await this.access.requireMember(user, id);
-    // Issue #527: terminate the narration stream when this user's membership is revoked.
-    // The AI narration channel is a separate Subject from CampaignEventsService, so the
-    // shared membership.revoked notifier (from the campaign event stream) is tapped here
-    // via takeUntil — applied to the WHOLE merged stream so the heartbeat interval stops
-    // too (otherwise merge keeps the connection alive on keepalive pings after the data
-    // stream has ended). Same race-free reasoning as CampaignEventsController: the notifier
-    // subscribes to the same Subject the revocation is emitted on, so it fires synchronously.
-    // Issue #527 / #867: tear down on membership revocation OR campaign trash.
-    const closed = this.events.streamFor(id).pipe(
-      filter(
-        (event) =>
-          (event.type === 'membership.revoked' && event.userId === user.id)
-          || event.type === 'campaign.trashed',
-      ),
-    );
-    return merge(
-      this.stream.streamFor(id).pipe(
-        // Role redaction is enforced HERE, at the broadcast boundary (#572), for EVERY frame
-        // type rather than the two that used to be named inline (#1552). A withheld frame is
-        // DROPPED from this subscriber's stream entirely — a player is never handed a DM-only
-        // event and merely trusted not to render it. `projectAiDmStreamEventForRole` fails
-        // closed: an unclassified frame type does not compile, and does not reach the wire.
-        map((event) => projectAiDmStreamEventForRole(event, role)),
-        filter((event): event is NonNullable<typeof event> => event !== null),
-        map((event): MessageEvent => ({ data: event })),
-      ),
-      interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(closed));
   }
 }

@@ -2,7 +2,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 
 /**
  * Issue #825 — AI encounter activity must carry server-derived encounter identity
@@ -155,7 +156,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
     expect((await request(h.server).post(`/api/v1/encounters/${encounterB}/start`).set(dm)).status).toBe(201);
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     h.script(
@@ -173,7 +174,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
       { name: 'next_turn', isError: false, proposed: false, encounterId: encounterB },
     ]);
 
-    const toolEv = events.find((e): e is Extract<AiDmStreamEvent, { type: 'tool' }> => e.type === 'tool');
+    const toolEv = events.find((e): e is Extract<CampaignEvent, { type: 'tool' }> => e.type === 'tool');
     expect(toolEv).toBeDefined();
     expect(toolEv?.name).toBe('next_turn');
     expect(toolEv?.encounterId).toBe(encounterB);
@@ -240,7 +241,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
     const encounterId = await createEncounter(campaignId, 'Not Started');
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // next_turn on a preparing encounter errors — identity must still attach.
@@ -256,7 +257,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
     expect(res.body.toolCalls).toEqual([
       { name: 'next_turn', isError: true, proposed: false, encounterId },
     ]);
-    const toolEv = events.find((e): e is Extract<AiDmStreamEvent, { type: 'tool' }> => e.type === 'tool');
+    const toolEv = events.find((e): e is Extract<CampaignEvent, { type: 'tool' }> => e.type === 'tool');
     expect(toolEv?.isError).toBe(true);
     expect(toolEv?.encounterId).toBe(encounterId);
   });
@@ -268,7 +269,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
     const prepId = await createEncounter(campaignId, 'Visible Prep');
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     h.script(
@@ -294,7 +295,7 @@ describe('ai-dm encounter activity identity (#825)', () => {
     // Identity is the prep fight — not the live one a client might have open.
     expect(res.body.toolCalls[0].encounterId).not.toBe(liveId);
 
-    const toolEv = events.find((e): e is Extract<AiDmStreamEvent, { type: 'tool' }> => e.type === 'tool');
+    const toolEv = events.find((e): e is Extract<CampaignEvent, { type: 'tool' }> => e.type === 'tool');
     expect(toolEv?.encounterId).toBe(prepId);
     expect(toolEv?.encounterHidden).toBe(false);
   });

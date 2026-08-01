@@ -6,6 +6,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from './campaign-events.service';
+import { projectCampaignEventForRole } from './campaign-event-projection';
 
 /**
  * Keepalive cadence. Long enough to be negligible traffic, short enough that
@@ -53,7 +54,7 @@ export class CampaignEventsController {
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
   ): Promise<Observable<MessageEvent>> {
-    await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId);
 
     // Issue #527 / #867: complete the moment THIS user is revoked OR the campaign
     // is trashed. Applied with takeUntil to the WHOLE merged stream below (not
@@ -75,6 +76,13 @@ export class CampaignEventsController {
     // as data. We filter them out server-side so the wire stays clean.)
     const dataStream = this.events.streamFor(campaignId).pipe(
       filter((event) => event.type !== 'membership.revoked' && event.type !== 'campaign.trashed'),
+      map((event) => {
+        // Role redaction is enforced HERE, at the broadcast boundary (#572, #1552).
+        // `projectCampaignEventForRole` fails closed: an unclassified frame type does not
+        // compile, and does not reach the wire.
+        return projectCampaignEventForRole(event as any, role);
+      }),
+      filter((event): event is NonNullable<typeof event> => event !== null),
       map((event): MessageEvent => ({ data: event })),
     );
 

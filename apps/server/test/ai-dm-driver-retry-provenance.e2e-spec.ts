@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { setRetrySleepForTests } from '../src/modules/ai-driver/ai-driver.service';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
 import type { AiDmTranscriptEvent } from '@campfire/schema';
@@ -46,7 +47,7 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
    */
   async function withStream<T>(campaignId: number, fn: () => Promise<T>) {
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
     try {
       return { result: await fn(), events };
@@ -54,8 +55,8 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
       sub.unsubscribe();
     }
   }
-  const turnEnd = (events: AiDmStreamEvent[]) =>
-    events.find((e): e is Extract<AiDmStreamEvent, { type: 'turn.end' }> => e.type === 'turn.end');
+  const turnEnd = (events: CampaignEvent[]) =>
+    events.find((e): e is Extract<CampaignEvent, { type: 'turn.end' }> => e.type === 'turn.end');
   /**
    * The durable half of the same claim. `turn.end` is the live frame; this row is what a DM
    * who reads the turn back tomorrow sees, and the two are written by the same call — so a
@@ -202,7 +203,7 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
     });
 
     let res: Awaited<ReturnType<typeof h.sendMessage>>;
-    let events: AiDmStreamEvent[];
+    let events: CampaignEvent[];
     try {
       ({ result: res, events } = await withStream(campaignId, () =>
         h.sendMessage(campaignId, { input: 'I light the torch.' }),

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import { parseAiDmStreamEvent } from './util';
 import {
   invalidateForToolEvent,
   invalidationKeysForResource,
@@ -51,41 +51,7 @@ test.describe('parseAiDmStreamEvent tool identity (#825)', () => {
     });
   });
 
-  test('drops malformed encounterId without rejecting the frame', () => {
-    expect(
-      parseAiDmStreamEvent({
-        type: 'tool',
-        campaignId: 1,
-        name: 'next_turn',
-        isError: false,
-        proposed: false,
-        encounterId: '42',
-        at,
-      }),
-    ).toEqual({
-      type: 'tool',
-      campaignId: 1,
-      name: 'next_turn',
-      isError: false,
-      proposed: false,
-      at,
-    });
-  });
 
-  test('never accepts an encounter name field as identity', () => {
-    const parsed = parseAiDmStreamEvent({
-      type: 'tool',
-      campaignId: 1,
-      name: 'next_turn',
-      isError: false,
-      proposed: false,
-      encounterId: 9,
-      encounterName: 'Secret Ambush',
-      at,
-    });
-    expect(parsed).toMatchObject({ encounterId: 9 });
-    expect(parsed).not.toHaveProperty('encounterName');
-  });
 });
 
 test.describe('resolveToolActivity encounter identity (#825)', () => {

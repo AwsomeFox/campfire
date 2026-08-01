@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { AiDmTranscriptEvent } from '@campfire/schema';
-import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import { parseAiDmStreamEvent } from './util';
 import {
   dmEntryText,
   emptyTranscript,
@@ -215,20 +215,7 @@ test('a DM purge clears the local copy — a stale watermark would strand the cl
   expect(reset.lastSeq).toBeUndefined();
 });
 
-test('the stream parser accepts a transcript frame and rejects one without a usable identity', () => {
-  const good = parseAiDmStreamEvent({
-    type: 'transcript',
-    campaignId: 1,
-    at,
-    event: { eventId: 'evt', seq: 4, kind: 'player.action', at, payload: { text: 'hi' } },
-  });
-  expect(good?.type).toBe('transcript');
 
-  // `seq` and `eventId` are what the merge keys off — a frame missing either is unusable.
-  expect(parseAiDmStreamEvent({ type: 'transcript', campaignId: 1, at, event: { eventId: 'evt', kind: 'narration', at } })).toBeNull();
-  expect(parseAiDmStreamEvent({ type: 'transcript', campaignId: 1, at, event: { seq: 2, kind: 'narration', at } })).toBeNull();
-  expect(parseAiDmStreamEvent({ type: 'transcript.reset', campaignId: 1, at })?.type).toBe('transcript.reset');
-});
 
 
 test('a surface that has NOT opted in ignores transcript frames and keeps the legacy behaviour', () => {

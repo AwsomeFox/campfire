@@ -31,7 +31,7 @@ import { createContext, useCallback, useContext, useEffect, useReducer, useRef, 
 import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode } from '@campfire/schema';
 import { useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
-import { useAiDmStream, type AiDmStreamEvent } from '../../lib/useAiDmStream';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
@@ -183,7 +183,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       dispatchTranscript({ type: 'reset' });
     }
     transcriptOwnerRef.current = key;
-  }, [key, campaignId, enabled, viewerId, pendingHydrate.identityPending]);
+  }, [key, campaignId, enabled, viewerId, pendingHydrate, pendingHydrate.identityPending]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
@@ -224,13 +224,13 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     dispatchTranscript(action);
   }, []);
 
-  useAiDmStream(
-    campaignId,
+  useCampaignEvents(
+    enabled ? campaignId : undefined,
     {
-      onEvent: (event: AiDmStreamEvent) => {
+      onEvent: (event) => {
         setState((prev) => reduce(prev, event));
         if (enabled) {
-          dispatchTranscript({ type: 'stream', event });
+          dispatchTranscript({ type: 'stream', event: event as any });
         }
         if (campaignId === undefined) return;
         if (event.type === 'tool') {
@@ -269,8 +269,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       onStreamRecovery: () => {
         if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
       },
-    },
-    { enabled },
+    }
   );
 
   return {
@@ -281,7 +280,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   };
 }
 
-function reduce(prev: typeof INITIAL_STATE, event: AiDmStreamEvent): typeof INITIAL_STATE {
+function reduce(prev: typeof INITIAL_STATE, event: any): typeof INITIAL_STATE {
   switch (event.type) {
     case 'turn.start':
       return { ...prev, turnActive: true };
