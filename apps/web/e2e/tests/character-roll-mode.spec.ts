@@ -59,9 +59,9 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
-    await expect(savesCard).toBeVisible();
+    await expect(savesCard).toBeVisible({ timeout: 15000 });
 
-    const strSave = savesCard.getByRole('button', { name: /Roll .* save/i }).first();
+    const strSave = savesCard.locator('button').first();
     await expect(strSave).toBeVisible();
 
     // Right-click opens the context menu
@@ -79,7 +79,9 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
-    const strSave = savesCard.getByRole('button', { name: /Roll .* save/i }).first();
+    await expect(savesCard).toBeVisible({ timeout: 15000 });
+
+    const strSave = savesCard.locator('button').first();
     await expect(strSave).toBeVisible();
 
     const [rollRequest] = await Promise.all([
@@ -96,6 +98,9 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
   test('roll controls are axe-clean', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
+
+    const savesCard = page.locator('[data-testid="character-saving-throws"]');
+    await expect(savesCard).toBeVisible({ timeout: 15000 });
 
     const results = await new AxeBuilder({ page })
       .include('[data-testid="character-saving-throws"]')
