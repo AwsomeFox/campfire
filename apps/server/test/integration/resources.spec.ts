@@ -44,7 +44,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
     const access = new CampaignAccessService(db, new RoleResolver(db));
     charactersService = new CharactersService(db, audit, revisions, events, rolls, access);
-    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, campaignLibrary);
+    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
   });
 
   afterEach(() => {

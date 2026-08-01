@@ -28,6 +28,7 @@ describe('notification category mapping (issue #789)', () => {
       'session_scheduled', 'session_rsvp', 'session_reminder', 'rsvp_nudge',
       'quest_updated', 'proposal_submitted', 'proposal_resolved',
       'inbox_submitted', 'ai_dm_alert',
+      'encounter_started', 'encounter_ended', 'encounter_turn', 'character_downed',
       // #599 — the table safety hold. Critical/always-on: a safety stop must not be mutable by
       // a notification preference or deferrable into a digest.
       'safety_hold',

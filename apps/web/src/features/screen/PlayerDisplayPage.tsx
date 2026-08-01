@@ -29,7 +29,6 @@ import type {
   Encounter,
   EncounterWithCombatants,
   HpBand,
-  MapPing,
   PartyCharacter,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -350,7 +349,7 @@ export default function PlayerDisplayPage() {
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
-  const addMapPing = useCallback((ping: MapPing) => {
+  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++mapPingSeq.current;
     if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);

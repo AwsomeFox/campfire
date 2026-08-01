@@ -30,7 +30,7 @@ describe('encounter token batch atomicity (real SQLite, service layer)', () => {
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
-    return { orm, service: new EncountersService(orm, audit, events, rolls, revisions, attachments, new CampaignLibraryService(orm, audit)) };
+    return { orm, service: new EncountersService(orm, audit, events, rolls, revisions, attachments, new CampaignLibraryService(orm, audit), { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any) };
   }
 
   function seed(orm: ReturnType<typeof build>['orm']) {
