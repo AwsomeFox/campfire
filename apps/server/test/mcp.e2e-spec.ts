@@ -123,6 +123,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // with args advertises additionalProperties:false in tools/list.
     const updateCombatant = tools.find((t) => t.name === 'update_combatant');
     expect(updateCombatant?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    expect(updateCombatant?.description).toContain('addConditionInstance');
     const summary = tools.find((t) => t.name === 'get_campaign_summary');
     expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
@@ -2460,6 +2461,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(custom.isError).toBeFalsy();
     expect((parseResult(custom) as { conditions: string[] }).conditions).toContain('hexed_by_patron');
+
+    const structured = await dmClient.callTool({
+      name: 'update_combatant',
+      arguments: {
+        encounterId: encounter.id,
+        combatantId: heroCombatant!.id,
+        idempotencyKey: 'test-structured-cond',
+        addConditionInstance: { name: 'Charmed', durationRounds: 10, saveDc: 15 }
+      },
+    });
+    expect(structured.isError).toBeFalsy();
+    const result = parseResult(structured) as { conditionInstances: Array<{ name: string; durationRounds?: number; saveDc?: number }> };
+    expect(result.conditionInstances).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'Charmed', durationRounds: 10, saveDc: 15 })
+      ])
+    );
   });
 
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {

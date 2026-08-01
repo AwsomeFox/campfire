@@ -4350,9 +4350,11 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), addConditions/removeConditions. Use roll_death_save for a server-authoritative d20. ' +
-        'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
-        'the DM may mint custom condition labels. ' +
+        'successes = stable). Use roll_death_save for a server-authoritative d20. ' +
+        'Structured conditions are PREFERRED over flat string labels: use addConditionInstance, removeConditionInstanceId, ' +
+        'updateConditionInstance, or conditionInstances. A ConditionInstance supports { name, durationRounds, ' +
+        'roundsRemaining, saveDc, saveAbility, isConcentration, source, sourceCombatantId, ruleEntryId, stacks }. ' +
+        'Legacy addConditions/removeConditions flat strings are still supported. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
