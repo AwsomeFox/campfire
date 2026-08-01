@@ -16,12 +16,13 @@ import { useTranslation } from 'react-i18next';
  * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
  */
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, RollCheckDefinition } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
-import { queryKeys } from '../../lib/query';
+import { queryKeys, invalidateCampaignCheckRequests } from '../../lib/query';
 import { Card, Btn, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { useAuth } from '../../app/auth';
 
 /** Human summary of a resolved outcome for the announcer + result line. */
 function outcomeText(res: CheckRequestResolution): string {
@@ -44,16 +45,26 @@ export function CheckRequestPanel({
   onError,
 }: {
   campaignId: number;
-  characters: Character[];
+  characters?: Character[];
   encounterId?: number;
   onError?: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const queryClient = useQueryClient();
   const [characterId, setCharacterId] = useState<number | ''>('');
   const [checkId, setCheckId] = useState('');
   const [dc, setDc] = useState('');
   const [consequence, setConsequence] = useState('');
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const campaignCharactersQuery = useQuery({
+    queryKey: queryKeys.campaignCharacters(campaignId),
+    queryFn: () => api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
+    enabled: Number.isFinite(campaignId) && !characters,
+  });
+
+  const availableCharacters = characters ?? campaignCharactersQuery.data ?? [];
 
   // The picked character's catalog drives the check dropdown (favorites first, server math).
   const checksQuery = useQuery({
@@ -72,17 +83,25 @@ export function CheckRequestPanel({
         ...(consequence.trim() ? { consequence: consequence.trim() } : {}),
         ...(encounterId != null ? { encounterId } : {}),
       }),
-    onMutate: () => onError?.(null),
+    onMutate: () => {
+      setLocalError(null);
+      onError?.(null);
+    },
     onSuccess: (created) => {
       const req = created[0];
       if (req) {
         announce(`Requested ${req.checkLabel} from ${req.characterName}${req.dc != null ? ` at DC ${req.dc}` : ''}.`);
       }
+      invalidateCampaignCheckRequests(queryClient, campaignId);
       setCheckId('');
       setDc('');
       setConsequence('');
     },
-    onError: (err) => onError?.(translateApiError(err, t, { fallbackKey: 'encounters.errors.sendCheck' })),
+    onError: (err) => {
+      const msg = translateApiError(err, t, { fallbackKey: 'encounters.errors.sendCheck' });
+      setLocalError(msg);
+      onError?.(msg);
+    },
   });
 
   const canSend = typeof characterId === 'number' && checkId.trim().length > 0 && !send.isPending;
@@ -94,6 +113,7 @@ export function CheckRequestPanel({
         Ask a player to roll a check or save. They get an in-page prompt and roll once; the result
         lands in the shared dice log with your consequence text.
       </p>
+      {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
           <label htmlFor="check-request-character">Character</label>
@@ -108,7 +128,7 @@ export function CheckRequestPanel({
             }}
           >
             <option value="">Choose a character…</option>
-            {characters.map((c) => (
+            {availableCharacters.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
               </option>
@@ -179,14 +199,25 @@ function PromptCard({
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const queryClient = useQueryClient();
+  const [localError, setLocalError] = useState<string | null>(null);
+
   const roll = useMutation({
     mutationFn: () => api.post<CheckRequestResolution>(`${API}/check-requests/${request.id}/roll`, {}),
-    onMutate: () => onError?.(null),
+    onMutate: () => {
+      setLocalError(null);
+      onError?.(null);
+    },
     onSuccess: (res) => {
       announce(outcomeText(res));
+      invalidateCampaignCheckRequests(queryClient, request.campaignId);
       onResolved(res);
     },
-    onError: (err) => onError?.(translateApiError(err, t, { fallbackKey: 'encounters.errors.rollCheck' })),
+    onError: (err) => {
+      const msg = translateApiError(err, t, { fallbackKey: 'encounters.errors.rollCheck' });
+      setLocalError(msg);
+      onError?.(msg);
+    },
   });
 
   return (
@@ -210,6 +241,7 @@ function PromptCard({
           {request.consequence}
         </p>
       )}
+      {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div>
         <Btn
           disabled={roll.isPending}
@@ -271,10 +303,27 @@ export function CheckRequestPrompts({
   onError,
 }: {
   campaignId: number;
-  ownedCharacterIds: ReadonlySet<number>;
+  ownedCharacterIds?: ReadonlySet<number>;
   onError?: (msg: string | null) => void;
 }) {
+  const { me } = useAuth();
   const [resolved, setResolved] = useState<Record<number, CheckRequestResolution>>({});
+
+  const charactersQuery = useQuery({
+    queryKey: queryKeys.campaignCharacters(campaignId),
+    queryFn: () => api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
+    enabled: Number.isFinite(campaignId) && !ownedCharacterIds,
+  });
+
+  const effectiveOwnedCharacterIds = useMemo(() => {
+    if (ownedCharacterIds) return ownedCharacterIds;
+    const chars = charactersQuery.data ?? [];
+    const myUserId = me?.user.id;
+    if (myUserId == null) return new Set<number>();
+    return new Set(
+      chars.filter((c) => c.ownerUserId != null && String(c.ownerUserId) === String(myUserId)).map((c) => c.id),
+    );
+  }, [ownedCharacterIds, charactersQuery.data, me?.user.id]);
 
   const pendingQuery = useQuery({
     queryKey: queryKeys.campaignCheckRequests(campaignId),
@@ -284,8 +333,8 @@ export function CheckRequestPrompts({
   });
 
   const mine = useMemo(
-    () => (pendingQuery.data ?? []).filter((r) => ownedCharacterIds.has(r.characterId) && r.status === 'pending'),
-    [pendingQuery.data, ownedCharacterIds],
+    () => (pendingQuery.data ?? []).filter((r) => effectiveOwnedCharacterIds.has(r.characterId) && r.status === 'pending'),
+    [pendingQuery.data, effectiveOwnedCharacterIds],
   );
 
   const pendingPrompts = mine.filter((r) => resolved[r.id] == null);
@@ -294,7 +343,7 @@ export function CheckRequestPrompts({
   if (pendingPrompts.length === 0 && results.length === 0) return null;
 
   return (
-    <div data-testid="check-request-prompts" className="flex flex-col gap-2">
+    <div data-testid="check-request-prompts" className="flex flex-col gap-2 max-w-7xl mx-auto px-4 pt-3 pb-1 w-full">
       {pendingPrompts.map((request) => (
         <PromptCard
           key={request.id}
@@ -309,3 +358,4 @@ export function CheckRequestPrompts({
     </div>
   );
 }
+

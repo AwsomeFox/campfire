@@ -98,4 +98,79 @@ test.describe('DM check request loop (#415)', () => {
       await dmApi.dispose();
     }
   });
+
+  test('DM sends check request from dashboard (outside encounter); player on party page receives prompt and rolls', async ({ page, browser }) => {
+    const { baseURL } = seed();
+
+    const dmApi: APIRequestContext = await request.newContext({ baseURL: baseURL || undefined, storageState: stateFor('dm') });
+    const playerApi: APIRequestContext = await request.newContext({ baseURL: baseURL || undefined, storageState: stateFor('player') });
+
+    let campaignId: number;
+    let characterId: number;
+    try {
+      const playerUserId: number = (await (await playerApi.get('/api/v1/me')).json()).user.id;
+
+      const campaign = await (await dmApi.post('/api/v1/campaigns', { data: { name: 'E2E — Dashboard Check Request' } })).json();
+      campaignId = campaign.id;
+
+      await dmApi.post(`/api/v1/campaigns/${campaignId}/members`, {
+        data: { userId: playerUserId, role: 'player' },
+      });
+
+      const character = await (
+        await dmApi.post(`/api/v1/campaigns/${campaignId}/characters`, {
+          data: {
+            name: 'Scout Hero',
+            ownerUserId: String(playerUserId),
+            level: 3,
+            hpMax: 20,
+            hpCurrent: 20,
+            stats: { STR: 10, DEX: 14, CON: 10, INT: 12, WIS: 16, CHA: 10 },
+          },
+        })
+      ).json();
+      characterId = character.id;
+    } finally {
+      await playerApi.dispose();
+    }
+
+    // --- Player is sitting on the Party page (out-of-combat surface) ------------------
+    const playerContext = await browser.newContext({ storageState: stateFor('player') });
+    try {
+      const playerPage = await playerContext.newPage();
+      await playerPage.goto(`/c/${campaignId}/party`);
+      await expect(playerPage.getByRole('heading', { name: /Party|Heroes/i })).toBeVisible();
+
+      // --- DM sends request from campaign dashboard -------------------------------------
+      await page.goto(`/c/${campaignId}`);
+      const panel = page.getByTestId('request-check-panel');
+      await expect(panel).toBeVisible();
+
+      await panel.getByLabel('Character').selectOption(String(characterId));
+      await expect(panel.getByLabel('Check').locator('option[value="skill:Perception"]')).toHaveCount(1);
+      await panel.getByLabel('Check').selectOption('skill:Perception');
+      await panel.getByLabel('DC').fill('12');
+      await panel.getByLabel('Consequence').fill('You spot a hidden trapdoor.');
+      await panel.getByRole('button', { name: 'Send request' }).click();
+
+      // --- Player on /party receives prompt without navigating and rolls ------------------
+      const rollBtn = playerPage.getByRole('button', { name: 'Roll Perception check for Scout Hero' });
+      await expect(rollBtn).toBeVisible({ timeout: 15_000 });
+      await rollBtn.click();
+
+      // Result appears for the player and prompt clears from pending
+      const prompts = playerPage.getByTestId('check-request-prompts');
+      await expect(prompts.getByText('You spot a hidden trapdoor.')).toBeVisible();
+      await expect(prompts.getByText(/Rolled/)).toBeVisible();
+      await expect(playerPage.getByRole('button', { name: 'Roll Perception check for Scout Hero' })).toHaveCount(0);
+
+      // Verify server pending check requests for this campaign is empty
+      const pendingRes = await dmApi.get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`);
+      const pendingJson = await pendingRes.json();
+      expect(pendingJson.filter((r: { characterId: number }) => r.characterId === characterId)).toHaveLength(0);
+    } finally {
+      await playerContext.close();
+      await dmApi.dispose();
+    }
+  });
 });
