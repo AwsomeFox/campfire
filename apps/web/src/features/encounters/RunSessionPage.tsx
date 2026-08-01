@@ -96,7 +96,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown, endedSummaryTallies } from './encounterEndedSummary';
-import { filterPlayerSafeCombatants, safeEncounterForCast } from '../screen/playerSafe';
+import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   canStabilizeCombatant,
@@ -2697,11 +2697,6 @@ export default function RunSessionPage() {
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
-
-  const endedTallies =
-    encounter.status === 'ended'
-      ? endedSummaryTallies(safeEncounterForCast(encounter).combatants.filter((c) => !c.tokenHiddenByFog))
-      : null;
 
   return (
     <div
