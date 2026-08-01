@@ -7818,7 +7818,7 @@ function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEditPermission && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 8, flex: 'none', alignItems: 'center' }} data-testid="hp-steppers">
+        <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
               key={step}
@@ -7837,7 +7837,7 @@ function CombatantRow({
               {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
             </button>
           ))}
-          <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
               type="number"
               min="0"
@@ -7849,40 +7849,38 @@ function CombatantRow({
               aria-label="Exact HP amount"
               disabled={syncBlocked}
             />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, height: 44 }}>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                style={{ flex: 1, padding: '0 6px', fontSize: 11, minHeight: 0, lineHeight: 1 }}
-                disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
-                aria-label="Apply exact damage"
-                onClick={() => {
-                  const val = parseInt(exactHp, 10);
-                  if (!isNaN(val)) {
-                    onHpDelta(-Math.abs(val));
-                    setExactHp('');
-                  }
-                }}
-              >
-                Dmg
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                style={{ flex: 1, padding: '0 6px', fontSize: 11, minHeight: 0, lineHeight: 1 }}
-                disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
-                aria-label="Apply exact healing"
-                onClick={() => {
-                  const val = parseInt(exactHp, 10);
-                  if (!isNaN(val)) {
-                    onHpDelta(Math.abs(val));
-                    setExactHp('');
-                  }
-                }}
-              >
-                Heal
-              </button>
-            </div>
+            <button
+              type="button"
+              className="btn btn-secondary cf-target-44"
+              style={{ padding: '0 8px', fontSize: 13 }}
+              disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
+              aria-label="Apply exact damage"
+              onClick={() => {
+                const val = parseInt(exactHp, 10);
+                if (!isNaN(val)) {
+                  onHpDelta(-Math.abs(val));
+                  setExactHp('');
+                }
+              }}
+            >
+              Dmg
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary cf-target-44"
+              style={{ padding: '0 8px', fontSize: 13 }}
+              disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
+              aria-label="Apply exact healing"
+              onClick={() => {
+                const val = parseInt(exactHp, 10);
+                if (!isNaN(val)) {
+                  onHpDelta(Math.abs(val));
+                  setExactHp('');
+                }
+              }}
+            >
+              Heal
+            </button>
           </div>
         </div>
       )}
