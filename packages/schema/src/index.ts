@@ -10921,6 +10921,7 @@ export const CampaignEventType = z.enum([
   // the anonymity rules. Putting the actor on the wire would hand every connected browser
   // the one field the whole feature exists to withhold.
   'safety.hold',
+  'player-display-scene',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -10955,6 +10956,12 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('player-display-scene'),
+    campaignId: Id,
+    scene: z.string(),
     at: IsoDate,
   }),
   z.object({

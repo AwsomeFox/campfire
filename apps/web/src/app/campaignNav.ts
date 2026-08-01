@@ -34,6 +34,7 @@ export function buildCampaignNavGroups(
   campaignId: number,
   opts: {
     isDm: boolean;
+    canCast: boolean;
     aiDriverActive: boolean;
     inboxCount: number;
     pendingProposals: number;
@@ -41,7 +42,7 @@ export function buildCampaignNavGroups(
   },
 ): NavGroup[] {
   const base = `/c/${campaignId}`;
-  const { isDm, aiDriverActive, inboxCount, pendingProposals, trashCount } = opts;
+  const { isDm, canCast, aiDriverActive, inboxCount, pendingProposals, trashCount } = opts;
 
   const groups: NavGroup[] = [
     {
@@ -52,6 +53,7 @@ export function buildCampaignNavGroups(
         { key: 'party', label: t('nav.party'), to: `${base}/party` },
         { key: 'inventory', label: t('nav.inventory'), to: `${base}/inventory` },
         { key: 'encounters', label: t('nav.encounters'), to: `${base}/encounters` },
+        ...(canCast ? [{ key: 'screen', label: t('nav.playerDisplay'), to: `${base}/screen?from=${base}/encounters` }] : []),
         ...(aiDriverActive ? [{ key: 'table', label: t('nav.table'), to: `${base}/table` }] : []),
         { key: 'notes', label: t('nav.myNotes'), to: `${base}/notes` },
       ],
