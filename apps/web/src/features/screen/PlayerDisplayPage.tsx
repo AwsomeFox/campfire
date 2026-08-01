@@ -29,7 +29,6 @@ import type {
   Encounter,
   EncounterWithCombatants,
   HpBand,
-  MapPing,
   PartyCharacter,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
