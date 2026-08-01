@@ -89,7 +89,6 @@ export function OidcRecoveryPage() {
       }}
     >
       <Card
-        density="compact"
         elev="md"
         className="w-full flex flex-col items-center text-center"
         aria-labelledby="oidc-recovery-title"

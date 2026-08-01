@@ -184,7 +184,6 @@ export function ResetPasswordPage() {
       >
         <Card
           as="main"
-          density="compact"
           elev="md"
           style={{ padding: "28px 26px", gap: 14 }}
           aria-labelledby="reset-page-title"

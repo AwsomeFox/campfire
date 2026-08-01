@@ -290,7 +290,7 @@ export function JoinPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <Card density="compact" elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <Card elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
 
           {loading || !ready ? (

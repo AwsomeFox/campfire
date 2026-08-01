@@ -392,7 +392,7 @@ export function LoginPage() {
 
   const authCard = (
     <div className="login-auth-stack">
-      <Card density="compact" elev="md" className="items-center text-center login-auth-card">
+      <Card elev="md" className="items-center text-center login-auth-card">
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><BrandMark /></span>
           <div>
