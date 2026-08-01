@@ -241,17 +241,22 @@ export function TurnWorkspace({
         <section>
           <h3 className="text-sm font-semibold text-white mb-1.5">Action economy</h3>
           <div className="flex gap-2 flex-wrap">
-            {turn.actionEconomy.map((slot) => (
-              <SlotChip
-                key={slot.key}
-                slot={slot}
-                disabled={controlsDisabled}
-                unit={gridUnit || 'ft'}
-                step={gridScale || 5}
-                onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: gridScale || 5 } : { useSlot: slot.key })}
-                onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -(gridScale || 5) } : { releaseSlot: slot.key })}
-              />
-            ))}
+            {(() => {
+              const isFeet = !gridUnit || gridUnit === 'ft' || gridUnit === 'feet';
+              const unit = isFeet ? (gridUnit || 'ft') : 'ft';
+              const step = isFeet ? (gridScale || 5) : 5;
+              return turn.actionEconomy.map((slot) => (
+                <SlotChip
+                  key={slot.key}
+                  slot={slot}
+                  disabled={controlsDisabled}
+                  unit={unit}
+                  step={step}
+                  onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: step } : { useSlot: slot.key })}
+                  onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -step } : { releaseSlot: slot.key })}
+                />
+              ));
+            })()}
           </div>
         </section>
       )}
@@ -260,7 +265,7 @@ export function TurnWorkspace({
       <div className="flex gap-4 flex-wrap text-sm">
         {turn.movement && (
           <span className="text-muted">
-            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {gridUnit || 'ft'}</span>
+            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {!gridUnit || gridUnit === 'ft' || gridUnit === 'feet' ? (gridUnit || 'ft') : 'ft'}</span>
           </span>
         )}
         <span className="text-muted">
