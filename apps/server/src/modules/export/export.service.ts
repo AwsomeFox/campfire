@@ -954,11 +954,11 @@ export class ExportService {
       }));
 
     const rsvps = schedules.flatMap(s => s.rsvps
-      .filter(r => r.userId === user.id)
+      .filter(r => String(r.userId) === String(user.id))
       .map(r => ({ ...r, scheduledSessionId: s.id, sessionTitle: s.title }))
     );
 
-    const ownRolls = allRolls.filter(r => r.rollerUserId === String(user.id));
+    const ownRolls = allRolls.filter(r => String(r.rollerUserId) === String(user.id));
     
     const ownRevisions = allRevisions.filter(r => r.authorUserId === user.id);
 

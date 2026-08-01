@@ -304,8 +304,9 @@ describe('member export field policy (e2e, issue #1680)', () => {
   it('includes user-attributable data (rolls, rsvps, revisions, audit)', async () => {
     // 1. Create a roll
     const roll = await playerAgent
-      .post(`/api/v1/campaigns/${campaignId}/rolls`)
-      .send({ formula: '1d20', source: 'manual' });
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .send({ expr: '1d20' });
+    expect(roll.status).toBe(201);
       
     // 2. Create an RSVP
     const session = await dmAgent
@@ -313,7 +314,8 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .send({ title: 'Export RSVP Test', scheduledAt: new Date().toISOString() });
     await playerAgent
       .put(`/api/v1/campaigns/${campaignId}/scheduling/${session.body.id}/rsvps`)
-      .send({ status: 'yes', note: 'I can make it' });
+      .send({ status: 'yes', note: 'I can make it' })
+      .expect(200);
       
     // 3. Create a revision by editing a note authored by player
     const note = await playerAgent
@@ -321,7 +323,8 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .send({ body: 'Initial note', visibility: 'private' });
     await playerAgent
       .patch(`/api/v1/campaigns/${campaignId}/notes/${note.body.id}`)
-      .send({ body: 'Edited note' });
+      .send({ body: 'Edited note' })
+      .expect(200);
       
     // 4. Export and check
     const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
@@ -343,8 +346,9 @@ describe('member export field policy (e2e, issue #1680)', () => {
     
     // Ensure no other member's data is present
     const otherRoll = await otherPlayerAgent
-      .post(`/api/v1/campaigns/${campaignId}/rolls`)
-      .send({ formula: '2d20', source: 'manual' });
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .send({ expr: '2d20' });
+    expect(otherRoll.status).toBe(201);
     const res2 = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
     expect(res2.body.diceRolls.some((r: any) => r.id === otherRoll.body.id)).toBe(false);
   });
