@@ -660,7 +660,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const createCamp = parseResult(
       await dmClient.callTool({
         name: 'create_campaign',
-        arguments: { name: 'MCP Archmage Table', ruleSystem: 'archmage-srd' },
+        arguments: { name: 'MCP Archmage Table', ruleSystem: 'archmage' },
       }),
     ) as { id: number };
 
