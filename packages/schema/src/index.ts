@@ -7129,6 +7129,11 @@ export const AiGenerationProvenance = z.object({
   sourceHash: z.string().nullable().default(null),
   promptVersion: z.string().max(80),
   promptHash: z.string(),
+  ruleset: z.object({
+    id: z.string(),
+    pack: z.string().nullable().default(null),
+    version: z.string().nullable().default(null),
+  }).optional(),
   consent: z.object({
     campaignPolicy: AiExternalContentPolicy,
     /**

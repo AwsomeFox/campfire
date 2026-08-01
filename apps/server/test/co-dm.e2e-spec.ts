@@ -422,3 +422,60 @@ describe('co-DM authoring — a refused draft is still metered (#598)', () => {
     expect(seat.body.tokensUnknown).toBe(0);
   });
 });
+
+describe('co-DM authoring — adapter vocabulary & ruleset provenance', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'eval-model' });
+    await h.enableExperimental();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('injects correct adapter identity and neutral requirements for non-5e systems', async () => {
+    const campaignId = await h.createCampaign('PF2e Campaign');
+    await request(h.server).put(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: 'pf2e' });
+    await h.configureSeat(campaignId, { model: 'eval-model', instructions: 'Be terse.', tokenBudget: 1_000_000 });
+
+    h.script({ text: JSON.stringify({ name: 'Bob' }) });
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+      .set(dm)
+      .send({ target: 'npc', prompt: 'an npc' });
+    
+    expect(res.status).toBe(201);
+    const req = h.mock.received.at(-1)!;
+    
+    // Test that the prompt injects correct adapter identity
+    expect(req.system).toContain('Pathfinder 2e');
+    // Test that incompatible 5e terms ("Challenge Rating", "spell slots") are absent
+    expect(req.system).not.toContain('Challenge Rating');
+    expect(req.system).not.toContain('spell slots');
+    expect(req.system).not.toContain('D&D');
+
+    // Test that ruleset provenance was stored
+    expect(res.body.proposals[0].payload.name).toBe('Bob');
+    // The proposal response has the attribution embedded directly in the creation record
+    expect(res.body.proposals[0].proposerUserId).toBe(`ai-dm:${campaignId}`);
+  });
+
+  it('asks for assumptions for neutral/homebrew systems', async () => {
+    const campaignId = await h.createCampaign('Neutral Campaign');
+    // default is neutral/empty
+    await h.configureSeat(campaignId, { model: 'eval-model', instructions: 'Be terse.', tokenBudget: 1_000_000 });
+
+    h.script({ text: JSON.stringify({ name: 'Bob' }) });
+    await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+      .set(dm)
+      .send({ target: 'npc', prompt: 'an npc' });
+    
+    const req = h.mock.received.at(-1)!;
+    expect(req.system).toContain('Ask for assumptions before applying mechanics');
+    expect(req.system).toContain('tabletop RPG content');
+    expect(req.system).not.toContain('D&D');
+  });
+});
