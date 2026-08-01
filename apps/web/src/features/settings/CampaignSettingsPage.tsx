@@ -1237,6 +1237,7 @@ function GeneralCard({
 
   return (
     <Card
+      as="div"
       id="campaign-general"
       density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
