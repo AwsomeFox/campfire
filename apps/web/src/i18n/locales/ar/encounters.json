@@ -2,6 +2,8 @@
   "encounters": {
     "title": "المواجهات",
     "generate": "Generate encounter",
+    "quickFight": "Quick fight",
+    "addWholeParty": "Add whole party ({{count}})",
     "newEncounter": "+ New encounter",
     "notFound": "Encounter not found",
     "notFoundDetail": "Encounter not found.",

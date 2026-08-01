@@ -8358,6 +8358,30 @@ function AddCombatantPanel({
     }
   }
 
+  async function addAllFromParty() {
+    const available = characters.filter((c) => !existingCombatantCharacterIds.has(c.id));
+    if (available.length === 0) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await Promise.all(
+        available.map((character) =>
+          api.post(`${API}/encounters/${encounterId}/combatants`, {
+            kind: 'character' as CombatantKind,
+            characterId: character.id,
+            name: character.name,
+            hpMax: character.hpMax,
+          }),
+        ),
+      );
+      await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function addFromParty(character: Character) {
     setSaving(true);
     setError(null);
@@ -8622,31 +8646,45 @@ function AddCombatantPanel({
                 </p>
               );
             }
-            return available.map((c) => (
-              <Card
-                key={c.id}
-                density="compact" elev="sm" as="button"
-                style={{
-                  border: 0,
-                  font: 'inherit',
-                  color: 'var(--color-text)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '8px 12px',
-                  width: '100%',
-                }}
-                disabled={saving}
-                onClick={() => addFromParty(c)}
-              >
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
-                <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
-                  {c.hpCurrent}/{c.hpMax}
-                </span>
-              </Card>
-            ));
+            return (
+              <>
+                <Btn
+                  type="button"
+                  ghost
+                  data-testid="add-whole-party-button"
+                  disabled={saving}
+                  onClick={addAllFromParty}
+                  className="w-full text-xs mb-2"
+                >
+                  {t('encounters.addWholeParty', { count: available.length })}
+                </Btn>
+                {available.map((c) => (
+                  <Card
+                    key={c.id}
+                    density="compact" elev="sm" as="button"
+                    style={{
+                      border: 0,
+                      font: 'inherit',
+                      color: 'var(--color-text)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '8px 12px',
+                      width: '100%',
+                    }}
+                    disabled={saving}
+                    onClick={() => addFromParty(c)}
+                  >
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
+                    <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
+                      {c.hpCurrent}/{c.hpMax}
+                    </span>
+                  </Card>
+                ))}
+              </>
+            );
         })()}
       </div>
 
