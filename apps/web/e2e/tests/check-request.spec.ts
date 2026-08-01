@@ -154,7 +154,7 @@ test.describe('DM check request loop (#415)', () => {
       await panel.getByRole('button', { name: 'Send request' }).click();
 
       // --- Player on /party receives prompt without navigating and rolls ------------------
-      const rollBtn = playerPage.getByRole('button', { name: 'Roll Perception check for Scout Hero' });
+      const rollBtn = playerPage.getByRole('button', { name: /Roll Perception.*for Scout Hero/ });
       await expect(rollBtn).toBeVisible({ timeout: 15_000 });
       await rollBtn.click();
 
@@ -162,7 +162,7 @@ test.describe('DM check request loop (#415)', () => {
       const prompts = playerPage.getByTestId('check-request-prompts');
       await expect(prompts.getByText('You spot a hidden trapdoor.')).toBeVisible();
       await expect(prompts.getByText(/Rolled/)).toBeVisible();
-      await expect(playerPage.getByRole('button', { name: 'Roll Perception check for Scout Hero' })).toHaveCount(0);
+      await expect(playerPage.getByRole('button', { name: /Roll Perception.*for Scout Hero/ })).toHaveCount(0);
 
       // Verify server pending check requests for this campaign is empty
       const pendingRes = await dmApi.get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`);
