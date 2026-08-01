@@ -71,8 +71,8 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     await expect(menu).toBeVisible({ timeout: 5000 });
 
     // Options include Advantage and Disadvantage menuitem buttons
-    await expect(menu.locator('[role="menuitem"]', { hasText: /Advantage/i })).toBeVisible();
-    await expect(menu.locator('[role="menuitem"]', { hasText: /Disadvantage/i })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: /Advantage$/ })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: /Disadvantage/ })).toBeVisible();
   });
 
   test('the shift keyboard shortcut triggers advantage roll', async ({ page }) => {
