@@ -41,6 +41,9 @@ describe('ai-dm stuck ladder — detection (e2e)', () => {
     h = await createAiEvalHarness({ model: 'stuck-model' });
     await h.enableExperimental();
   });
+  beforeEach(() => {
+    h.resetMock();
+  });
   afterAll(async () => {
     await h.close();
   });
@@ -131,6 +134,9 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'stuck-model' });
     await h.enableExperimental();
+  });
+  beforeEach(() => {
+    h.resetMock();
   });
   afterAll(async () => {
     await h.close();
@@ -302,16 +308,16 @@ describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
     const res = await request(h.server).post('/api/v1/rules/packs/upload').set(dm).send(body);
     expect(res.status).toBe(202);
     const jobId = res.body.id as string;
-    const start = Date.now();
-    for (;;) {
+    const maxAttempts = 100;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const jobRes = await request(h.server).get(`/api/v1/rules/packs/install-jobs/${jobId}`).set(dm);
       if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
         expect(jobRes.body.status).toBe('completed');
         return { packId: jobRes.body.pack.id, slug: jobRes.body.pack.slug };
       }
-      if (Date.now() - start > 10_000) throw new Error(`pack upload job did not finish (last ${jobRes.body.status})`);
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 20));
     }
+    throw new Error(`uploadPack timed out waiting for job ${jobId}`);
   }
 
   // Two distinct packs that share an entry NAME ("Fireball") but live under different

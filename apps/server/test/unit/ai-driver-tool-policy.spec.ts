@@ -2,8 +2,11 @@ import {
   checkDriverPolicyRateLimits,
   DRIVER_AFTERMATH_WINDOW_MS,
   DRIVER_CONFIRM_TOOL_ATTEMPTS_PER_TURN,
+  DRIVER_FORBIDDEN_PREFIXES,
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
   DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
+  DRIVER_UNDOABLE_TOOLS,
+  isDriverForbiddenToolName,
   isWithinAftermathWindow,
   resolveDriverSessionProfile,
   resolveDriverToolPolicy,
@@ -342,5 +345,108 @@ describe('driver-tool-policy (#474)', () => {
       const secondPending = Object.values(session.pendingToolConfirmations).find((e: any) => e.id === confirmationId) ?? null;
       expect(secondPending).toBeNull();
     });
+  describe('#1500 tool-policy unit coverage gaps: default-deny, delete_ branch, prep overrides, undoable, and precedence', () => {
+    it('isDriverForbiddenToolName detects delete_ prefix hard deletes', () => {
+      expect(DRIVER_FORBIDDEN_PREFIXES).toContain('delete_');
+      expect(isDriverForbiddenToolName('delete_campaign')).toBe(true);
+      expect(isDriverForbiddenToolName('delete_character')).toBe(true);
+      expect(isDriverForbiddenToolName('update_character')).toBe(false);
+    });
+
+    it('denies delete_ prefixed tools regardless of profile or allowlist', () => {
+      for (const profile of ['prep', 'live', 'aftermath', 'downtime'] as const) {
+        const decision = resolveDriverToolPolicy({
+          profile,
+          tool: writeTool('delete_encounter'),
+          onLivePlayAllowList: true,
+        });
+        expect(decision).toEqual({
+          policy: 'deny',
+          profile,
+          offer: false,
+          reason: 'Hard deletes are never permitted.',
+          undoable: false,
+        });
+      }
+    });
+
+    it('returns policy auto for non-mutating tools', () => {
+      const decision = resolveDriverToolPolicy({
+        profile: 'live',
+        tool: { name: 'get_character', mutating: false, proposalCapable: false },
+        onLivePlayAllowList: false,
+      });
+      expect(decision).toEqual({
+        policy: 'auto',
+        profile: 'live',
+        offer: true,
+        undoable: false,
+      });
+    });
+
+    it('falls through to default-deny for mutating non-proposal-capable tools not on the live-play allowlist', () => {
+      const decision = resolveDriverToolPolicy({
+        profile: 'live',
+        tool: writeTool('unlisted_direct_write'),
+        onLivePlayAllowList: false,
+      });
+      expect(decision).toEqual({
+        policy: 'deny',
+        profile: 'live',
+        offer: false,
+        reason: 'Not on the live-play allow-list.',
+        undoable: false,
+      });
+    });
+
+    it('asserts the prep profile overrides table', () => {
+      const prepCases: Array<{ tool: string; expectedPolicy: string }> = [
+        { tool: 'remove_combatant', expectedPolicy: 'auto' },
+        { tool: 'end_encounter', expectedPolicy: 'deny' },
+        { tool: 'begin_encounter', expectedPolicy: 'confirm' },
+        { tool: 'award_xp', expectedPolicy: 'confirm' },
+        { tool: 'level_up_character', expectedPolicy: 'confirm' },
+        { tool: 'add_note', expectedPolicy: 'auto' },
+        { tool: 'adjust_treasury', expectedPolicy: 'confirm' },
+        { tool: 'add_inventory_item', expectedPolicy: 'confirm' },
+        { tool: 'update_inventory_item', expectedPolicy: 'confirm' },
+      ];
+      for (const { tool, expectedPolicy } of prepCases) {
+        const decision = resolveDriverToolPolicy({
+          profile: 'prep',
+          tool: writeTool(tool),
+          onLivePlayAllowList: true,
+        });
+        expect(decision.policy).toBe(expectedPolicy);
+      }
+    });
+
+    it('sets undoable flag for DRIVER_UNDOABLE_TOOLS', () => {
+      for (const toolName of DRIVER_UNDOABLE_TOOLS) {
+        const decision = resolveDriverToolPolicy({
+          profile: 'live',
+          tool: writeTool(toolName),
+          onLivePlayAllowList: true,
+        });
+        expect(decision.undoable).toBe(true);
+      }
+
+      const nonUndoable = resolveDriverToolPolicy({
+        profile: 'live',
+        tool: writeTool('add_note'),
+        onLivePlayAllowList: true,
+      });
+      expect(nonUndoable.undoable).toBe(false);
+    });
+
+    it('precedence order: profile overrides take precedence over proposalCapable and live-play allowlist', () => {
+      const decision = resolveDriverToolPolicy({
+        profile: 'aftermath',
+        tool: writeTool('award_xp', true),
+        onLivePlayAllowList: true,
+      });
+      expect(decision.policy).toBe('auto');
+    });
   });
+});
 });

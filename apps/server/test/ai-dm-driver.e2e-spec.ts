@@ -856,12 +856,15 @@ describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'driver-idle-model' });
     await h.enableExperimental();
-    // Shrink the watchdog so the e2e does not wait the production 30s.
-    setDriverStreamIdleTimeoutMsForTests(50);
   });
 
   beforeEach(() => {
     h.resetMock();
+    setDriverStreamIdleTimeoutMsForTests(500);
+  });
+
+  afterEach(() => {
+    setDriverStreamIdleTimeoutMsForTests(DEFAULT_IDLE_TIMEOUT_MS);
   });
 
   afterAll(async () => {
