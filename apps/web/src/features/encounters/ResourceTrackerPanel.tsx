@@ -35,7 +35,7 @@ export function ResourceTrackerPanel({
   combatants: Combatant[];
   canDmWrite: boolean;
 }) {
-  const { t } = useTranslation();
+  useTranslation();
   const [busy, setBusy] = useState(false);
 
   const applyRest = async (kind: 'short' | 'long' | 'custom', customKeys?: string[]) => {
