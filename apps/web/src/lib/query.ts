@@ -18,7 +18,7 @@
  * only owns caching, dedupe, polling, and optimistic writes on top of it.
  */
 import { QueryClient, useQuery, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
-import type { AiDmSeat, AiDmToolConfirmation, TableSafetyHold } from '@campfire/schema';
+import type { AiDmSeat, AiDmToolConfirmation, DriverLastUndoableCommit, TableSafetyHold } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 
 /**
@@ -144,6 +144,9 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
+// `DriverLastUndoableCommit` (the seat's last reversible action, #1501) is shared from
+// `@campfire/schema` above — the server and web import the single definition so they cannot drift.
+
 /**
  * The thin server-truth session state (GET /campaigns/:id/ai-dm/session), mirroring the
  * server's `AiDmSessionState`. Deliberately lightweight: the running transcript is
@@ -171,6 +174,8 @@ export interface AiDmSession {
    * retention pruning immediately. Optional: a server predating #1038 simply omits it.
    */
   historyLength?: number;
+  /** The seat's last reversible action commit (#1501), or null when there is nothing to undo. */
+  lastUndoableCommit?: DriverLastUndoableCommit | null;
 }
 
 /**
