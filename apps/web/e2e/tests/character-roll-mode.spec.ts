@@ -57,22 +57,22 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    // Wait for the saving throws card to render (uses data-testid)
+    // Wait for the saving throws card to render (uses data-testid on the Card)
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
     await expect(savesCard).toBeVisible({ timeout: 20000 });
 
-    // Find the first RollContextMenu button inside the saves card
-    const rollBtn = savesCard.locator('[role="button"], button').first();
+    // The first button inside saves card is a RollContextMenu button
+    const rollBtn = savesCard.locator('button').first();
     await expect(rollBtn).toBeVisible();
 
-    // Right-click opens the context menu
+    // Right-click opens the context menu (portalled to body with role="menu")
     await rollBtn.click({ button: 'right' });
     const menu = page.locator('[role="menu"]');
     await expect(menu).toBeVisible();
 
-    // Options for Advantage, Disadvantage
-    await expect(menu.getByText(/advantage/i)).toBeVisible();
-    await expect(menu.getByText(/disadvantage/i)).toBeVisible();
+    // Options include Advantage and Disadvantage menuitem buttons
+    await expect(menu.locator('[role="menuitem"]', { hasText: /Advantage/i })).toBeVisible();
+    await expect(menu.locator('[role="menuitem"]', { hasText: /Disadvantage/i })).toBeVisible();
   });
 
   test('the shift keyboard shortcut triggers advantage roll', async ({ page }) => {
@@ -82,7 +82,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const savesCard = page.locator('[data-testid="character-saving-throws"]');
     await expect(savesCard).toBeVisible({ timeout: 20000 });
 
-    const rollBtn = savesCard.locator('[role="button"], button').first();
+    const rollBtn = savesCard.locator('button').first();
     await expect(rollBtn).toBeVisible();
 
     const [rollRequest] = await Promise.all([

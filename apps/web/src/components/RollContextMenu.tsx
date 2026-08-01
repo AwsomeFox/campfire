@@ -92,6 +92,7 @@ export function RollContextMenu({ children, onRoll, className, disabled, onClick
       {menuPos && createPortal(
         <div
           className="cf-popover"
+          role="menu"
           style={{
             position: 'fixed',
             left: menuPos.x,
@@ -109,16 +110,16 @@ export function RollContextMenu({ children, onRoll, className, disabled, onClick
           }}
           onPointerDown={(e) => e.stopPropagation()} // prevent closing immediately
         >
-          <button type="button" className="cf-menu-item" onClick={() => { onRoll('normal'); closeMenu(); }}>
+          <button type="button" role="menuitem" className="cf-menu-item" onClick={() => { onRoll('normal'); closeMenu(); }}>
             🎲 Normal
           </button>
-          <button type="button" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
+          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
             ✅ Advantage
           </button>
-          <button type="button" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
+          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
             ❌ Disadvantage
           </button>
-          <button type="button" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
+          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
             💥 Critical Hit
           </button>
         </div>,
