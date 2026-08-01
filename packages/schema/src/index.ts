@@ -9096,6 +9096,8 @@ export const MapPing = z.object({
   y: z.number().min(0).max(100),
   color: z.string().max(24).nullable().default(null),
   label: z.string().max(40).nullable().default(null),
+  senderId: z.string().nullable().default(null),
+  senderName: z.string().nullable().default(null),
 });
 export type MapPing = z.infer<typeof MapPing>;
 

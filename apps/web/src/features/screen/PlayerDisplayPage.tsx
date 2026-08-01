@@ -261,7 +261,7 @@ export default function PlayerDisplayPage() {
    * paging deterministically. */
   const [sceneTick, setSceneTick] = useState(0);
   /** Transient battle-map pings mirrored from the live encounter (issue #484). */
-  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
   const mapPingSeq = useRef(0);
   const fullscreenActiveRef = useRef(isFullscreen);
   /** A popup gets one best-effort fullscreen request. Browser activation rules
@@ -352,10 +352,22 @@ export default function PlayerDisplayPage() {
 
   const addMapPing = useCallback((ping: MapPing) => {
     const key = ++mapPingSeq.current;
-    setMapPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
+    if (ping.senderName) {
+      announce(`${ping.senderName} pinged the map`);
+    } else {
+      announce('A map ping arrived');
+    }
+    setMapPings((prev) => {
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      return next.slice(-10);
+    });
     window.setTimeout(() => {
       setMapPings((prev) => prev.filter((p) => p.key !== key));
-    }, 2_400);
+    }, 10000);
+  }, [announce]);
+
+  const dismissMapPing = useCallback((key: number) => {
+    setMapPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
 
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
@@ -1104,6 +1116,7 @@ export default function PlayerDisplayPage() {
               onSetAoe={() => {}}
               onPing={() => {}}
               pings={mapPings}
+              onDismissPing={dismissMapPing}
               onError={() => {}}
               ruleSystem={summary.campaign.ruleSystem ?? null}
             />

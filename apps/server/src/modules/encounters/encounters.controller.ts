@@ -436,7 +436,7 @@ export class EncountersController {
     // enforced inside pingMap itself, AFTER the hidden check, so hidden stays 404 for
     // everyone non-DM while a merely-visible encounter now correctly 403s a viewer.
     const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
-    this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
+    this.encounters.pingMap(id, row.campaignId, { ...body, senderId: user.id, senderName: user.name }, role, row.hidden);
     return { ok: true };
   }
 
