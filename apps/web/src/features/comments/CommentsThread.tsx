@@ -511,6 +511,11 @@ function CommentCard({
       )}
       {!editing && (
         <div className="flex gap-3 text-xs">
+          {onReply && (
+            <button onClick={onReply} className="text-secondary hover:text-[var(--color-neutral-300)]">
+              Reply
+            </button>
+          )}
           {comment.deletedAt !== null ? (
             canModerate && (
               <button
@@ -523,11 +528,6 @@ function CommentCard({
             )
           ) : (
             <>
-              {onReply && (
-                <button onClick={onReply} className="text-secondary hover:text-[var(--color-neutral-300)]">
-                  Reply
-                </button>
-              )}
               {canModerate && (
                 <button
                   onClick={() => {
