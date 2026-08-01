@@ -325,10 +325,10 @@ export function CharacterStatCard({
                             onClick={(e) => void roller.roll(toHitExpr(a.toHit, advFromEvent(e))!, `${character.name} · ${a.name} to hit`)}
                             data-testid="attack-roll-control"
                           >
-                            {a.toHit} to hit
+                            🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}
                           </button>
                         ) : (
-                          <span className="text-muted">{a.toHit} to hit</span>
+                          <span className="text-muted">🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}</span>
                         ))}
                       {a.damage &&
                         (canRollDmg ? (
@@ -344,10 +344,10 @@ export function CharacterStatCard({
                             }
                             data-testid="damage-roll-control"
                           >
-                            {a.damage}
+                            💥 {a.damage}
                           </button>
                         ) : (
-                          <span className="text-muted">{a.damage}</span>
+                          <span className="text-muted">💥 {a.damage}</span>
                         ))}
                       {canUse && (
                         <button

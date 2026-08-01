@@ -7672,6 +7672,8 @@ function CombatantRow({
           <CombatantActionsList
             encounterId={encounterId}
             combatantId={combatant.id}
+            combatantName={combatant.name}
+            campaignId={campaignId}
             enabled
             disabledReason={syncBlockedReason}
             onUseAction={onUseMonsterAction}
