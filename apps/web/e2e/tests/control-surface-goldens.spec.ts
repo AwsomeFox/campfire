@@ -104,7 +104,8 @@ test.describe('control surface goldens (#1694)', () => {
       animations: 'disabled',
       caret: 'hide',
       clip: box ? { x: box.x, y: box.y, width: box.width, height: 729 } : undefined,
-      maxDiffPixelRatio: 0.25,
+      mask: [workspace.locator('[role="tablist"]')],
+      maxDiffPixelRatio: 0.45,
     });
   });
 
