@@ -36,6 +36,8 @@ export const campaigns = sqliteTable('campaigns', {
   // for external AI generation. Paired with campaignMembers.aiExternalUseConsent.
   aiExternalContentPolicy: text('ai_external_content_policy').notNull().default('member_consent'),
   sessionCount: integer('session_count').notNull().default(0),
+  // Issue #841: highest canonical session number (MAX of live session numbers), not the recap count.
+  latestSessionNumber: integer('latest_session_number').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),

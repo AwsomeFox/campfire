@@ -2701,8 +2701,8 @@ export class McpToolsService {
       server,
       user,
       'delete_session',
-      'Delete a session recap (DM). The campaign\'s denormalized sessionCount is recomputed. With propose:true any ' +
-        'member may submit the deletion as a pending proposal for a dm to approve instead.',
+      'Delete a session recap (DM). The campaign\'s denormalized sessionCount and latestSessionNumber are recomputed. ' +
+        'With propose:true any member may submit the deletion as a pending proposal for a dm to approve instead.',
       { sessionId: Id.describe('Session id — from get_session_recaps'), propose: ProposeArg },
       async ({ sessionId, propose }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
@@ -3468,8 +3468,8 @@ export class McpToolsService {
       user,
       'update_campaign_status',
       'DM only: update campaign state — status (active|paused|completed), current location, and/or danger level. ' +
-        '(sessionCount is intentionally NOT settable here — it\'s a denormalized count auto-recomputed by ' +
-        'add_session_recap/session delete, not a free-form field.)',
+        '(sessionCount and latestSessionNumber are intentionally NOT settable here — they\'re denormalized ' +
+        'stats auto-recomputed by add_session_recap/session delete/restore, not free-form fields.)',
       {
         campaignId: CampaignIdArg,
         status: z.enum(['active', 'paused', 'completed']).optional().describe('Campaign status'),
@@ -3498,8 +3498,8 @@ export class McpToolsService {
       'DM only: general campaign update — name, description, ruleSystem (the installed rule-pack slug this campaign ' +
         'uses, or "" for none/homebrew), mapAttachmentId (a map attachment id, or null to clear), and/or the same ' +
         'status/currentLocationId/dangerLevel that update_campaign_status covers. On a paused/completed (archived, ' +
-        'read-only) campaign only `status` may be changed — un-archive first to edit anything else. (sessionCount and ' +
-        'storageQuotaBytes are intentionally NOT settable here.)',
+        'read-only) campaign only `status` may be changed — un-archive first to edit anything else. (sessionCount, ' +
+        'latestSessionNumber, and storageQuotaBytes are intentionally NOT settable here.)',
       { campaignId: CampaignIdArg, ...CampaignUpdate.shape },
       async ({ campaignId, ...fields }) => {
         // allowArchived: CampaignsService.update() itself restricts an archived campaign to a

@@ -1004,6 +1004,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const campRes = await dmAgent.get(`/api/v1/campaigns/${dupCampaignId}`);
     expect(campRes.body.sessionCount).toBe(1);
+    expect(campRes.body.latestSessionNumber).toBe(1);
 
     // A genuinely different recap with no number still appends a new session (number 2).
     const distinct = await dmClient.callTool({

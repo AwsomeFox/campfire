@@ -174,6 +174,9 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(imported.publicRecapSharingEnabled).toBe(false);
     // Attachments aren't recreated from a JSON export.
     expect(imported.mapAttachmentId).toBeNull();
+    // Issue #841: imported campaign's denormalized session stats are recomputed from live rows.
+    expect(imported.sessionCount).toBe(1);
+    expect(imported.latestSessionNumber).toBe(1);
 
     // Locations: both copied, nesting parentId remapped, no id collision with source.
     const locs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/locations`);
@@ -362,6 +365,32 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     const firstQuests = await dmAgent.get(`/api/v1/campaigns/${first.body.id}/quests`);
     const secondQuests = await dmAgent.get(`/api/v1/campaigns/${second.body.id}/quests`);
     expect(firstQuests.body[0].id).not.toBe(secondQuests.body[0].id);
+  });
+
+  it('imports a publish-shaped document as a pristine module with zeroed session stats', async () => {
+    // The publish profile sets sessionCount/latestSessionNumber to 0 and strips
+    // session played state. Re-import should keep those pristine values instead
+    // of recomputing them from the session rows (#841).
+    const publishDoc = JSON.parse(JSON.stringify(exportDoc)) as Record<string, unknown>;
+    const campaign = publishDoc.campaign as Record<string, unknown>;
+    campaign.sessionCount = 0;
+    campaign.latestSessionNumber = 0;
+    publishDoc.sessions = (publishDoc.sessions as Array<Record<string, unknown>>).map((s) => ({
+      number: s.number,
+      title: s.title,
+    }));
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(publishDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    expect(imported.sessionCount).toBe(0);
+    expect(imported.latestSessionNumber).toBe(0);
+
+    // The planned session row still travels so the module is playable; only the
+    // denormalized position stays reset.
+    const sessions = await dmAgent.get(`/api/v1/campaigns/${imported.id}/sessions`);
+    expect(sessions.body.length).toBe(1);
+    expect(sessions.body[0].number).toBe(1);
   });
 
   it('accepts a name override', async () => {

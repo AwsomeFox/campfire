@@ -107,7 +107,7 @@ describe('allowlist projection (#586)', () => {
   /** A raw payload shaped like buildExport's output, with a column nobody allowlisted. */
   function rawPayload() {
     return {
-      campaign: { id: 1, name: 'Deep Halls', description: 'x', status: 'active', dangerLevel: 'low', sessionCount: 4, icsToken: 'cf_ics_secret', storageQuotaBytes: 99, futureColumn: 'LEAK' },
+      campaign: { id: 1, name: 'Deep Halls', description: 'x', status: 'active', dangerLevel: 'low', sessionCount: 4, latestSessionNumber: 4, icsToken: 'cf_ics_secret', storageQuotaBytes: 99, futureColumn: 'LEAK' },
       quests: [{ id: 1, campaignId: 1, title: 'Q', body: 'b', status: 'completed', dmSecret: 'S', hidden: true, objectives: [{ id: 1, questId: 1, text: 'o', done: true, sortOrder: 0 }], futureColumn: 'LEAK' }],
       npcs: [], locations: [], factions: [], timelineEvents: [], storyArcs: [], encounters: [],
       sessions: [{ id: 1, campaignId: 1, number: 1, title: 'One', recap: 'R', playedAt: '2026-01-01', dmSecret: 'S' }],
@@ -185,6 +185,7 @@ describe('allowlist projection (#586)', () => {
     expect(quest.status).toBe('available');
     const campaign = out.data.campaign as Record<string, unknown>;
     expect(campaign.sessionCount).toBe(0);
+    expect(campaign.latestSessionNumber).toBe(0);
     const character = (out.data.characters as Array<Record<string, unknown>>)[0];
     expect(character.xp).toBe(0);
     expect(character.hpCurrent).toBe(20); // reset to hpMax, not left undefined

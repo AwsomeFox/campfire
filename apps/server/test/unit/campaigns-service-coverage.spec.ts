@@ -53,7 +53,10 @@ describe('CampaignsService unit coverage tests', () => {
       listForCampaign: jest.fn().mockResolvedValue([]),
       partyRosterForCampaign: jest.fn().mockResolvedValue([]),
     } as unknown as CharactersService;
-    const dummySessions = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as SessionsService;
+    const dummySessions = {
+      listForCampaign: jest.fn().mockResolvedValue([]),
+      recomputeSessionStatsInTx: jest.fn(),
+    } as unknown as SessionsService;
     const dummyScheduling = {
       nextSession: jest.fn().mockResolvedValue(null),
       currentAndNextForCampaign: jest.fn().mockResolvedValue({ current: null, next: null }),

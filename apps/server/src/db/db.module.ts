@@ -2982,6 +2982,39 @@ function migrateCampaignsTableForNarrationLanguage(sqlite: Database.Database): v
 }
 
 /**
+ * Issue #841: campaign position needs the highest canonical session number, not the
+ * recap COUNT(*). Existing rows get a one-time backfill from live (non-trashed) sessions.
+ */
+function migrateCampaignsTableForLatestSessionNumber(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'latest_session_number')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN latest_session_number INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Backfill is idempotent (only rows at the default 0), so re-run it even if the
+  // column was already added — a previous interrupted run may have added the column
+  // but not yet reached the UPDATE.
+  sqlite.exec(`
+    UPDATE campaigns
+    SET latest_session_number = COALESCE(
+      (
+        SELECT MAX(s.number)
+        FROM sessions s
+        WHERE s.campaign_id = campaigns.id
+          AND s.deleted_at IS NULL
+      ),
+      0
+    )
+    WHERE latest_session_number = 0
+  `);
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
@@ -4938,6 +4971,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0152_inventory_items_equip_1326', run: migrateInventoryItemsEquip1326 },
   { name: '0153_ai_driver_aftermath_grant_window_1781', run: migrateAiDriverAftermathGrantWindow1781 },
   { name: '0156_ai_scribe_jobs_dedupe_1530', run: migrateAiScribeDedupeIndex1530 },
+  // #841: campaign position needs the highest canonical session number, not the recap COUNT(*).
+  { name: '0157_campaigns_latest_session_number_841', run: migrateCampaignsTableForLatestSessionNumber },
 ];
 
 /**

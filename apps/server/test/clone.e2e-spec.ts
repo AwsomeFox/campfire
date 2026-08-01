@@ -210,6 +210,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clone.name).toBe('Origin Campaign (copy)');
       expect(clone.description).toBe('The one true prep.');
       expect(clone.sessionCount).toBe(1);
+      expect(clone.latestSessionNumber).toBe(1);
       expect(clone.mapAttachmentId).toBeNull();
       expect(clone.publicRecapSharingEnabled).toBe(true);
 
@@ -530,6 +531,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const clone = res.body;
     expect(clone.name).toBe('Fresh Start');
     expect(clone.sessionCount).toBe(0);
+    expect(clone.latestSessionNumber).toBe(0);
     expect(clone.status).toBe('active');
     expect(clone.currentLocationId).toBeNull();
 

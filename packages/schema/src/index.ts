@@ -228,6 +228,10 @@ export const Campaign = z.object({
   // enabled, each member must separately opt in on their own membership row.
   aiExternalContentPolicy: AiExternalContentPolicy.default('member_consent'),
   sessionCount: z.number().int().nonnegative().default(0),
+  // Issue #841: highest canonical session number among live recaps, distinct from the
+  // COUNT(*) in sessionCount, so cards can show "Session 12" without treating 3 recaps
+  // (after gaps or deletes) as the current session number. Denormalized and recomputed.
+  latestSessionNumber: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
   // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
@@ -244,7 +248,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.

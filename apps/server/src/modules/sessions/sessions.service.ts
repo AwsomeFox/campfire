@@ -350,16 +350,55 @@ export class SessionsService {
   }
 
   /**
-   * campaign.sessionCount is a denormalized COUNT(*) of this campaign's sessions —
-   * recomputed (never bumped/guessed) on every create/delete so it stays accurate
-   * regardless of session numbering (which may have gaps or be renumbered) or deletes
-   * (which previously never decremented it at all).
+   * Recompute denormalized campaign session stats from live (non-trashed) rows:
+   *  - sessionCount         = COUNT(*) of recaps
+   *  - latestSessionNumber  = MAX(number), or 0 when empty
+   *
+   * Kept separate so UI can show campaign position ("Session 12") without mistaking
+   * the recap COUNT for the current session number when numbering has gaps (#841).
+   * Recomputed (never bumped/guessed) on create/delete/restore/renumber. Public so
+   * clone/import can re-sync after bulk inserts.
    */
-  private async recomputeSessionCount(campaignId: number): Promise<void> {
-    // Trashed sessions (soft-deleted, #116) don't count toward the campaign's session
-    // tally — the count reflects live sessions only, and rises again on restore.
-    const rows = await this.db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
-    await this.db.update(campaigns).set({ sessionCount: rows.length, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+  async recomputeSessionStats(campaignId: number): Promise<void> {
+    const [stats] = await this.db
+      .select({
+        count: sql<number>`count(*)`,
+        latest: sql<number>`coalesce(max(${sessions.number}), 0)`,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
+    await this.db
+      .update(campaigns)
+      .set({
+        sessionCount: Number(stats.count),
+        latestSessionNumber: Number(stats.latest),
+        updatedAt: nowIso(),
+      })
+      .where(eq(campaigns.id, campaignId));
+  }
+
+  /**
+   * Synchronous, transaction-scoped variant used by clone/import so the denormalized
+   * stats are committed atomically with the copied sessions (#841).
+   */
+  recomputeSessionStatsInTx(tx: DrizzleDb, campaignId: number): void {
+    const [stats] = tx
+      .select({
+        count: sql<number>`count(*)`,
+        latest: sql<number>`coalesce(max(${sessions.number}), 0)`,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+      .all();
+    tx
+      .update(campaigns)
+      .set({
+        sessionCount: Number(stats.count),
+        latestSessionNumber: Number(stats.latest),
+        updatedAt: nowIso(),
+      })
+      .where(eq(campaigns.id, campaignId))
+      .run();
   }
 
   /**
@@ -480,7 +519,7 @@ export class SessionsService {
       return redactSecret(toDomain(row), role);
     }
 
-    await this.recomputeSessionCount(campaignId);
+    await this.recomputeSessionStats(campaignId);
 
     // Open the initial prose tip so the first overwrite attributes this version to
     // the creator rather than inventing legacy "Replaced by…" authorship (#813).
@@ -620,6 +659,13 @@ export class SessionsService {
     });
     const row = written.row;
 
+    // Renumbering changes latestSessionNumber without changing sessionCount (#841).
+    // Recompute immediately after the write transaction, before audit/notifications,
+    // so a failure in the async side-effects never leaves the campaign denormalized.
+    if (input.number !== undefined && input.number !== existing.number) {
+      await this.recomputeSessionStats(existing.campaignId);
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -677,7 +723,7 @@ export class SessionsService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.update(sessions).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(sessions.id, id));
-    await this.recomputeSessionCount(existing.campaignId);
+    await this.recomputeSessionStats(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -713,7 +759,7 @@ export class SessionsService {
         .returning()
         .all()[0];
     });
-    await this.recomputeSessionCount(existing.campaignId);
+    await this.recomputeSessionStats(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

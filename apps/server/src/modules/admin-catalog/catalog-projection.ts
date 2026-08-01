@@ -43,6 +43,9 @@ import { campaigns } from '../../db/schema';
  *    `public_recap_sharing_enabled` — table-play preferences. Not needed to locate or
  *    administer a campaign, so not disclosed. If a future operator workflow genuinely
  *    needs one, adding it here is a one-line, reviewable change.
+ *  - `latest_session_number` — a denormalized session-position statistic.
+ *    `session_count` is the operational summary; the highest live session number is not
+ *    needed to locate or administer a campaign in the catalog.
  */
 export const CATALOG_CAMPAIGN_COLUMNS = {
   id: campaigns.id,

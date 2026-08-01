@@ -281,7 +281,7 @@ export const DM_SECRET_FIELDS = {
 
 /** Fields merged in only when the policy allows played state. */
 export const PLAYED_STATE_FIELDS = {
-  campaign: ['sessionCount'],
+  campaign: ['sessionCount', 'latestSessionNumber'],
   quest: ['status'],
   location: ['status'],
   session: ['playedAt', 'recap'],
@@ -312,7 +312,7 @@ export const PLAYER_CONTENT_FIELDS = {
  * half-played or shape-broken).
  */
 export const PRISTINE_STATE: Record<string, Record<string, unknown>> = {
-  campaign: { sessionCount: 0 },
+  campaign: { sessionCount: 0, latestSessionNumber: 0 },
   quest: { status: 'available' },
   location: { status: 'unexplored' },
   encounter: { status: 'preparing', round: 0, turnIndex: 0, currentCombatantId: null, turnPhase: 'combatant', escalationDie: 0, endedAt: null },
