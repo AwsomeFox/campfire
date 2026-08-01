@@ -1139,7 +1139,9 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--cf-density-comfortable-card-radius);
 }
 /* Media / split tiles that paint their own inner padding (issue #674). */
-.cf-card.cf-card-flush {
+.cf-card.cf-card-flush,
+.card.cf-card-flush,
+.card-flush {
   padding: 0;
 }
 /* Nocturne .card aliases the compact density shell (issue #674). */
