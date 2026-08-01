@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ActionSpec } from '@campfire/schema';
 import { api, API } from '../../lib/api';
@@ -84,6 +85,7 @@ export function QuickRollButtons({
   disabledReason,
   className = '',
 }: QuickRollButtonsProps) {
+  useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const { showRoll } = useRollResultToast();
