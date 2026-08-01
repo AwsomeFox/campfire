@@ -274,7 +274,8 @@ test.describe('issue #822 — invite QR code card', () => {
     await expect(qrCard).toBeVisible();
     await expect(qrCard).toBeInViewport();
 
-    // QR canvas visible
+    // QR canvas visible (scroll into view so the tall card doesn't leave it
+    // off-screen on narrow mobile viewports — see #1844)
     const qrCanvas = qrCard.locator('canvas[role="img"]');
     await expect(qrCanvas).toBeVisible();
     await qrCanvas.scrollIntoViewIfNeeded();
