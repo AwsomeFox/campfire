@@ -134,9 +134,9 @@ test.describe('encounter death saves (#1465)', () => {
       const playerUserId = mePlayer.user.id;
 
       // Open Legend has no 5e-style death saves
-      const campaign = await (
-        await dmCtx.post('/api/v1/campaigns', { data: { name: 'E2E — Open Legend', ruleSystem: 'open-legend' } })
-      ).json();
+      const campRes = await dmCtx.post('/api/v1/campaigns', { data: { name: 'E2E — Open Legend', ruleSystem: 'open-legend' } });
+      expect(campRes.ok()).toBe(true);
+      const campaign = await campRes.json();
       campaignId = campaign.id;
 
       await dmCtx.post(`/api/v1/campaigns/${campaignId}/members`, {

@@ -246,6 +246,26 @@ export default async function globalSetup(config: FullConfig) {
   });
   await waitForInstall(admin, archmagePackUpload.id);
 
+  const openLegendPackUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
+    source: 'upload',
+    pack: {
+      slug: 'open-legend',
+      name: 'Open Legend Fixtures',
+      version: '1',
+      license: 'CC0',
+    },
+    entries: [
+      {
+        slug: 'open-legend-fixture',
+        name: 'Open Legend Fixture Monster',
+        type: 'monster',
+        summary: 'Open Legend Monster',
+        dataJson: JSON.stringify({ name: 'Open Legend Fixture Monster', hpMax: 20 }),
+      },
+    ],
+  });
+  await waitForInstall(admin, openLegendPackUpload.id);
+
   // --- DM builds the campaign + memberships + fixtures -------------------------
   const dm = await loginContext(baseURL, 'dm');
   const campaign = await okJson(dm, 'post', '/api/v1/campaigns', {
