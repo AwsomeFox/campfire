@@ -5,7 +5,7 @@
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
