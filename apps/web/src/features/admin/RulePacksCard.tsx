@@ -173,6 +173,13 @@ export function RulePacksCard() {
         onError={setError}
       />
 
+      <RulePackUploadPanel
+        onInstalled={() => {
+          void load();
+        }}
+        onError={setError}
+      />
+
       <p className="text-[11px] text-secondary">
         Rule packs are server-wide (not per-campaign) and readable by any signed-in user. Installing or removing a
         pack here affects every campaign that has it selected as its rule system. Usage counts are server-wide
@@ -492,6 +499,97 @@ function InstallPanel({
       <div className="flex justify-end">
         <Btn density="xs" className="text-xs" onClick={install} disabled={!canSubmit}>
           {installing ? 'Installing…' : hasExistingPack ? 'Add sections' : 'Install pack'}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+function RulePackUploadPanel({
+  onInstalled,
+  onError,
+}: {
+  onInstalled: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [jsonText, setJsonText] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      if (typeof evt.target?.result === 'string') {
+        setJsonText(evt.target.result);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const uploadPack = async () => {
+    if (!jsonText.trim()) return;
+    setUploading(true);
+    setDone(null);
+    setUploadError(null);
+    onError(null);
+    try {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonText);
+      } catch {
+        setUploadError('Invalid JSON format. Please check your uploaded file or JSON text.');
+        setUploading(false);
+        return;
+      }
+
+      const enqueued = await api.post<RulePackInstallJob>(`${API}/rules/packs/upload`, parsed);
+      const job = await pollInstallJob(enqueued.id, () => {});
+      if (job.status === 'failed') {
+        setUploadError(job.error ?? 'Upload failed.');
+        return;
+      }
+      setDone(`Successfully uploaded rule pack "${job.pack?.name ?? 'Pack'}".`);
+      onInstalled();
+    } catch (err) {
+      setUploadError(translateApiError(err, t, { fallbackKey: 'admin.errors.installPack' }));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="cf-inset border-indigo-500/30 p-3.5 space-y-2.5 mt-3">
+      <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">
+        Upload Custom Rule Pack (JSON)
+      </p>
+      <p className="text-[11px] text-slate-400">
+        Upload a custom rule pack JSON file. Must contain a pack header (name, slug, version, license) and an array of entries. Content must carry a recognized open license or self-authored license.
+      </p>
+      <div className="flex flex-col gap-2">
+        <input
+          type="file"
+          accept=".json,application/json"
+          onChange={handleFile}
+          disabled={uploading}
+          className="text-xs text-slate-300"
+        />
+        <textarea
+          className="cf-input text-xs font-mono min-h-[80px]"
+          placeholder="Paste rule pack JSON here…"
+          value={jsonText}
+          onChange={(e) => setJsonText(e.target.value)}
+          disabled={uploading}
+        />
+      </div>
+      {uploadError && <p className="text-[11px] text-rose-400">{uploadError}</p>}
+      {done && <p className="text-[11px] text-emerald-400">{done}</p>}
+      <div className="flex justify-end">
+        <Btn density="xs" className="text-xs" onClick={uploadPack} disabled={uploading || !jsonText.trim()}>
+          {uploading ? 'Uploading…' : 'Upload pack'}
         </Btn>
       </div>
     </div>

@@ -95,6 +95,29 @@ export default function ReaderPage() {
   async function duplicateHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function archiveHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function showRevisions() { if (!entry) return; setActing(true); setActionError(null); try { setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
+  async function copyToLibrary() {
+    if (!entry) return;
+    setActing(true);
+    setActionError(null);
+    try {
+      let statblockObj: Record<string, unknown> = {};
+      try {
+        statblockObj = JSON.parse(entry.dataJson || '{}');
+      } catch {
+        statblockObj = { name: entry.name };
+      }
+      await api.post(`${API}/campaigns/${id}/library/monsters`, {
+        name: entry.name,
+        statblock: statblockObj,
+        sourceRuleEntryId: entry.id,
+      });
+      navigate(`/c/${id}/compendium`);
+    } catch (err) {
+      setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' }));
+    } finally {
+      setActing(false);
+    }
+  }
   async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { const serialized = serializeHomebrewEditor({ name: editName, slug: editSlug, type: editType, summary: editSummary, body: editBody, rightsStatus: editRights, license: editLicense, attribution: editAttribution, author: editAuthor, sourceUrl: editSourceUrl, dataJson: editDataJson }, editStructured, editRaw); if (!serialized.ok) { setEditError(serialized.error); return; } const payload = { ...serialized.value, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
 
   useEffect(() => {
@@ -197,6 +220,13 @@ export default function ReaderPage() {
                     Reset
                   </Btn>
                 )}
+              </span>
+            )}
+            {!entry.campaignId && isDm && canDmWrite && (
+              <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}>
+                <Btn density="xs" ghost className="text-xs" disabled={acting} onClick={copyToLibrary}>
+                  Copy into my library
+                </Btn>
               </span>
             )}
             {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={() => { const parsed = (() => { try { return JSON.parse(entry.dataJson ?? '{}') as Record<string, unknown>; } catch { return {}; } })(); setEditBody(entry.body); setEditName(entry.name); setEditSummary(entry.summary); setEditSlug(entry.slug); setEditType(entry.type); setEditRights(entry.rightsStatus); setEditLicense(entry.license); setEditAttribution(entry.attribution); setEditAuthor(entry.author); setEditSourceUrl(entry.sourceUrl); setEditDataJson(entry.dataJson ?? '{}'); setEditStructured(Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn density="xs" ghost className="text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}

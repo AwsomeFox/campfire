@@ -92,9 +92,10 @@ function buildService(entities: {
     { listEvents: noop as any, getCalendar: async () => null } as any,
     { get: async () => null } as any,
     { getOwn: async () => null } as any,
-    { listForCampaign: noop as any, getTreasury: async () => null } as any,
-    { listForCampaign: noop as any } as any,
+    { listForCampaign: noop as any, getTreasury: async () => null } as any, // inventory
+    { listForCampaign: noop as any } as any, // revisions
     { listForCampaign: noop as any } as any, // rolls
+    { listForCampaign: noop as any } as any, // library
   );
 }
 

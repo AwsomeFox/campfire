@@ -2934,6 +2934,7 @@ export const RevisionEntityType = z.enum([
   'session_zero',
   'comment',
   'story_beat',
+  'campaign_library_monster',
 ]);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
 
@@ -6076,37 +6077,59 @@ const OPEN_LICENSE_KEYWORDS = [
   'gnu free documentation',
 ];
 
+const SELF_AUTHORED_LICENSE_KEYWORDS = [
+  'my own work',
+  'custom',
+  'self',
+  'homebrew',
+  'original work',
+  'author reserved',
+];
+
+/**
+ * Whether a license string names self-authored original work by the author/DM (issue #1504).
+ */
+export function isSelfAuthoredLicense(license: string): boolean {
+  const l = (license ?? '').trim().toLowerCase();
+  if (!l) return false;
+  return SELF_AUTHORED_LICENSE_KEYWORDS.some((k) => l.includes(k) || l === k);
+}
+
 /**
  * Whether a license string names a recognized open/free-culture license. Used to
  * gate uploaded rule packs (issue #19) so only open-licensed content can be added —
  * proprietary strings ("All Rights Reserved", a publisher name, "Proprietary") are
  * rejected. Substring match, case-insensitive, intentionally permissive about
  * formatting ("OGL 1.0a", "CC-BY-4.0", "Creative Commons Attribution 4.0" all pass).
+ * NC-ND and self-authored licenses are not open licenses (issue #1504).
  */
 export function isOpenLicense(license: string): boolean {
   const l = (license ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (licenseForbidsRedistribution(l)) return false;
   return OPEN_LICENSE_KEYWORDS.some((k) => l.includes(k));
 }
 
 /**
  * Whether a license string carries a Creative Commons NonCommercial (NC) or NoDerivatives
- * (ND) restriction, which forbids the redistribution/re-serving that bundling a map into a
- * campaign entails. This is the failure mode for battle-map content specifically (issue
- * #303): nearly every 'free map' pack is CC-BY-NC-ND, and — because `isOpenLicense` is a
- * permissive substring match — the string "CC-BY-NC-ND" itself sneaks past that gate on the
- * "cc-by" substring. This is an ADDITIVE guard layered on top of `isOpenLicense` (it does
- * not change that shared gate's behaviour): content-import paths that redistribute the bytes
- * must reject anything this flags, even when `isOpenLicense` returns true. Matches the "nc"/
- * "nd" tokens in CC short-forms ("by-nc", "by-nc-nd", "by-nd", "noncommercial",
- * "no derivatives") but not incidental substrings of unrelated words.
+ * (ND) restriction, or is self-authored original work (issue #1504), which forbids
+ * general redistribution.
  */
 export function licenseForbidsRedistribution(license: string): boolean {
   const l = (license ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (isSelfAuthoredLicense(l)) return true;
   if (/\bnoncommercial\b|\bnon-commercial\b|\bno[\s-]?deriv\w*/.test(l)) return true;
   // CC short-form tokens: an "-nc" or "-nd" segment, or a bare "nc"/"nd" token.
   return /(^|[\s-])n[cd]([\s-]|$)/.test(l);
+}
+
+/**
+ * Whether a license string is acceptable for rule pack upload (issue #1504): either a recognized
+ * open license or self-authored original work.
+ */
+export function isValidUploadLicense(license: string): boolean {
+  return isOpenLicense(license) || isSelfAuthoredLicense(license);
 }
 
 export const RulePackUploadEntry = z.object({

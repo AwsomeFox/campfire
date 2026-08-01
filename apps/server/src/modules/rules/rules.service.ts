@@ -7,7 +7,9 @@ import {
   SF2E_PACK_SLUG,
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
-  isOpenLicense,
+  isValidUploadLicense,
+  isSelfAuthoredLicense,
+  licenseForbidsRedistribution,
   type RuleEntry,
   type RuleEntryType,
   type RulePack,
@@ -1194,7 +1196,12 @@ export class RulesService implements OnModuleInit {
   }
 
   private assertOpenLicense(license: string): void {
-    if (!isOpenLicense(license)) {
+    if (!isValidUploadLicense(license)) {
+      if (licenseForbidsRedistribution(license) && !isSelfAuthoredLicense(license)) {
+        throw new BadRequestException(
+          `License "${license}" forbids redistribution (NonCommercial or NoDerivatives restrictions). Non-redistributable third-party content cannot be uploaded.`,
+        );
+      }
       throw new BadRequestException(
         `License "${license}" is not a recognized open license. Uploaded rule packs must be OGL, ORC, Creative Commons, or public domain — copyrighted or purchased content cannot be uploaded.`,
       );
@@ -1205,7 +1212,7 @@ export class RulesService implements OnModuleInit {
    * Per-entry effective-license validation (issue #734). The pack-level check
    * (assertOpenLicense) only validates the PACK license; a non-open entry ("All Rights
    * Reserved") could otherwise smuggle into an open-licensed pack. Each entry's effective
-   * license is its own, falling back to the pack's, and ALL must be open. Throws a single
+   * license is its own, falling back to the pack's, and ALL must be open or self-authored. Throws a single
    * indexed BadRequestException naming every offending entry (input index + slug + license)
    * so the uploader can fix and resubmit — called synchronously at enqueue so the caller
    * gets a 400 at the POST, not a failed job to poll for.
@@ -1214,7 +1221,7 @@ export class RulesService implements OnModuleInit {
     const offenders: Array<{ index: number; slug: string; license: string }> = [];
     input.entries.forEach((entry, index) => {
       const effectiveLicense = (entry.license ?? '').trim() || input.pack.license;
-      if (!isOpenLicense(effectiveLicense)) {
+      if (!isValidUploadLicense(effectiveLicense)) {
         offenders.push({ index, slug: entry.slug, license: effectiveLicense });
       }
     });
@@ -2043,8 +2050,8 @@ export class RulesService implements OnModuleInit {
     this.assertOpenLicense(meta.license);
     for (const entry of rawEntries) {
       const license = entry.license.trim() || meta.license;
-      if (!isOpenLicense(license)) {
-        throw new BadRequestException(`Imported entry "${entry.slug}" has a non-open license "${license}".`);
+      if (!isValidUploadLicense(license)) {
+        throw new BadRequestException(`Imported entry "${entry.slug}" has a non-open or forbidden license "${license}".`);
       }
     }
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers

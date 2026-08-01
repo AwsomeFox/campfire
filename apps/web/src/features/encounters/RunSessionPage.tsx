@@ -7819,6 +7819,7 @@ function CombatantRow({
             <CombatantStatblockEditor
               value={combatant.statblock}
               onChange={(next) => onPatchCombatant?.({ statblock: next })}
+              ruleSystem={ruleSystem}
             />
           </details>
         )}
@@ -8609,7 +8610,7 @@ function AddCombatantPanel({
         <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
           {COMBATANT_STATBLOCK_HELP.library}
         </p>
-        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} />
+        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} ruleSystem={rulePack} />
       </div>
 
       <div
