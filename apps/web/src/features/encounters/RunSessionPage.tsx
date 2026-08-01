@@ -7818,7 +7818,7 @@ function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEditPermission && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center' }} data-testid="hp-steppers">
+        <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
               key={step}

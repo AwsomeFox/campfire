@@ -161,6 +161,14 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
 
         // Condition editor: opening it should fit within the viewport at 320px.
         await charRow.getByRole('button', { name: '+ condition' }).click();
+
+        // New quick-condition flow: first opens the quick-chip view
+        const quickForm = page.getByText('Quick condition:').first().locator('..');
+        await expect(quickForm).toBeVisible();
+
+        // Then we open the full form
+        await quickForm.getByRole('button', { name: 'More options…' }).click();
+
         const conditionForm = page.getByText('Add a structured condition instance.').first().locator('..');
         await expect(conditionForm).toBeVisible();
         const formBox = await conditionForm.boundingBox();
