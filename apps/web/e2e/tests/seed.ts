@@ -176,7 +176,7 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
           initiative: c.initiative,
           deathSaveSuccesses: 0,
           deathSaveFailures: 0,
-          deathState: 'alive',
+          deathState: 'none',
           conditionInstances: [],
           hpTemp: 0,
         },
