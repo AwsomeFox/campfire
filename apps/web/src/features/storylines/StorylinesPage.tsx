@@ -39,6 +39,7 @@ import { Markdown } from '../../components/Markdown';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import {
   StorylineContentEditor,
@@ -991,6 +992,7 @@ function BeatRow({
   const [contentError, setContentError] = useState<string | null>(null);
   const [contentSaving, setContentSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   // Issue #688: per-mutation error surfaces. Each keeps the beat on the page with its
   // data intact and offers a targeted retry; nothing is silently discarded.
@@ -1082,6 +1084,7 @@ function BeatRow({
       });
       setEditingContent(false);
       setContentConflict(null);
+      setHistoryNonce((n) => n + 1);
       restoreFocusRef.current = true;
       await onChange(entityDomId('beat', beat.id));
       announce(`Saved beat ${title}.`);
@@ -1383,6 +1386,23 @@ function BeatRow({
             }}
             onSave={() => void saveContent()}
             onCancel={cancelContentEdit}
+          />
+        </div>
+      )}
+
+      {canDmWrite && !editingContent && (
+        <div style={{ marginLeft: 22 }}>
+          <RevisionHistoryPanel
+            entityType="story_beat"
+            entityId={beat.id}
+            currentSnapshot={{ body: beat.body ?? '' }}
+            expectedUpdatedAt={beat.updatedAt}
+            reloadNonce={historyNonce}
+            onRestored={() => {
+              setHistoryNonce((n) => n + 1);
+              void onChange(entityDomId('beat', beat.id));
+            }}
+            label="Beat history"
           />
         </div>
       )}
