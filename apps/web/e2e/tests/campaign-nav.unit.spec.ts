@@ -73,8 +73,8 @@ test.describe('campaign nav IA (#643)', () => {
     for (const tabKey of MOBILE_TAB_BAR_KEYS) {
       expect(keys).not.toContain(tabKey);
     }
-    expect(keys).toContain('encounters');
     expect(keys).toContain('members');
+    expect(keys).toContain('inventory');
   });
 
   test('isActiveNavPath marks dashboard exactly and children by prefix', () => {
