@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Combatant, Character } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -11,6 +12,7 @@ interface PlayerVitalsHeaderProps {
 }
 
 export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax }: PlayerVitalsHeaderProps) {
+  const { t } = useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
 
