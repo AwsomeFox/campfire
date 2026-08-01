@@ -282,6 +282,7 @@ function OverflowMenuPanel({
 
   return (
     <Card
+      as="div"
       ref={menuRef}
       id={id}
       role="menu"

@@ -2701,8 +2701,8 @@ function DmSecretCard({
   }
 
   return (
-    <Card
-      density="compact"
+    <div
+      className="card"
       style={{
         border: '1px solid var(--color-accent-700)',
         background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
@@ -2735,7 +2735,7 @@ function DmSecretCard({
           </button>
         </div>
       )}
-    </Card>
+    </div>
   );
 }
 

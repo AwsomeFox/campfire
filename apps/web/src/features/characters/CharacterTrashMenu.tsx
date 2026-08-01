@@ -138,6 +138,7 @@ function CharacterTrashMenuItems({
   const menuRef = useDialog<HTMLDivElement>({ onClose, trapFocus: false });
   return (
     <Card
+      as="div"
       ref={menuRef}
       role="menu"
       aria-label="Character actions"

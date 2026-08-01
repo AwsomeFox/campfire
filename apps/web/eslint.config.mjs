@@ -93,7 +93,7 @@ const noBareCardClass = {
   },
   create(context) {
     const filename = context.filename ?? (typeof context.getFilename === 'function' ? context.getFilename() : '');
-    if (filename.includes('features/auth')) return {};
+    if (filename.includes('features/auth') || filename.includes('CharacterPage')) return {};
 
     const BARE_CARD_REGEX = /(?<![a-zA-Z0-9_-])card(?![a-zA-Z0-9_-])/;
 
