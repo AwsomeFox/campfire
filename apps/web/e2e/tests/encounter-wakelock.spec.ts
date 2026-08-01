@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { restoreSeedEncounter, seed, stateFor } from './seed';
 
 async function installWakeLockMock(page: Page) {
   await page.addInitScript(() => {
@@ -60,6 +60,7 @@ test.describe('Encounter Runner wake lock (#1473)', () => {
   test.use({ storageState: stateFor('dm') });
 
   test('acquires wake lock while encounter is running and releases on unmount', async ({ page }) => {
+    await restoreSeedEncounter();
     await installWakeLockMock(page);
 
     const { campaignId, encounterId } = seed();
