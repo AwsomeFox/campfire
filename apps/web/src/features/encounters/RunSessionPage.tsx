@@ -2698,12 +2698,10 @@ export default function RunSessionPage() {
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
-  const endedTallies = useMemo(() => {
-    if (encounter.status !== 'ended') return null;
-    const castSafeEncounter = safeEncounterForCast(encounter);
-    const visibleTallyCombatants = castSafeEncounter.combatants.filter((c) => !c.tokenHiddenByFog);
-    return endedSummaryTallies(visibleTallyCombatants);
-  }, [encounter]);
+  const endedTallies =
+    encounter.status === 'ended'
+      ? endedSummaryTallies(safeEncounterForCast(encounter).combatants.filter((c) => !c.tokenHiddenByFog))
+      : null;
 
   return (
     <div
