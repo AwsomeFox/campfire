@@ -277,6 +277,7 @@ test.describe('issue #822 — invite QR code card', () => {
     // QR canvas visible
     const qrCanvas = qrCard.locator('canvas[role="img"]');
     await expect(qrCanvas).toBeVisible();
+    await qrCanvas.scrollIntoViewIfNeeded();
     await expect(qrCanvas).toBeInViewport();
 
     // Action buttons all visible (scroll — tall invite row can sit below fold on mobile)
