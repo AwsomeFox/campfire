@@ -90,15 +90,16 @@ export function ResourceTrackerPanel({
               {hasResources && (
                 <div className="space-y-2">
                   <div className="text-xs font-semibold uppercase text-muted">Features</div>
-                  {Object.entries(resources).map(([key, res]) => (
-                    <div key={key} className="flex items-center justify-between gap-4">
-                      <div className="text-sm">
-                        {res.name || key} 
-                        {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
-                        {(res as unknown as Record<string, unknown>).source && (
-                          <span className="ml-2 text-xs opacity-70">[{String((res as unknown as Record<string, unknown>).source)}]</span>
-                        )}
-                      </div>
+                  {Object.entries(resources).map(([key, res]) => {
+                    const sourceVal = (res as Record<string, unknown>).source;
+                    const sourceText = typeof sourceVal === 'string' || typeof sourceVal === 'number' ? String(sourceVal) : null;
+                    return (
+                      <div key={key} className="flex items-center justify-between gap-4">
+                        <div className="text-sm">
+                          {res.name || key} 
+                          {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
+                          {sourceText && <span className="ml-2 text-xs opacity-70">[{sourceText}]</span>}
+                        </div>
                       <Pips 
                         max={res.max} 
                         used={res.used} 
@@ -117,7 +118,8 @@ export function ResourceTrackerPanel({
                         }} 
                       />
                     </div>
-                  ))}
+                  );
+                })}
                 </div>
               )}
 
