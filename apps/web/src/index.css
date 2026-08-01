@@ -1120,6 +1120,7 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--color-divider);
   border-radius: var(--cf-density-default-card-radius);
   box-shadow: var(--shadow-sm);
+  gap: 0;
 }
 /* Issue #674 — per-density card geometry. Compose on Card / cf-card surfaces. */
 .cf-card.cf-density-xs {
