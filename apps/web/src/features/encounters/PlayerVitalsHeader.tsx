@@ -11,7 +11,7 @@ interface PlayerVitalsHeaderProps {
   onSetHpMax?: (combatantId: number, max: number) => void;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, _onSetHpMax }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax }: PlayerVitalsHeaderProps) {
   useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
