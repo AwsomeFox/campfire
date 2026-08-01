@@ -7,7 +7,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
-import { Btn } from '../../components/ui';
+import { Card, Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
@@ -117,7 +117,7 @@ export function StatusHeader({
 
   if (editing) {
     return (
-      <section className="card elev-sm" style={{ padding: 16 }} aria-label="Edit campaign details">
+      <Card density="compact" elev="sm" style={{ padding: 16 }} aria-label="Edit campaign details">
         <CampaignMetadataFields
           idPrefix="dashboard-campaign"
           name={name}
@@ -138,7 +138,7 @@ export function StatusHeader({
             {saving ? 'Saving…' : 'Save'}
           </Btn>
         </div>
-      </section>
+      </Card>
     );
   }
 

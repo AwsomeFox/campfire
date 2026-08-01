@@ -3045,8 +3045,8 @@ export default function RunSessionPage() {
       )}
 
       {isArchmage && encounter.status === 'running' && (
-        <div
-          className="card elev-sm"
+        <Card
+          density="compact" elev="sm"
           data-testid="archmage-escalation-panel"
           style={{
             padding: '12px 14px',
@@ -3129,7 +3129,7 @@ export default function RunSessionPage() {
               )}
             </div>
           </details>
-        </div>
+        </Card>
       )}
 
       {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
@@ -3261,8 +3261,8 @@ export default function RunSessionPage() {
       {/* Current-turn workspace (issue #413): "what can I do now?" + player End-turn. Only
           while running; the component self-hides when there's no current combatant. */}
       {encounter.status === 'running' && encounter.turnPhase === 'lair' && (
-        <div
-          className="card elev-sm"
+        <Card
+          density="compact" elev="sm"
           data-testid="lair-action-slot"
           style={{
             padding: '12px 14px',
@@ -3280,7 +3280,7 @@ export default function RunSessionPage() {
               </Btn>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {encounter.status === 'running' && (
@@ -3357,7 +3357,7 @@ export default function RunSessionPage() {
       )}
 
       {concentrationCheckCombatant && pendingConcentrationCheck && (
-        <div className="card border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
+        <Card density="compact" className="border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
           <strong>{concentrationCheckCombatant.name} must make a Constitution saving throw.</strong>
           <p className="text-muted" style={{ margin: '4px 0 10px' }}>
             Concentration check: DC {pendingConcentrationCheck.dc} ({pendingConcentrationCheck.damage} damage).
@@ -3406,7 +3406,7 @@ export default function RunSessionPage() {
               Waiting for the DM or this combatant&apos;s owner to resolve the save.
             </p>
           )}
-        </div>
+        </Card>
       )}
 
       {pendingActionUse && (
@@ -3456,7 +3456,7 @@ export default function RunSessionPage() {
         className="grid gap-4 min-w-0 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
       >
         <div className="space-y-4 min-w-0">
-          <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+          <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
             {sheetsStatusLabel && (
               <p
                 className="text-muted"
@@ -3593,7 +3593,7 @@ export default function RunSessionPage() {
                 />
               ))
             )}
-          </div>
+          </Card>
 
           {canDmWrite && encounter.status !== 'ended' && (
             <AddCombatantPanel
@@ -5126,8 +5126,8 @@ export function BattleMap({
   );
 
   return (
-    <div
-      className={isCast ? 'cf-cast-battle-map' : 'card elev-sm reading-exempt'}
+    <Card
+      density="compact" elev={isCast ? undefined : 'sm'} className={isCast ? 'cf-cast-battle-map' : 'reading-exempt'}
       data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}
       style={{
         padding: 0,
@@ -6428,7 +6428,7 @@ export function BattleMap({
           onExpire={() => setTokenBatchUndo(null)}
         />
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -8413,13 +8413,13 @@ function AddCombatantPanel({
   return (
     <Card
       className="space-y-3"
-      onDragOver={(event) => {
+      onDragOver={(event: React.DragEvent) => {
         if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
           event.preventDefault();
           event.dataTransfer.dropEffect = 'copy';
         }
       }}
-      onDrop={(event) => void addDroppedRuleEntry(event)}
+      onDrop={(event: React.DragEvent<HTMLElement>) => void addDroppedRuleEntry(event)}
     >
       <span className="card-kicker">Add combatant</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
@@ -8518,10 +8518,10 @@ function AddCombatantPanel({
         ) : (
           <div className="flex flex-col gap-1.5">
             {library.map((entry) => (
-              <button
+              <Card
                 key={entry.id}
                 type="button"
-                className="card elev-sm text-left"
+                density="compact" elev="sm" as="button" className="text-left"
                 style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
                 disabled={saving}
                 onClick={() => void addFromLibrary(entry)}
@@ -8530,7 +8530,7 @@ function AddCombatantPanel({
                 <span className="text-muted text-xs block">
                   {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
                 </span>
-              </button>
+              </Card>
             ))}
           </div>
         )}
@@ -8571,9 +8571,9 @@ function AddCombatantPanel({
           ) : (
             <div className="flex flex-col gap-1.5">
               {results.map((entry) => (
-                <button
+                <Card
                   key={entry.id}
-                  className="card elev-sm"
+                  density="compact" elev="sm" as="button"
                   style={{
                     border: 0,
                     font: 'inherit',
@@ -8592,7 +8592,7 @@ function AddCombatantPanel({
                   <span className="tag tag-neutral">
                     {entry.type}
                   </span>
-                </button>
+                </Card>
               ))}
             </div>
           )}
@@ -8623,9 +8623,9 @@ function AddCombatantPanel({
               );
             }
             return available.map((c) => (
-              <button
+              <Card
                 key={c.id}
-                className="card elev-sm"
+                density="compact" elev="sm" as="button"
                 style={{
                   border: 0,
                   font: 'inherit',
@@ -8645,7 +8645,7 @@ function AddCombatantPanel({
                 <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
                   {c.hpCurrent}/{c.hpMax}
                 </span>
-              </button>
+              </Card>
             ));
         })()}
       </div>
@@ -8713,9 +8713,9 @@ function AddCombatantPanel({
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {results.map((entry) => (
-                    <button
+                    <Card
                       key={entry.id}
-                      className="card elev-sm"
+                      density="compact" elev="sm" as="button"
                       style={{
                         border: 0,
                         font: 'inherit',
@@ -8735,7 +8735,7 @@ function AddCombatantPanel({
                       <span className="tag tag-neutral">
                         statblock
                       </span>
-                    </button>
+                    </Card>
                   ))}
                 </div>
               )}

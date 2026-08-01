@@ -500,9 +500,9 @@ function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; o
   }
 
   return (
-    <div
+    <Card
       id="public-recap-sharing"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="public-recap-sharing-settings"
       aria-labelledby="public-recap-sharing-heading"
@@ -552,7 +552,7 @@ function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; o
           onConfirm={() => void revokeAll()}
         />
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -606,9 +606,9 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
   const canEnable = campaign.status === 'active' && campaign.deletedAt == null;
 
   return (
-    <div
+    <Card
       id="public-invites"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="public-invites-settings"
       aria-labelledby="public-invites-heading"
@@ -670,7 +670,7 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
           onConfirm={() => void revokeAll()}
         />
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -725,9 +725,9 @@ function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
   const effective = setting?.effective;
 
   return (
-    <div
+    <Card
       id="catalog-privacy"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="catalog-privacy-settings"
       aria-labelledby="catalog-privacy-heading"
@@ -776,7 +776,7 @@ function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
         default will not reveal yours.
       </p>
       {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
-    </div>
+    </Card>
   );
 }
 
@@ -881,9 +881,9 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
   const decided = (requests ?? []).filter((r) => r.status !== 'pending');
 
   return (
-    <div
+    <Card
       id="export-requests"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="export-requests-settings"
       aria-labelledby="export-requests-heading"
@@ -986,7 +986,7 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
           {error}
         </p>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1075,9 +1075,9 @@ function CastSessionsCard({ campaign }: { campaign: Campaign }) {
   const castUrl = created ? new URL(created.url, window.location.origin).href : null;
 
   return (
-    <div
+    <Card
       id="cast-sessions"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="cast-sessions-settings"
       aria-labelledby="cast-sessions-heading"
@@ -1175,7 +1175,7 @@ function CastSessionsCard({ campaign }: { campaign: Campaign }) {
           onConfirm={() => void revokeAll()}
         />
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1236,9 +1236,10 @@ function GeneralCard({
   }
 
   return (
-    <div
+    <Card
+      as="div"
       id="campaign-general"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       aria-labelledby="campaign-general-heading"
     >
@@ -1294,7 +1295,7 @@ function GeneralCard({
         </button>
         {feedback.announcement}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -1508,9 +1509,9 @@ function StatusCard({
   const previewVisible = pending && (snapshot.phase === 'preview' || snapshot.phase === 'confirming');
 
   return (
-    <div
+    <Card
       id="status"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       data-testid="campaign-status-settings"
       aria-labelledby="status-heading"
@@ -1691,7 +1692,7 @@ function StatusCard({
       )}
 
       {error && <p className="text-sm" style={{ color: '#f87171' }} role="alert">{error}</p>}
-    </div>
+    </Card>
   );
 }
 
@@ -1761,9 +1762,9 @@ function RuleSystemCard({
       : 'No installed rules text. Combat math falls back to D&D 5e defaults; this does not select a 5e rules pack.');
 
   return (
-    <div
+    <Card
       id="rule-system"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       aria-labelledby="rule-system-heading"
     >
@@ -1909,7 +1910,7 @@ function RuleSystemCard({
         </p>
       )}
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-    </div>
+    </Card>
   );
 }
 
@@ -1978,9 +1979,9 @@ function ExportCard({ campaignId }: { campaignId: number }) {
   const includedRows = preview?.rows.filter((r) => r.included > 0) ?? [];
 
   return (
-    <div
+    <Card
       id="export"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       aria-labelledby="export-heading"
       data-testid="export-settings"
@@ -2092,7 +2093,7 @@ function ExportCard({ campaignId }: { campaignId: number }) {
           ⬇ Markdown zip
         </a>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -2153,9 +2154,9 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
     : [];
 
   return (
-    <div
+    <Card
       id="duplicate"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       aria-labelledby="duplicate-heading"
     >
@@ -2221,7 +2222,7 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
           {cloning ? 'Duplicating…' : mode === 'template' ? 'Create from template' : 'Duplicate campaign'}
         </button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -2259,9 +2260,9 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   return (
-    <div
+    <Card
       id="danger-zone"
-      className="card elev-sm settings-anchor"
+      density="compact" elev="sm" className="settings-anchor"
       tabIndex={-1}
       style={{ borderLeft: '2px solid #f87171' }}
       data-testid="danger-zone-card"
@@ -2337,6 +2338,6 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
           }}
         />
       )}
-    </div>
+    </Card>
   );
 }

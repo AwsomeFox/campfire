@@ -11,7 +11,7 @@ import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { ErrorNote } from '../../components/ui';
+import { Card, ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, attachmentSrcSet, uploadAttachment } from '../../components/ImageUpload';
 import { MapReplaceDialog, type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { useAttachmentDerivatives } from '../../components/useAttachmentDerivatives';
@@ -544,7 +544,7 @@ export function RegionMap({
   }
 
   return (
-    <div className="card elev-sm reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
+    <Card density="compact" elev="sm" className="reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
       <CampaignCover
         campaignId={campaignId}
         name={campaign.name}
@@ -947,7 +947,7 @@ export function RegionMap({
         </span>
         <span style={{ marginLeft: 'auto' }}>Open or move a pin</span>
       </div>
-    </div>
+    </Card>
   );
 }
 

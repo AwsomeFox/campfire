@@ -28,7 +28,7 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
+import { Card, Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -395,8 +395,8 @@ export default function StorylinesPage() {
       </p>
 
       {canDmWrite && (
-        <form
-          className="card elev-sm"
+        <Card
+          density="compact" elev="sm" as="form"
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
           onSubmit={compositionSafeFormSubmit(arcCompositionGate, () => {
             void createArc();
@@ -444,16 +444,16 @@ export default function StorylinesPage() {
               <ErrorNote message={arcCreateError} />
             </div>
           )}
-        </form>
+        </Card>
       )}
 
       {error && <ErrorNote message={error} onRetry={() => void load()} />}
       {arcReorderError && <ErrorNote message={arcReorderError} />}
 
       {loading && !arcs.length ? (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           <Skeleton lines={5} />
-        </div>
+        </Card>
       ) : arcs.length === 0 ? (
         <EmptyState icon="oak-leaf" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
       ) : (
@@ -712,8 +712,8 @@ function ArcCard({
   };
 
   return (
-    <section
-      className="card elev-sm"
+    <Card
+      density="compact" elev="sm"
       style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}
       aria-labelledby={arcTitleId}
       {...entityTargetProps('arc', arc.id)}
@@ -944,7 +944,7 @@ function ArcCard({
           onCancel={() => setConfirmingDelete(false)}
         />
       )}
-    </section>
+    </Card>
   );
 }
 

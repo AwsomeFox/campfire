@@ -1120,6 +1120,7 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--color-divider);
   border-radius: var(--cf-density-default-card-radius);
   box-shadow: var(--shadow-sm);
+  gap: 0;
 }
 /* Issue #674 — per-density card geometry. Compose on Card / cf-card surfaces. */
 .cf-card.cf-density-xs {
@@ -1139,7 +1140,9 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--cf-density-comfortable-card-radius);
 }
 /* Media / split tiles that paint their own inner padding (issue #674). */
-.cf-card.cf-card-flush {
+.cf-card.cf-card-flush,
+.card.cf-card-flush,
+.card-flush {
   padding: 0;
 }
 /* Nocturne .card aliases the compact density shell (issue #674). */

@@ -24,7 +24,7 @@ import {
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
-import { ErrorNote } from '../../components/ui';
+import { Card, ErrorNote } from '../../components/ui';
 
 const MODES: NotificationDeliveryMode[] = ['immediate', 'digest', 'muted'];
 
@@ -127,24 +127,24 @@ export function NotificationPreferencesCard() {
 
   if (loadError) {
     return (
-      <div className="card elev-sm" data-testid="notification-preferences">
+      <Card density="compact" elev="sm" data-testid="notification-preferences">
         <span className="card-kicker">{t('preferences.notifTitle')}</span>
         <ErrorNote message={t('preferences.notifLoadError')} />
-      </div>
+      </Card>
     );
   }
 
   if (drafts === null) {
     return (
-      <div className="card elev-sm" data-testid="notification-preferences">
+      <Card density="compact" elev="sm" data-testid="notification-preferences">
         <span className="card-kicker">{t('preferences.notifTitle')}</span>
         <p className="text-muted" style={{ fontSize: 13 }}>{t('preferences.notifLoading')}</p>
-      </div>
+      </Card>
     );
   }
 
   return (
-    <div className="card elev-sm" data-testid="notification-preferences">
+    <Card density="compact" elev="sm" data-testid="notification-preferences">
       <span className="card-kicker">{t('preferences.notifTitle')}</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>{t('preferences.notifBlurb')}</p>
 
@@ -273,6 +273,6 @@ export function NotificationPreferencesCard() {
           </div>
         );
       })}
-    </div>
+    </Card>
   );
 }

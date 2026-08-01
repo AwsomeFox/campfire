@@ -174,7 +174,7 @@ export default function ReaderPage() {
       ) : !entry ? (
         <ErrorNote message={t('compendium.notFound')} />
       ) : (
-        <div className="card elev-sm" style={{ minWidth: 0, padding: '22px 26px', gap: 12 }}>
+        <Card density="compact" elev="sm" style={{ minWidth: 0, padding: '22px 26px', gap: 12 }}>
           <div className="flex items-center gap-2.5 flex-wrap">
             {/* Statblock-title glyph (issue #305): the DM's override, else the
                 type/school-derived default. Decorative — the heading names the entry. */}
@@ -239,7 +239,7 @@ export default function ReaderPage() {
                 honest "Source unavailable" — never dead text that implies traceability. */}
             <CompendiumSourceRow entrySourceUrl={entry.sourceUrl} packSourceUrl={pack?.sourceUrl} />
           </div>
-        </div>
+        </Card>
       )}
       {pickingIcon && entry && (
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />

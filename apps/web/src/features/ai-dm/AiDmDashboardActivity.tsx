@@ -8,6 +8,7 @@
  *     moment a `tool` event with `proposed: true` lands — the same signal that bumps
  *     the sidebar's pending-proposals badge in Layout.tsx.
  */
+import { Card } from '../../components/ui';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
@@ -41,7 +42,7 @@ export function AiDmDashboardActivity({ campaignId, isDm }: { campaignId: number
     : null;
 
   return (
-    <div className="card elev-sm" style={{ padding: 12, gap: 8 }}>
+    <Card density="compact" elev="sm" style={{ padding: 12, gap: 8 }}>
       <div className="flex items-center gap-2 flex-wrap">
         <AiDmPresenceTag turnActive={liveActivity.turnActive} />
         {chip && liveActivity.lastToolAt !== null && <AiDmToolActivityRow chip={chip} at={liveActivity.lastToolAt} />}
@@ -70,6 +71,6 @@ export function AiDmDashboardActivity({ campaignId, isDm }: { campaignId: number
           </button>
         </div>
       )}
-    </div>
+    </Card>
   );
 }

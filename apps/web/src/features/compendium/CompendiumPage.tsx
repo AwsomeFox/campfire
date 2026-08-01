@@ -497,10 +497,10 @@ export default function CompendiumPage() {
             <Skeleton lines={4} />
           </Card>
         ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: Boolean(campaignPack && !noPacksInstalled) }) ? (
-          <div className="card items-center text-center" style={{ padding: 24 }}>
+          <Card density="compact" className="items-center text-center" style={{ padding: 24 }}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>No rule system or campaign homebrew yet.</p>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>Create homebrew above, or select an installed rule system in Campaign settings.</p>
-          </div>
+          </Card>
         ) : (
           <>
             {error && (
@@ -522,7 +522,7 @@ export default function CompendiumPage() {
                 <Skeleton lines={5} />
               </Card>
             ) : !error && results && results.length === 0 && !loading ? (
-              <div className="card items-center text-center" style={{ padding: 24 }}>
+              <Card density="compact" className="items-center text-center" style={{ padding: 24 }}>
                 {searchQuery.trim() ? (
                   <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
                     Nothing matches “{searchQuery.trim()}”
@@ -543,7 +543,7 @@ export default function CompendiumPage() {
                     This rule system has no entries yet.
                   </p>
                 )}
-              </div>
+              </Card>
             ) : results && results.length > 0 ? (
               <>
                 {total != null && (
@@ -563,11 +563,11 @@ export default function CompendiumPage() {
                   }}
                 >
                   {results.map((entry) => (
-                    <Link
+                    <Card
                       key={entry.id}
                       to={`/c/${id}/compendium/${entry.id}`}
                       draggable={entry.type === 'monster' || entry.type === 'hazard'}
-                      onDragStart={(event) => {
+                      onDragStart={(event: React.DragEvent) => {
                         if (entry.type !== 'monster' && entry.type !== 'hazard') return;
                         event.dataTransfer.effectAllowed = 'copy';
                         event.dataTransfer.setData(
@@ -576,7 +576,7 @@ export default function CompendiumPage() {
                         );
                       }}
                       title={entry.type === 'monster' || entry.type === 'hazard' ? 'Drag into an open encounter to add' : undefined}
-                      className="card elev-sm text-left"
+                      density="compact" elev="sm" as={Link} className="text-left"
                       style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                     >
                       {/* Type/school/monster glyph (issue #305): the DM's override if set,
@@ -602,7 +602,7 @@ export default function CompendiumPage() {
                       <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
                         ›
                       </span>
-                    </Link>
+                    </Card>
                   ))}
                 </div>
                 {hasMore && (

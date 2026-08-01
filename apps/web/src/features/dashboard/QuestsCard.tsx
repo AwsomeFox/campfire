@@ -9,7 +9,7 @@ import { ListDetailLink } from '../../components/ListDetailLink';
 import type { CampaignSummary, QuestObjective } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { api, API, ApiError } from '../../lib/api';
-import { EmptyState } from '../../components/ui';
+import { Card, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Toggle } from '../../components/Toggle';
 
@@ -148,7 +148,7 @@ export function QuestsCard({
   }
 
   return (
-    <div className="card elev-sm">
+    <Card density="compact" elev="sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <span className="card-kicker">Quests</span>
         <div style={{ flex: 1 }} />
@@ -173,6 +173,6 @@ export function QuestsCard({
       ) : (
         roots.map((q) => renderQuest(q))
       )}
-    </div>
+    </Card>
   );
 }

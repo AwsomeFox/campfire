@@ -715,7 +715,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
       <div className="cf-print-columns grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <div className="card elev-sm">
+          <Card density="compact" elev="sm">
             {editingBody ? (
               <div className="space-y-3">
                 {proposeMode && (
@@ -961,7 +961,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 {t('quests.addSubquest')}
               </Link>
             )}
-          </div>
+          </Card>
 
           {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
               regretted edit is recoverable. Refetches after each body save. */}
@@ -980,8 +980,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
           )}
 
           {showSecret && (
-            <div
-              className="cf-print-secret card"
+            <Card
+              density="compact" className="cf-print-secret"
               style={{
                 border: '1px solid var(--color-accent-700)',
                 background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
@@ -1016,7 +1016,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   )}
                 </div>
               )}
-            </div>
+            </Card>
           )}
           {canDmWrite && !quest.dmSecret && !editingDmSecret && (
             <button
@@ -1036,7 +1036,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <div className="card elev-sm">
+          <Card density="compact" elev="sm">
             <span className="card-kicker">{t('quests.facts')}</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -1060,7 +1060,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 <span title={quest.updatedAt}>{timeAgo(quest.updatedAt)}</span>
               </div>
             </div>
-          </div>
+          </Card>
 
           <div className="cf-print-hide"><NotesRail campaignId={campaignId} entityType="quest" entityId={questId} /></div>
         </div>

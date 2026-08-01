@@ -1,7 +1,7 @@
 /**
  * Restore prompt when a namespaced local draft exists (issue #641).
  */
-import { Btn } from './ui';
+import { Card, Btn } from './ui';
 import { formatDateTime } from '../lib/format';
 
 export function RestoreDraftBanner({
@@ -17,7 +17,7 @@ export function RestoreDraftBanner({
 }) {
   const when = formatDraftSavedAt(savedAt);
   return (
-    <div className="card elev-sm space-y-2" role="region" aria-label="Draft restore">
+    <Card density="compact" elev="sm" className="space-y-2" role="region" aria-label="Draft restore">
       <p className="m-0 text-sm text-slate-200">
         {stale
           ? `You have a local draft from ${when}, but the server copy changed since then. Restoring may overwrite newer work.`
@@ -31,7 +31,7 @@ export function RestoreDraftBanner({
           Discard draft
         </Btn>
       </div>
-    </div>
+    </Card>
   );
 }
 

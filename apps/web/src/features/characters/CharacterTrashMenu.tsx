@@ -15,7 +15,7 @@
  *  - dialog: see ConfirmDialog — role=dialog, focus trap, Escape cancels, Enter confirms
  */
 import { useEffect, useRef, useState } from 'react';
-import { Btn } from '../../components/ui';
+import { Card, Btn } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 
@@ -137,11 +137,12 @@ function CharacterTrashMenuItems({
   // handled by the parent; useDialog still restores focus to the trigger on close.
   const menuRef = useDialog<HTMLDivElement>({ onClose, trapFocus: false });
   return (
-    <div
+    <Card
+      as="div"
       ref={menuRef}
       role="menu"
       aria-label="Character actions"
-      className="absolute right-0 top-9 w-52 card elev-md p-1.5 space-y-0.5 text-sm z-40"
+      density="compact" elev="md" className="absolute right-0 top-9 w-52 p-1.5 space-y-0.5 text-sm z-40"
     >
       <button
         type="button"
@@ -152,6 +153,6 @@ function CharacterTrashMenuItems({
       >
         Move to Trash…
       </button>
-    </div>
+    </Card>
   );
 }

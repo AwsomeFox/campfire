@@ -291,7 +291,7 @@ export default function PreferencesPage() {
 
       {error && <ErrorNote message={error} />}
 
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <span className="card-kicker">{t('preferences.theme')}</span>
 
         <div className="flex items-center gap-3 flex-wrap">
@@ -451,7 +451,7 @@ export default function PreferencesPage() {
         <p className="text-muted reading-supporting" style={{ fontSize: 12.5, marginTop: 4 }}>
           {t('preferences.accentNote')}
         </p>
-      </div>
+      </Card>
 
       <Card className="flex flex-col gap-4">
         <div>
@@ -554,7 +554,7 @@ export default function PreferencesPage() {
         </p>
       </Card>
 
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <span className="card-kicker">{t('preferences.language')}</span>
         <div className="field" style={{ maxWidth: 260 }}>
           <label htmlFor="prefs-lang">{t('preferences.languageLabel')}</label>
@@ -575,9 +575,9 @@ export default function PreferencesPage() {
         <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.languageNote')}
         </p>
-      </div>
+      </Card>
 
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <span className="card-kicker">{t('preferences.timeFormat')}</span>
         <div className="field" style={{ maxWidth: 260 }}>
           <label htmlFor="prefs-time-format">{t('preferences.timeFormatLabel')}</label>
@@ -597,9 +597,9 @@ export default function PreferencesPage() {
         <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.timeFormatNote')}
         </p>
-      </div>
+      </Card>
 
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <span className="card-kicker">{t('preferences.profile')}</span>
         <div className="field">
           <label htmlFor="prefs-display-name">{t('preferences.displayName')}</label>
@@ -614,9 +614,9 @@ export default function PreferencesPage() {
             {t('preferences.displayNameHistoryNote')}
           </p>
         </div>
-      </div>
+      </Card>
 
-      <div className="card elev-sm">
+      <Card density="compact" elev="sm">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="card-kicker" style={{ margin: 0 }}>{t('preferences.mcpTitle')}</span>
           <span className="tag tag-accent">{t('preferences.mcpLive')}</span>
@@ -636,7 +636,7 @@ export default function PreferencesPage() {
           </Link>
           <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>{t('preferences.mcpThenConnect')}</span>
         </div>
-      </div>
+      </Card>
 
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" disabled={saving || !profileDirty} onClick={save}>
@@ -684,7 +684,7 @@ function DeleteAccountCard({ username }: { username: string }) {
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="delete-account-card">
+    <Card density="compact" elev="sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="delete-account-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>{t('preferences.deleteAccount')}</span>
       <div className="flex items-center gap-2 flex-wrap">
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
@@ -734,6 +734,6 @@ function DeleteAccountCard({ username }: { username: string }) {
           }}
         />
       )}
-    </div>
+    </Card>
   );
 }

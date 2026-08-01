@@ -1,3 +1,4 @@
+import { Card } from '../../components/ui';
 import { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -41,11 +42,11 @@ export default function GlossaryPage() {
           const term = GLOSSARY_TERMS[termId];
           const headingId = `${glossaryAnchorId(termId)}-heading`;
           return (
-            <section
+            <Card
               key={termId}
               id={glossaryAnchorId(termId)}
               tabIndex={-1}
-              className="card elev-sm settings-anchor"
+              density="compact" elev="sm" className="settings-anchor"
               aria-labelledby={headingId}
               style={{ scrollMarginTop: 72 }}
             >
@@ -71,7 +72,7 @@ export default function GlossaryPage() {
                   <dd className="m-0 text-muted">{t(term.visibilityKey)}</dd>
                 </div>
               </dl>
-            </section>
+            </Card>
           );
         })}
       </div>

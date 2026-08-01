@@ -14,7 +14,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import type { Attachment } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { shareInFlightRef } from '../../lib/shareInFlight';
-import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
+import { Card, Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -119,7 +119,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const visible = (items ?? []).filter((a) => (isDm ? true : a.kind !== 'portrait'));
 
   return (
-    <div className="card elev-sm" data-testid="dashboard-handouts" style={{ padding: 0, overflow: 'hidden' }}>
+    <Card density="compact" elev="sm" data-testid="dashboard-handouts" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px' }}>
         <span className="card-kicker">Handouts</span>
         <div style={{ flex: 1 }} />
@@ -306,7 +306,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
           onCancel={() => setEditing(null)}
         />
       )}
-    </div>
+    </Card>
   );
 }
 

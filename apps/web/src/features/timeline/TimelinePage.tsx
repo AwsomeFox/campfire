@@ -26,7 +26,7 @@ import { TIMELINE_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
+import { Card, Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
@@ -464,11 +464,11 @@ export default function TimelinePage() {
 
       {/* Current in-world date */}
       {loading && !calendar ? (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           <Skeleton lines={2} />
-        </div>
+        </Card>
       ) : (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           {editingCalendar ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {calConflict && (
@@ -568,12 +568,12 @@ export default function TimelinePage() {
               />
             </div>
           )}
-        </div>
+        </Card>
       )}
 
       {/* New event form */}
       {canDmWrite && creating && (
-        <div className="card elev-sm" data-testid="timeline-event-create-form">
+        <Card density="compact" elev="sm" data-testid="timeline-event-create-form">
           <EventForm
             idPrefix={TIMELINE_NEW_FORM_PREFIX}
             draft={newDraft}
@@ -598,14 +598,14 @@ export default function TimelinePage() {
               Cancel
             </Btn>
           </div>
-        </div>
+        </Card>
       )}
 
       {/* Event list */}
       {loading && !events.length ? (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           <Skeleton lines={5} />
-        </div>
+        </Card>
       ) : events.length === 0 ? (
         <EmptyState
           icon="calendar"
@@ -615,7 +615,7 @@ export default function TimelinePage() {
       ) : (
         <ol style={{ display: 'flex', flexDirection: 'column', gap: 10, listStyle: 'none', margin: 0, padding: 0 }}>
           {events.map((e) => (
-            <li key={e.id} className="card elev-sm" {...entityTargetProps('timeline', e.id)}>
+            <Card key={e.id} density="compact" elev="sm" as="li" {...entityTargetProps('timeline', e.id)}>
               {editingId === e.id ? (
                 <div data-testid="timeline-event-edit-form">
                   {eventConflict && (
@@ -742,7 +742,7 @@ export default function TimelinePage() {
                   />
                 </div>
               )}
-            </li>
+            </Card>
           ))}
         </ol>
       )}

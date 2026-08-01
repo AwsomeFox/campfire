@@ -278,9 +278,9 @@ function EncounterCard({
 }) {
   const { t } = useTranslation();
   return (
-    <ListDetailLink
+    <Card
       to={`/c/${campaignId}/encounters/${encounter.id}`}
-      className="card elev-sm"
+      density="compact" elev="sm" as={ListDetailLink}
       style={{ color: 'var(--color-text)', textDecoration: 'none', gap: 10 }}
     >
       <div className="flex items-center gap-2 flex-wrap">
@@ -305,7 +305,7 @@ function EncounterCard({
           </Chip>
         )}
       </div>
-    </ListDetailLink>
+    </Card>
   );
 }
 

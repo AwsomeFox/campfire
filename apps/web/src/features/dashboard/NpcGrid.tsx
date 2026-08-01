@@ -2,14 +2,14 @@ import { Link } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Npc } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { EmptyState } from '../../components/ui';
+import { Card, EmptyState } from '../../components/ui';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 
 export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] }) {
   const { canDmWrite } = useCampaignAccess();
 
   return (
-    <div className="card elev-sm">
+    <Card density="compact" elev="sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <span className="card-kicker">NPCs</span>
         <div style={{ flex: 1 }} />
@@ -58,6 +58,6 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
           </ListDetailLink>
         ))
       )}
-    </div>
+    </Card>
   );
 }
