@@ -2240,6 +2240,28 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
     expect(after.body.name).toBe('Crossroads Ambush'); // unchanged from the prior test
     expect(after.body.fog.enabled).toBe(true); // Tab A's edit survived
   });
+
+  it('combatant update with stale expectedUpdatedAt 409s with STALE_WRITE and does not mutate combatant (#1501)', async () => {
+    const server = ctx.app.getHttpServer();
+    const current = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatant = current.body.combatants[0];
+    const loadedAt = current.body.updatedAt;
+
+    // First update succeeds and bumps encounter.updatedAt
+    const first = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatant.id}`)
+      .set(dm)
+      .send({ hpDelta: -2 });
+    expect(first.status).toBe(200);
+
+    // Stale expectedUpdatedAt 409s
+    const stale = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatant.id}`)
+      .set(dm)
+      .send({ hpDelta: -2, expectedUpdatedAt: loadedAt });
+    expect(stale.status).toBe(409);
+    expect(stale.body.code).toBe('STALE_WRITE');
+  });
 });
 
 describe('encounters — lifecycle write serialization (issue #1461, e2e)', () => {

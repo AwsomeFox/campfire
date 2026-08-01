@@ -4363,10 +4363,11 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...CombatantUpdate.shape,
         deathSaveRoll: z.number().optional().describe('Removed: use roll_death_save instead'),
       },
-      async ({ encounterId, combatantId, deathSaveRoll, ...fields }) => {
+      async ({ encounterId, combatantId, deathSaveRoll, expectedUpdatedAt, ...fields }) => {
         if (deathSaveRoll !== undefined) {
           throw new BadRequestException({
             code: 'validation_failed',
@@ -4382,7 +4383,13 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantUpdate.parse(fields);
-        return this.encounters.updateCombatant(encounterId as number, combatantId as number, validated, user, role);
+        return this.encounters.updateCombatant(
+          encounterId as number,
+          combatantId as number,
+          { ...validated, expectedUpdatedAt: expectedUpdatedAt as string | undefined },
+          user,
+          role,
+        );
       },
     );
 
