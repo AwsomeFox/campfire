@@ -10,20 +10,21 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const EN_ENCOUNTERS = resolve(__dirname, '../../src/i18n/locales/en/encounters.json');
 
 /** Body string on the End ConfirmDialog (not Delete / Reopen). */
-function endConfirmBody(source: string): string {
-  const match = source.match(
-    /title="End this encounter\?"\s*body="([^"]+)"/,
-  );
-  expect(match, 'End ConfirmDialog body string').toBeTruthy();
-  return match![1];
+function endConfirmBody(): string {
+  const catalog = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8'));
+  return catalog.encounters.runner.confirmEndBody;
 }
 
 test.describe('End encounter confirmation copy (issue #475)', () => {
   test('explains write-back, Reopen, and re-end conflict — not irreversible', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    const body = endConfirmBody(source);
+    expect(source).toMatch(/confirmEndTitle/);
+    expect(source).toMatch(/confirmEndBody/);
+
+    const body = endConfirmBody();
 
     expect(body.toLowerCase()).not.toMatch(/cannot be undone|irreversible/);
     expect(body).toMatch(/writes? .*HP/i);

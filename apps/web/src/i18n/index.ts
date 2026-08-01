@@ -46,11 +46,9 @@ function loadCatalog(modules: Record<string, unknown>): Record<string, unknown> 
 }
 
 const en = loadCatalog(import.meta.glob('./locales/en/*.json', { eager: true }));
-const ar = loadCatalog(import.meta.glob('./locales/ar/*.json', { eager: true }));
 
 export const resources = {
   en: { translation: en },
-  ar: { translation: ar },
   pseudo: { translation: pseudoLocalizeCatalog(en) },
 } as const;
 

@@ -13,6 +13,6 @@ test.describe('Standard combat actions bar (#1852)', () => {
     expect(source).toMatch(/aria-label=\{act\.label\}/);
     expect(source).toMatch(/min-h-\[44px\]/);
     expect(source).toMatch(/actionSlot \? actionSlot\.used >= actionSlot\.max : true/);
-    expect(source).toMatch(/STANDARD_ACTIONS = \[/);
+    expect(source).toMatch(/standardActions = useMemo\(/);
   });
 });

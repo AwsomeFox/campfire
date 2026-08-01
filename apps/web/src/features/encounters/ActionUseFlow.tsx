@@ -84,8 +84,8 @@ export function ActionUsePanel({
   useEffect(() => {
     ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     ref.current?.focus({ preventScroll: true });
-    announce(`${actionName} ready. Pick targets or preview.`);
-  }, [actionName, announce]);
+    announce(t('encounters.actionUse.readyAnnounce', { name: actionName }));
+  }, [actionName, announce, t]);
 
   const candidates = useMemo(
     () => legalTargets(combatants, actorCombatantId, spec.targets.allow),
@@ -128,7 +128,7 @@ export function ActionUsePanel({
     },
     onSuccess: (res) => {
       if (res.undoToken) onApplied(res.undoToken, res.policy, res.sourceEncounterId);
-      announce(`${actionName} applied.`);
+      announce(t('encounters.actionUse.appliedAnnounce', { name: actionName }));
       onDismiss();
     },
     onError: (err) => {
@@ -142,11 +142,7 @@ export function ActionUsePanel({
         // and refresh the encounter state rather than permitting duplicate retry dispatches.
         setIsUnconfirmed(true);
         void invalidateEncounter(queryClient, encounterId);
-        onError(
-          t('encounters.errors.applyUnconfirmed', {
-            defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
-          }),
-        );
+        onError(t('encounters.errors.applyUnconfirmed'));
       }
     },
   });
@@ -174,16 +170,16 @@ export function ActionUsePanel({
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontWeight: 700, fontSize: 13 }}>{actorName} · {actionName}</span>
-        <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
+        <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : t('encounters.actionUse.free')}</span>
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
           disabled={commit.isPending || commitSubmitted || isUnconfirmed}
           onClick={onDismiss}
           style={{ marginLeft: 'auto' }}
-          aria-label="Cancel action use"
+          aria-label={t('encounters.actionUse.cancelAria')}
         >
-          Cancel
+          {t('encounters.actionUse.cancel')}
         </button>
       </div>
 
@@ -191,13 +187,13 @@ export function ActionUsePanel({
         <>
           {spec.range.range && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-              Range: {spec.range.range}{spec.range.size ? ` · ${spec.range.shape || 'area'} ${spec.range.size}` : ''}
+              {t('encounters.actionUse.range', { range: spec.range.range })}{spec.range.size ? ` · ${spec.range.shape || 'area'} ${spec.range.size}` : ''}
             </p>
           )}
           {needsTarget && (
             <div>
               <span className="card-kicker" style={{ marginBottom: 6, display: 'block' }}>
-                Pick target{spec.targets.count === 1 ? '' : 's'} ({targetIds.length}/{spec.targets.count || '∞'})
+                {spec.targets.count === 1 ? t('encounters.actionUse.pickTarget') : t('encounters.actionUse.pickTargets')} ({targetIds.length}/{spec.targets.count || '∞'})
               </span>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} data-testid="action-use-targets">
                 {candidates.map((c) => (
@@ -212,7 +208,7 @@ export function ActionUsePanel({
                     {c.name}
                   </button>
                 ))}
-                {candidates.length === 0 && <span className="text-muted" style={{ fontSize: 12 }}>No legal targets.</span>}
+                {candidates.length === 0 && <span className="text-muted" style={{ fontSize: 12 }}>{t('encounters.actionUse.noLegalTargets')}</span>}
               </div>
             </div>
           )}
@@ -221,7 +217,7 @@ export function ActionUsePanel({
             disabled={!canPreview || resolvePreview.isPending}
             onClick={() => resolvePreview.mutate()}
           >
-            {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
+            {resolvePreview.isPending ? t('encounters.actionUse.resolving') : t('encounters.actionUse.preview')}
           </Btn>
         </>
       )}
@@ -240,20 +236,18 @@ export function ActionUsePanel({
           </div>
           {preview.policy === 'dm-confirmed' && !isDm && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-              Your DM will apply the consequences — this is a declaration only.
+              {t('encounters.actionUse.dmWillApply')}
             </p>
           )}
           {preview.policy === 'player-declares' && !isDm && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-              Declared — waiting for the DM to apply.
+              {t('encounters.actionUse.declaredWaitingDm')}
             </p>
           )}
           {isUnconfirmed && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p className="text-muted" style={{ fontSize: 11.5, margin: 0, color: 'var(--color-warning, #d97706)' }} data-testid="action-use-unconfirmed-text">
-                {t('encounters.errors.applyUnconfirmed', {
-                  defaultValue: 'Outcome unconfirmed due to a network error. Encounter state refreshed.',
-                })}
+                {t('encounters.errors.applyUnconfirmed')}
               </p>
               <Btn
                 data-testid="action-use-retry"
@@ -262,7 +256,7 @@ export function ActionUsePanel({
                   commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
                 }}
               >
-                {commit.isPending ? 'Retrying…' : 'Retry'}
+                {commit.isPending ? t('encounters.actionUse.retrying') : t('encounters.actionUse.retry')}
               </Btn>
             </div>
           )}
@@ -278,7 +272,7 @@ export function ActionUsePanel({
                 setIsUnconfirmed(false);
               }}
             >
-              Back
+              {t('encounters.actionUse.back')}
             </button>
             {!isUnconfirmed && (preview.canApply || (isDm && !preview.applied)) && (
               <Btn
@@ -289,12 +283,12 @@ export function ActionUsePanel({
                   commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
                 }}
               >
-                {commit.isPending ? 'Applying…' : 'Apply'}
+                {commit.isPending ? t('encounters.actionUse.applying') : t('encounters.actionUse.apply')}
               </Btn>
             )}
             {!preview.canApply && !isDm && !isUnconfirmed && (
               <Btn data-testid="action-use-done" onClick={onDismiss}>
-                Done
+                {t('encounters.actionUse.done')}
               </Btn>
             )}
           </div>

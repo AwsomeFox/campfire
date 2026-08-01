@@ -65,6 +65,7 @@ for (const rel of [
   'apps/web/src/i18n/locales/en/preferences.json',
   'apps/web/src/i18n/locales/ar/preferences.json',
 ]) {
+  if (!existsSync(join(root, rel))) continue;
   expectContains(rel, '{{toolCount}} tools covering', 'preferences mcpBlurb interpolation');
   if (read(rel).match(/\b\d+\+?\s+tools covering/)) {
     errors.push(`${rel} still hardcodes a tool count — use {{toolCount}}`);

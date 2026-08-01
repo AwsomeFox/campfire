@@ -15,7 +15,6 @@ export const SYSTEM_LOCALE = 'system' as const;
 /** Languages Campfire currently ships a translation catalog for. */
 export const SUPPORTED_LANGUAGES = [
   { code: 'en', label: 'English' },
-  { code: 'ar', label: 'العربية' },
   /** Pseudo-locale: accentized English for layout/overflow audits (issue #629). */
   { code: 'pseudo', label: '⒫⒮⒠⒰⒟︎⒪⒞' },
 ] as const;

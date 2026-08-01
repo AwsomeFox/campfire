@@ -2892,9 +2892,9 @@ export default function RunSessionPage() {
                   ghost
                   disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
-                  title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
+                  title={needsInitiativeCount === 0 ? t('encounters.runner.allInitiativeSetTitle') : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0 ? t('encounters.runner.rollRemaining', { count: needsInitiativeCount }) : t('encounters.runner.rollInitiative')}
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
@@ -2902,11 +2902,11 @@ export default function RunSessionPage() {
                     onClick={startEncounter}
                     aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
                   >
-                    Start
+                    {t('encounters.runner.start')}
                   </Btn>
                   {hasNoCombatants && (
                     <p id="start-empty-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
-                      Add at least one combatant before starting
+                      {t('encounters.runner.startEmptyHint')}
                     </p>
                   )}
                 </div>
@@ -2924,9 +2924,9 @@ export default function RunSessionPage() {
                     encounter.currentCombatantId === orderedCombatants[0].id)
                 }
                 onClick={undoTurn}
-                title="Undo turn"
+                title={t('encounters.runner.undoTurnTitle')}
               >
-                ← Undo turn
+                {t('encounters.runner.undoTurn')}
               </Btn>
             )}
             {lifecycle.rollInitiative && lifecycle.nextTurn && (
@@ -2940,18 +2940,18 @@ export default function RunSessionPage() {
                   ghost
                   disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
-                  title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
+                  title={needsInitiativeCount === 0 ? t('encounters.runner.allInitiativeSetTitle') : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0 ? t('encounters.runner.rollRemaining', { count: needsInitiativeCount }) : t('encounters.runner.rollInitiative')}
                 </Btn>
                 <Btn
                   data-testid="encounter-header-next-turn"
                   disabled={headerBusy || riskyBlocked}
                   onClick={nextTurn}
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
-                  title={`Next turn${nextTurnShortcut.titleSuffix}`}
+                  title={`${t('encounters.runner.nextTurnTitle')}${nextTurnShortcut.titleSuffix}`}
                 >
-                  Next turn →
+                  {t('encounters.runner.nextTurn')}
                 </Btn>
               </>
             )}
@@ -2960,7 +2960,7 @@ export default function RunSessionPage() {
               // linked character sheet (cross-entity, no CAS guard) — genuinely conflict-prone,
               // so it stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
-                End
+                {t('encounters.runner.end')}
               </Btn>
             )}
             {lifecycle.reopen && (
@@ -2975,7 +2975,7 @@ export default function RunSessionPage() {
                   setConfirmReopen(true);
                 }}
               >
-                Reopen
+                {t('encounters.runner.reopen')}
               </Btn>
             )}
             {lifecycle.delete && (
@@ -2985,7 +2985,7 @@ export default function RunSessionPage() {
               // effectively unrecoverable action is worse than racing a turn advance, so
               // this stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
-                {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
+                {encounter.status === 'preparing' ? t('encounters.runner.cancel') : t('encounters.runner.delete')}
               </Btn>
             )}
           </div>
@@ -3627,10 +3627,10 @@ export default function RunSessionPage() {
 
       {confirmEnd && (
         <ConfirmDialog
-          title="End this encounter?"
-          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
-          confirmLabel="End encounter"
-          pendingLabel="Ending encounter…"
+          title={t('encounters.runner.confirmEndTitle')}
+          body={t('encounters.runner.confirmEndBody')}
+          confirmLabel={t('encounters.runner.confirmEndLabel')}
+          pendingLabel={t('encounters.runner.confirmEndPending')}
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -3638,17 +3638,15 @@ export default function RunSessionPage() {
       )}
       {confirmReopen && (
         <ConfirmDialog
-          title="Reopen this encounter?"
+          title={t('encounters.runner.confirmReopenTitle')}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <p style={{ margin: 0 }}>
-                It returns to Running where combat left off. Character sheets were synced when it
-                ended — if a sheet has healed, rested, or otherwise changed since then, choose which
-                HP to keep before reopening.
+                {t('encounters.runner.confirmReopenBody')}
               </p>
               {hpSyncConflicts.length === 0 ? (
                 <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                  No sheet HP conflicts — combatant snapshots still match the sheets.
+                  {t('encounters.runner.noHpConflicts')}
                 </p>
               ) : (
                 <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -27,14 +27,20 @@
  * This is a pure unit test — it touches no backend — so it runs under the same Playwright
  * runner as the other `.unit.spec.ts` files without needing the seeded server.
  */
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { AI_DM_MODE_CAPABILITIES } from '@campfire/schema';
 import { MODES as AI_DM_CARD_MODES } from '../../src/features/settings/AiDmCard';
 import { FEATURES as LOGIN_FEATURES } from '../../src/features/auth/LoginPage';
 import aiOnboarding from '../../src/i18n/locales/en/aiOnboarding.json';
-import settingsAr from '../../src/i18n/locales/ar/settings.json';
 import settingsEn from '../../src/i18n/locales/en/settings.json';
 import table from '../../src/i18n/locales/en/table.json';
+
+const AR_SETTINGS_PATH = resolve(__dirname, '../../src/i18n/locales/ar/settings.json');
+const settingsAr = existsSync(AR_SETTINGS_PATH)
+  ? JSON.parse(readFileSync(AR_SETTINGS_PATH, 'utf8'))
+  : settingsEn;
 
 const ai = aiOnboarding.aiOnboarding;
 const modeOptions = settingsEn.settings.aiDm.modeOptions;
@@ -136,9 +142,11 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
 
     // Arabic is intentionally not the English keyword policy source, but it must keep real
     // localized entries for the same rendered catalog keys instead of falling through to MODES.
-    for (const mode of ['co_dm', 'driver'] as const) {
-      expect(arModeOptions[mode].blurb, `ar settings.aiDm.modeOptions.${mode}.blurb`).toBeTruthy();
-      expect(arModeOptions[mode].blurb).not.toBe(modeOptions[mode].blurb);
+    if (existsSync(AR_SETTINGS_PATH)) {
+      for (const mode of ['co_dm', 'driver'] as const) {
+        expect(arModeOptions[mode].blurb, `ar settings.aiDm.modeOptions.${mode}.blurb`).toBeTruthy();
+        expect(arModeOptions[mode].blurb).not.toBe(modeOptions[mode].blurb);
+      }
     }
   });
 

@@ -33,22 +33,6 @@ import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
 
-const DIFFICULTY_OPTIONS: { value: DifficultyBand; label: string }[] = [
-  { value: 'trivial', label: 'Trivial' },
-  { value: 'easy', label: 'Easy' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'hard', label: 'Hard' },
-  { value: 'deadly', label: 'Deadly' },
-];
-
-const SHAPE_OPTIONS: { value: '' | EncounterShape; label: string }[] = [
-  { value: '', label: 'Auto (budget picks)' },
-  { value: 'solo', label: 'Solo (1) — boss' },
-  { value: 'pair', label: 'Pair (2)' },
-  { value: 'group', label: 'Group (3–6) — standard fight' },
-  { value: 'horde', label: 'Horde (7+) — swarm' },
-];
-
 /** A stable idempotency key per wizard session so a double-click / retry never double-commits. */
 function useIdempotencyKey(deps: unknown): string {
   return useMemo(() => {
@@ -197,16 +181,38 @@ export function GenerateEncounterWizard({
     }
   }, [preview, campaignId, idempotencyKey, name, locationId, questId, sessionId, audience, navigate]);
 
+  const difficultyOptions = useMemo(
+    () => [
+      { value: 'trivial' as DifficultyBand, label: t('encounters.wizard.difficulties.trivial') },
+      { value: 'easy' as DifficultyBand, label: t('encounters.wizard.difficulties.easy') },
+      { value: 'medium' as DifficultyBand, label: t('encounters.wizard.difficulties.medium') },
+      { value: 'hard' as DifficultyBand, label: t('encounters.wizard.difficulties.hard') },
+      { value: 'deadly' as DifficultyBand, label: t('encounters.wizard.difficulties.deadly') },
+    ],
+    [t],
+  );
+
+  const shapeOptions = useMemo(
+    () => [
+      { value: '' as '' | EncounterShape, label: t('encounters.wizard.shapes.auto') },
+      { value: 'solo' as '' | EncounterShape, label: t('encounters.wizard.shapes.solo') },
+      { value: 'pair' as '' | EncounterShape, label: t('encounters.wizard.shapes.pair') },
+      { value: 'group' as '' | EncounterShape, label: t('encounters.wizard.shapes.group') },
+      { value: 'horde' as '' | EncounterShape, label: t('encounters.wizard.shapes.horde') },
+    ],
+    [t],
+  );
+
   const canCommit = !!preview && preview.roster.length > 0 && !committing;
 
   return (
     <Card className="space-y-4" data-testid="generate-encounter-wizard">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="font-bold text-white text-sm inline-flex items-center gap-2">
-          <GameIcon slug="dice-twenty-faces-twenty" size={UI_ICON_SIZE.sm} /> Generate encounter
+          <GameIcon slug="dice-twenty-faces-twenty" size={UI_ICON_SIZE.sm} /> {t('encounters.wizard.title')}
         </h2>
         <Btn ghost type="button" onClick={onCancel}>
-          Close
+          {t('encounters.wizard.close')}
         </Btn>
       </div>
 
@@ -215,19 +221,19 @@ export function GenerateEncounterWizard({
 
       {/* ── Step 1: parameters ── */}
       <fieldset className="space-y-3 border-0 p-0 m-0">
-        <legend className="text-xs text-slate-400 font-semibold">1. Parameters</legend>
+        <legend className="text-xs text-slate-400 font-semibold">{t('encounters.wizard.parametersLegend')}</legend>
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
           <Field
             idPrefix="gen-enc"
             name="difficulty"
             as="select"
-            label="Target difficulty"
+            label={t('encounters.wizard.targetDifficulty')}
             labelClassName="text-xs text-slate-400"
             selectClassName="cf-select text-xs w-full cf-density-xs"
             value={difficulty}
             onChange={(e) => setDifficulty(e.target.value as DifficultyBand)}
           >
-            {DIFFICULTY_OPTIONS.map((o) => (
+            {difficultyOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
@@ -237,13 +243,13 @@ export function GenerateEncounterWizard({
             idPrefix="gen-enc"
             name="shape"
             as="select"
-            label="Duration / shape"
+            label={t('encounters.wizard.durationShape')}
             labelClassName="text-xs text-slate-400"
             selectClassName="cf-select text-xs w-full cf-density-xs"
             value={shape}
             onChange={(e) => setShape(e.target.value as '' | EncounterShape)}
           >
-            {SHAPE_OPTIONS.map((o) => (
+            {shapeOptions.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
@@ -252,9 +258,9 @@ export function GenerateEncounterWizard({
           <Field
             idPrefix="gen-enc"
             name="creatureType"
-            label="Enemy role / type"
+            label={t('encounters.wizard.enemyRoleType')}
             labelClassName="text-xs text-slate-400"
-            placeholder="e.g. undead, dragon"
+            placeholder={t('encounters.wizard.enemyRoleTypePlaceholder')}
             value={creatureType}
             onChange={(e) => setCreatureType(e.target.value)}
             optional
@@ -262,9 +268,9 @@ export function GenerateEncounterWizard({
           <Field
             idPrefix="gen-enc"
             name="environment"
-            label="Theme / environment"
+            label={t('encounters.wizard.themeEnvironment')}
             labelClassName="text-xs text-slate-400"
-            placeholder="e.g. forest, crypt"
+            placeholder={t('encounters.wizard.themeEnvironmentPlaceholder')}
             value={environment}
             onChange={(e) => setEnvironment(e.target.value)}
             optional
@@ -273,7 +279,7 @@ export function GenerateEncounterWizard({
             idPrefix="gen-enc"
             name="minCr"
             type="number"
-            label="Min CR"
+            label={t('encounters.wizard.minCr')}
             labelClassName="text-xs text-slate-400"
             value={minCr}
             onChange={(e) => setMinCr(e.target.value)}
@@ -283,7 +289,7 @@ export function GenerateEncounterWizard({
             idPrefix="gen-enc"
             name="maxCr"
             type="number"
-            label="Max CR"
+            label={t('encounters.wizard.maxCr')}
             labelClassName="text-xs text-slate-400"
             value={maxCr}
             onChange={(e) => setMaxCr(e.target.value)}
@@ -293,7 +299,7 @@ export function GenerateEncounterWizard({
             idPrefix="gen-enc"
             name="maxCount"
             type="number"
-            label="Max creatures"
+            label={t('encounters.wizard.maxCreatures')}
             labelClassName="text-xs text-slate-400"
             value={maxCount}
             onChange={(e) => setMaxCount(e.target.value)}
@@ -302,11 +308,11 @@ export function GenerateEncounterWizard({
         </div>
         <label className="flex items-center gap-2 text-xs text-slate-300">
           <input type="checkbox" checked={includeHazards} onChange={(e) => setIncludeHazards(e.target.checked)} />
-          Include hazards (traps / environmental dangers)
+          {t('encounters.wizard.includeHazards')}
         </label>
         <div className="flex gap-2">
           <Btn type="button" onClick={() => void runPreview()} disabled={loading}>
-            {loading ? 'Generating…' : preview ? 'Regenerate' : 'Preview roster'}
+            {loading ? t('encounters.wizard.generating') : preview ? t('encounters.wizard.regenerate') : t('encounters.wizard.previewRoster')}
           </Btn>
         </div>
       </fieldset>
@@ -319,14 +325,14 @@ export function GenerateEncounterWizard({
           {/* ── Step 2: roster + tune ── */}
           <fieldset className="space-y-2 border-0 p-0 m-0">
             <legend className="text-xs text-slate-400 font-semibold flex items-center justify-between w-full">
-              <span>2. Roster</span>
+              <span>{t('encounters.wizard.rosterLegend')}</span>
             </legend>
             <div className="flex gap-2 flex-wrap">
               <Btn ghost type="button" onClick={() => void runPreview({ op: 'reroll-all' })} disabled={loading}>
-                Reroll all
+                {t('encounters.wizard.rerollAll')}
               </Btn>
               <Btn ghost type="button" onClick={() => void runPreview({ op: 'add-slot' })} disabled={loading}>
-                + Add creature
+                {t('encounters.wizard.addCreature')}
               </Btn>
             </div>
             <div className="space-y-2">
@@ -343,43 +349,43 @@ export function GenerateEncounterWizard({
                   onCount={(count) => void runPreview({ op: 'adjust-count', slotId: slot.slotId, count })}
                 />
               ))}
-              {preview.roster.length === 0 && <p className="text-xs text-slate-400">No creatures — adjust the filters and regenerate, or add one.</p>}
+              {preview.roster.length === 0 && <p className="text-xs text-slate-400">{t('encounters.wizard.noCreatures')}</p>}
             </div>
           </fieldset>
 
           {/* ── Step 3: commit ── */}
           <fieldset className="space-y-3 border-0 p-0 m-0">
-            <legend className="text-xs text-slate-400 font-semibold">3. Save encounter</legend>
+            <legend className="text-xs text-slate-400 font-semibold">{t('encounters.wizard.saveLegend')}</legend>
             <Field
               idPrefix="gen-enc"
               name="name"
-              label="Encounter name"
+              label={t('encounters.wizard.encounterName')}
               labelClassName="text-xs text-slate-400"
-              placeholder={`Generated ${preview.targetBand} encounter`}
+              placeholder={t('encounters.wizard.encounterNamePlaceholder', { band: preview.targetBand })}
               value={name}
               onChange={(e) => setName(e.target.value)}
               maxLength={120}
               optional
             />
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-              <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
-                <option value="">— none —</option>
+              <Field idPrefix="gen-enc" name="locationId" as="select" label={t('encounters.wizard.location')} labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name ?? `#${l.id}`}
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
-                <option value="">— none —</option>
+              <Field idPrefix="gen-enc" name="questId" as="select" label={t('encounters.wizard.quest')} labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {quests.map((q) => (
                   <option key={q.id} value={q.id}>
                     {q.title ?? `#${q.id}`}
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
-                <option value="">— none —</option>
+              <Field idPrefix="gen-enc" name="sessionId" as="select" label={t('encounters.wizard.session')} labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.title || `Session ${s.number ?? s.id}`}
@@ -389,14 +395,14 @@ export function GenerateEncounterWizard({
             </div>
             <AudienceField value={audience} onChange={setAudience} entityLabel="encounter" name="gen-encounter-audience" />
             <p className="text-xs text-slate-400">
-              After saving you can generate/select a battle map and place tokens on the encounter tracker.
+              {t('encounters.wizard.battleMapHint')}
             </p>
             <div className="flex gap-2 justify-end">
               <Btn ghost type="button" onClick={onCancel} disabled={committing}>
-                Cancel
+                {t('encounters.wizard.close')}
               </Btn>
               <Btn type="button" onClick={() => void commit()} disabled={!canCommit}>
-                {committing ? 'Saving…' : 'Create encounter'}
+                {committing ? t('encounters.wizard.saving') : t('encounters.wizard.createEncounter')}
               </Btn>
             </div>
           </fieldset>
@@ -475,6 +481,7 @@ function RosterSlotRow({
   onRemove: () => void;
   onCount: (count: number) => void;
 }) {
+  const { t } = useTranslation();
   const insp = slot.inspection;
   return (
     <div className="rounded-lg border border-white/10 p-2">
@@ -491,7 +498,7 @@ function RosterSlotRow({
         {slot.pinned && (
           <Chip variant="active">
             <span className="inline-flex items-center gap-1">
-              <GameIcon slug="pin" size={UI_ICON_SIZE.xs} /> Pinned
+              <GameIcon slug="pin" size={UI_ICON_SIZE.xs} /> {t('encounters.wizard.pinned')}
             </span>
           </Chip>
         )}
@@ -516,10 +523,10 @@ function RosterSlotRow({
             />
           </label>
           <Btn ghost type="button" onClick={onReroll} disabled={disabled} title="Reroll / swap this slot">
-            Reroll
+            {t('encounters.wizard.reroll')}
           </Btn>
-          <Btn ghost type="button" onClick={onPin} disabled={disabled} title={slot.pinned ? 'Unpin' : 'Pin (survives reroll-all)'}>
-            {slot.pinned ? 'Unpin' : 'Pin'}
+          <Btn ghost type="button" onClick={onPin} disabled={disabled} title={slot.pinned ? t('encounters.wizard.unpin') : t('encounters.wizard.pin')}>
+            {slot.pinned ? t('encounters.wizard.unpin') : t('encounters.wizard.pin')}
           </Btn>
           <Btn ghost type="button" onClick={onRemove} disabled={disabled} title="Remove this slot" aria-label={`Remove ${slot.name}`}>
             <UIIcon name="close" size="xs" />
@@ -560,7 +567,7 @@ function RosterSlotRow({
               <span className="text-slate-200 font-medium">{a.name}.</span> {a.text}
             </div>
           ))}
-          {!insp.hasStatblock && <p className="text-amber-300">No statblock detail — HP/CR may be incomplete.</p>}
+          {!insp.hasStatblock && <p className="text-amber-300">{t('encounters.wizard.noStatblock')}</p>}
         </div>
       )}
     </div>

@@ -108,6 +108,7 @@ replacePattern('website/docs/reference/roadmap.md', [
 ]);
 
 for (const rel of ['apps/web/src/i18n/locales/en/preferences.json', 'apps/web/src/i18n/locales/ar/preferences.json']) {
+  if (!existsSync(join(root, rel))) continue;
   const content = read(rel);
   if (content.includes('{{toolCount}} tools covering')) continue;
   replace(rel, [

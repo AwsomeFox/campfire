@@ -37,7 +37,7 @@ test.describe('locale preference resolution', () => {
 
   test('accepts only translation catalogs the application actually ships', () => {
     expect(isSupportedLanguage('en')).toBe(true);
-    expect(isSupportedLanguage('ar')).toBe(true);
+    expect(isSupportedLanguage('ar')).toBe(false);
     expect(isSupportedLanguage('pseudo')).toBe(true);
     expect(isSupportedLanguage('fr-FR')).toBe(false);
     expect(isSupportedLanguage('system')).toBe(false);
@@ -94,7 +94,7 @@ test.describe('locale preference resolution', () => {
   test('an unsupported browser locale falls back only the catalog', () => {
     expect(resolveLocales(SYSTEM_LOCALE, 'ar-EG')).toEqual({
       preference: SYSTEM_LOCALE,
-      catalogLocale: 'ar',
+      catalogLocale: 'en',
       formatLocale: 'ar-EG',
     });
   });

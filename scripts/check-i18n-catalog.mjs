@@ -56,6 +56,30 @@ function listLocaleDirs() {
   });
 }
 
+const ALLOWED_UNTRANSLATED_VALUES = new Set([
+  'HP', 'XP', 'AC', 'DC', 'DM', 'AI', 'REST', 'MCP',
+  'd4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100',
+  'OK', 'JSON', 'REST API', 'ID', 'UUID', 'URL',
+]);
+
+const UNTRANSLATED_THRESHOLD = 0.20;
+
+/** @param {Record<string, unknown>} obj @param {string} [prefix] */
+function flattenKeyValuePairs(obj, prefix = '') {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (key.startsWith('_')) continue;
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      Object.assign(out, flattenKeyValuePairs(/** @type {Record<string, unknown>} */ (value), path));
+    } else if (typeof value === 'string') {
+      out[path] = value;
+    }
+  }
+  return out;
+}
+
 function checkKeyParity() {
   const en = loadMergedLocale(enDir);
   const enKeys = flattenKeys(en);
@@ -83,6 +107,33 @@ function checkKeyParity() {
     }
     if (extra.length > 0) {
       errors.push(`locales/${lang}: extra ${extra.length} keys (e.g. ${extra.slice(0, 5).join(', ')})`);
+    }
+
+    // Check for untranslated values identical to English source
+    for (const file of files.filter((f) => enFiles.includes(f))) {
+      const enMod = JSON.parse(readFileSync(join(enDir, file), 'utf8'));
+      const langMod = JSON.parse(readFileSync(join(dir, file), 'utf8'));
+      const enMap = flattenKeyValuePairs(enMod);
+      const langMap = flattenKeyValuePairs(langMod);
+
+      let total = 0;
+      let untranslated = 0;
+      for (const [k, langVal] of Object.entries(langMap)) {
+        const enVal = enMap[k];
+        if (enVal !== undefined) {
+          total++;
+          if (langVal === enVal && !ALLOWED_UNTRANSLATED_VALUES.has(langVal) && langVal.trim().length > 1) {
+            untranslated++;
+          }
+        }
+      }
+
+      if (total > 0 && untranslated / total > UNTRANSLATED_THRESHOLD) {
+        const pct = Math.round((untranslated / total) * 100);
+        errors.push(
+          `locales/${lang}/${file}: ${untranslated} of ${total} keys (${pct}%) are untranslated English values (threshold is ${UNTRANSLATED_THRESHOLD * 100}%)`,
+        );
+      }
     }
   }
 

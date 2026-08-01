@@ -55,7 +55,7 @@ test.describe('In-combat Spellbook panel (issue #1851)', () => {
 
     expect(src).toContain('SpellbookPanel');
     expect(src).toContain('toggle-spellbook-btn');
-    expect(src).toContain('🔮 Spellbook');
+    expect(src).toContain('encounters.turn.spellbook');
     expect(src).toContain('showSpellbook');
   });
 

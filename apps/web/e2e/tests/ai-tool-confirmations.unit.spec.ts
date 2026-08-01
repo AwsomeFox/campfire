@@ -7,7 +7,7 @@
  * driven by the live signal rather than only by its poll.
  */
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const PANEL = resolve(__dirname, '../../src/features/ai-dm/ToolConfirmationsPanel.tsx');
@@ -70,8 +70,10 @@ test.describe('tool confirmations UI (#1558)', () => {
       expect(panel).toContain(`table.confirmations.${key}`);
     }
     for (const lng of ['en', 'ar']) {
+      const file = resolve(__dirname, `../../src/i18n/locales/${lng}/table.json`);
+      if (!existsSync(file)) continue;
       const cat = JSON.parse(
-        readFileSync(resolve(__dirname, `../../src/i18n/locales/${lng}/table.json`), 'utf8'),
+        readFileSync(file, 'utf8'),
       ) as { table: { confirmations?: Record<string, string> } };
       expect(Object.keys(cat.table.confirmations ?? {}).sort()).toContain('approve');
     }

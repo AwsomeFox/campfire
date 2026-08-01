@@ -28,18 +28,6 @@ import { Card, Btn } from '../../components/ui';
 import { SpellbookPanel, type SpellItem, type SpellSlotMap, type PactSlotPool, type SpellcastingStats } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 
-const STANDARD_ACTIONS = [
-  { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
-  { id: 'dash', label: 'Dash', icon: 'running-shoe', desc: 'Move your speed again' },
-  { id: 'dodge', label: 'Dodge', icon: 'shield', desc: 'Focus on avoiding attacks' },
-  { id: 'disengage', label: 'Disengage', icon: 'evasion', desc: 'Move without provoking opportunity attacks' },
-  { id: 'help', label: 'Help', icon: 'help', desc: 'Grant advantage to an ally' },
-  { id: 'hide', label: 'Hide', icon: 'hood', desc: 'Attempt to hide from enemies' },
-  { id: 'ready', label: 'Ready', icon: 'stopwatch', desc: 'Prepare an action for a specific trigger' },
-  { id: 'search', label: 'Search', icon: 'magnifying-glass', desc: 'Devote your attention to finding something' },
-  { id: 'use', label: 'Use Object', icon: 'grab', desc: 'Interact with a complex object' }
-];
-
 interface TurnWorkspaceProps {
   encounterId: number;
   /** Round + current-combatant id drive the query key so the workspace refetches on advance. */
@@ -81,6 +69,8 @@ function SlotChip({
   disabled,
   unit = 'ft',
   step = 5,
+  useLabel = 'Use',
+  undoLabel = 'Undo',
 }: {
   slot: TurnWorkspaceData['actionEconomy'][number];
   onUse: () => void;
@@ -88,6 +78,8 @@ function SlotChip({
   disabled: boolean;
   unit?: string;
   step?: number;
+  useLabel?: string;
+  undoLabel?: string;
 }) {
   const isMovement = slot.kind === 'movement';
   const remaining = Math.max(0, slot.max - slot.used);
@@ -108,10 +100,10 @@ function SlotChip({
       <p className="text-[11px] text-muted m-0 leading-tight">{slot.help}</p>
       <div className="flex gap-1">
         <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled} onClick={onUse}>
-          {isMovement ? `+${step} ${unit}` : 'Use'}
+          {isMovement ? `+${step} ${unit}` : useLabel}
         </button>
         <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled || slot.used <= 0} onClick={onRelease}>
-          {isMovement ? `-${step} ${unit}` : 'Undo'}
+          {isMovement ? `-${step} ${unit}` : undoLabel}
         </button>
       </div>
     </div>
@@ -186,16 +178,28 @@ export function TurnWorkspace({
   const turnRound = turn?.round ?? 0;
   useEffect(() => {
     if (isYourTurn && currentId != null) {
-      announce(`Your turn — round ${turnRound}, ${currentName}.`, {
+      announce(t('encounters.turn.yourTurnAnnounce', { round: turnRound, name: currentName }), {
         assertive: true,
         dedupeKey: `your-turn:${encounterId}:${currentId}:${turnRound}`,
       });
     }
-  }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+  }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound, t]);
 
   useEffect(() => {
     setReadiedDraft(currentTurnState?.readied ?? '');
   }, [currentTurnState?.readied]);
+
+  const standardActions = useMemo(() => [
+    { id: 'attack', label: t('encounters.turn.standardActions.attack'), icon: 'crossed-swords', desc: t('encounters.turn.standardActions.attackDesc') },
+    { id: 'dash', label: t('encounters.turn.standardActions.dash'), icon: 'running-shoe', desc: t('encounters.turn.standardActions.dashDesc') },
+    { id: 'dodge', label: t('encounters.turn.standardActions.dodge'), icon: 'shield', desc: t('encounters.turn.standardActions.dodgeDesc') },
+    { id: 'disengage', label: t('encounters.turn.standardActions.disengage'), icon: 'evasion', desc: t('encounters.turn.standardActions.disengageDesc') },
+    { id: 'help', label: t('encounters.turn.standardActions.help'), icon: 'help', desc: t('encounters.turn.standardActions.helpDesc') },
+    { id: 'hide', label: t('encounters.turn.standardActions.hide'), icon: 'hood', desc: t('encounters.turn.standardActions.hideDesc') },
+    { id: 'ready', label: t('encounters.turn.standardActions.ready'), icon: 'stopwatch', desc: t('encounters.turn.standardActions.readyDesc') },
+    { id: 'search', label: t('encounters.turn.standardActions.search'), icon: 'magnifying-glass', desc: t('encounters.turn.standardActions.searchDesc') },
+    { id: 'use', label: t('encounters.turn.standardActions.use'), icon: 'grab', desc: t('encounters.turn.standardActions.useDesc') },
+  ], [t]);
 
   const actionItems = useMemo(() => {
     const list = turn?.suggestedActions ?? [];
@@ -229,11 +233,11 @@ export function TurnWorkspace({
   }, [turn?.suggestedActions, actionFilter]);
 
   const tabs = useMemo(() => [
-    { id: 'action', label: 'Actions' },
-    { id: 'bonus', label: 'Bonus Actions' },
-    { id: 'reaction', label: 'Reactions' },
-    { id: 'other', label: 'Other / Limited Use' },
-  ] as const, []);
+    { id: 'action', label: t('encounters.turn.tabAction') },
+    { id: 'bonus', label: t('encounters.turn.tabBonus') },
+    { id: 'reaction', label: t('encounters.turn.tabReaction') },
+    { id: 'other', label: t('encounters.turn.tabOther') },
+  ] as const, [t]);
 
   useEffect(() => {
     if (actionItems[activeTab].length === 0) {
@@ -275,20 +279,20 @@ export function TurnWorkspace({
       {/* Prominent actor / round / next actor + Spellbook toggle. */}
       <div className="flex items-center justify-between gap-2.5 flex-wrap">
         <div className="flex items-center gap-2.5 flex-wrap">
-          <span className="text-xs uppercase tracking-wide text-muted">Round {turn.round}</span>
+          <span className="text-xs uppercase tracking-wide text-muted">{t('encounters.turn.round', { round: turn.round })}</span>
           <h2 className="text-lg font-extrabold text-white m-0">{turn.current.name}</h2>
-          <span className="tag tag-neutral">now</span>
-          {turn.next && <span className="text-sm text-muted">Next: {turn.next.name}</span>}
+          <span className="tag tag-neutral">{t('encounters.turn.now')}</span>
+          {turn.next && <span className="text-sm text-muted">{t('encounters.turn.next', { name: turn.next.name })}</span>}
         </div>
         <button
           type="button"
           className="btn btn-secondary text-xs cf-target-44 flex items-center gap-1.5 min-h-[44px]"
           data-testid="toggle-spellbook-btn"
           aria-expanded={showSpellbook}
-          aria-label="Toggle spellbook panel"
+          aria-label={t('encounters.turn.spellbookToggleAria')}
           onClick={() => setShowSpellbook((prev) => !prev)}
         >
-          <span>🔮 Spellbook</span>
+          <span>{t('encounters.turn.spellbook')}</span>
         </button>
       </div>
 
@@ -310,7 +314,7 @@ export function TurnWorkspace({
           banner below is a purely visual cue and is intentionally not its own live region. */}
       {turn.isYourTurn && (
         <div className="rounded-md px-3 py-2 font-semibold" style={{ background: 'var(--cf-difficulty-easy-bg)', color: 'var(--cf-difficulty-easy-fg)' }}>
-          It’s your turn.
+          {t('encounters.turn.yourTurn')}
         </div>
       )}
 
@@ -321,39 +325,39 @@ export function TurnWorkspace({
         <div className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 space-y-2" data-testid="turn-death-save-card">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div>
-              <span className="tag tag-danger font-semibold">Unconscious & Dying (0 HP)</span>
-              <p className="text-xs text-muted m-0 mt-1">Roll a d20 death saving throw to stabilize or revive.</p>
+              <span className="tag tag-danger font-semibold">{t('encounters.turn.dyingTitle')}</span>
+              <p className="text-xs text-muted m-0 mt-1">{t('encounters.turn.dyingHint')}</p>
             </div>
             <button
               type="button"
               className="btn btn-primary min-h-[44px] min-w-[44px] px-4 py-2 font-bold text-sm flex items-center gap-1.5"
               data-testid="turn-roll-death-save"
-              aria-label={`Roll a death save for ${turn.current.name}`}
+              aria-label={t('encounters.turn.rollDeathSaveAria', { name: turn.current.name })}
               disabled={controlsDisabled || deathSavePending || isCombatantPending?.(turn.current.combatantId) || !onRollDeathSave}
               onClick={() => {
                 if (onRollDeathSave && turn.current) onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
               }}
             >
-              🎲 Roll Death Save
+              {t('encounters.turn.rollDeathSave')}
             </button>
           </div>
           <div className="flex items-center gap-4 text-xs text-muted pt-1 flex-wrap">
-            <span>Successes: <strong className="text-white">{turn.current.deathSaveSuccesses ?? 0}/3</strong></span>
-            <span>Failures: <strong className="text-red-400">{turn.current.deathSaveFailures ?? 0}/3</strong></span>
+            <span>{t('encounters.turn.deathSaveSuccesses')}<strong className="text-white">{turn.current.deathSaveSuccesses ?? 0}/3</strong></span>
+            <span>{t('encounters.turn.deathSaveFailures')}<strong className="text-red-400">{turn.current.deathSaveFailures ?? 0}/3</strong></span>
           </div>
         </div>
       )}
 
       {isDying && (
         <p className="text-xs text-amber-400 m-0 italic">
-          Character is unconscious — normal actions and movement are suppressed while dying.
+          {t('encounters.turn.dyingSuppressed')}
         </p>
       )}
 
       {/* Action economy — adapter-defined slots with plain-language help + usage. */}
       {turn.actionEconomy.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-white mb-1.5">Action economy</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.turn.actionEconomy')}</h3>
           <div className="flex gap-2 flex-wrap">
             {(() => {
               const isFeet = !gridUnit || gridUnit === 'ft' || gridUnit === 'feet';
@@ -366,6 +370,8 @@ export function TurnWorkspace({
                   disabled={controlsDisabled}
                   unit={unit}
                   step={step}
+                  useLabel={t('encounters.turn.slotChip.use')}
+                  undoLabel={t('encounters.turn.slotChip.undo')}
                   onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: step } : { useSlot: slot.key })}
                   onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -step } : { releaseSlot: slot.key })}
                 />
@@ -373,7 +379,7 @@ export function TurnWorkspace({
             })()}
           </div>
           <div className="flex gap-1.5 mt-3 overflow-x-auto py-1 max-w-full flex-wrap sm:flex-nowrap" data-testid="standard-actions-bar">
-            {STANDARD_ACTIONS.map((act) => (
+            {standardActions.map((act) => (
               <button
                 key={act.id}
                 type="button"
@@ -415,18 +421,18 @@ export function TurnWorkspace({
       <div className="flex gap-4 flex-wrap text-sm">
         {turn.movement && (
           <span className="text-muted">
-            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {!gridUnit || gridUnit === 'ft' || gridUnit === 'feet' ? (gridUnit || 'ft') : 'ft'}</span>
+            {t('encounters.turn.movement')} <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {!gridUnit || gridUnit === 'ft' || gridUnit === 'feet' ? (gridUnit || 'ft') : 'ft'}</span>
           </span>
         )}
         <span className="text-muted">
-          Reaction: <span className="text-white">{turn.reactionAvailable ? 'available' : 'used'}</span>
+          {t('encounters.turn.reaction')} <span className="text-white">{turn.reactionAvailable ? t('encounters.turn.reactionAvailable') : t('encounters.turn.reactionUsed')}</span>
         </span>
         <span className="text-muted">
-          Concentration:{' '}
-          <span className="text-white">{turn.concentration ?? 'none'}</span>
+          {t('encounters.turn.concentration')}{' '}
+          <span className="text-white">{turn.concentration ?? t('encounters.turn.concentrationNone')}</span>
           {turn.concentration && (
             <button type="button" className="btn btn-ghost text-[11px] ml-1 cf-target-44" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
-              clear
+              {t('encounters.turn.clear')}
             </button>
           )}
         </span>
@@ -435,7 +441,7 @@ export function TurnWorkspace({
       {/* Delay / ready (issue #487) — MVP flags on the current turn. */}
       {(turn.isYourTurn || isDm) && (
         <section data-testid="turn-delay-ready">
-          <h3 className="text-sm font-semibold text-white mb-1.5">Delay &amp; ready</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.turn.delayReady')}</h3>
           <div className="flex gap-2 flex-wrap items-center">
             <button
               type="button"
@@ -444,14 +450,14 @@ export function TurnWorkspace({
               data-testid="workspace-delay-toggle"
               onClick={() => turnState.mutate({ delaying: !currentTurnState?.delaying })}
             >
-              {currentTurnState?.delaying ? 'Resume turn' : 'Delay turn'}
+              {currentTurnState?.delaying ? t('encounters.turn.resumeTurn') : t('encounters.turn.delayTurn')}
             </button>
             <input
               id="turn-readied-input"
               type="text"
               className="input cf-target-44"
-              placeholder="Ready action trigger…"
-              aria-label="Readied action trigger"
+              placeholder={t('encounters.turn.readyPlaceholder')}
+              aria-label={t('encounters.turn.readyAria')}
               value={readiedDraft}
               disabled={controlsDisabled}
               maxLength={200}
@@ -475,7 +481,7 @@ export function TurnWorkspace({
                 turnState.mutate({ readied: trimmed || null });
               }}
             >
-              Set ready
+              {t('encounters.turn.setReady')}
             </button>
             {currentTurnState?.readied && (
               <button
@@ -488,12 +494,12 @@ export function TurnWorkspace({
                   turnState.mutate({ readied: null });
                 }}
               >
-                Clear ready
+                {t('encounters.turn.clearReady')}
               </button>
             )}
           </div>
           {currentTurnState?.readied && (
-            <p className="text-xs text-muted m-0 mt-1">Readied: {currentTurnState.readied}</p>
+            <p className="text-xs text-muted m-0 mt-1">{t('encounters.turn.readied', { readied: currentTurnState.readied })}</p>
           )}
         </section>
       )}
@@ -501,15 +507,15 @@ export function TurnWorkspace({
       {/* Active effects (duration + save timing). */}
       {turn.activeEffects.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-white mb-1.5">Active effects</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.turn.activeEffects')}</h3>
           <ul className="list-none p-0 m-0 space-y-1">
             {turn.activeEffects.map((e) => (
               <li key={e.id} className="text-sm text-muted flex items-center gap-2">
                 <span className="text-white">{e.name}</span>
-                {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} rd</span>}
-                {e.saveAbility && <span className="text-[11px]">save: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
+                {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{t('encounters.turn.roundsShort', { count: e.roundsRemaining })}</span>}
+                {e.saveAbility && <span className="text-[11px]">{t('encounters.turn.saveDc', { ability: e.saveAbility })}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
                 <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
-                  remove
+                  {t('encounters.turn.remove')}
                 </button>
               </li>
             ))}
@@ -522,7 +528,7 @@ export function TurnWorkspace({
         <section className="grid gap-3 sm:grid-cols-2">
           {turn.startPrompts.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-white mb-1">Start of turn</h3>
+              <h3 className="text-sm font-semibold text-white mb-1">{t('encounters.turn.startOfTurn')}</h3>
               <ul className="list-none p-0 m-0 space-y-1">
                 {turn.startPrompts.map((p) => (
                   <li key={p.id} className="text-sm text-muted">• {p.message}</li>
@@ -532,7 +538,7 @@ export function TurnWorkspace({
           )}
           {turn.endPrompts.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-white mb-1">Before you end</h3>
+              <h3 className="text-sm font-semibold text-white mb-1">{t('encounters.turn.beforeYouEnd')}</h3>
               <ul className="list-none p-0 m-0 space-y-1">
                 {turn.endPrompts.map((p) => (
                   <li key={p.id} className="text-sm text-muted">• {p.message}</li>
@@ -546,13 +552,13 @@ export function TurnWorkspace({
       {/* Suggested actions, searchable inline. */}
       {turn.suggestedActions.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-white mb-1.5">Suggested actions</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.turn.suggestedActions')}</h3>
           <input
             id="turn-suggested-actions-search"
             type="search"
             className="input mb-2 w-full"
-            placeholder="Search actions…"
-            aria-label="Search suggested actions"
+            placeholder={t('encounters.turn.searchActionsPlaceholder')}
+            aria-label={t('encounters.turn.searchActionsAria')}
             value={actionFilter}
             onChange={(e) => setActionFilter(e.target.value)}
           />
@@ -614,13 +620,13 @@ export function TurnWorkspace({
                       data-testid="suggested-action-use"
                       onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
                     >
-                      Use
+                      {t('encounters.turn.slotChip.use')}
                     </button>
                   )}
                 </div>
               );
             })}
-            {actionItems[activeTab].length === 0 && <p className="text-sm text-muted py-2 m-0">No matching actions.</p>}
+            {actionItems[activeTab].length === 0 && <p className="text-sm text-muted py-2 m-0">{t('encounters.turn.noMatchingActions')}</p>}
           </div>
         </section>
       )}
@@ -633,13 +639,13 @@ export function TurnWorkspace({
             onClick={() => onEndTurn?.(turn.current!.combatantId)}
             data-testid="workspace-end-turn"
           >
-            {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
+            {turn.isYourTurn ? t('encounters.turn.endMyTurn') : t('encounters.turn.endTurn')}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">The DM advances turns in this campaign.</span>
+          <span className="text-sm text-muted">{t('encounters.turn.dmAdvances')}</span>
         ) : null}
         {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">Ending your turn will ask the DM to confirm.</span>
+          <span className="text-sm text-muted">{t('encounters.turn.endingAsksDm')}</span>
         )}
       </div>
     </Card>

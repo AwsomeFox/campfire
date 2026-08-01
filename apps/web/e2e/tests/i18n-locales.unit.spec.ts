@@ -1,5 +1,5 @@
 /**
- * i18n catalog locales — LTR English, pseudo-locale, and RTL Arabic (issue #629).
+ * i18n catalog locales — LTR English, pseudo-locale, and RTL direction (issue #629, #1464).
  */
 import { expect, test } from '@playwright/test';
 import i18n from 'i18next';
@@ -12,7 +12,6 @@ import {
 } from '../../src/i18n/locale';
 import { pseudoLocalizeCatalog, pseudoLocalizeString } from '../../src/i18n/pseudo';
 import commonEn from '../../src/i18n/locales/en/common.json';
-import inventoryAr from '../../src/i18n/locales/ar/inventory.json';
 
 class MemoryStorage implements LocaleStorage {
   constructor(private readonly value: string | null) {}
@@ -29,13 +28,7 @@ function env(browserLocale: string): LocaleEnvironment {
   };
 }
 
-test.describe('shipped translation catalogs (#629)', () => {
-  test('Arabic catalog contains translated inventory strings', () => {
-    const label = inventoryAr.inventory.partyStash;
-    expect(label).toMatch(/[\u0600-\u06FF]/);
-    expect(label).not.toBe('Party stash');
-  });
-
+test.describe('shipped translation catalogs (#629, #1464)', () => {
   test('pseudo-locale expands English for layout audits', () => {
     const expanded = pseudoLocalizeString('Save');
     expect(expanded).toContain('⟦');
@@ -44,12 +37,11 @@ test.describe('shipped translation catalogs (#629)', () => {
     expect(catalog.common.save).toBe(expanded);
   });
 
-  test('resolveCatalogLocale matches en, ar, and pseudo explicitly', () => {
+  test('resolveCatalogLocale matches en and pseudo explicitly, falling back for untranslated locales', () => {
     expect(resolveCatalogLocale('en')).toBe('en');
     expect(resolveCatalogLocale('en-US')).toBe('en');
-    expect(resolveCatalogLocale('ar')).toBe('ar');
-    expect(resolveCatalogLocale('ar-EG')).toBe('ar');
     expect(resolveCatalogLocale('pseudo')).toBe('pseudo');
+    expect(resolveCatalogLocale('ar')).toBe('en');
     expect(resolveCatalogLocale('fr-FR')).toBe('en');
   });
 
