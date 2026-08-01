@@ -1,0 +1,129 @@
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+
+export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
+
+interface RollContextMenuProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  children: React.ReactNode;
+  onRoll: (mode: RollMode, event?: React.MouseEvent) => void;
+}
+
+export function RollContextMenu({ children, onRoll, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const pressTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (disabled) return;
+    e.preventDefault();
+    setMenuPos({ x: e.clientX, y: e.clientY });
+  }, [disabled]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (disabled || e.button !== 0 || e.pointerType !== 'touch') return;
+    pressTimer.current = setTimeout(() => {
+      setMenuPos({ x: e.clientX, y: e.clientY });
+    }, 500); // 500ms long press
+  }, [disabled]);
+
+  const handlePointerUp = useCallback(() => {
+    if (pressTimer.current) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  }, []);
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    if (disabled) return;
+    // Let keyboard modifiers override
+    if (e.shiftKey) {
+      onRoll('advantage', e);
+    } else if (e.altKey || e.metaKey || e.ctrlKey) {
+      onRoll('disadvantage', e);
+    } else {
+      onRoll('normal', e);
+    }
+  }, [disabled, onRoll]);
+
+  const closeMenu = useCallback(() => setMenuPos(null), []);
+
+  useEffect(() => {
+    if (menuPos) {
+      const handleGlobalClick = () => closeMenu();
+      const handleGlobalKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMenu(); };
+      window.addEventListener('pointerdown', handleGlobalClick);
+      window.addEventListener('keydown', handleGlobalKey);
+      return () => {
+        window.removeEventListener('pointerdown', handleGlobalClick);
+        window.removeEventListener('keydown', handleGlobalKey);
+      };
+    }
+  }, [menuPos, closeMenu]);
+
+  return (
+    <>
+      <button
+        type="button"
+        className={className}
+        disabled={disabled}
+        onClick={(e) => {
+          handleClick(e);
+          onClick?.(e);
+        }}
+        onContextMenu={(e) => {
+          handleContextMenu(e);
+          onContextMenu?.(e);
+        }}
+        onPointerDown={(e) => {
+          handlePointerDown(e);
+          onPointerDown?.(e);
+        }}
+        onPointerUp={(e) => {
+          handlePointerUp();
+          onPointerUp?.(e);
+        }}
+        onPointerCancel={(e) => {
+          handlePointerUp();
+          onPointerCancel?.(e);
+        }}
+        {...rest}
+      >
+        {children}
+      </button>
+      {menuPos && createPortal(
+        <div
+          className="cf-popover"
+          style={{
+            position: 'fixed',
+            left: menuPos.x,
+            top: menuPos.y,
+            zIndex: 10000,
+            background: 'var(--color-bg-elevated, #ffffff)',
+            border: '1px solid var(--color-border, #e5e5e5)',
+            borderRadius: 6,
+            padding: 4,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            minWidth: 160
+          }}
+          onPointerDown={(e) => e.stopPropagation()} // prevent closing immediately
+        >
+          <button type="button" className="cf-menu-item" onClick={() => { onRoll('normal'); closeMenu(); }}>
+            🎲 Normal
+          </button>
+          <button type="button" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
+            ✅ Advantage
+          </button>
+          <button type="button" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
+            ❌ Disadvantage
+          </button>
+          <button type="button" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
+            💥 Critical Hit
+          </button>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}

@@ -119,7 +119,8 @@ export interface ResolverAdapter {
 export interface AttackRollInput {
   readonly modifier: number;
   readonly targetAc: number;
-  readonly roll: ActionRollFn;
+  roll: ActionRollFn;
+  rollMode?: 'advantage' | 'disadvantage';
 }
 
 /**
@@ -151,7 +152,8 @@ export interface AttackRollResult {
  * behaviour a NAMED default instead of the only path that existed.
  */
 export function defaultAttackRoll(adapter: ResolverAdapter, input: AttackRollInput): AttackRollResult {
-  const r = input.roll('1d20');
+  const expr = input.rollMode === 'advantage' ? '2d20kh1' : input.rollMode === 'disadvantage' ? '2d20kl1' : '1d20';
+  const r = input.roll(expr);
   const naturalRoll = r.rolls[0] ?? r.total;
   const total = naturalRoll + input.modifier;
   const outcome = classifyAttackOutcome(adapter, total, naturalRoll, input.targetAc);
@@ -680,6 +682,7 @@ export const ActionResolveRequest = z.object({
   spec: ActionSpec.optional(),
   targetIds: z.array(z.number().int()).max(50).default([]),
   commit: z.boolean().default(false),
+  rollMode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).optional(),
 });
 export type ActionResolveRequest = z.infer<typeof ActionResolveRequest>;
 

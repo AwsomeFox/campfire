@@ -105,7 +105,7 @@ import {
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
-import { NotesRail } from '../../components/NotesRail';
+import { RollContextMenu, type RollMode } from '../../components/RollContextMenu';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
@@ -119,11 +119,11 @@ import {
   abilityFieldsForCharacter,
   signed,
   toHitExpr,
-  damageExpr,
+  damageExpr, critDamageExpr,
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { resolveRollMode, toCheckRollMode, rollModeSummary, type RollMode } from './rollMode';
+import { resolveRollMode, toCheckRollMode, rollModeSummary } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -1260,12 +1260,6 @@ function XpCard({
                 if (e.key === 'Enter' && !isImeComposing(e)) void addXp();
               }}
               placeholder="XP…"
-              // No cf-density-xs (issue #1692 review — Devin): same shape as the
-              // adjacent "+ Award XP" button's dropped density prop, and just as much
-              // a no-op for height (the inline minHeight: 44 / padding below already
-              // govern) — but NOT a no-op for font-size, which cf-density-xs was
-              // silently shrinking below the text-sm this className already asks for,
-              // making the XP field's text visibly smaller than the rest of its row.
               className="cf-input !w-24 text-sm"
               style={{ minHeight: 44, padding: '4px 10px' }}
             />
@@ -1278,19 +1272,10 @@ function XpCard({
               </p>
             )}
           </div>
-          {/* No density prop (issue #1683 review): this is the card's primary write
-              action, not a dense inline row control — density="xs" would be a no-op
-              here anyway, since the inline minHeight below already governs the
-              rendered height, but carrying it was misleading (reads as "this is a
-              24px xs control" when it renders at 44px). Dropped rather than kept
-              alongside a comment, since there is nothing for xs to actually do here. */}
           <Btn className="" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
           {!atCap && !levellingUp && (
-            // No density prop (issue #1683 review, same reasoning as Award XP above):
-            // this row's other primary action, not a dense inline control — the inline
-            // minHeight: 44 already governs, so xs would be a no-op reading as "24px".
             <Btn
               ghost={!ready}
               className="ml-auto"
@@ -1368,28 +1353,15 @@ function RollChip({
   disabled: boolean;
 }) {
   return (
-    // The inline minHeight is deliberate (issue #1683 review), not a leftover: this
-    // dense inline action-row chip intentionally sits at a bespoke 32px — above the
-    // xs floor (24px, WCAG 2.2 SC 2.5.8 legal minimum) but below the ramp default
-    // (44px), because rolling dice is a meaningful action worth more than the bare
-    // minimum without needing a full-size control in a row that packs several of
-    // these per action. density="xs" still supplies the font-size/padding for this
-    // chip; only the height is pinned above what xs alone would give it. Removing
-    // this inline style would shrink the click target from 32px to 24px — do not
-    // "clean this up" as redundant with density="xs".
-    <Btn density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
+    <RollContextMenu density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title}>
       <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
-    </Btn>
+    </RollContextMenu>
   );
 }
 
 function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
-  // Roll-mode chooser (issue #713): a touch- and keyboard-visible Flat / Advantage
-  // / Disadvantage selector shared by every save in this card. The chooser holds
-  // the persistent one-tap default; a shift/alt-click still overrides it for a
-  // single roll so the desktop keyboard shortcut keeps working (resolveRollMode).
   const [mode, setMode] = useState<RollMode>('flat');
   const pb = profBonus(character.level);
   const profs = new Set<string>(character.saveProficiencies);
@@ -1441,18 +1413,17 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
           const breakdownStr = formatCheckBreakdown(def);
           return (
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
-              <button
-                type="button"
-                onClick={(e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(mode, e)))}
+              <RollContextMenu
+                className="w-full h-full block"
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
                 disabled={roller.rolling}
-                className="cf-target-44 w-full"
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}
-                title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
-                aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
+                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
+                aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)})`}
               >
                 <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
-              </button>
+              </RollContextMenu>
               {canEdit ? (
                 <>
                   <button
@@ -1485,7 +1456,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
         })}
       </div>
       <p className="text-[11px] text-secondary">
-        Tap a save to roll a d20{canEdit ? <span className="cf-print-hide">; tap the ● to toggle proficiency</span> : ''}. Pick a mode above; shift-click for a one-tap advantage, alt-click for disadvantage.
+        Tap a save to roll a d20{canEdit ? <span className="cf-print-hide">; tap the ● to toggle proficiency</span> : ''}.
       </p>
     </Card>
   );
@@ -1494,8 +1465,6 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
-  // Roll-mode chooser (issue #713): one persistent default for every skill roll
-  // in this card; the keyboard shortcut (shift/alt-click) still overrides once.
   const [mode, setMode] = useState<RollMode>('flat');
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
@@ -1529,17 +1498,6 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
         <span className="text-[11px] text-secondary">
           tap a skill to roll{canEdit ? <span className="cf-print-hide">; tap the ○/●/★ to cycle proficiency</span> : ''}
         </span>
-        <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
-          {rollModeSummary(mode)}
-        </span>
-      </div>
-      <div className="cf-print-hide">
-        <RollModeChooser
-          value={mode}
-          onChange={setMode}
-          disabled={roller.rolling}
-          aria-label="Skill check roll mode"
-        />
       </div>
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {skillChecks.map((def) => {
@@ -1583,19 +1541,18 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   {marker}
                 </span>
               )}
-              <button
-                type="button"
-                onClick={(e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(mode, e)))}
+              <RollContextMenu
+                className="flex-1 flex items-center gap-1.5 min-w-0"
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
                 disabled={roller.rolling}
-                className="cf-target-44 flex-1 flex items-center gap-1.5 min-w-0"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${name} (${signed(mod)}) [${breakdownStr}] · ${rollModeSummary(mode)}`}
-                aria-label={`Roll ${name} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
+                title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
+                aria-label={`Roll ${name} (${signed(mod)})`}
               >
                 <span className="flex-1 text-left truncate">{name}</span>
                 {ability && <span className="text-[10px] text-secondary">{ability}</span>}
                 <span className="w-8 text-right font-semibold">{signed(mod)}</span>
-              </button>
+              </RollContextMenu>
             </div>
           );
         })}
@@ -1790,7 +1747,10 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                         label={`to hit ${action.toHit}`}
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
-                        onClick={(e) => void roller.roll(toHitExpr(action.toHit, resolveRollMode(mode, e))!, `${character.name} · ${action.name} to hit`)}
+                        onClick={(m) => {
+                          const resolvedMode = resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false });
+                          void roller.roll(toHitExpr(action.toHit, resolvedMode)! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
+                        }}
                       />
                     ) : (
                       <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5">
@@ -1803,7 +1763,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                         label={action.damage}
                         title={`Roll ${action.name} damage (${dmgExpr})`}
                         disabled={roller.rolling}
-                        onClick={() => void roller.roll(dmgExpr, `${character.name} · ${action.name} damage`)}
+                        onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${action.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                       />
                     ) : (
                       <span className="text-xs text-slate-400" title="Flat or unparseable damage — no dice to roll">

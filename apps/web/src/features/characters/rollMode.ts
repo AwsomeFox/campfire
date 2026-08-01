@@ -17,9 +17,9 @@
 import type { Adv } from '../../lib/characterStats';
 
 /** The three roll modes a d20 check/attack can be taken with. */
-export type RollMode = Adv;
+export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
-export const ROLL_MODES: ReadonlyArray<RollMode> = ['flat', 'adv', 'dis'];
+export const ROLL_MODES: ReadonlyArray<RollMode> = ['normal', 'advantage', 'disadvantage'];
 
 export interface RollModeOption {
   mode: RollMode;
@@ -36,21 +36,23 @@ export interface RollModeOption {
  */
 export function rollModeOptions(): ReadonlyArray<RollModeOption> {
   return [
-    { mode: 'flat', label: 'Flat', description: 'Flat — roll one d20' },
-    { mode: 'adv', label: 'Advantage', description: 'Advantage — roll two d20 and keep the higher' },
-    { mode: 'dis', label: 'Disadvantage', description: 'Disadvantage — roll two d20 and keep the lower' },
+    { mode: 'normal', label: 'Normal', description: 'Normal — roll one d20' },
+    { mode: 'advantage', label: 'Advantage', description: 'Advantage — roll two d20 and keep the higher' },
+    { mode: 'disadvantage', label: 'Disadvantage', description: 'Disadvantage — roll two d20 and keep the lower' },
   ];
 }
 
 /** A one-line summary of the currently selected mode, shown before submission. */
 export function rollModeSummary(mode: RollMode): string {
   switch (mode) {
-    case 'adv':
+    case 'advantage':
       return 'Rolling with advantage';
-    case 'dis':
+    case 'disadvantage':
       return 'Rolling with disadvantage';
+    case 'crit':
+      return 'Critical hit';
     default:
-      return 'Flat roll';
+      return 'Normal roll';
   }
 }
 
@@ -62,13 +64,13 @@ export function rollModeSummary(mode: RollMode): string {
  * with no modifiers always rolls the chosen mode.
  */
 export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): RollMode {
-  if (modifiers.shiftKey) return 'adv';
-  if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey) return 'dis';
+  if (modifiers.shiftKey) return 'advantage';
+  if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey) return 'disadvantage';
   return chosen;
 }
 
-export function toCheckRollMode(mode: RollMode): 'flat' | 'advantage' | 'disadvantage' {
-  return mode === 'adv' ? 'advantage' : mode === 'dis' ? 'disadvantage' : 'flat';
+export function toCheckRollMode(mode: RollMode): 'normal' | 'advantage' | 'disadvantage' | 'crit' {
+  return mode;
 }
 
 

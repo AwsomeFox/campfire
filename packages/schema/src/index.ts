@@ -5144,7 +5144,7 @@ export function formatCheckBreakdown(def: Pick<RollCheckDefinition, 'breakdown' 
 }
 
 /** The three roll modes a d20-style check can be taken with (mirrors the sheet's chooser). */
-export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+export type CheckRollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 /**
  * Build the restricted dice expression for a catalog check + roll mode (issue #415). Uses the
@@ -5153,7 +5153,7 @@ export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
  */
 export function checkRollExpr(
   def: Pick<RollCheckDefinition, 'modifier' | 'die' | 'supportsAdvantage'>,
-  mode: CheckRollMode = 'flat',
+  mode: CheckRollMode = 'normal',
 ): string {
   const die = def.die > 0 ? def.die : 20;
   const tail = def.modifier === 0 ? '' : signedModifier(def.modifier);
@@ -11060,7 +11060,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 // records the roll to the shared dice log, and returns the transparent breakdown + outcome.
 export const CheckRollRequest = z.object({
   checkId: z.string().min(1).max(60).describe('Stable catalog id from GET .../checks, e.g. "skill:Athletics", "save:DEX", "initiative"'),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).default('normal').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
 });
@@ -11079,7 +11079,7 @@ export const CheckRollResponse = z.object({
     breakdownText: z.string(),
     incomplete: z.boolean().optional(),
   }),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']),
   roll: DiceRoll,
   // PF2e degree of success (only present when the system reports degrees AND a dc was given).
   degree: z.enum(['criticalFailure', 'failure', 'success', 'criticalSuccess']).optional(),

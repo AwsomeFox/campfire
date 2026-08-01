@@ -17,6 +17,8 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
+import { legalTargets } from '../../lib/encounter';
+import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 
@@ -94,12 +96,13 @@ export function ActionUsePanel({
   const needsTarget = spec.targets.count > 0;
 
   const resolvePreview = useMutation({
-    mutationFn: () =>
+    mutationFn: (rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit') =>
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
         targetIds,
         commit: false,
+        rollMode,
       }),
     onMutate: () => onError(null),
     onSuccess: (res) => {
@@ -216,13 +219,14 @@ export function ActionUsePanel({
               </div>
             </div>
           )}
-          <Btn
+          <RollContextMenu
+            className="btn btn-primary"
             data-testid="action-use-preview"
             disabled={!canPreview || resolvePreview.isPending}
-            onClick={() => resolvePreview.mutate()}
+            onRoll={(mode) => resolvePreview.mutate(mode)}
           >
             {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
-          </Btn>
+          </RollContextMenu>
         </>
       )}
 
