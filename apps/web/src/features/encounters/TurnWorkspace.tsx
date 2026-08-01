@@ -25,6 +25,7 @@ import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
+import { SpellbookPanel, type SpellItem, type SpellSlotMap, type PactSlotPool, type SpellcastingStats } from './SpellbookPanel';
 
 interface TurnWorkspaceProps {
   encounterId: number;
@@ -51,6 +52,12 @@ interface TurnWorkspaceProps {
   endTurnBusy?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
+  /** Issue #1851: In-combat spellbook panel integration */
+  spells?: SpellItem[];
+  spellSlots?: SpellSlotMap;
+  pactSlots?: PactSlotPool | null;
+  spellStats?: SpellcastingStats;
+  onUpdateSpellSlot?: (level: number | 'pact', delta: number) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -114,6 +121,11 @@ export function TurnWorkspace({
   endTurnBusy = false,
   gridUnit,
   gridScale,
+  spells,
+  spellSlots,
+  pactSlots,
+  spellStats,
+  onUpdateSpellSlot,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -122,6 +134,7 @@ export function TurnWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
   const [activeTab, setActiveTab] = useState<'action' | 'bonus' | 'reaction' | 'other'>('action');
+  const [showSpellbook, setShowSpellbook] = useState(false);
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
@@ -218,6 +231,23 @@ export function TurnWorkspace({
     }
   }, [actionItems, activeTab]);
 
+  const effectiveSpells = useMemo<SpellItem[]>(() => {
+    if (spells && spells.length > 0) return spells;
+    if (!turn?.suggestedActions) return [];
+    return turn.suggestedActions
+      .filter((a) => a.source?.toLowerCase().includes('spell') || a.name.toLowerCase().includes('spell'))
+      .map((a, idx) => ({
+        id: `suggested-spell-${idx}`,
+        name: a.name,
+        level: 1,
+        castingTime: '1A',
+        range: '60 ft',
+        school: 'Evocation',
+        spec: a.spec,
+        actionIndex: a.actionIndex,
+      }));
+  }, [spells, turn?.suggestedActions]);
+
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurnBusy || turnState.isPending;
   const controlsDisabled = busy || actionsDisabled;
@@ -225,13 +255,39 @@ export function TurnWorkspace({
 
   return (
     <Card className="space-y-3" data-testid="turn-workspace">
-      {/* Prominent actor / round / next actor. */}
-      <div className="flex items-center gap-2.5 flex-wrap">
-        <span className="text-xs uppercase tracking-wide text-muted">Round {turn.round}</span>
-        <h2 className="text-lg font-extrabold text-white m-0">{turn.current.name}</h2>
-        <span className="tag tag-neutral">now</span>
-        {turn.next && <span className="text-sm text-muted">Next: {turn.next.name}</span>}
+      {/* Prominent actor / round / next actor + Spellbook toggle. */}
+      <div className="flex items-center justify-between gap-2.5 flex-wrap">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <span className="text-xs uppercase tracking-wide text-muted">Round {turn.round}</span>
+          <h2 className="text-lg font-extrabold text-white m-0">{turn.current.name}</h2>
+          <span className="tag tag-neutral">now</span>
+          {turn.next && <span className="text-sm text-muted">Next: {turn.next.name}</span>}
+        </div>
+        <button
+          type="button"
+          className="btn btn-secondary text-xs cf-target-44 flex items-center gap-1.5 min-h-[44px]"
+          data-testid="toggle-spellbook-btn"
+          aria-expanded={showSpellbook}
+          aria-label="Toggle spellbook panel"
+          onClick={() => setShowSpellbook((prev) => !prev)}
+        >
+          <span>🔮 Spellbook</span>
+        </button>
       </div>
+
+      {showSpellbook && (
+        <SpellbookPanel
+          combatantName={turn.current.name}
+          stats={spellStats}
+          spells={effectiveSpells}
+          spellSlots={spellSlots}
+          pactSlots={pactSlots}
+          activeConcentration={turn.concentration}
+          disabled={controlsDisabled}
+          onUpdateSlot={onUpdateSpellSlot}
+          onUseActionRequested={onUseSuggestedAction}
+        />
+      )}
 
       {/* "Your turn" is announced via the app-root Announcer (see the effect above); the
           banner below is a purely visual cue and is intentionally not its own live region. */}
