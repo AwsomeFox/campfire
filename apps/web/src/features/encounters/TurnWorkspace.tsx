@@ -382,22 +382,23 @@ export function TurnWorkspace({
                 disabled={actionDisabled}
                 className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
                 onClick={() => {
+                  const currentName = turn.current?.name ?? 'Combatant';
                   if (act.id === 'attack') {
-                    announce(`${turn.current.name} action: Attack`);
+                    announce(`${currentName} action: Attack`);
                     const el = document.getElementById('turn-suggested-actions-search');
                     if (el) {
                       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                       el.focus();
                     }
                   } else if (act.id === 'ready') {
-                    announce(`${turn.current.name} action: Ready`);
+                    announce(`${currentName} action: Ready`);
                     const el = document.getElementById('turn-readied-input');
                     if (el) {
                       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                       el.focus();
                     }
                   } else {
-                    announce(`${turn.current.name} action: ${act.label}`);
+                    announce(`${currentName} action: ${act.label}`);
                     turnState.mutate({ useSlot: 'action' });
                   }
                 }}
