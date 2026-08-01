@@ -22,7 +22,6 @@ import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateCampaignCheckRequests } from '../../lib/query';
 import { Card, Btn, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
-import { useAuth } from '../../app/auth';
 
 /** Human summary of a resolved outcome for the announcer + result line. */
 function outcomeText(res: CheckRequestResolution): string {
@@ -306,24 +305,7 @@ export function CheckRequestPrompts({
   ownedCharacterIds?: ReadonlySet<number>;
   onError?: (msg: string | null) => void;
 }) {
-  const { me } = useAuth();
   const [resolved, setResolved] = useState<Record<number, CheckRequestResolution>>({});
-
-  const charactersQuery = useQuery({
-    queryKey: queryKeys.campaignCharacters(campaignId),
-    queryFn: () => api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
-    enabled: Number.isFinite(campaignId) && !ownedCharacterIds,
-  });
-
-  const effectiveOwnedCharacterIds = useMemo(() => {
-    if (ownedCharacterIds) return ownedCharacterIds;
-    const chars = charactersQuery.data ?? [];
-    const myUserId = me?.user.id;
-    if (myUserId == null) return new Set<number>();
-    return new Set(
-      chars.filter((c) => c.ownerUserId != null && String(c.ownerUserId) === String(myUserId)).map((c) => c.id),
-    );
-  }, [ownedCharacterIds, charactersQuery.data, me?.user.id]);
 
   const pendingQuery = useQuery({
     queryKey: queryKeys.campaignCheckRequests(campaignId),
@@ -333,8 +315,11 @@ export function CheckRequestPrompts({
   });
 
   const mine = useMemo(
-    () => (pendingQuery.data ?? []).filter((r) => effectiveOwnedCharacterIds.has(r.characterId) && r.status === 'pending'),
-    [pendingQuery.data, effectiveOwnedCharacterIds],
+    () =>
+      (pendingQuery.data ?? []).filter(
+        (r) => (ownedCharacterIds ? ownedCharacterIds.has(r.characterId) : true) && r.status === 'pending',
+      ),
+    [pendingQuery.data, ownedCharacterIds],
   );
 
   const pendingPrompts = mine.filter((r) => resolved[r.id] == null);
