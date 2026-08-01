@@ -936,7 +936,6 @@ export class ExportService {
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
-    const ownCharacterIds = new Set(ownCharacters.map(c => c.id));
     
     // Already scoped + projected for the caller's role (#817); keep the list as-is.
     const ownProposals = proposalList;
