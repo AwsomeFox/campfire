@@ -62,7 +62,7 @@ describe('CampaignLibraryService unit coverage tests', () => {
         statblock: {
           ac: 14,
           abilityScores: { str: 16, dex: 14, con: 14, int: 3, wis: 12, cha: 7 },
-          notes: '',
+          notes: '', resources: {}, spellSlots: {},
           actions: [],
           traits: [],
         },

@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import { ActionSpec, isResolvableSpec } from './action-resolver';
 import { CharacterAction } from './character-action';
+import type { CharacterResource, SpellSlotLevel } from './index';
 
 // ---------------------------------------------------------------------------
 // Inline help (issue #425) — surfaced in the statblock editor + Use flow.
@@ -46,6 +47,8 @@ export const CombatantStatblock = z.object({
     CHA: 10,
   })),
   actions: z.array(CharacterAction).max(50).default([]),
+  resources: z.record(z.string().max(80), z.any()).default({}),
+  spellSlots: z.record(z.string().regex(/^[1-9]$/), z.any()).default({}),
   traits: z
     .array(z.object({ name: z.string().max(120).default(''), text: z.string().max(1200).default('') }))
     .max(30)

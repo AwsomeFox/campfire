@@ -120,6 +120,8 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
+
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { CombatantActionsList } from './CombatantActionsList';
@@ -3617,6 +3619,8 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} />
+
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />

@@ -349,6 +349,10 @@ export const ActionUses = z.object({
   repeatSave: z.boolean().default(false),
   // Consume a spell slot of this level on use (0 = none / cantrip / non-spell).
   spellLevel: z.number().int().min(0).max(9).default(0),
+  // The specific limited-use resource pool this action consumes (e.g. "Ki").
+  resourceKey: z.string().max(80).default(''),
+  // How many uses of the resource this action consumes.
+  resourceCost: z.number().int().min(0).max(99).default(0),
 });
 export type ActionUses = z.infer<typeof ActionUses>;
 
