@@ -24,6 +24,7 @@ import { SupportPreferencesService } from '../../src/modules/session-zero/suppor
 import { InventoryService } from '../../src/modules/inventory/inventory.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
+import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { ExportService } from '../../src/modules/export/export.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { campaigns } from '../../src/db/schema';
@@ -101,6 +102,7 @@ describe('ExportService unit coverage tests', () => {
     } as unknown as InventoryService;
     const revisions = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as RevisionsService;
     const rolls = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as RollsService;
+    const library = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as CampaignLibraryService;
     const campaignService = { getOrThrow: jest.fn().mockResolvedValue({ id: 1, name: 'Test Campaign' }) } as unknown as CampaignsService;
 
     exportService = new ExportService(
@@ -127,6 +129,7 @@ describe('ExportService unit coverage tests', () => {
       inventory,
       revisions,
       rolls,
+      library,
     );
 
     const [camp] = await db

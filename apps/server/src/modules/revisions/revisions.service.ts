@@ -75,6 +75,7 @@ const PROSE_FIELD: Record<RevisionEntityType, ProseField> = {
   comment: 'body',
   story_beat: 'body',
   session_zero: 'body',
+  campaign_library_monster: 'body',
 };
 
 const AUTHOR_SOURCES = new Set<RevisionAuthorSource>(['human', 'ai', 'tool']);
@@ -685,6 +686,7 @@ export class RevisionsService {
           .get();
         return row ?? null;
       },
+      campaign_library_monster: () => null,
     };
     return loaders[entityType]();
   }
@@ -873,6 +875,7 @@ export class RevisionsService {
           ) > 0
         );
       case 'session_zero':
+      case 'campaign_library_monster':
         return false;
     }
   }

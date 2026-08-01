@@ -64,6 +64,7 @@ describe('ExportService — AI scribe jobs bounding (Issue #1529)', () => {
       { listForCampaign: emptyList, getTreasury: async () => null } as any, // inventory
       { listForCampaign: emptyList } as any, // revisions
       { listForCampaign: emptyList } as any, // rolls
+      { listForCampaign: emptyList } as any, // library
     );
   }
 

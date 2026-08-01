@@ -35,6 +35,7 @@ import { SupportPreferencesService } from '../session-zero/support-preferences.s
 import { InventoryService } from '../inventory/inventory.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
+import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
 import type { RequestUser } from '../../common/user.types';
 import {
   archiveDisplayStem,
@@ -193,6 +194,7 @@ export class ExportService {
     private readonly inventory: InventoryService,
     private readonly revisions: RevisionsService,
     private readonly rolls: RollsService,
+    @Inject(CampaignLibraryService) private readonly library: CampaignLibraryService,
   ) {}
 
   /**
@@ -302,6 +304,7 @@ export class ExportService {
       scheduledSessionList,
       sessionAttendanceList,
       diceRollList,
+      libraryMonsterList,
     ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -338,6 +341,8 @@ export class ExportService {
       this.sessions.listAttendanceForCampaign(campaignId),
       // Issue #673: shared dice log (including physical/manual entries) travels with export.
       this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
+      // Issue #1504: campaign homebrew monsters saved in the library travel with export.
+      this.library.listForCampaign(campaignId),
     ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
@@ -485,6 +490,7 @@ export class ExportService {
       scheduledSessions: scheduledSessionList.map(toScheduledSessionExport),
       sessionAttendance: sessionAttendanceList,
       diceRolls: diceRollList,
+      libraryMonsters: libraryMonsterList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
       // #1049: the portable field set is stated once in ai-seat-portability.ts. It used to be
       // enumerated here by hand, which is how proactiveSettings (#1044), stylePresets (#1049)

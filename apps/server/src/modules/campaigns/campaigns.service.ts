@@ -44,6 +44,7 @@ import {
   apiTokens,
   attachments,
   rulePacks,
+  campaignLibraryMonsters,
   storyArcs,
   storyBeats,
   storyBranches,
@@ -3058,6 +3059,21 @@ export class CampaignsService {
             safetyTools: JSON.stringify(szTools),
             houseRules: szHouseRules,
             toneAndExpectations: szTone,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      const libraryMonsterRows = asArr(doc.libraryMonsters);
+      for (const lm of libraryMonsterRows) {
+        const statblockObj = asRec(lm.statblock);
+        tx.insert(campaignLibraryMonsters)
+          .values({
+            campaignId: cid,
+            name: str(lm.name, 'Unnamed Monster'),
+            statblockJson: JSON.stringify(statblockObj),
+            sourceRuleEntryId: intOrNull(lm.sourceRuleEntryId),
             createdAt: ts,
             updatedAt: ts,
           })
