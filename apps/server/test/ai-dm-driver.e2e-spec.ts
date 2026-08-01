@@ -1126,9 +1126,14 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     // And a later script() push is refused — it would land behind the cursor and be silently dropped.
     expect(() => h.script({ text: 'too late' })).toThrow(/silently dropped/);
 
-    // resetMock() re-arms a fresh queue: scripting works again and the guard is clean.
+    // resetMock() re-arms a fresh queue: scripting works again, the scripted turn is
+    // genuinely consumed (not silently dropped behind a stale cursor), and the guard
+    // is clean. (Strengthened per Copilot review #1846.)
     h.resetMock();
-    expect(() => h.script({ text: 'fresh' })).not.toThrow();
-    expect(() => h.assertScriptDrained()).not.toThrow();
+    expect(() => h.script({ text: 'fresh queue after reset' })).not.toThrow();
+    const fresh = await h.sendMessage(campaignId, { input: 'Consume the reset.' });
+    expect(fresh.status).toBe(201);
+    expect(fresh.body.narration).toContain('fresh queue after reset');
+    h.assertScriptDrained();
   });
 });
