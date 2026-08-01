@@ -2243,20 +2243,26 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
 
   it('combatant update with stale expectedUpdatedAt 409s with STALE_WRITE and does not mutate combatant (#1501)', async () => {
     const server = ctx.app.getHttpServer();
+    const createdCombatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Goblin Scout', hpMax: 10 });
+    expect(createdCombatant.status).toBe(201);
+    const combatantId = createdCombatant.body.id;
+
     const current = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-    const combatant = current.body.combatants[0];
     const loadedAt = current.body.updatedAt;
 
     // First update succeeds and bumps encounter.updatedAt
     const first = await request(server)
-      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatant.id}`)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
       .set(dm)
       .send({ hpDelta: -2 });
     expect(first.status).toBe(200);
 
     // Stale expectedUpdatedAt 409s
     const stale = await request(server)
-      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatant.id}`)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
       .set(dm)
       .send({ hpDelta: -2, expectedUpdatedAt: loadedAt });
     expect(stale.status).toBe(409);
