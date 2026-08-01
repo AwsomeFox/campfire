@@ -199,7 +199,7 @@ import {
   snapMapPercentToHex,
   tokenFootprintDiameterPx,
 } from './hexGeometry';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { scrollBehavior, prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
@@ -1136,12 +1136,23 @@ export default function RunSessionPage() {
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
-  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
   const pingSeq = useRef(0);
   const addPing = useCallback((ping: MapPing) => {
     const key = ++pingSeq.current;
-    setPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
-    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 2600);
+    if (ping.senderName) {
+      announce(`${ping.senderName} pinged the map`);
+    } else {
+      announce('A map ping arrived');
+    }
+    setPings((prev) => {
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      return next.slice(-10);
+    });
+    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
+  }, [announce]);
+  const dismissPing = useCallback((key: number) => {
+    setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
@@ -2586,7 +2597,7 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null });
+  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null });
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
@@ -3390,6 +3401,7 @@ export default function RunSessionPage() {
           onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
           pings={pings}
+          onDismissPing={dismissPing}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
@@ -4047,6 +4059,7 @@ export function BattleMap({
   onDismissGuidance,
   onPing,
   pings,
+  onDismissPing,
   onError,
   onAoeHitLayoutChange,
   projection = 'session',
@@ -4083,7 +4096,8 @@ export function BattleMap({
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
   onPing: (x: number, y: number) => void;
-  pings: ReadonlyArray<{ key: number; x: number; y: number }>;
+  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>;
+  onDismissPing: (key: number) => void;
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
@@ -6418,26 +6432,67 @@ export function BattleMap({
                 )}
 
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
-                {pings.map((p) => (
-                  <div
-                    key={p.key}
-                    className="absolute -translate-x-1/2 -translate-y-1/2"
-                    style={{
-                      left: `${p.x}%`,
-                      top: `${p.y}%`,
-                      width: 20,
-                      height: 20,
-                      borderRadius: '50%',
-                      border: '3px solid var(--color-accent)',
-                      zIndex: 10,
-                      animation: 'cfPing 2.4s ease-out forwards',
-                    }}
-                  />
+                {pings.map((p) => {
+                  const isReduced = prefersReducedMotion();
+                  const color = p.color || 'var(--color-accent)';
+                  return (
+                    <div
+                      key={p.key}
+                      className="absolute z-10 flex flex-col items-center justify-center pointer-events-none"
+                      style={{
+                        left: `${p.x}%`,
+                        top: `${p.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                      }}
+                    >
+                      <div className="relative flex items-center justify-center" style={{ width: 24, height: 24 }}>
+                        {!isReduced && (
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              borderRadius: '50%',
+                              border: `3px solid ${color}`,
+                              animation: 'cfPing 2.4s ease-out forwards',
+                            }}
+                          />
+                        )}
+                        <div
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: '50%',
+                            backgroundColor: color,
+                            boxShadow: '0 0 4px rgba(0,0,0,0.5)',
+                            border: '1px solid white', // high contrast
+                          }}
+                        />
+                      </div>
+                      {p.senderName && (
+                        <div className="mt-1 px-1 rounded text-xs whitespace-nowrap bg-surface-raised font-semibold shadow-sm" style={{ color: 'var(--color-text)', border: `1px solid ${color}` }}>
+                          {p.senderName}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Ping Log */}
+            {pings.length > 0 && (
+              <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
+                {pings.slice().reverse().map((p) => (
+                  <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
+                    <span className="truncate mr-2 font-medium">{p.senderName || 'Someone'} pinged</span>
+                    <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
+                      <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
             </div>
-            <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
+            <style>{'@keyframes cfPing{0%{transform:scale(.4);opacity:.9}70%{opacity:.55}100%{transform:scale(3);opacity:0}}'}</style>
           </div>
 
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
