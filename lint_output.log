@@ -1,0 +1,477 @@
+
+> campfire@0.14.1 lint
+> npm run lint --workspaces
+
+
+> @campfire/server@0.14.1 lint
+> eslint .
+
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/common/build-metadata.ts
+  13:1  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-require-imports')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/common/request-context.ts
+  47:56  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/db/schema.ts
+  1815:112  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1819:97   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/main.ts
+  267:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/ai-dm/ai-dm.service.ts
+  1077:83   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1078:68   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1089:103  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1090:88   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/ai-driver/ai-driver.service.ts
+   810:21  warning  Unexpected any. Specify a different type                                                  @typescript-eslint/no-explicit-any
+   811:19  warning  Unexpected any. Specify a different type                                                  @typescript-eslint/no-explicit-any
+  3228:17  warning  Unexpected any. Specify a different type                                                  @typescript-eslint/no-explicit-any
+  3819:15  warning  Unexpected any. Specify a different type                                                  @typescript-eslint/no-explicit-any
+  4175:21  warning  Unexpected any. Specify a different type                                                  @typescript-eslint/no-explicit-any
+  4896:9   warning  Unused eslint-disable directive (no problems were reported from 'no-constant-condition')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/ai-driver/proactive.service.ts
+  216:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  230:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/auth/oidc.service.ts
+  960:5  warning  Unused eslint-disable directive (no problems were reported from 'no-constant-condition')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/backup/backup.service.ts
+  1539:60   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1539:105  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/data-repair/data-repair.service.ts
+   46:52   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   50:99   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   71:235  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   81:420  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   82:187  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   83:336  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   83:502  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   83:770  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  124:249  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  125:145  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  126:50   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  126:225  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  126:424  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/encounters/encounters.service.ts
+   803:75   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  4144:53   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  4158:83   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  4158:111  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/archmage-importer.ts
+  63:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  65:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/datasworn-importer.ts
+  115:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  117:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/open-legend-importer.ts
+  85:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  87:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/open5e-importer.ts
+  134:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  136:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/osr-importer.ts
+  139:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  141:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/pathfinder1e-importer.ts
+  79:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  81:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/pf2e-importer.ts
+  154:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  156:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/rules.service.ts
+   466:26  warning  Unexpected any. Specify a different type                                       @typescript-eslint/no-explicit-any
+  1498:7   warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  1633:7   warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/src/modules/rules/starfinder-importer.ts
+  96:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  98:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/api-docs.coverage.e2e-spec.ts
+  131:3  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-var-requires')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/attachment-diagnostics.e2e-spec.ts
+  27:3  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/deletion-fs.e2e-spec.ts
+  42:7  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+  77:7  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/import.e2e-spec.ts
+  600:5  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-var-requires')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-combatant-identity-concurrency.spec.ts
+  67:52  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-condition-concurrency.spec.ts
+  65:52  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-death-temp-hp-reconcile.spec.ts
+  55:52  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-link-validation.spec.ts
+  58:52  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-reopen-validate.spec.ts
+  43:52  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-token-batch.spec.ts
+  33:49  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/encounter-turn-workspace.spec.ts
+  46:42  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/integration/resources.spec.ts
+  47:46  error  Parsing error: Argument expression expected
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/perf-batching.e2e-spec.ts
+  32:3  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  36:7  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  39:9  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  53:5  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/storage.e2e-spec.ts
+  324:9  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/test-app.ts
+  95:5  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/server/test/unit/build-metadata.spec.ts
+  3:1  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-require-imports')
+
+✖ 76 problems (8 errors, 68 warnings)
+  0 errors and 34 warnings potentially fixable with the `--fix` option.
+
+npm error Lifecycle script `lint` failed with error:
+npm error code 1
+npm error path /Users/anthonyanderson/Documents/wt-1322/apps/server
+npm error workspace @campfire/server@0.14.1
+npm error location /Users/anthonyanderson/Documents/wt-1322/apps/server
+npm error command failed
+npm error command sh -c eslint .
+
+
+> @campfire/web@0.14.1 lint
+> eslint .
+
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/e2e/tests/clipboard-copy.unit.spec.ts
+  213:7  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  215:7  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/public/sw-sensitive-purge.js
+  8:1  warning  Unused eslint-disable directive (no problems were reported from 'no-restricted-globals')
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/AuthProvider.tsx
+  52:3  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/AuthStatusGate.tsx
+  91:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/CampaignAccessContext.tsx
+  30:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  37:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/CampaignContext.tsx
+  60:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  64:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/Layout.tsx
+  284:6  warning  React Hook useMemo has unnecessary dependencies: 'formattingLocale' and 'timeFormat'. Either exclude them or remove the dependency array  react-hooks/exhaustive-deps
+  330:6  warning  React Hook useMemo has unnecessary dependencies: 'formattingLocale' and 'timeFormat'. Either exclude them or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/LiveEncounterContext.tsx
+  7:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/app/MentionsContext.tsx
+  44:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/Announcer.tsx
+  31:1   warning  Unused eslint-disable directive (no problems were reported from 'react-refresh/only-export-components')
+  33:3   warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  34:3   warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  35:3   warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  57:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/AudienceField.tsx
+  8:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/CampaignMetadataFields.tsx
+   24:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+   25:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  162:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/ConfirmDestructiveDialog.tsx
+  60:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  64:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/DiceRollOverlay.tsx
+   8:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+   9:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  37:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/Field.tsx
+  37:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  46:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  54:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  82:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/GenerateMapPanel.tsx
+  155:18  warning  The ref value 'previewSeq.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'previewSeq.current' to a variable inside the effect, and use that variable in the cleanup function  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/GetAMapPanel.tsx
+  118:6  warning  React Hook useEffect has a missing dependency: 'setOpen'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/ImageUpload.tsx
+   64:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+   86:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  114:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  134:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  143:10  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  152:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  199:23  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  224:23  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  380:5   warning  React Hook useCallback has a missing dependency: 'acceptedMime'. Either include it or remove the dependency array               react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/KeyboardCommandProvider.tsx
+   42:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+   47:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+   65:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  224:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/LabeledField.tsx
+  26:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  27:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  30:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  36:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  47:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  64:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/LocationStatusLabel.tsx
+  11:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/PasswordInput.tsx
+  31:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  36:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  41:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/RollResultToastContext.tsx
+   31:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  207:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  212:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/SaveFeedback.tsx
+   8:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  22:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  42:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/StaleWriteConflict.tsx
+  21:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/StatBlock.tsx
+  176:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  247:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  256:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/mapOnboarding.tsx
+    5:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+    7:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  189:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/ui.tsx
+   48:21  warning  Unexpected any. Specify a different type                                                                                        @typescript-eslint/no-explicit-any
+   93:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  261:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/components/useDisclosure.ts
+  127:62  warning  The ref value 'triggerRef.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'triggerRef.current' to a variable inside the effect, and use that variable in the cleanup function  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/AuditLogCard.tsx
+  50:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/BackupCard.tsx
+  39:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/MembersPage.tsx
+  130:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  388:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/MembershipIntegrityCard.tsx
+  21:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/OidcCard.tsx
+  173:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/ResetRequestsCard.tsx
+  33:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/RulePacksCard.tsx
+  107:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/StorageCard.tsx
+  52:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/TokensCard.tsx
+  137:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/admin/campaignAuditDisplay.tsx
+   6:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  14:10  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  17:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  28:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  50:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/ai-dm/AiDmTranscriptUi.tsx
+   20:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  160:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/ai-dm/AiTablePage.tsx
+  369:6  warning  React Hook useEffect has a missing dependency: 'pendingHydrate'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  439:6  warning  React Hook useEffect has a missing dependency: 'pendingHydrate'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/ai-dm/EncounterAiDriverPanel.tsx
+  35:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/ai-dm/useAiDmLiveActivity.tsx
+  102:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  186:6   warning  React Hook useEffect has a missing dependency: 'pendingHydrate'. Either include it or remove the dependency array               react-hooks/exhaustive-deps
+  212:6   warning  React Hook useEffect has a missing dependency: 'pendingHydrate'. Either include it or remove the dependency array               react-hooks/exhaustive-deps
+  343:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/auth/LoginPage.tsx
+  39:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  42:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/auth/useMembershipLiveSync.ts
+  97:5  warning  React Hook useCallback has a missing dependency: 'queryClient'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/characters/CharacterPage.tsx
+  1509:67  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/characters/status.tsx
+   8:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  10:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/compendium/CompendiumPage.tsx
+  231:6  warning  React Hook useEffect has a missing dependency: 'id'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/compendium/ReaderPage.tsx
+  153:6   warning  React Hook useEffect has missing dependencies: 'id' and 't'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+  164:68  warning  Unexpected any. Specify a different type                                                                         @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/dashboard/RegionMap.tsx
+  23:10  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/dice/DiceTray.tsx
+  423:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/encounters/GenerateEncounterWizard.tsx
+  171:5  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  198:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/encounters/PlayerVitalsHeader.tsx
+  37:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  37:70  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  38:45  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  38:82  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  39:45  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  39:82  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/encounters/RunSessionPage.tsx
+   746:17   warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components            react-refresh/only-export-components
+  1141:38   warning  Unexpected any. Specify a different type                                                                                                  @typescript-eslint/no-explicit-any
+  1322:76   warning  Unexpected any. Specify a different type                                                                                                  @typescript-eslint/no-explicit-any
+  1390:6    warning  React Hook useEffect has a missing dependency: 'encounter'. Either include it or remove the dependency array                              react-hooks/exhaustive-deps
+  1555:6    warning  React Hook useMemo has unnecessary dependencies: 'formattingLocale' and 'timeFormat'. Either exclude them or remove the dependency array  react-hooks/exhaustive-deps
+  2600:133  warning  Unexpected any. Specify a different type                                                                                                  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/encounters/SpellbookPanel.tsx
+  54:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  64:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  73:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  86:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/inventory/InventoryPage.tsx
+   99:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  112:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/inventory/inventoryShared.tsx
+  31:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  32:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  33:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  35:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/library/CampaignLibraryPage.tsx
+  21:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  22:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  23:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  24:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/locations/LocationPage.tsx
+  116:9  warning  The 'allLocations' logical expression could make the dependencies of useMemo Hook (at line 223) change on every render. To fix this, wrap the initialization of 'allLocations' in its own useMemo() Hook                         react-hooks/exhaustive-deps
+  116:9  warning  The 'allLocations' logical expression could make the dependencies of useMemo Hook (at line 240) change on every render. To fix this, wrap the initialization of 'allLocations' in its own useMemo() Hook                         react-hooks/exhaustive-deps
+  116:9  warning  The 'allLocations' logical expression could make the dependencies of useMemo Hook (at line 259) change on every render. To fix this, wrap the initialization of 'allLocations' in its own useMemo() Hook                         react-hooks/exhaustive-deps
+  117:9  warning  The 'npcs' logical expression could make the dependencies of useMemo Hook (at line 206) change on every render. Move it inside the useMemo callback. Alternatively, wrap the initialization of 'npcs' in its own useMemo() Hook  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/notes/InboxPage.tsx
+  273:6  warning  React Hook useEffect has missing dependencies: 'load' and 't'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/notifications/NotificationsBell.tsx
+   91:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  118:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  156:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+  472:6   warning  React Hook useCallback has a missing dependency: 'cancelCountRequest'. Either include it or remove the dependency array         react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/npcs/NpcPage.tsx
+  79:9  warning  The 'locations' logical expression could make the dependencies of useMemo Hook (at line 128) change on every render. To fix this, wrap the initialization of 'locations' in its own useMemo() Hook  react-hooks/exhaustive-deps
+  80:9  warning  The 'factions' logical expression could make the dependencies of useMemo Hook (at line 137) change on every render. To fix this, wrap the initialization of 'factions' in its own useMemo() Hook    react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/quests/QuestListPage.tsx
+  107:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/screen/PlayerDisplayPage.tsx
+  352:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/session-zero/SessionZeroPage.tsx
+  164:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  229:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/sessions/ScribePanel.tsx
+  130:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/sessions/SessionsPage.tsx
+   245:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array                  react-hooks/exhaustive-deps
+   779:6  warning  React Hook useEffect has missing dependencies: 'seedRecap' and 't'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+   860:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array                  react-hooks/exhaustive-deps
+  1355:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array                  react-hooks/exhaustive-deps
+  1505:6  warning  React Hook useCallback has a missing dependency: 't'. Either include it or remove the dependency array                  react-hooks/exhaustive-deps
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/settings/AiDmCard.tsx
+  68:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/anthonyanderson/Documents/wt-1322/apps/web/src/features/storylines/StorylineContentEditor.tsx
+  7:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+✖ 159 problems (0 errors, 159 warnings)
+  0 errors and 4 warnings potentially fixable with the `--fix` option.
+
+
+> @campfire/schema@0.14.1 lint
+> eslint .
+

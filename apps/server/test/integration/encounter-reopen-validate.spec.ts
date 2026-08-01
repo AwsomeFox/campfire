@@ -40,7 +40,7 @@ describe('encounter reopen turn-pointer validation (issue #489, service layer)',
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn(), notifyUser: jest.fn() } as any);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
     return { orm, encountersService };
   }
 
