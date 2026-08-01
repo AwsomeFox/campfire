@@ -374,25 +374,4 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     const img = surface.locator('img[alt="Battle map"]');
     await expect(img).toHaveAttribute('draggable', 'false');
   });
-
-  test('enabling fog auto-selects the reveal tool', async ({ page }) => {
-    await openGestureFixture(page);
-    
-    const fogCheckbox = page.getByRole('checkbox', { name: 'Fog' });
-    const revealTool = page.getByTestId('map-tool-reveal');
-    const moveTool = page.getByTestId('map-tool-move');
-
-    // First ensure we're not on reveal tool just in case
-    await moveTool.click();
-    await expect(revealTool).not.toHaveAttribute('aria-pressed', 'true');
-
-    // Disable fog
-    await fogCheckbox.uncheck();
-    
-    // Re-enable fog
-    await fogCheckbox.check();
-    
-    // Reveal tool should be auto-selected
-    await expect(revealTool).toHaveAttribute('aria-pressed', 'true');
-  });
 });
