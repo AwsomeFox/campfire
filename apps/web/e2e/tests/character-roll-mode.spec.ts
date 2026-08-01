@@ -4,8 +4,8 @@ import { seed, stateFor } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
- * Issue #713 / #1853 — expose Roll Mode Context Menu & Chooser
- * at the character-sheet roll controls.
+ * Issue #713 / #1853 — expose Roll Mode Context Menu & Roll Controls
+ * at character sheet roll controls.
  */
 
 test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', () => {
@@ -58,14 +58,11 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('[data-testid="character-saving-throws"]');
-    await expect(savesCard).toBeVisible({ timeout: 15000 });
-
-    const strSave = savesCard.locator('button').first();
-    await expect(strSave).toBeVisible();
+    const rollControl = page.locator('[data-testid="attack-roll-control"]').first();
+    await expect(rollControl).toBeVisible({ timeout: 15000 });
 
     // Right-click opens the context menu
-    await strSave.click({ button: 'right' });
+    await rollControl.click({ button: 'right' });
     const menu = page.locator('[role="menu"]');
     await expect(menu).toBeVisible();
 
@@ -78,11 +75,8 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('[data-testid="character-saving-throws"]');
-    await expect(savesCard).toBeVisible({ timeout: 15000 });
-
-    const strSave = savesCard.locator('button').first();
-    await expect(strSave).toBeVisible();
+    const rollControl = page.locator('[data-testid="attack-roll-control"]').first();
+    await expect(rollControl).toBeVisible({ timeout: 15000 });
 
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
@@ -90,7 +84,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
           (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
           res.request().method() === 'POST',
       ),
-      strSave.click({ modifiers: ['Shift'] }),
+      rollControl.click({ modifiers: ['Shift'] }),
     ]);
     expect(rollRequest.status()).toBeLessThan(300);
   });
@@ -99,11 +93,10 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('[data-testid="character-saving-throws"]');
-    await expect(savesCard).toBeVisible({ timeout: 15000 });
+    await page.locator('[data-testid="attack-roll-control"]').first().waitFor({ state: 'visible', timeout: 15000 });
 
     const results = await new AxeBuilder({ page })
-      .include('[data-testid="character-saving-throws"]')
+      .include('[data-testid="character-sheet-panel-play"]')
       .analyze();
     expect(results.violations).toEqual([]);
   });
