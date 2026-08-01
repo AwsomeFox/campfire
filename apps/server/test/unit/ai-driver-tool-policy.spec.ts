@@ -347,6 +347,7 @@ describe('driver-tool-policy (#474)', () => {
     });
   describe('#1500 tool-policy unit coverage gaps: default-deny, delete_ branch, prep overrides, undoable, and precedence', () => {
     it('isDriverForbiddenToolName detects delete_ prefix hard deletes', () => {
+      expect(DRIVER_FORBIDDEN_PREFIXES).toContain('delete_');
       expect(isDriverForbiddenToolName('delete_campaign')).toBe(true);
       expect(isDriverForbiddenToolName('delete_character')).toBe(true);
       expect(isDriverForbiddenToolName('update_character')).toBe(false);
