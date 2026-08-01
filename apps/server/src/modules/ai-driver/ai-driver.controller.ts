@@ -25,10 +25,11 @@ import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
+import { assertDirectWriteAllowed } from '../../common/proposed.util';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService, toPublicAiDmSessionState, toPublicAiDmToolConfirmation, type AiDmTurnRunResult } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState, toPublicAiDmSessionStateForRole, toPublicAiDmToolConfirmation, type AiDmTurnRunResult } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
@@ -303,8 +304,9 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 200, description: 'The session state.' })
   async session(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, id);
-    return toPublicAiDmSessionState(this.driver.getSession(id));
+    const role = await this.access.requireMember(user, id);
+    // #1501: lastUndoableCommit is DM-only — its encounterId could name a hidden fight.
+    return toPublicAiDmSessionStateForRole(this.driver.getSession(id), role);
   }
 
   @Post('pause')
@@ -331,6 +333,27 @@ export class AiDriverController {
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
+  }
+
+  @Post('undo')
+  @ApiOperation({
+    summary: 'Undo the AI DM seat\'s last reversible action',
+    description:
+      'DM only. Reverses the seat\'s most recently committed undoable action (a resolve_action/apply_action) ' +
+      'by driving the existing undo path against the chain the seat observed — no client-held undo token required. ' +
+      '404 when there is nothing reversible to undo.',
+  })
+  @ApiResponse({ status: 201, description: 'The reversal completed.' })
+  @ApiResponse({ status: 404, description: 'No reversible action to undo.' })
+  async undo(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    // #1501 review: this handler performs a DIRECT combat mutation (it drives
+    // ActionResolverService.undo, rewriting combatant HP/conditions/effects + character sheets) but
+    // bypasses the tool layer that normally gates the seat's writes, so it cannot lean on the
+    // controller-wide @WriteModeExempt(). Enforce the same write-mode/PAT-scope gate the
+    // WriteModeGuard applies to the equivalent POST /encounters/:id/actions/undo route.
+    assertDirectWriteAllowed(user);
+    return this.driver.undoLastSeatAction(id, user);
   }
 
   // ---- Session lifecycle (#1043) ----------------------------------------------------

@@ -770,6 +770,7 @@ function MyProposalsView({ campaignId }: { campaignId: number }) {
                   campaignId={campaignId}
                   busy={busyId === p.id}
                   onWithdraw={() => withdraw(p.id)}
+                  onRevised={load}
                 />
               ))}
             </section>
@@ -794,14 +795,52 @@ function MyProposalCard({
   campaignId,
   busy,
   onWithdraw,
+  onRevised,
 }: {
   proposal: Proposal;
   campaignId: number;
   busy: boolean;
   onWithdraw: () => void;
+  onRevised: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const href = proposalTargetHref(campaignId, proposal);
   const isDelete = proposal.action === 'delete';
+
+  function startEdit() {
+    setDraft(JSON.stringify(proposal.payload, null, 2));
+    setEditError(null);
+    setEditing(true);
+  }
+
+  async function saveRevision() {
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(draft);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Payload must be a JSON object.');
+      }
+      payload = parsed as Record<string, unknown>;
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Invalid JSON.');
+      return;
+    }
+    setSaving(true);
+    setEditError(null);
+    try {
+      await api.patch(`${API}/proposals/${proposal.id}`, { payload });
+      setEditing(false);
+      onRevised();
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : "Couldn't revise proposal.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2 flex-wrap">
@@ -820,11 +859,41 @@ function MyProposalCard({
         ) : null}
         {' '}· {timeAgo(proposal.createdAt)}
       </p>
-      {isDelete ? <DeleteView snapshot={proposal.snapshot} /> : <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />}
-      <div className="flex items-center justify-end">
-        <Btn density="xs" ghost className="text-xs" onClick={onWithdraw} disabled={busy}>
-          Withdraw
-        </Btn>
+      {isDelete ? (
+        <DeleteView snapshot={proposal.snapshot} />
+      ) : editing ? (
+        <div className="space-y-1">
+          <textarea
+            className="w-full text-[12px] font-mono bg-[var(--color-surface-2,#1a1b26)] border border-[var(--color-divider)] rounded-[var(--radius-md)] p-2.5 min-h-[140px] text-slate-200"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            spellCheck={false}
+          />
+          {editError && <p className="text-[11px] text-red-400 m-0">{editError}</p>}
+          <p className="text-[10px] text-secondary m-0">Edit the proposed payload (JSON) for your pending proposal.</p>
+        </div>
+      ) : (
+        <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
+      )}
+      <div className="flex items-center gap-2 justify-end">
+        {!isDelete && (
+          <button
+            type="button"
+            className="text-[11px] text-secondary hover:text-white"
+            onClick={() => (editing ? setEditing(false) : startEdit())}
+          >
+            {editing ? 'Cancel edit' : 'Edit payload'}
+          </button>
+        )}
+        {editing ? (
+          <Btn density="xs" className="text-xs" onClick={saveRevision} disabled={busy || saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </Btn>
+        ) : (
+          <Btn density="xs" ghost className="text-xs" onClick={onWithdraw} disabled={busy || saving}>
+            Withdraw
+          </Btn>
+        )}
       </div>
     </Card>
   );

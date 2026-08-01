@@ -447,6 +447,16 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
+  async function deleteObjective(o: QuestObjective) {
+    if (!quest) return;
+    try {
+      await api.delete(`${API}/quests/${quest.id}/objectives/${o.id}`);
+      setQuest({ ...quest, objectives: quest.objectives.filter((x) => x.id !== o.id) });
+    } catch {
+      setError(t('quests.deleteObjectiveFailed'));
+    }
+  }
+
   // Move an objective one slot up/down and persist the new order (#100). Sends the
   // full reordered id list to the atomic reorder endpoint, then adopts the server's
   // canonical ordering from the response.
@@ -884,6 +894,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                         </button>
                         <button onClick={() => startEditObjective(o)} className="text-xs text-secondary hover:text-[var(--color-neutral-300)] shrink-0">
                           ✎
+                        </button>
+                        <button
+                          onClick={() => void deleteObjective(o)}
+                          aria-label={t('quests.deleteObjective', { text: o.text })}
+                          className="text-xs text-rose-400 hover:text-rose-300 shrink-0"
+                        >
+                          🗑
                         </button>
                       </>
                     )}
