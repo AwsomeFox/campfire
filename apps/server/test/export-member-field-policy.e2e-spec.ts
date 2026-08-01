@@ -314,7 +314,7 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .send({ title: 'Export RSVP Test', scheduledAt: '2099-06-10T18:00:00Z' })
       .expect(201);
     await playerAgent
-      .put(`/api/v1/campaigns/${campaignId}/schedule/${session.body.id}/rsvp`)
+      .put(`/api/v1/schedule/${session.body.id}/rsvp`)
       .send({ status: 'yes', note: 'I can make it' })
       .expect(200);
       
