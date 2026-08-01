@@ -57,6 +57,7 @@ describe('EncountersService unit coverage tests', () => {
       revisions,
       attachmentsService,
       campaignLibrary,
+      { notifyCampaign: jest.fn(), notifyUser: jest.fn() } as any,
       null as any,
     );
 
