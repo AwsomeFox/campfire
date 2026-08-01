@@ -19,7 +19,7 @@ test.describe('MarkdownEditor', () => {
     await textarea.fill('Hello world');
 
     await previewTab.click();
-    await expect(editor.getByText('Hello world')).toBeVisible();
+    await expect(editor.getByTestId('markdown-preview')).toContainText('Hello world');
     await expect(textarea).not.toBeVisible();
 
     await writeTab.click();

@@ -79,7 +79,7 @@ export const MarkdownEditor = forwardRef<HTMLTextAreaElement, MarkdownEditorProp
             </Btn>
           </div>
           {showToolbar && tab === 'write' && (
-            <div className="flex gap-1 items-center bg-[var(--color-neutral-800)] p-1 rounded-md" role="toolbar" aria-label="Markdown formatting">
+            <div className="flex gap-1 items-center bg-[var(--color-neutral-800)] p-1 rounded-md max-w-full overflow-x-auto flex-wrap" role="toolbar" aria-label="Markdown formatting">
               <Btn type="button" unstyled className="cf-target-44 px-3 py-2 hover:bg-[var(--color-neutral-700)] rounded" onClick={() => applyFormat('**', '**')} title="Bold (Ctrl+B)" aria-label="Bold"><span className="font-bold">B</span></Btn>
               <Btn type="button" unstyled className="cf-target-44 px-3 py-2 hover:bg-[var(--color-neutral-700)] rounded" onClick={() => applyFormat('_', '_')} title="Italic (Ctrl+I)" aria-label="Italic"><span className="italic">I</span></Btn>
               <Btn type="button" unstyled className="cf-target-44 px-3 py-2 hover:bg-[var(--color-neutral-700)] rounded" onClick={() => applyFormat('[', '](url)')} title="Link (Ctrl+K)" aria-label="Link">🔗</Btn>
@@ -105,7 +105,7 @@ export const MarkdownEditor = forwardRef<HTMLTextAreaElement, MarkdownEditorProp
             />
           </div>
           {tab === 'preview' && (
-            <Card className="min-h-[120px] max-h-[500px] overflow-auto">
+            <Card data-testid="markdown-preview" className="min-h-[120px] max-h-[500px] overflow-auto">
               {value ? <Markdown>{String(value)}</Markdown> : <span className="text-[var(--color-neutral-500)] italic">Nothing to preview.</span>}
             </Card>
           )}
