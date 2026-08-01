@@ -23,13 +23,13 @@ function Pips({ max, used, onChange }: { max: number; used: number; onChange: (u
 }
 
 export function ResourceTrackerPanel({
-  _campaignId,
+  campaignId: _campaignId,
   encounterId,
   characters,
   combatants,
   canDmWrite
 }: {
-  _campaignId?: number;
+  campaignId?: number;
   encounterId: number;
   characters: Character[];
   combatants: Combatant[];
