@@ -31,6 +31,8 @@
  * selected state.
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { Btn, DensityProps } from './ui';
+
 
 export interface StatusMenuOption<V extends string> {
   value: V;
@@ -40,7 +42,7 @@ export interface StatusMenuOption<V extends string> {
   accessibleName?: string;
 }
 
-export interface StatusMenuButtonProps<V extends string> {
+export interface StatusMenuButtonProps<V extends string> extends DensityProps {
   /** Accessible name for the trigger button, e.g. "Quest status: Active". */
   triggerLabel: string;
   /** Accessible description appended via aria-describedby (optional). */
@@ -56,6 +58,10 @@ export interface StatusMenuButtonProps<V extends string> {
    * immediately without restoring focus, then awaits this in the background.
    */
   onSelect: (value: V) => void | Promise<void>;
+  /** Optional ghost button style for the trigger. */
+  ghost?: boolean;
+  /** Optional unstyled button mode for chip or custom trigger wrappers. */
+  unstyled?: boolean;
   /** Disables the trigger (e.g. while a status save is in flight). */
   disabled?: boolean;
   /** Visible trigger text. Defaults to the selected option's label. */
@@ -80,6 +86,9 @@ export function StatusMenuButton<V extends string>({
   disabled = false,
   triggerText,
   className = '',
+  ghost,
+  unstyled,
+  density,
   announceFailure,
   failureMessage,
 }: StatusMenuButtonProps<V>) {
@@ -369,10 +378,13 @@ export function StatusMenuButton<V extends string>({
 
   return (
     <div ref={containerRef} className="relative inline-block">
-      <button
+      <Btn
         ref={buttonRef}
         id={buttonId}
         type="button"
+        ghost={ghost}
+        unstyled={unstyled}
+        density={density}
         className={className}
         disabled={disabled}
         aria-haspopup="listbox"
@@ -384,7 +396,7 @@ export function StatusMenuButton<V extends string>({
         aria-describedby={triggerDescription ? `${baseId}-desc` : undefined}
       >
         {triggerTextNode}
-      </button>
+      </Btn>
       {triggerDescription && (
         <span id={`${baseId}-desc`} className="sr-only">
           {triggerDescription}

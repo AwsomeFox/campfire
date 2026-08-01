@@ -14,7 +14,7 @@ export type { ChipVariant } from './chipVariants';
 export type { UiDensity, UiElevation } from './density';
 export { EntityCard, type EntityCardProps } from './EntityCard';
 
-type DensityProps = { density?: UiDensity };
+export type DensityProps = { density?: UiDensity };
 
 export function Card({
   children,
@@ -84,16 +84,20 @@ export function statusVariant(status: string): ChipVariant {
 type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & DensityProps & {
   ghost?: boolean;
   danger?: boolean;
+  unstyled?: boolean;
   /** Marks an in-flight action and keeps it natively disabled until it settles. */
   busy?: boolean;
 };
 
 export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
-  function Btn({ ghost, danger, busy = false, disabled = false, density = 'default', className = '', ...rest }, ref) {
+  function Btn({ ghost, danger, unstyled, busy = false, disabled = false, density = 'default', className = '', ...rest }, ref) {
+    const btnClasses = unstyled
+      ? className.trim()
+      : `cf-btn ${densityClass(density)} ${ghost ? 'cf-btn-ghost' : ''} ${danger ? 'cf-btn-danger' : ''} ${className}`.trim();
     return (
       <button
         ref={ref}
-        className={`cf-btn ${densityClass(density)} ${ghost ? 'cf-btn-ghost' : ''} ${danger ? 'cf-btn-danger' : ''} ${className}`.trim()}
+        className={btnClasses}
         {...rest}
         disabled={disabled || busy}
         aria-busy={busy || undefined}
