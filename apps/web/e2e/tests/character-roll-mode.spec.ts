@@ -95,7 +95,6 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
     const results = await new AxeBuilder({ page })
       .include('section:has-text("Saving throws")')
       .analyze();
