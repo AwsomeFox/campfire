@@ -50,17 +50,14 @@ interface TurnWorkspaceProps {
    *  is authoritative when the parent's encounter cache is briefly stale. */
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
-<<<<<<< HEAD
   gridUnit?: string | null;
   gridScale?: number | null;
-=======
   /** Issue #1851: In-combat spellbook panel integration */
   spells?: SpellItem[];
   spellSlots?: SpellSlotMap;
   pactSlots?: PactSlotPool | null;
   spellStats?: SpellcastingStats;
   onUpdateSpellSlot?: (level: number | 'pact', delta: number) => void;
->>>>>>> d10982069 (feat(web): add in-combat spellbook panel with slot tracking and cast controls (Fixes #1851))
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -122,16 +119,13 @@ export function TurnWorkspace({
   onUseSuggestedAction,
   onEndTurn,
   endTurnBusy = false,
-<<<<<<< HEAD
   gridUnit,
   gridScale,
-=======
   spells,
   spellSlots,
   pactSlots,
   spellStats,
   onUpdateSpellSlot,
->>>>>>> d10982069 (feat(web): add in-combat spellbook panel with slot tracking and cast controls (Fixes #1851))
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -139,11 +133,8 @@ export function TurnWorkspace({
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
-<<<<<<< HEAD
   const [activeTab, setActiveTab] = useState<'action' | 'bonus' | 'reaction' | 'other'>('action');
-=======
   const [showSpellbook, setShowSpellbook] = useState(false);
->>>>>>> d10982069 (feat(web): add in-combat spellbook panel with slot tracking and cast controls (Fixes #1851))
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
