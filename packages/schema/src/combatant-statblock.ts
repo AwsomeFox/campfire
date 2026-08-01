@@ -9,7 +9,6 @@
 import { z } from 'zod';
 import { ActionSpec, isResolvableSpec } from './action-resolver';
 import { CharacterAction } from './character-action';
-import type { CharacterResource, SpellSlotLevel } from './index';
 
 // ---------------------------------------------------------------------------
 // Inline help (issue #425) — surfaced in the statblock editor + Use flow.

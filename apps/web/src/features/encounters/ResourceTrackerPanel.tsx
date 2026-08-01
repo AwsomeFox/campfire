@@ -23,13 +23,13 @@ function Pips({ max, used, onChange }: { max: number; used: number; onChange: (u
 }
 
 export function ResourceTrackerPanel({
-  campaignId,
+  _campaignId,
   encounterId,
   characters,
   combatants,
   canDmWrite
 }: {
-  campaignId: number;
+  _campaignId?: number;
   encounterId: number;
   characters: Character[];
   combatants: Combatant[];
@@ -38,7 +38,7 @@ export function ResourceTrackerPanel({
   useTranslation();
   const [busy, setBusy] = useState(false);
 
-  const applyRest = async (kind: 'short' | 'long' | 'custom', customKeys?: string[]) => {
+  const applyRest = async (_kind: 'short' | 'long' | 'custom', _customKeys?: string[]) => {
     if (!canDmWrite) return;
     setBusy(true);
     try {
@@ -73,10 +73,9 @@ export function ResourceTrackerPanel({
               spellSlots = char.spellSlots;
             }
           } else if (c.statblock) {
-            // @ts-ignore
-            resources = c.statblock.resources || {};
-            // @ts-ignore
-            spellSlots = c.statblock.spellSlots || {};
+            const sb = c.statblock as unknown as Record<string, unknown>;
+            resources = (sb.resources as Record<string, CharacterResource>) || {};
+            spellSlots = (sb.spellSlots as Record<string, SpellSlotLevel>) || {};
           }
 
           const hasResources = Object.keys(resources).length > 0;
@@ -96,7 +95,6 @@ export function ResourceTrackerPanel({
                       <div className="text-sm">
                         {res.name || key} 
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
-                        {/* @ts-ignore */}
                         {res.source && <span className="ml-2 text-xs opacity-70">[{res.source}]</span>}
                       </div>
                       <Pips 
@@ -106,13 +104,12 @@ export function ResourceTrackerPanel({
                           if (!canDmWrite && (!c.characterId || c.characterId === 0)) return;
                           if (c.kind === 'character' && c.characterId) {
                             api.post(`${API}/characters/${c.characterId}/resources`, {
-                              // @ts-ignore
                               [key]: { used: val, max: res.max, name: res.name, recharge: res.recharge, source: res.source }
                             });
                           } else if (c.statblock) {
+                            const sb = c.statblock as unknown as Record<string, unknown>;
                             api.patch(`${API}/encounters/${encounterId}/combatants/${c.id}`, {
-                              // @ts-ignore
-                              statblock: { ...c.statblock, resources: { ...c.statblock.resources, [key]: { ...res, used: val } } }
+                              statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } }
                             });
                           }
                         }} 
@@ -138,9 +135,9 @@ export function ResourceTrackerPanel({
                               [level]: { used: val, max: slot.max }
                             });
                           } else if (c.statblock) {
+                            const sb = c.statblock as unknown as Record<string, unknown>;
                             api.patch(`${API}/encounters/${encounterId}/combatants/${c.id}`, {
-                              // @ts-ignore
-                              statblock: { ...c.statblock, spellSlots: { ...c.statblock.spellSlots, [level]: { ...slot, used: val } } }
+                              statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } }
                             });
                           }
                         }} 
