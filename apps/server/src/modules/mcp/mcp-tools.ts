@@ -4028,7 +4028,7 @@ export class McpToolsService {
           characterId as number,
           {
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: (mode === 'flat' ? 'normal' : (mode as 'normal' | 'advantage' | 'disadvantage' | 'crit' | undefined)) ?? 'normal',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
           },
@@ -4066,7 +4066,7 @@ export class McpToolsService {
           {
             characterIds: characterIds as number[],
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: (mode === 'flat' ? 'normal' : (mode as 'normal' | 'advantage' | 'disadvantage' | 'crit' | undefined)) ?? 'normal',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
             encounterId: encounterId as number | undefined,
