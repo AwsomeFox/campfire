@@ -187,9 +187,15 @@ export function safeCombatant(c: Combatant): SafeCombatant {
   return { ...base, hpCurrent: null, hpMax: null, hpBand: band };
 }
 
-export function safeCombatants(combatants: Combatant[]): SafeCombatant[] {
-  return combatants.map(safeCombatant);
+export function filterPlayerSafeCombatants<T>(combatants: T[]): T[] {
+  return combatants.filter((c) => (c as { hidden?: boolean }).hidden !== true);
 }
+
+export function safeCombatants(combatants: Combatant[]): SafeCombatant[] {
+  return filterPlayerSafeCombatants(combatants).map(safeCombatant);
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Battle map — re-derive the player VTT projection for the cast surface (issue

@@ -12,7 +12,9 @@ export type SummaryCombatant = {
   hpCurrent?: number | null;
   hpBand?: string | null;
   deathState?: 'none' | 'dying' | 'stable' | 'dead' | string | null;
+  hidden?: boolean;
 };
+
 
 /** At 0 HP, or (for a redacted monster) banded 'down'. */
 export function isDown(c: SummaryCombatant): boolean {

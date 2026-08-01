@@ -95,7 +95,8 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
-import { isDown } from './encounterEndedSummary';
+import { endedSummaryTallies, isDown } from './encounterEndedSummary';
+import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   canStabilizeCombatant,
@@ -226,7 +227,7 @@ import {
   type EncounterOverrideState,
   type EncounterSyncRevision,
 } from './encounterSyncState';
-import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
+import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
 import {
   armMapPingTap,
   decideMapPingTapRelease,
@@ -3153,6 +3154,49 @@ export default function RunSessionPage() {
         />
       )}
 
+      {encounter.status === 'ended' && (() => {
+        const visibleCombatants = isDm
+          ? encounter.combatants
+          : filterPlayerSafeCombatants(encounter.combatants);
+        const { dead, downed, survivors } = endedSummaryTallies(visibleCombatants);
+        return (
+          <Card
+            density="comfortable"
+            className="space-y-2"
+            role="region"
+            aria-labelledby="encounter-ended-summary-heading"
+            data-testid="encounter-ended-summary"
+          >
+            <h2 id="encounter-ended-summary-heading" className="text-sm font-bold text-white m-0">
+              Combat Summary
+            </h2>
+            <div className="flex gap-4 flex-wrap text-[13px]" data-testid="encounter-ended-summary-tallies">
+              <span>
+                Rounds: <b>{encounter.round}</b>
+              </span>
+              <span>
+                Dead: <b>{dead.length}</b>
+                {dead.length > 0 && (
+                  <span className="text-muted"> ({dead.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+              <span>
+                Downed: <b>{downed.length}</b>
+                {downed.length > 0 && (
+                  <span className="text-muted"> ({downed.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+              <span>
+                Survivors: <b>{survivors.length}</b>
+                {survivors.length > 0 && (
+                  <span className="text-muted"> ({survivors.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+            </div>
+          </Card>
+        );
+      })()}
+
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
       )}
@@ -3166,39 +3210,69 @@ export default function RunSessionPage() {
         }}
       />
 
-      {canDmWrite && preparingSetupGuidance && (
-        <div
-          data-testid="encounter-preparing-guidance"
-          className="text-muted"
-          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
-        >
-          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
-          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {preparingSetupGuidance.nextSteps.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-          <ol
-            aria-label="Encounter lifecycle"
-            data-testid="encounter-lifecycle-checklist"
-            style={{
-              margin: 0,
-              padding: 0,
-              listStyle: 'none',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 6,
-              alignItems: 'center',
-            }}
+      {(() => {
+        const partyCombatantCount = encounter.combatants.filter((c) => c.kind === 'character').length;
+        const enemyCombatantCount = encounter.combatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length;
+        const activeStepId = activeLifecycleStepId(encounter.status, {
+          partyCombatantCount,
+          enemyCombatantCount,
+          needsInitiativeCount,
+        });
+        return (
+          <div
+            data-testid="encounter-preparing-guidance"
+            className="text-muted"
+            style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
           >
-            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
-              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
-                {i + 1}. {step.label}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+            {canDmWrite && encounter.status === 'preparing' && preparingSetupGuidance ? (
+              <>
+                <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+                <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {preparingSetupGuidance.nextSteps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+              </>
+            ) : (
+              <p style={{ margin: 0 }} data-testid="encounter-status-guidance-lead">
+                {playerGuidance({
+                  status: encounter.status,
+                  currentCombatantName: currentCombatant?.name,
+                })}
+              </p>
+            )}
+            <ol
+              aria-label="Encounter lifecycle"
+              data-testid="encounter-lifecycle-checklist"
+              style={{
+                margin: 0,
+                padding: 0,
+                listStyle: 'none',
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                alignItems: 'center',
+              }}
+            >
+              {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => {
+                const isActive = step.id === activeStepId;
+                return (
+                  <li
+                    key={step.id}
+                    className={`tag ${isActive ? 'tag-accent' : 'tag-neutral'}`}
+                    style={{ fontSize: 10 }}
+                    title={step.detail}
+                    aria-current={isActive ? 'step' : undefined}
+                    data-active={isActive ? 'true' : undefined}
+                  >
+                    {i + 1}. {step.label}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        );
+      })()}
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
           tokens. Shown to the DM always (so they can attach one), and to players only once

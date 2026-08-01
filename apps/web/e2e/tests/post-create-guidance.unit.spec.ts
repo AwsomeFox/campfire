@@ -1,25 +1,20 @@
-/**
- * Post-create encounter guidance + accessible naming (issue #431).
- *
- * New encounters auto-add the active party; the preparing banner must say so
- * and never ask the DM to "Add the party" again. The create form needs a real
- * Encounter name label (not placeholder-only).
- */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  activeLifecycleStepId,
   ENCOUNTER_LIFECYCLE_STEPS,
   ENCOUNTER_NAME_HELP,
   ENCOUNTER_NAME_ID,
   ENCOUNTER_NAME_LABEL,
+  playerGuidance,
   preparingGuidance,
 } from '../../src/features/encounters/postCreateGuidance';
 
 const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 const LIST_PAGE = resolve(__dirname, '../../src/features/encounters/EncounterListPage.tsx');
 
-test.describe('post-create encounter guidance (issue #431)', () => {
+test.describe('post-create encounter guidance (issue #431 & #1470)', () => {
   test('auto-added party lead never asks to add the party again', () => {
     const g = preparingGuidance({
       partyCombatantCount: 3,
@@ -67,15 +62,33 @@ test.describe('post-create encounter guidance (issue #431)', () => {
     ]);
   });
 
+  test('playerGuidance provides status-specific copy for non-DM viewers (issue #1470)', () => {
+    expect(playerGuidance({ status: 'preparing' })).toMatch(/waiting for the dm/i);
+    expect(playerGuidance({ status: 'running', currentCombatantName: 'Ember' })).toBe("It's Ember's turn.");
+    expect(playerGuidance({ status: 'running' })).toMatch(/combat in progress/i);
+    expect(playerGuidance({ status: 'ended' })).toBe('Combat has ended.');
+  });
+
+  test('activeLifecycleStepId maps encounter status and roster state to step ids (issue #1470)', () => {
+    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 0 })).toBe('preparing');
+    expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 2 })).toBe('initiative');
+    expect(activeLifecycleStepId('running')).toBe('running');
+    expect(activeLifecycleStepId('ended')).toBe('ended');
+  });
+
   test('encounter name has a durable label and validation help', () => {
     expect(ENCOUNTER_NAME_LABEL).toBe('Encounter name');
     expect(ENCOUNTER_NAME_ID).toBe('encounter-name');
     expect(ENCOUNTER_NAME_HELP.toLowerCase()).toMatch(/required/);
   });
 
-  test('RunSessionPage and EncounterListPage wire the guidance helpers', () => {
+  test('RunSessionPage and EncounterListPage wire the guidance helpers and ended summary (issue #1470)', () => {
     const run = readFileSync(RUN_SESSION, 'utf8');
     expect(run).toMatch(/preparingGuidance/);
+    expect(run).toMatch(/playerGuidance/);
+    expect(run).toMatch(/activeLifecycleStepId/);
+    expect(run).toMatch(/endedSummaryTallies/);
+    expect(run).toMatch(/encounter-ended-summary/);
     expect(run).toMatch(/encounter-preparing-guidance/);
     expect(run).toMatch(/encounter-lifecycle-checklist/);
     expect(run).not.toMatch(/Add the party &amp; monsters below/);
@@ -87,3 +100,4 @@ test.describe('post-create encounter guidance (issue #431)', () => {
     expect(list).toMatch(/ENCOUNTER_NAME_HELP/);
   });
 });
+
