@@ -1,5 +1,4 @@
-import type { Role } from '@campfire/schema';
-import type { CampaignEvent } from '@campfire/schema';
+import type { Role, CampaignEvent } from '@campfire/schema';
 import {
   CAMPAIGN_BROADCAST_SAFE_FRAMES as AI_DM_BROADCAST_SAFE_FRAMES,
   PROJECTED_FRAME_TYPES,
@@ -43,6 +42,8 @@ const SAMPLES = [
   { type: 'takeover', campaignId: 1, action: 'requested', memberId: 'm1', at },
   { type: 'secret-approval', campaignId: 1, action: 'granted', tool: 'get_npc', entityId: 4242, at },
   { type: 'tool-confirmation', campaignId: 1, action: 'queued', confirmationId: 'c1', tool: 'end_encounter', at },
+  { type: 'phase', campaignId: 1, phase: 'greeting', at },
+  { type: 'narration.withheld', campaignId: 1, reason: 'content_filter', message: 'redacted', at },
   {
     type: 'transcript',
     campaignId: 1,

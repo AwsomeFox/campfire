@@ -1,10 +1,9 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
-import type { CampaignEvent } from '@campfire/schema';
+import type { CampaignEvent, AiDmTranscriptEvent } from '@campfire/schema';
 import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { setRetrySleepForTests } from '../src/modules/ai-driver/ai-driver.service';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
-import type { AiDmTranscriptEvent } from '@campfire/schema';
 
 /**
  * #1052 review — provenance and usage precision after a failover.

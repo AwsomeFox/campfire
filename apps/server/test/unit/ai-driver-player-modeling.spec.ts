@@ -26,6 +26,7 @@ describe('ai-driver-player-modeling', () => {
       getSeat: jest.fn<any>().mockResolvedValue({ tokenBudget: 1000, tokensUsed: 0, actionQueueDepth: 2 } as AiDmSeat),
       meterTurn: jest.fn<any>().mockResolvedValue({ seat: { tokenBudget: 1000, tokensUsed: 100 }, budgetRemaining: 900 }),
       registerDriverSessionTeardown: jest.fn(),
+      isExperimentalEnabled: jest.fn<any>().mockResolvedValue(true),
     };
     mcpTools = {
       buildToolset: jest.fn().mockReturnValue({

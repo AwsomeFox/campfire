@@ -8,11 +8,9 @@ import {
   ParseIntPipe,
   Post,
   Query,
-  Sse,
   UseInterceptors,
-  type MessageEvent,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiQuery, ApiResponse, ApiProduces } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
@@ -21,8 +19,7 @@ import {
   AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
   NarrationLanguage,
 } from '@campfire/schema';
-import { interval, merge, map, type Observable } from 'rxjs';
-import { filter, takeUntil } from 'rxjs/operators';
+
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import { assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -210,7 +207,7 @@ const AiDmGroundingCorrectionRequest = z
   .strict();
 class AiDmGroundingCorrectionDto extends createZodDto(AiDmGroundingCorrectionRequest) {}
 
-const HEARTBEAT_MS = 25_000;
+
 
 /**
  * Driver AI-DM runtime endpoints (#312), alongside the existing seat config/turn

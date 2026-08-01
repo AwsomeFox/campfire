@@ -1,9 +1,8 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
-import type { CampaignEvent } from '@campfire/schema';
+import type { CampaignEvent, AiDmTranscriptEvent } from '@campfire/schema';
 import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
-import type { AiDmTranscriptEvent } from '@campfire/schema';
 
 /**
  * Driver-runtime SECURITY + correctness regressions (post-merge review of the AI-DM program).

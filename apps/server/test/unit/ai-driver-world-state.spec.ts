@@ -203,7 +203,7 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
     const campaigns = {
       getOrThrow: jest.fn(async () => ({ id: CAMPAIGN, narrationLanguage: campaignLanguage })),
     };
-    const aiDm = { registerDriverSessionTeardown: jest.fn() };
+    const aiDm = { registerDriverSessionTeardown: jest.fn(), isExperimentalEnabled: jest.fn(() => Promise.resolve(true)) };
     const svc = new AiDriverService(
       aiDm as unknown as Ctor[0],
       mcpTools as unknown as Ctor[1],

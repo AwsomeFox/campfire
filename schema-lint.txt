@@ -1,0 +1,4 @@
+
+> @campfire/schema@0.14.1 lint
+> eslint .
+
