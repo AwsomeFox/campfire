@@ -1486,6 +1486,11 @@ export class ExportService {
         path: 'campaign.json',
         note: 'Per-session character attendance; machine copy in campaign.json.',
       },
+      libraryMonsters: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Homebrew library monsters; machine copy in campaign.json.',
+      },
       attachments: { kind: 'markdown-file', path: 'attachments.md' },
       attachmentsNote: {
         kind: 'embedded',
