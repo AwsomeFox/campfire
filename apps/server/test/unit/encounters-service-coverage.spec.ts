@@ -57,6 +57,7 @@ describe('EncountersService unit coverage tests', () => {
       revisions,
       attachmentsService,
       campaignLibrary,
+      null as any,
     );
 
     const [camp] = await db

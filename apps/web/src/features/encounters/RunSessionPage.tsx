@@ -1138,7 +1138,7 @@ export default function RunSessionPage() {
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
   const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
   const pingSeq = useRef(0);
-  const addPing = useCallback((ping: MapPing) => {
+  const addPing = useCallback((ping: any) => {
     const key = ++pingSeq.current;
     if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);
@@ -2597,7 +2597,7 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null });
+  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null } as any);
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).

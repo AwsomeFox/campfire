@@ -62,7 +62,7 @@ describe('encounter condition concurrency (real SQLite, service layer)', () => {
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, null as any);
     return { orm, encountersService };
   }
 

@@ -350,7 +350,7 @@ export default function PlayerDisplayPage() {
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
-  const addMapPing = useCallback((ping: MapPing) => {
+  const addMapPing = useCallback((ping: any) => {
     const key = ++mapPingSeq.current;
     if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);

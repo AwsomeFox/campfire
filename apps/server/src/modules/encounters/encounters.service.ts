@@ -23,6 +23,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   actionEconomySlotMax,
   advanceEncounterTurn,
@@ -735,6 +736,7 @@ export class EncountersService {
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
     private readonly campaignLibrary: CampaignLibraryService,
+    private readonly notifications: NotificationsService,
     /**
      * #599 — the table safety hold. Optional and LAST in the list because several integration
      * specs hand-construct this service positionally (test/integration/encounter-*.spec.ts);
@@ -4542,6 +4544,26 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
+    if (row.kind === 'character' && row.characterId) {
+      if (beforeDeath !== 'dead' && afterDeath === 'dead') {
+        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+          type: 'character_downed',
+          title: 'Character died!',
+          body: `${row.name} has died in combat.`,
+          entityType: 'encounter',
+          entityId: encounterId,
+        }).catch(() => {});
+      } else if (beforeHp > 0 && afterHp === 0 && afterDeath !== 'dead') {
+        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+          type: 'character_downed',
+          title: 'Character downed!',
+          body: `${row.name} was downed in combat.`,
+          entityType: 'encounter',
+          entityId: encounterId,
+        }).catch(() => {});
+      }
+    }
+
     return combatantToDomain(row);
   }
 
@@ -5294,6 +5316,34 @@ export class EncountersService {
       combatantKind: first?.kind ?? null,
     });
 
+    this.notifications.notifyCampaign(campaignId, user, {
+      type: 'encounter_started',
+      title: 'Encounter started',
+      body: `Encounter '${encounterRow.name}' has begun.`,
+      entityType: 'encounter',
+      entityId: encounterId,
+    }).catch(() => {});
+
+    if (first?.kind === 'character' && first.characterId) {
+      this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, first.characterId))
+        .limit(1)
+        .then(([char]) => {
+          if (char && char.ownerUserId) {
+            this.notifications.notifyUser(char.ownerUserId, campaignId, user, {
+              type: 'encounter_turn',
+              title: 'Your turn!',
+              body: `It's ${first.name}'s turn in '${encounterRow.name}'.`,
+              entityType: 'encounter',
+              entityId: encounterId,
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
     return snapshot;
   }
 
@@ -5778,6 +5828,27 @@ export class EncountersService {
       currentCombatantId: newCurrentId,
       combatantKind: startingKind,
     });
+
+    const [newCurrentRow] = await this.db.select().from(combatants).where(eq(combatants.id, newCurrentId!)).limit(1);
+    if (newCurrentRow?.kind === 'character' && newCurrentRow.characterId) {
+      this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, newCurrentRow.characterId))
+        .limit(1)
+        .then(([char]) => {
+          if (char && char.ownerUserId) {
+            this.notifications.notifyUser(char.ownerUserId, encounterRow.campaignId, user, {
+              type: 'encounter_turn',
+              title: 'Your turn!',
+              body: `It's ${newCurrentRow.name}'s turn in '${encounterRow.name}'.`,
+              entityType: 'encounter',
+              entityId: encounterId,
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
 
     const view = await this.getWithCombatantsOrThrow(encounterId, role);
     // Backfill the original response onto the already-committed claim (issue #580) so a
@@ -6822,6 +6893,14 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+
+    this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+      type: 'encounter_ended',
+      title: 'Encounter ended',
+      body: `Encounter '${encounterRow.name}' has concluded.`,
+      entityType: 'encounter',
+      entityId: encounterId,
+    }).catch(() => {});
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
