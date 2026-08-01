@@ -234,7 +234,15 @@ export default async function globalSetup(config: FullConfig) {
       version: '1',
       license: 'CC0',
     },
-    entries: [],
+    entries: [
+      {
+        slug: 'archmage-fixture',
+        name: 'Archmage Fixture Monster',
+        type: 'monster',
+        summary: '13th Age Monster',
+        dataJson: JSON.stringify({ name: 'Archmage Fixture Monster', hpMax: 50 }),
+      },
+    ],
   });
   await waitForInstall(admin, archmagePackUpload.id);
 
