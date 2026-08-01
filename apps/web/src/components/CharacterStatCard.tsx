@@ -34,15 +34,9 @@ import {
   damageExpr, critDamageExpr,
 } from '../lib/characterStats';
 import { RollContextMenu, type RollMode } from './RollContextMenu';
-import { useRoller, type CheckRollMode } from '../lib/useRoller';
+import { useRoller } from '../lib/useRoller';
 import { useDisclosure } from './useDisclosure';
 
-/** Map a modifier-key click to a catalog roll mode (shift = advantage, alt/ctrl/⌘ = disadvantage). */
-function checkModeFromEvent(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): CheckRollMode {
-  if (e.shiftKey) return 'advantage';
-  if (e.altKey || e.metaKey || e.ctrlKey) return 'disadvantage';
-  return 'normal';
-}
 
 const NOOP = () => {};
 

@@ -1466,7 +1466,6 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
-  const [mode, setMode] = useState<RollMode>('normal');
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const skillChecks = useMemo(() => catalog.filter((c) => c.category === 'skill'), [catalog]);

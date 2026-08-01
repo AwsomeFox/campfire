@@ -14,7 +14,6 @@
  * notion would simply not render the chooser (the action surface gates on
  * `RollMode.isApplicable`).
  */
-import type { Adv } from '../../lib/characterStats';
 
 /** The three roll modes a d20 check/attack can be taken with. */
 export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
