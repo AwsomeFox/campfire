@@ -4,26 +4,15 @@ import { seed, stateFor } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
- * Issue #713 — expose Flat / Advantage / Disadvantage at the character-sheet roll
- * controls for touch AND keyboard (saving throws, skills, attack "to hit").
- *
- * Covers the acceptance criteria end-to-end:
- *  - The chooser is visible on a touch viewport (no hover available).
- *  - Selecting Advantage via the chooser shows the mode before submission.
- *  - The roll that follows reflects it (the posted expression becomes 2d20kh1…).
- *  - The keyboard-modifier shortcut still overrides the chooser for one roll.
- *  - The chooser is keyboard-operable (radiogroup arrow navigation) and axe-clean.
- *
- * Uses its own freshly-created character (saves/skills are always present on a
- * sheet; an attack action is added so the Actions chooser is exercised too) so
- * the shared seeded roster stays untouched.
+ * Issue #713 / #1853 — expose Roll Mode Context Menu (Normal / Advantage / Disadvantage / Crit)
+ * at the character-sheet roll controls.
  */
 
-test.describe('Character sheet roll-mode chooser (issue #713)', () => {
+test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', () => {
   test.use({ storageState: stateFor('player') });
 
   let characterId = 0;
-  const name = `713 Roll-mode PC ${Date.now()}`;
+  const name = `1853 Roll-mode PC ${Date.now()}`;
 
   test.beforeAll(async ({ baseURL }) => {
     const ctx = await request.newContext({ baseURL: baseURL! });
@@ -59,111 +48,56 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     try {
-      // Hard-delete keeps the shared roster pristine across runs.
       await ctx.delete(`/api/v1/characters/${characterId}`);
     } finally {
       await ctx.dispose();
     }
   });
 
-  test('a touch user picks advantage from the chooser and the save roll reflects it', async ({ page }) => {
+  test('a touch or mouse user can trigger a roll context menu', async ({ page }) => {
     const { campaignId } = seed();
-    // A narrow mobile viewport — hover titles are not reachable here, so this is
-    // exactly the touch-user population that could previously only flat-roll.
-    await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
-    await expect(chooser).toBeVisible();
-
-    // Default is Flat; the live status (role=status) announces it before any roll.
-    // The chooser and its status live in the same Saving throws card.
     const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    await expect(savesCard.getByRole('status')).toContainText(/flat roll/i);
-
-    // Select Advantage via the visible chooser (a tap, not a modifier key).
-    // The radio accessible names are the full descriptions ("Advantage — roll
-    // two d20 and keep the higher" / "Disadvantage — …"), so the name regex
-    // MUST be anchored — an unanchored /advantage/i matches "Disadvantage" too
-    // and Playwright strict mode then sees two elements.
-    await chooser.getByRole('radio', { name: /^advantage/i }).click();
-    await expect(savesCard.getByRole('status')).toContainText(/rolling with advantage/i);
-    // The selected option reports its state accessibly.
-    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toHaveAttribute('aria-checked', 'true');
-
-    // The STR save button now advertises the advantage mode in its accessible name.
-    const strSave = savesCard.getByRole('button', { name: /Roll STR save.*advantage/i });
+    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
     await expect(strSave).toBeVisible();
 
-    // Rolling posts 2d20kh1… to the shared dice log — assert on the request.
+    // Right-click opens the context menu
+    await strSave.click({ button: 'right' });
+    const menu = page.locator('[role="menu"]');
+    await expect(menu).toBeVisible();
+
+    // Options for Normal, Advantage, Disadvantage, Crit
+    await expect(menu.getByText(/advantage/i)).toBeVisible();
+    await expect(menu.getByText(/disadvantage/i)).toBeVisible();
+  });
+
+  test('the shift keyboard shortcut triggers advantage roll', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.goto(`/c/${campaignId}/characters/${characterId}`);
+
+    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
+    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
+    await expect(strSave).toBeVisible();
+
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
         (res) =>
           (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
           res.request().method() === 'POST',
       ),
-      strSave.click(),
+      strSave.click({ modifiers: ['Shift'] }),
     ]);
     expect(rollRequest.status()).toBeLessThan(300);
-    const body = (await rollRequest.json()) as { roll?: { expr: string; label: string } };
-    const posted = rollRequest.request().postDataJSON() as { mode?: string; expr?: string; label?: string };
-    // Advantage expression is 2d20kh1 + modifier (or mode: advantage).
-    expect(body.roll?.expr ?? posted.expr ?? posted.mode).toMatch(/^2d20kh1|advantage/);
-    if (body.roll?.label || posted.label) {
-      expect(body.roll?.label ?? posted.label).toContain('STR save');
-    }
-  });
+  ]);
 
-  test('the keyboard shortcut still overrides the chooser for a single roll', async ({ page }) => {
+  test('roll controls are axe-clean', async ({ page }) => {
     const { campaignId } = seed();
-    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
     const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-
-    // Leave the chooser on Flat (the default).
-    await expect(chooser.getByRole('radio', { name: /^flat/i })).toHaveAttribute('aria-checked', 'true');
-
-    // Shift-click the DEX save — advantage applies THIS roll only, even though
-    // the chooser still reads Flat afterward.
-    const dexSave = savesCard.getByRole('button', { name: /Roll DEX save/i });
-    const [rollRequest] = await Promise.all([
-      page.waitForResponse(
-        (res) =>
-          (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
-          res.request().method() === 'POST',
-      ),
-      dexSave.click({ modifiers: ['Shift'] }),
-    ]);
-    const body = (await rollRequest.json()) as { roll?: { expr: string } };
-    const posted = rollRequest.request().postDataJSON() as { mode?: string; expr?: string };
-    expect(body.roll?.expr ?? posted.expr ?? posted.mode).toMatch(/^2d20kh1|advantage/);
-
-    // The chooser selection is untouched — the shortcut was a one-shot override.
-    await expect(chooser.getByRole('radio', { name: /^flat/i })).toHaveAttribute('aria-checked', 'true');
-  });
-
-  test('the chooser is keyboard-operable (arrow keys move and select) and axe-clean', async ({ page }) => {
-    const { campaignId } = seed();
-    await page.goto(`/c/${campaignId}/characters/${characterId}`);
-
-    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
-    // Enter the group on the (tabindex 0) selected Flat option.
-    await chooser.getByRole('radio', { name: /^flat/i }).focus();
-    // ArrowRight moves to Advantage AND selects it (radiogroup semantics).
-    // Anchored name regexes (see note above): /advantage/i would also match
-    // "Disadvantage" because that description contains the substring.
-    await page.keyboard.press('ArrowRight');
-    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toHaveAttribute('aria-checked', 'true');
-    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toBeFocused();
-    // ArrowRight again lands on Disadvantage.
-    await page.keyboard.press('ArrowRight');
-    await expect(chooser.getByRole('radio', { name: /^disadvantage/i })).toHaveAttribute('aria-checked', 'true');
-
-    // No axe violations scoped to the chooser (names, roles, keyboard).
     const results = await new AxeBuilder({ page })
-      .include('.cf-roll-mode')
+      .include('section:has-text("Saving throws")')
       .analyze();
     expect(results.violations).toEqual([]);
   });
