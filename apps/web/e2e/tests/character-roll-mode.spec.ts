@@ -57,11 +57,14 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const strSaveBtn = page.locator('[aria-label*="STR save"]').first();
-    await expect(strSaveBtn).toBeVisible({ timeout: 15000 });
+    const savesSection = page.locator('section', { hasText: 'Saving throws' }).first();
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
+
+    const strSave = savesSection.getByRole('button').first();
+    await expect(strSave).toBeVisible();
 
     // Right-click opens the context menu
-    await strSaveBtn.click({ button: 'right' });
+    await strSave.click({ button: 'right' });
     const menu = page.locator('[role="menu"]');
     await expect(menu).toBeVisible();
 
@@ -74,8 +77,11 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const strSaveBtn = page.locator('[aria-label*="STR save"]').first();
-    await expect(strSaveBtn).toBeVisible({ timeout: 15000 });
+    const savesSection = page.locator('section', { hasText: 'Saving throws' }).first();
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
+
+    const strSave = savesSection.getByRole('button').first();
+    await expect(strSave).toBeVisible();
 
     const [rollRequest] = await Promise.all([
       page.waitForResponse(
@@ -83,7 +89,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
           (res.url().endsWith(`/api/v1/campaigns/${campaignId}/roll`) || res.url().includes(`/characters/${characterId}/checks/roll`)) &&
           res.request().method() === 'POST',
       ),
-      strSaveBtn.click({ modifiers: ['Shift'] }),
+      strSave.click({ modifiers: ['Shift'] }),
     ]);
     expect(rollRequest.status()).toBeLessThan(300);
   });
@@ -92,8 +98,8 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const strSaveBtn = page.locator('[aria-label*="STR save"]').first();
-    await expect(strSaveBtn).toBeVisible({ timeout: 15000 });
+    const savesSection = page.locator('section', { hasText: 'Saving throws' }).first();
+    await expect(savesSection).toBeVisible({ timeout: 15000 });
 
     const results = await new AxeBuilder({ page })
       .include('#character-sheet-panel-play')
