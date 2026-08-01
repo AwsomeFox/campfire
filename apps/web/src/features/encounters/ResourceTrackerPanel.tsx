@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Character, Combatant, CharacterResource, SpellSlotLevel } from '@campfire/schema';
 import { Card, Btn } from '../../components/ui';
 import { api, API } from '../../lib/api';
@@ -34,6 +35,7 @@ export function ResourceTrackerPanel({
   combatants: Combatant[];
   canDmWrite: boolean;
 }) {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
 
   const applyRest = async (kind: 'short' | 'long' | 'custom', customKeys?: string[]) => {
