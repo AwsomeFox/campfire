@@ -144,6 +144,7 @@ import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip'
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
+import { useWakeLock } from '../screen/useWakeLock';
 import {
   CAST_DISPLAY_CHANNEL,
   type CastDisplayStatus,
@@ -1279,6 +1280,7 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+  useWakeLock(encounter?.status === 'running');
 
   // An encounter can be restored by another client or API caller. A newer authoritative
   // revision clears only that old local-trash marker, not the still-cached pre-trash row.
@@ -3274,6 +3276,8 @@ export default function RunSessionPage() {
           actionsDisabled={riskyBlocked}
           deathSavePending={reconcileBlocks}
           isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}
+          gridUnit={encounter.gridUnit}
+          gridScale={encounter.gridScale}
           onRollDeathSave={rollDeathSave}
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
