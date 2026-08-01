@@ -6783,6 +6783,8 @@ function CombatantRow({
   const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
   const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
   const [addingCondition, setAddingCondition] = useState(false);
+  const [showFullCondition, setShowFullCondition] = useState(false);
+  const [exactHp, setExactHp] = useState('');
   const [editingIdentity, setEditingIdentity] = useState(false);
   const [nameDraft, setNameDraft] = useState(combatant.name);
   const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
@@ -6836,6 +6838,7 @@ function CombatantRow({
     }
     setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
     setEditingConditionId(null);
+    setShowFullCondition(false);
     setAddingCondition(false);
   }
   // Draft of the initiative field (DM only). Kept local so typing doesn't fire a
@@ -7216,6 +7219,7 @@ function CombatantRow({
                         onClick={() => {
                           setEditingConditionId(inst.id);
                           setConditionDraft(conditionDraftFromInstance(inst));
+                          setShowFullCondition(true);
                           setAddingCondition(true);
                         }}
                         disabled={busy || syncBlocked}
@@ -7302,6 +7306,46 @@ function CombatantRow({
         {canEditPermission && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
+              (!showFullCondition && !editingConditionId) ? (
+                <div
+                  className="flex gap-2 flex-wrap items-center"
+                  style={{
+                    boxSizing: 'border-box',
+                    width: '100%',
+                    padding: 8,
+                    border: '1px dashed var(--color-divider)',
+                    borderRadius: 'var(--radius-lg)',
+                    background: 'color-mix(in srgb, var(--color-surface) 96%, var(--color-accent) 4%)',
+                  }}
+                >
+                  <p className="text-muted text-xs" style={{ flexBasis: '100%', margin: 0 }}>
+                    Quick condition:
+                  </p>
+                  {conditionSuggestions.slice(0, 12).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy || syncBlocked}
+                      style={{ fontSize: 'var(--type-label)' }}
+                      onClick={() => {
+                        const instance = buildConditionInstance({ ...emptyConditionDraft(defaultConditionSourceCombatantId), name: s }, conditionSuggestions, combatant.conditionInstances ?? [], undefined);
+                        if (!instance) return;
+                        if (onPatchCombatant) {
+                          onPatchCombatant({ addConditionInstance: instance });
+                        } else {
+                          onAddCondition(instance.name);
+                        }
+                        setAddingCondition(false);
+                      }}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                  <button type="button" className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => setShowFullCondition(true)}>More options…</button>
+                  <button type="button" className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => setAddingCondition(false)}>Cancel</button>
+                </div>
+              ) : (
               <form
                 onSubmit={submitConditionDraft}
                 className="flex gap-2 flex-wrap items-end"
@@ -7526,12 +7570,14 @@ function CombatantRow({
                   onClick={() => {
                     setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
                     setEditingConditionId(null);
+                    setShowFullCondition(false);
                     setAddingCondition(false);
                   }}
                 >
                   Cancel
                 </button>
               </form>
+              )
             ) : (
               <button
                 type="button"
@@ -7772,7 +7818,7 @@ function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEditPermission && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 8, flex: 'none' }} data-testid="hp-steppers">
+        <div style={{ display: 'flex', gap: 8, flex: 'none', alignItems: 'center' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
               key={step}
@@ -7791,6 +7837,53 @@ function CombatantRow({
               {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
             </button>
           ))}
+          <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center' }}>
+            <input
+              type="number"
+              min="0"
+              placeholder="Amt"
+              value={exactHp}
+              onChange={(e) => setExactHp(e.target.value)}
+              className="input cf-target-44"
+              style={{ width: 60, textAlign: 'center' }}
+              aria-label="Exact HP amount"
+              disabled={syncBlocked}
+            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, height: 44 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ flex: 1, padding: '0 6px', fontSize: 11, minHeight: 0, lineHeight: 1 }}
+                disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
+                aria-label="Apply exact damage"
+                onClick={() => {
+                  const val = parseInt(exactHp, 10);
+                  if (!isNaN(val)) {
+                    onHpDelta(-Math.abs(val));
+                    setExactHp('');
+                  }
+                }}
+              >
+                Dmg
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ flex: 1, padding: '0 6px', fontSize: 11, minHeight: 0, lineHeight: 1 }}
+                disabled={!exactHp || isNaN(parseInt(exactHp, 10)) || syncBlocked}
+                aria-label="Apply exact healing"
+                onClick={() => {
+                  const val = parseInt(exactHp, 10);
+                  if (!isNaN(val)) {
+                    onHpDelta(Math.abs(val));
+                    setExactHp('');
+                  }
+                }}
+              >
+                Heal
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {canRemove && (
