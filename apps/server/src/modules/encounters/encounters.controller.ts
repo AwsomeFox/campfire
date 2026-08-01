@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -838,4 +838,18 @@ export class EncountersController {
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.undo(id, body, user, role);
   }
+
+  @Post(':id/quick-roll')
+  @ApiOperation({
+    summary: 'Quick-roll an action to-hit or damage in an encounter (issue #1850)',
+    description:
+      'Rolls to-hit (d20+mod) or damage dice for a combatant action in one tap. Persists the roll to BOTH campaign dice_rolls feed AND encounter_events feed with character identity, roll kind, formula breakdown, nat20/nat1 status, and damage type icon.',
+  })
+  @ApiResponse({ status: 201, description: 'The rolled dice result and recorded encounter event.' })
+  async quickRoll(@Param('id', ParseIntPipe) id: number, @Body() body: QuickRollRequestDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.quickRoll(id, body, user, role);
+  }
 }
+

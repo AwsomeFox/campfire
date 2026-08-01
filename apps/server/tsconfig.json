@@ -7,6 +7,9 @@
     "outDir": "dist",
     "rootDir": "src",
     "baseUrl": "./",
+    "paths": {
+      "@campfire/schema": ["../../packages/schema/dist/types/index.d.ts"]
+    },
     "incremental": true,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,

@@ -19,6 +19,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { QuickRollButtons } from './QuickRollButtons';
 
 type Step = 'targets' | 'preview';
 
@@ -175,6 +176,14 @@ export function ActionUsePanel({
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontWeight: 700, fontSize: 13 }}>{actorName} · {actionName}</span>
         <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
+        <QuickRollButtons
+          encounterId={encounterId}
+          combatantId={actorCombatantId}
+          actorName={actorName}
+          actionName={actionName}
+          spec={spec}
+          disabled={commit.isPending || commitSubmitted || isUnconfirmed || applyDisabled}
+        />
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
