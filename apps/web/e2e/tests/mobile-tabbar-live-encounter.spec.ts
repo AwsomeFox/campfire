@@ -3,24 +3,38 @@ import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
- * Issue #637 — when a campaign has a running encounter, the mobile tab bar swaps
- * the More slot for a Live shortcut to the fight.
+ * Issues #637, #1472 — mobile tab bar contract:
+ * Encounters is a standing tab (or Live when an encounter is running),
+ * and More remains reachable mid-fight across phone viewports (320px, 375px, 430px).
  */
 
-test.describe('mobile tab bar live encounter (#637)', () => {
+test.describe('mobile tab bar live encounter (#637, #1472)', () => {
   test.use({ storageState: stateFor('dm') });
 
-  test('shows Live tab linking to the running encounter at phone widths', async ({ page }) => {
+  test('shows Live tab linking to running encounter while keeping More accessible', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     await restoreSeedEncounter();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`/c/${campaignId}`);
-    await expect(page.getByTestId('tabbar-live')).toBeVisible();
-    await page.getByTestId('tabbar-live').click();
+
+    // Both Live and More must be visible on the tab bar
+    const liveTab = page.getByTestId('tabbar-live');
+    const moreBtn = page.locator('.cf-tabbar').getByRole('button', { name: /More/ });
+    await expect(liveTab).toBeVisible();
+    await expect(moreBtn).toBeVisible();
+
+    // Verify More sheet opens while combat is live
+    await moreBtn.click();
+    await expect(page.getByRole('dialog', { name: /More navigation/i })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: /More navigation/i })).toBeHidden();
+
+    // Verify Live tab routes directly to active encounter
+    await liveTab.click();
     await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/encounters/${encounterId}`));
   });
 
-  test('shows More instead of Live when no encounter is running', async ({ page }) => {
+  test('shows standing Encounters tab and More when no encounter is running', async ({ page }) => {
     const { baseURL, campaignId } = seed();
     const dm = await request.newContext({ baseURL, storageState: stateFor('dm') });
     try {
@@ -35,10 +49,55 @@ test.describe('mobile tab bar live encounter (#637)', () => {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(`/c/${campaignId}`);
       await expect(page.getByTestId('tabbar-live')).toHaveCount(0);
-      await expect(page.locator('.cf-tabbar').getByRole('button', { name: /More/ })).toBeVisible();
+
+      const encountersTab = page.getByTestId('tabbar-encounters');
+      const moreBtn = page.locator('.cf-tabbar').getByRole('button', { name: /More/ });
+      await expect(encountersTab).toBeVisible();
+      await expect(moreBtn).toBeVisible();
+
+      await encountersTab.click();
+      await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/encounters`));
     } finally {
       await dm.dispose();
       await restoreSeedEncounter();
+    }
+  });
+
+  test('renders tab bar without overflow at 320px, 375px, and 430px viewports', async ({ page }) => {
+    const { campaignId } = seed();
+    await restoreSeedEncounter();
+
+    const viewports = [
+      { width: 320, height: 568 },
+      { width: 375, height: 667 },
+      { width: 430, height: 932 },
+    ];
+
+    for (const vp of viewports) {
+      await page.setViewportSize(vp);
+      await page.goto(`/c/${campaignId}`);
+
+      const tabbar = page.locator('.cf-tabbar');
+      await expect(tabbar).toBeVisible();
+
+      // Check tabbar container bounds and horizontal scroll
+      const isOverflowing = await tabbar.evaluate((el) => el.scrollWidth > el.clientWidth);
+      expect(isOverflowing).toBe(false);
+
+      // Verify all 6 tabs fit within viewport horizontal range
+      const tabItems = tabbar.locator('a, button');
+      expect(await tabItems.count()).toBe(6);
+
+      for (let i = 0; i < 6; i++) {
+        const item = tabItems.nth(i);
+        await expect(item).toBeVisible();
+        const box = await item.boundingBox();
+        expect(box).not.toBeNull();
+        if (box) {
+          expect(box.x).toBeGreaterThanOrEqual(-1);
+          expect(box.x + box.width).toBeLessThanOrEqual(vp.width + 1);
+        }
+      }
     }
   });
 });

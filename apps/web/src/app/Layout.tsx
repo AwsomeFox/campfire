@@ -1,9 +1,8 @@
 /**
  * Authenticated app chrome — desktop sidebar + mobile topbar/tabbar/More sheet.
- * Mobile tab bar contract (issue #637): five primary targets — Home, Quests, Party,
- * Notes, and either More or a temporary Live shortcut to the running encounter.
- * Overflow nav stays in the More sheet (reachable from the role chip in the top bar
- * when Live replaces More in the tab bar).
+ * Mobile tab bar contract (issues #637, #1472): six primary targets — Home, Quests, Party,
+ * Encounters (or Live shortcut), Notes, and More.
+ * Overflow nav stays in the More sheet.
  * Mirrors the Nocturne app shell in design/claude-design/Campfire.dc.html
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
@@ -1118,9 +1117,6 @@ function LayoutContent() {
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico"><GameIcon slug="shield" size={UI_ICON_SIZE.md} /></span>Party
           </NavLink>
-          <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
-          </NavLink>
           {liveEncounter ? (
             <NavLink
               to={`/c/${campaignId}/encounters/${liveEncounter.id}`}
@@ -1134,10 +1130,23 @@ function LayoutContent() {
               {t('nav.live')}
             </NavLink>
           ) : (
-            <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
-              <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
-            </button>
+            <NavLink
+              to={`/c/${campaignId}/encounters`}
+              className={({ isActive }) => (isActive ? 'active' : '')}
+              data-testid="tabbar-encounters"
+            >
+              <span className="ico">
+                <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.md} />
+              </span>
+              {t('nav.encounters')}
+            </NavLink>
           )}
+          <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
+            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
+          </NavLink>
+          <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
+            <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
+          </button>
         </nav>
       )}
 
