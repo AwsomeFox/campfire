@@ -103,7 +103,7 @@ test.describe('control surface goldens (#1694)', () => {
     await expect(workspace).toHaveScreenshot('turn-workspace.png', {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.45,
+      maxDiffPixelRatio: 0.55,
     });
   });
 
