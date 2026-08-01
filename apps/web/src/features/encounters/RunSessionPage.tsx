@@ -6960,9 +6960,11 @@ function CombatantRow({
           {adapter.initiativeModel?.mode === 'group' && (
             <select
               className="input cf-target-44"
+              aria-label={`Initiative group for ${combatant.name}`}
+              aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
               value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
               onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value })}
-              disabled={busy || syncBlocked}
+              disabled={busy || syncBlocked || !canSetInitiative}
               title="Initiative group"
               style={{ width: 'auto', marginLeft: 4 }}
             >
