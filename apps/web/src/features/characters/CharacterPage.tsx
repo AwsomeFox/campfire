@@ -107,7 +107,7 @@ import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
 import { RollContextMenu, type RollMode } from '../../components/RollContextMenu';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
-import { NotesRail } from '../notes/NotesRail';
+import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
@@ -1354,7 +1354,7 @@ function RollChip({
   disabled: boolean;
 }) {
   return (
-    <RollContextMenu density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title}>
+    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title}>
       <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
     </RollContextMenu>
   );
@@ -1750,7 +1750,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                         disabled={roller.rolling}
                         onClick={(m) => {
                           const resolvedMode = resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false });
-                          void roller.roll(toHitExpr(action.toHit, resolvedMode)! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
+                          void roller.roll(toHitExpr(action.toHit, resolvedMode === 'advantage' ? 'adv' : resolvedMode === 'disadvantage' ? 'dis' : 'flat')! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
                         }}
                       />
                     ) : (

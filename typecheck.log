@@ -10,3 +10,39 @@
 > @campfire/server@0.14.1 typecheck
 > tsc --noEmit -p tsconfig.jest.json --rootDir ../..
 
+src/modules/mcp/mcp-tools.ts(4031,13): error TS2322: Type 'unknown' is not assignable to type '"crit" | "normal" | "advantage" | "disadvantage"'.
+src/modules/mcp/mcp-tools.ts(4069,13): error TS2322: Type 'unknown' is not assignable to type '"crit" | "normal" | "advantage" | "disadvantage"'.
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path /Users/anthonyanderson/Documents/wt-1853/apps/server
+npm error workspace @campfire/server@0.14.1
+npm error location /Users/anthonyanderson/Documents/wt-1853/apps/server
+npm error command failed
+npm error command sh -c tsc --noEmit -p tsconfig.jest.json --rootDir ../..
+
+
+> @campfire/web@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.json && npm run test:e2e:typecheck
+
+src/components/CharacterStatCard.tsx(336,67): error TS2552: Cannot find name 'critDamageExpr'. Did you mean 'damageExpr'?
+src/features/ai-dm/aiDmUndoLever.ts(1,15): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+src/features/ai-dm/AiTablePage.tsx(53,15): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+src/features/characters/CharacterPage.tsx(110,27): error TS2307: Cannot find module '../notes/NotesRail' or its corresponding type declarations.
+src/features/characters/CharacterPage.tsx(1357,22): error TS2322: Type '{ children: (string | Element)[]; density: string; ghost: true; type: "button"; className: string; style: { minHeight: number; }; onRoll: (mode: RollMode) => void; disabled: boolean; title: string; }' is not assignable to type 'IntrinsicAttributes & RollContextMenuProps'.
+  Property 'density' does not exist on type 'IntrinsicAttributes & RollContextMenuProps'.
+src/features/characters/CharacterPage.tsx(1753,68): error TS2345: Argument of type 'RollMode' is not assignable to parameter of type 'Adv'.
+  Type '"normal"' is not assignable to type 'Adv'.
+src/features/encounters/ActionUseFlow.tsx(20,30): error TS2307: Cannot find module '../../lib/encounter' or its corresponding type declarations.
+src/lib/query.ts(21,47): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path /Users/anthonyanderson/Documents/wt-1853/apps/web
+npm error workspace @campfire/web@0.14.1
+npm error location /Users/anthonyanderson/Documents/wt-1853/apps/web
+npm error command failed
+npm error command sh -c tsc --noEmit -p tsconfig.json && npm run test:e2e:typecheck
+
+
+> @campfire/schema@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.json
+

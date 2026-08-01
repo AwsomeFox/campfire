@@ -31,7 +31,7 @@ import {
   abilityFieldsForCharacter,
   signed,
   toHitExpr,
-  damageExpr,
+  damageExpr, critDamageExpr,
 } from '../lib/characterStats';
 import { RollContextMenu, type RollMode } from './RollContextMenu';
 import { useRoller, type CheckRollMode } from '../lib/useRoller';
