@@ -313,7 +313,7 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .post(`/api/v1/campaigns/${campaignId}/scheduling`)
       .send({ title: 'Export RSVP Test', scheduledAt: new Date().toISOString() });
     await playerAgent
-      .put(`/api/v1/campaigns/${campaignId}/scheduling/${session.body.id}/rsvps`)
+      .put(`/api/v1/campaigns/${campaignId}/scheduling/${session.body.id}/rsvp`)
       .send({ status: 'yes', note: 'I can make it' })
       .expect(200);
       
