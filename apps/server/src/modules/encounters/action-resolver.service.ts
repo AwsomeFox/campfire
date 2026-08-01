@@ -629,7 +629,7 @@ export class ActionResolverService {
     for (const tid of targetIds) {
       const target = this.combatantRowOrThrow(encounterId, tid);
       this.assertTargetAllowed(spec.targets.allow, actor, target, name);
-      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target));
+      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target, req.rollMode));
     }
 
     const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
@@ -682,6 +682,7 @@ export class ActionResolverService {
     prof: number,
     roll: ActionRollFn,
     target: typeof combatants.$inferSelect,
+    rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit',
   ): ResolvedTarget {
     const base = {
       combatantId: target.id,
@@ -723,9 +724,10 @@ export class ActionResolverService {
       // -AC behaviour, byte-identical) for every adapter that has not. The resolver does not ask
       // "which system is this" itself — see osr-adapter.ts / index.ts's OpenLegendAdapter for
       // where that decision actually lives.
-      const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll });
+      const rollModeForAttack = rollMode === 'advantage' || rollMode === 'disadvantage' ? rollMode : undefined;
+      const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll, rollMode: rollModeForAttack });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
-      outcome = resolvedOutcome;
+      outcome = rollMode === 'crit' ? 'crit' : resolvedOutcome;
       // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
@@ -754,7 +756,7 @@ export class ActionResolverService {
       const { dc } = computeSaveDc(spec.save.dc, adapter, actorStats, prof);
       if (dc === null) throw new BadRequestException(`"${actionName}" has no resolvable DC — resolve manually rather than inventing one.`);
       const saveMod = this.targetSaveModifier(target, spec.save.ability, adapter as unknown as RuleSystemAdapter);
-      const nat = this.rollD20(roll);
+      const nat = this.rollD20(roll, rollMode);
       const total = nat + saveMod;
       const { outcome: o, degree } = classifySaveOutcome(adapter, total, nat, dc);
       outcome = o;
@@ -827,8 +829,11 @@ export class ActionResolverService {
     return ResolvedTarget.parse({ ...base, outcome, playerText, dmText });
   }
 
-  private rollD20(roll: ActionRollFn): number {
-    const r = roll('1d20');
+  private rollD20(roll: ActionRollFn, rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit'): number {
+    let expr = '1d20';
+    if (rollMode === 'advantage') expr = '2d20kh1';
+    else if (rollMode === 'disadvantage') expr = '2d20kl1';
+    const r = roll(expr);
     return r.rolls[0] ?? r.total;
   }
 
