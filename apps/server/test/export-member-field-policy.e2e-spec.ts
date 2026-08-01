@@ -311,7 +311,7 @@ describe('member export field policy (e2e, issue #1680)', () => {
     // 2. Create an RSVP
     const session = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/schedule`)
-      .send({ title: 'Export RSVP Test', scheduledAt: new Date().toISOString() })
+      .send({ title: 'Export RSVP Test', scheduledAt: '2099-06-10T18:00:00Z' })
       .expect(201);
     await playerAgent
       .put(`/api/v1/campaigns/${campaignId}/schedule/${session.body.id}/rsvp`)
