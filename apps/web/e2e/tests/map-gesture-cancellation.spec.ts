@@ -368,4 +368,10 @@ test.describe('battle-map gesture ownership and cancellation', () => {
       await settleNoPatch(page, calls, 0);
     });
   }
+
+  test('default-mode map surface prevents native image drag', async ({ page }) => {
+    const { surface } = await openGestureFixture(page);
+    const img = surface.locator('img[alt="Battle map"]');
+    await expect(img).toHaveAttribute('draggable', 'false');
+  });
 });

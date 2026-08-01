@@ -5710,7 +5710,13 @@ export function BattleMap({
                 <input
                   type="checkbox"
                   checked={fogOn}
-                  onChange={(e) => commitFogEdit(e.target.checked ? { enabled: true, revealed: fog?.revealed ?? [] } : null)}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    commitFogEdit(enabled ? { enabled: true, revealed: fog?.revealed ?? [] } : null);
+                    if (enabled) {
+                      setTool('reveal');
+                    }
+                  }}
                 />
                 Fog
               </label>
@@ -5844,6 +5850,7 @@ export function BattleMap({
                   : tool !== 'move' || draggingId != null || aoeDrag != null
                     ? 'none'
                     : undefined,
+              userSelect: tool !== 'move' || draggingId != null || aoeDrag != null || viewportPan ? 'none' : undefined,
               cursor: viewportPan
                 ? 'grab'
                 : tool === 'measure'
@@ -5862,6 +5869,7 @@ export function BattleMap({
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
             onKeyDown={onViewportKeyDown}
+            onDragStart={(e) => e.preventDefault()}
           >
             <div
               data-testid="battle-map-viewport"
@@ -5876,6 +5884,7 @@ export function BattleMap({
               srcSet={mapSrcSet}
               sizes={mapSrcSet ? '100vw' : undefined}
               alt="Battle map"
+              draggable={false}
               className="absolute inset-0 w-full h-full object-contain"
               style={{ background: 'rgba(15,23,42,.4)' }}
               onLoad={(e) => setImgNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
