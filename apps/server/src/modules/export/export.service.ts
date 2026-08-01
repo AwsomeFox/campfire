@@ -910,29 +910,102 @@ export class ExportService {
    * weakens the redaction this method leans on, that suite fails loudly instead of
    * this method silently drifting out of sync with the rest of the export system.
    */
-  async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
-    const [campaign, characterList, noteList, commentList, proposalList, supportPreference] = await Promise.all([
+  async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer', previewCountsOnly = false) {
+    const [
+      campaign,
+      characterList,
+      noteList,
+      allComments,
+      proposalList,
+      supportPreference,
+      auditExport,
+      allRolls,
+      schedules,
+      allRevisions
+    ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.characters.listForExport(campaignId, role),
       this.notes.listAllForCampaign(campaignId, user, role, { mine: true }),
-      this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
+      this.comments.listForCampaign(campaignId, role),
       this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),
       this.supportPreferences.getOwn(campaignId, user.id),
+      this.audit.listForCampaignExport(campaignId),
+      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
+      this.scheduling.listForExport(campaignId),
+      this.revisions.listForCampaign(campaignId),
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
+    const ownCharacterIds = new Set(ownCharacters.map(c => c.id));
+    
     // Already scoped + projected for the caller's role (#817); keep the list as-is.
     const ownProposals = proposalList;
-    const ownComments = commentList;
+    
+    const ownComments = allComments.filter(c => c.authorUserId === String(user.id) || c.authorUserId === user.id);
+    const parentCommentIds = new Set(ownComments.map(c => c.parentId).filter(id => id != null));
+    const parentContext = allComments
+      .filter(c => parentCommentIds.has(c.id) && c.authorUserId !== String(user.id) && c.authorUserId !== user.id)
+      .map(c => ({
+        id: c.id,
+        entityType: c.entityType,
+        entityId: c.entityId,
+        body: c.body,
+        authorName: '[Redacted Member]',
+        characterName: null,
+      }));
+
+    const rsvps = schedules.flatMap(s => s.rsvps
+      .filter(r => r.userId === user.id)
+      .map(r => ({ ...r, scheduledSessionId: s.id, sessionTitle: s.title }))
+    );
+
+    const ownRolls = allRolls.filter(r => r.actor === String(user.id));
+    
+    const ownRevisions = allRevisions.filter(r => r.authorUserId === user.id);
+
+    const ownAudit = auditExport.entries.filter(e => e.actor === String(user.id));
+
+    const counts = {
+      characters: ownCharacters.length,
+      notes: noteList.length,
+      comments: ownComments.length,
+      commentParentContext: parentContext.length,
+      proposals: ownProposals.length,
+      supportPreference: supportPreference ? 1 : 0,
+      rsvps: rsvps.length,
+      diceRolls: ownRolls.length,
+      revisions: ownRevisions.length,
+      auditActions: ownAudit.length,
+    };
+
+    const manifest = {
+      version: 1,
+      exportDate: new Date().toISOString(),
+      userId: user.id,
+      included: Object.keys(counts),
+      excluded: ['campaignWorldData', 'otherMembersPrivateData', 'fullAuditLog'],
+      excludedReason: 'Export is limited to player-authored content and explicitly attributable actions. Campaign world data and other members\' private data are omitted.',
+      counts,
+    };
+
+    if (previewCountsOnly) {
+      return { manifest };
+    }
 
     return {
+      manifest,
       campaign: { id: campaign.id, name: campaign.name, description: campaign.description, status: campaign.status },
       exportedFor: { userId: user.id, name: user.name, role },
       characters: ownCharacters,
       notes: noteList,
       comments: ownComments,
+      commentParentContext: parentContext,
       proposals: ownProposals,
       supportPreference,
+      rsvps,
+      diceRolls: ownRolls,
+      revisions: ownRevisions,
+      auditActions: ownAudit,
       note:
         'This is a MEMBER-scoped export — only the characters and support preference you own, the notes and comments ' +
         'you authored, and the proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
