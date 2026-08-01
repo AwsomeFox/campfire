@@ -13,6 +13,7 @@ import type { Character, Combatant, EncounterWithCombatants } from '@campfire/sc
 import { api, API, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
+import { aiDmPauseRequest } from './aiDmPause';
 import { speakerPrefix } from './transcript';
 import { StuckLadder } from './StuckLadder';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
@@ -152,11 +153,12 @@ export function EncounterAiDriverPanel({
   }
 
   async function onTogglePause() {
-    const action = paused ? 'resume' : 'pause';
+    // #1501 — the strict /pause DTO needs { paused }; see aiDmPauseRequest.
+    const { action, body } = aiDmPauseRequest(paused);
     setPauseBusy(true);
     setPauseError(null);
     try {
-      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`, body);
       invalidateAiDm(queryClient, campaignId);
     } catch {
       setPauseError(t('table.pauseFailed'));

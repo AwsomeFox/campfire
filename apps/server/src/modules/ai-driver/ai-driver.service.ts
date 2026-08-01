@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { and, desc, eq, lt } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
@@ -18,11 +18,12 @@ import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
+import type { AiDmSeat, Character, DriverLastUndoableCommit, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
   AiDmToolConfirmation,
+  ActionUndoToken,
   buildNarrationLanguageContract,
   DriverSessionProfile,
   DriverToolPolicyClass,
@@ -506,6 +507,9 @@ export interface AiDmTableVote {
   outcome: 'passed' | 'failed' | null;
 }
 
+// `DriverLastUndoableCommit` (the seat's last reversible action, #1501) is the shared shape from
+// `@campfire/schema`, imported above — server and web use the single definition.
+
 export interface AiDmSessionState {
   campaignId: number;
   status: AiDmSessionStatus;
@@ -592,6 +596,13 @@ export interface AiDmSessionState {
    */
   aftermathGrantWindow?: AftermathGrantWindow | null;
   /**
+   * The seat's last reversible action commit, exposed so a DM can undo the AI's last action
+   * (#1501) without holding the client undo token. Null when nothing undoable was committed.
+   * DM-only in projection (see {@link toPublicAiDmSessionStateForRole}): the encounterId could
+   * reference a DM-only hidden fight, so it is never serialized to non-DM members.
+   */
+  lastUndoableCommit?: DriverLastUndoableCommit | null;
+  /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
    * must not write ladder/status updates that would race a replacement session.
@@ -609,7 +620,10 @@ type AiDmSessionPrivateGuardFields =
   | 'policyViolationsThisTurn'
   | 'pendingToolConfirmations'
   | 'detached'
-  | 'aftermathGrantWindow';
+  | 'aftermathGrantWindow'
+  // DM-only (#1501): the encounterId could name a DM-only hidden fight, so this is stripped by
+  // default and re-added only for DMs in {@link toPublicAiDmSessionStateForRole}.
+  | 'lastUndoableCommit';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
@@ -634,9 +648,29 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
     pendingToolConfirmations: _pendingTools,
     detached: _detached,
     aftermathGrantWindow: _aftermathGrantWindow,
+    lastUndoableCommit: _lastUndoableCommit,
     ...rest
   } = session;
   return rest;
+}
+
+/**
+ * DM-only session projection (#1501): the public state plus `lastUndoableCommit`, which is
+ * stripped by default because its encounterId could name a DM-only hidden fight. Only the DM
+ * (who can already see hidden prep) gets the undo lever's reference; every other member gets the
+ * plain {@link toPublicAiDmSessionState}.
+ */
+export function toPublicAiDmSessionStateForRole(
+  session: AiDmSessionState,
+  role: Role,
+): AiDmPublicSessionState & { lastUndoableCommit?: DriverLastUndoableCommit | null } {
+  const base = toPublicAiDmSessionState(session);
+  // A DM always sees the lever — the armed commit, or `null` once it is consumed/cleared — so the
+  // client can reliably distinguish "nothing to undo" from "lever withheld by role". Non-DMs never
+  // receive the field: its encounterId could name a DM-only hidden fight (#1501 secrecy).
+  return role === 'dm'
+    ? { ...base, lastUndoableCommit: session.lastUndoableCommit ?? null }
+    : base;
 }
 
 /**
@@ -1793,6 +1827,28 @@ export function recordDriverAuthoredEncounter(session: AiDmSessionState, encount
   if (!session.driverAuthoredEncounterIds.includes(encounterId)) {
     session.driverAuthoredEncounterIds.push(encounterId);
   }
+}
+
+/**
+ * Capture the seat's most recent reversible action commit so a DM can undo it (#1501). The
+ * autonomous seat has always been able to call `undo_action` with the `undoToken` a resolve
+ * (commit) / apply returned; a human had no such lever. Recording the chain here lets a DM-only
+ * control drive the existing {@link ActionResolverService.undo} path without holding a token.
+ *
+ * `chainId` is the LOOKUP KEY `undo()` trusts; every other echoed field is ignored in favor of
+ * the persisted `action_apply_chains` snapshot. `actionName` is display-only. Taken from the
+ * RESULT (the server-issued token), never from the model's arguments — exactly the same
+ * "observe, do not assert" rule as {@link recordDriverAuthoredEncounter}.
+ */
+export function recordDriverUndoableCommit(
+  session: AiDmSessionState,
+  encounterId: number,
+  actorCombatantId: number,
+  chainId: string,
+  actionName: string,
+): void {
+  if (!chainId) return;
+  session.lastUndoableCommit = { encounterId, actorCombatantId, chainId, actionName, committedAt: nowIso() };
 }
 
 /**
@@ -3436,6 +3492,80 @@ export class AiDriverService {
     // as a transient banner that a reloading client loses.
     this.recordControl(campaignId, { control: paused ? 'paused' : 'resumed', state: session.state });
     return session;
+  }
+
+  /**
+   * Reverse the seat's last reversible action commit (#1501). The autonomous seat has always
+   * been able to call `undo_action` with the token a resolve/apply returned; this exposes the
+   * SAME reversal to a DM without requiring the client undo token. DM-only (the controller
+   * enforces the role floor) and it drives the existing {@link ActionResolverService.undo} path,
+   * which re-reads its snapshot from the persisted `action_apply_chains` row — so the only field
+   * trusted out of the stored reference is `chainId`, exactly as the model's own `undo_action`
+   * call does. Audited with the real human actor.
+   */
+  async undoLastSeatAction(
+    campaignId: number,
+    user: RequestUser,
+  ): Promise<{ encounterId: number; chainId: string; actionName: string }> {
+    const resolver = this.actionResolver;
+    if (!resolver) {
+      throw new ServiceUnavailableException('The action resolver is unavailable, so undo is not possible right now.');
+    }
+    const session = this.ensureSession(campaignId);
+    const ref = session.lastUndoableCommit ?? null;
+    if (!ref) {
+      throw new NotFoundException('The AI seat has no reversible action to undo.');
+    }
+    // Only `chainId` (and `encounterId` for the cross-encounter guard) are read from the token —
+    // every other field is re-derived from the persisted chain. `.parse` fills the rest with the
+    // schema's safe defaults, matching how an `undo_action` tool call constructs its token.
+    const token = ActionUndoToken.parse({
+      encounterId: ref.encounterId,
+      actorCombatantId: ref.actorCombatantId,
+      chainId: ref.chainId,
+    });
+    try {
+      resolver.undo(ref.encounterId, token, user, 'dm');
+    } catch (err) {
+      // Classify BEFORE touching the lever. Two failure families mean the lever is DEAD — there is
+      // no reversible action left for it to offer — so it must be cleared (answering 404 "nothing
+      // left to undo") rather than left as a permanently-armed, silently-failing button:
+      //  - STALE reference: the chain was already undone (the model called undo_action itself, or
+      //    a prior DM undo raced this one and won the conditional claim, which still throws
+      //    "already undone"), no longer exists ("unknown chain"), or belongs to a different
+      //    encounter — a BadRequestException carrying one of those messages.
+      //  - GONE reference: `ActionResolverService.undo` throws a NotFoundException when the
+      //    encounter the AI acted in (or its actor combatant) was deleted, so the action can no
+      //    longer be reversed. Keeping the lever armed there leaves a header button that 404s on
+      //    the client and never surfaces an error — the cached session still carries the lever, so
+      //    AiTablePage keeps rendering it and every click is a silent no-op (#1501 review).
+      // Every OTHER failure is RETRYABLE while the chain is still undoable — a busy database or an
+      // `assertTargetAllowed` target guard — so keep the lever armed and rethrow the concrete
+      // reason: clearing it there would strand the DM with no undo button (AiTablePage renders it
+      // only while lastUndoableCommit is set) and a follow-up 404.
+      const dead =
+        (err instanceof BadRequestException &&
+          /already undone|unknown chain|different encounter|no chain id/i.test(String(err.message ?? ''))) ||
+        err instanceof NotFoundException;
+      if (dead) {
+        session.lastUndoableCommit = null;
+        this.persistControlState(session);
+        throw new NotFoundException('The AI seat has no reversible action to undo.');
+      }
+      throw err;
+    }
+    session.lastUndoableCommit = null;
+    this.persistControlState(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.undo',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `DM undid AI action chain=${ref.chainId} encounter=${ref.encounterId} (${ref.actionName || 'unknown'})`,
+    });
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
+    return { encounterId: ref.encounterId, chainId: ref.chainId, actionName: ref.actionName };
   }
 
   /**
@@ -6025,6 +6155,16 @@ export class AiDriverService {
       if (canPropose && call.name !== 'add_session_recap') args.propose = true;
       const proposed = canPropose && args.propose === true;
 
+      // #1501 §3 note: the seat does NOT auto-inject `expectedUpdatedAt` on its direct writes.
+      // Canon writes (npc/location/quest/…) are forced to `propose` just above, so they are
+      // DM-reviewed and cannot silently overwrite a concurrent human edit. The remaining
+      // direct-write surface is the encounter, whose `updatedAt` is high-churn — it bumps on
+      // every turn advance and combat op — so a read-then-write CAS keyed on it makes the AI's
+      // OWN later edits spuriously 409 (after it advances a turn). A correct combatant/encounter
+      // CAS needs a stable per-write version that survives turn advances, which is a separate
+      // change and is deferred to a follow-up. The MCP tools still honor a model-supplied
+      // `expectedUpdatedAt` opt-in, unchanged.
+
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
 
@@ -6048,6 +6188,43 @@ export class AiDriverService {
         } catch {
           // Non-JSON tool payload — skip tracking; the seat simply cannot reshape this one.
         }
+      }
+
+      // #1501 — capture the seat's last reversible action commit so a DM can undo it. Both
+      // resolve_action (when commit:true applied atomically) and apply_action return an
+      // `undoToken` whose `chainId` is the key `undo()` re-reads its snapshot from. A
+      // resolve that only previewed (commit:false) returns undoToken:null and is skipped.
+      if (!res.isError && (call.name === 'resolve_action' || call.name === 'apply_action')) {
+        try {
+          const parsed = JSON.parse(res.text) as {
+            undoToken?: { chainId?: unknown; actionName?: unknown; actorCombatantId?: unknown } | null;
+          };
+          const token = parsed.undoToken;
+          const chainId = typeof token?.chainId === 'string' ? token.chainId : null;
+          const encounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
+          const actorCombatantId = typeof token?.actorCombatantId === 'number' ? token.actorCombatantId : 0;
+          if (chainId && Number.isFinite(encounterId)) {
+            recordDriverUndoableCommit(
+              session,
+              encounterId,
+              actorCombatantId,
+              chainId,
+              typeof token?.actionName === 'string' ? token.actionName : '',
+            );
+          }
+        } catch {
+          // Non-JSON tool payload — nothing to capture.
+        }
+      }
+
+      // #1501 — when the seat reverses its own action (undo_action), the armed last-undoable
+      // lever is now stale: that chain is undone and the seat is self-correcting. Clear it so the
+      // DM control never offers a reversal that cannot succeed. The safe direction to be wrong in
+      // is "nothing to undo" — a still-valid newer commit simply re-arms the lever on the seat's
+      // next resolve/apply.
+      if (!res.isError && call.name === 'undo_action') {
+        session.lastUndoableCommit = null;
+        this.persistControlState(session);
       }
 
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
@@ -6768,6 +6945,42 @@ export class AiDriverService {
             }`,
           );
         }
+      }
+    }
+
+    // #1501 — a DM-APPROVED mechanical commit arms the undo lever too. Collaborative handoff
+    // (#1051) promotes resolve_action/apply_action from `auto` to `confirm`, so on those tables
+    // EVERY mechanical commit reaches this approval path rather than executeToolCalls — without
+    // capturing the undoToken here, the DM "undo the AI's last action" control would never arm
+    // on the very tables it matters most for. Mirrors the capture in executeToolCalls: chainId is
+    // the lookup key `undo()` re-reads its snapshot from, taken from the RESULT (the server-issued
+    // token), never from the model's arguments. The lever lives in-memory on the session
+    // (lastUndoableCommit is not serialized by persistControlState) so it arms for the current
+    // session but does not survive a server restart.
+    if (!res.isError && (pending.tool === 'resolve_action' || pending.tool === 'apply_action')) {
+      try {
+        const parsed = JSON.parse(res.text) as {
+          undoToken?: { chainId?: unknown; actionName?: unknown; actorCombatantId?: unknown } | null;
+        };
+        const token = parsed.undoToken;
+        const chainId = typeof token?.chainId === 'string' ? token.chainId : null;
+        const encounterId =
+          typeof executionArgs.encounterId === 'number'
+            ? executionArgs.encounterId
+            : Number(executionArgs.encounterId);
+        const actorCombatantId = typeof token?.actorCombatantId === 'number' ? token.actorCombatantId : 0;
+        if (chainId && Number.isFinite(encounterId)) {
+          recordDriverUndoableCommit(
+            session,
+            encounterId,
+            actorCombatantId,
+            chainId,
+            typeof token?.actionName === 'string' ? token.actionName : '',
+          );
+          this.persistControlState(session);
+        }
+      } catch {
+        // Non-JSON tool payload — nothing to capture.
       }
     }
 
