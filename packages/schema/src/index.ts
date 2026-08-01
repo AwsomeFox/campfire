@@ -530,6 +530,7 @@ export const CharacterResource = z.object({
   used: z.number().int().min(0).max(100).default(0),
   name: z.string().max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
+  source: z.string().max(80).optional(),
 });
 export type CharacterResource = z.infer<typeof CharacterResource>;
 
@@ -760,6 +761,7 @@ export const ResourcePatch = z.object({
   max: z.number().int().min(0).max(100).optional(),
   name: z.string().min(1).max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
+  source: z.string().max(80).optional(),
 });
 export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([
