@@ -80,3 +80,55 @@ export function preparingGuidance(input: PreparingGuidanceInput): PreparingGuida
 
   return { lead, nextSteps };
 }
+
+export type PlayerGuidanceInput = {
+  status: 'preparing' | 'running' | 'ended' | string;
+  currentCombatantName?: string | null;
+};
+
+/**
+ * Player-facing guidance copy for non-DM viewers or lifecycle states (issue #1470).
+ */
+export function playerGuidance(input: PlayerGuidanceInput): string {
+  const { status, currentCombatantName } = input;
+  if (status === 'preparing') {
+    return 'Waiting for the DM to start.';
+  }
+  if (status === 'running') {
+    return currentCombatantName
+      ? `It's ${currentCombatantName}'s turn.`
+      : 'Combat in progress.';
+  }
+  if (status === 'ended') {
+    return 'Combat has ended.';
+  }
+  return '';
+}
+
+export type LifecycleStepId = (typeof ENCOUNTER_LIFECYCLE_STEPS)[number]['id'];
+
+export type RosterStateInput = {
+  partyCombatantCount?: number;
+  enemyCombatantCount?: number;
+  needsInitiativeCount?: number;
+};
+
+/**
+ * Determines the current active lifecycle step ('preparing' | 'initiative' | 'running' | 'ended')
+ * based on encounter status and roster state (issue #1470).
+ */
+export function activeLifecycleStepId(
+  status: 'preparing' | 'running' | 'ended' | string,
+  rosterState?: RosterStateInput,
+): LifecycleStepId {
+  if (status === 'ended') return 'ended';
+  if (status === 'running') return 'running';
+  if (status === 'preparing') {
+    if (rosterState && (rosterState.enemyCombatantCount ?? 0) > 0) {
+      return 'initiative';
+    }
+    return 'preparing';
+  }
+  return 'preparing';
+}
+
