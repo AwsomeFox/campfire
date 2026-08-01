@@ -2577,7 +2577,7 @@ export default function RunSessionPage() {
   );
 
   const { data: turnWorkspace } = useQuery({
-    queryKey: [...queryKeys.encounterTurn(eid), encounter?.round ?? 0, currentCombatantId ?? 0],
+    queryKey: queryKeys.encounterTurn(eid),
     queryFn: () => api.get<TurnWorkspaceData>(`${API}/encounters/${eid}/turn`),
     enabled: encounter?.status === 'running',
     staleTime: 2_000,
@@ -6908,7 +6908,7 @@ function CombatantRow({
             type="number"
             className="input cf-target-44"
             aria-label={`Initiative for ${combatant.name}`}
-            title="Set initiative"
+            title={combatant.initiativeBreakdown?.formula || "Set initiative"}
             value={initDraft}
             disabled={busy}
             placeholder="–"
@@ -6957,24 +6957,53 @@ function CombatantRow({
               <UIIcon name="close" size="xs" />
             </button>
           )}
+          {adapter.initiativeModel?.mode === 'group' && (
+            <select
+              className="input cf-target-44"
+              value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
+              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value })}
+              disabled={busy || syncBlocked}
+              title="Initiative group"
+              style={{ width: 'auto', marginLeft: 4 }}
+            >
+              <option value="party">Party</option>
+              <option value="monsters">Monsters</option>
+            </select>
+          )}
         </div>
       ) : (
-        <span
-          style={{
-            width: 30,
-            height: 30,
-            flex: 'none',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--color-divider)',
-            display: 'grid',
-            placeItems: 'center',
-            fontSize: 13,
-            fontFamily: 'var(--font-heading)',
-            color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
-          }}
-        >
-          {combatant.initiative ?? '–'}
-        </span>
+        <div className="flex items-center" style={{ gap: 2 }}>
+          <span
+            title={combatant.initiativeBreakdown?.formula}
+            style={{
+              width: 30,
+              height: 30,
+              flex: 'none',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              display: 'grid',
+              placeItems: 'center',
+              fontSize: 13,
+              fontFamily: 'var(--font-heading)',
+              color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+            }}
+          >
+            {combatant.initiative ?? '–'}
+          </span>
+          {adapter.initiativeModel?.mode === 'group' && (
+            <select
+              className="input cf-target-44"
+              value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
+              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value })}
+              disabled={busy || syncBlocked}
+              title="Initiative group"
+              style={{ width: 'auto', marginLeft: 4 }}
+            >
+              <option value="party">Party</option>
+              <option value="monsters">Monsters</option>
+            </select>
+          )}
+        </div>
       )}
       <div style={{ flex: 1, minWidth: 160 }}>
         {editingIdentity ? (
