@@ -310,10 +310,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
       
     // 2. Create an RSVP
     const session = await dmAgent
-      .post(`/api/v1/campaigns/${campaignId}/scheduling`)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
       .send({ title: 'Export RSVP Test', scheduledAt: new Date().toISOString() });
     await playerAgent
-      .put(`/api/v1/campaigns/${campaignId}/scheduling/${session.body.id}/rsvp`)
+      .put(`/api/v1/campaigns/${campaignId}/schedule/${session.body.id}/rsvp`)
       .send({ status: 'yes', note: 'I can make it' })
       .expect(200);
       
