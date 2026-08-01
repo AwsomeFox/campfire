@@ -17,7 +17,6 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
-import { legalTargets } from '../../lib/encounter';
 import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
