@@ -49,7 +49,7 @@ test.describe('run session active row scroll (issue #636)', () => {
     const fixture = await createTallRunningEncounter(page);
     try {
       await page.emulateMedia({ reducedMotion: 'reduce' });
-      await page.setViewportSize({ width: 900, height: 360 });
+      await page.setViewportSize({ width: 900, height: 420 });
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByRole('heading', { name: 'Tall scroll drill' })).toBeVisible();
       const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
