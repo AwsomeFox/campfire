@@ -42,6 +42,7 @@ import { formatNumber } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import {
   queryKeys,
   useAiDmSeat,
@@ -49,7 +50,10 @@ import {
   invalidateAiDm,
   invalidateAiDmToolConfirmations,
 } from '../../lib/query';
+import type { DriverLastUndoableCommit } from '@campfire/schema';
 import { useAiDmStream } from '../../lib/useAiDmStream';
+import { aiDmPauseRequest } from './aiDmPause';
+import { nextUndoLeverState, resolveUndoPostError } from './aiDmUndoLever';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import {
   transcriptReducer,
@@ -182,6 +186,18 @@ export default function AiTablePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  // #1501 — DM undo of the AI's last reversible action. `undoSnackbar` holds the commit a fresh
+  // snackbar is offering; `seenUndoChainRef` stops a reload that rehydrates a commit from
+  // re-popping it. A failed undo is surfaced via `undoError` rather than swallowed, EXCEPT a 404
+  // (the lever is already gone — superseded or reversed), which just dismisses the snackbar.
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [undoSnackbar, setUndoSnackbar] = useState<DriverLastUndoableCommit | null>(null);
+  const [undoError, setUndoError] = useState<string | null>(null);
+  const seenUndoChainRef = useRef<string | null>(null);
+  // `nextUndoLeverState` seeds `seenUndoChainRef` from the FIRST loaded session so a lever that
+  // pre-existed when the DM (re)opened the table (prior visit, or react-query cache rehydration)
+  // doesn't pop a stale undo; only actions armed after mount pop. Sticky once set.
+  const undoLeverSeededRef = useRef(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -461,6 +477,12 @@ export default function AiTablePage() {
           // only update on its poll, and "the AI is waiting on you" would arrive up to 30s late
           // in the one situation where the delay is the whole problem.
           invalidateAiDmToolConfirmations(queryClient, campaignId);
+          // #1501: a DM-APPROVED mechanical commit arms the undo lever server-side on this path
+          // (collaborative handoff promotes resolve_action/apply_action to `confirm`), but an
+          // approval emits a tool-confirmation frame — not a tool/state frame — so the session
+          // invalidation those paths drive never fires, and useAiDmSession has no poll. Refetch the
+          // session on approval so the just-armed "undo the AI's last action" control appears.
+          if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -837,13 +859,79 @@ export default function AiTablePage() {
     }
   }
 
+  // #1501 — reset the undo-lever state whenever the page switches to a different campaign.
+  // AiTablePage stays mounted across a campaign switch (same route, different :campaignId — see
+  // router.tsx), so without this the seeded flag, seen chain id, open snackbar, and busy/error
+  // state from the PREVIOUS table survive. The newly-opened table's pre-existing lever would
+  // immediately pop a stale undo the DM never asked for (or a stale snackbar would post to the
+  // wrong campaign). Declared before the lever effect so it runs first on the switch render. A
+  // first visit is unaffected: the refs already start false/null and the state is already clear.
+  useEffect(() => {
+    undoLeverSeededRef.current = false;
+    seenUndoChainRef.current = null;
+    setUndoSnackbar(null);
+    setUndoError(null);
+    setUndoBusy(false);
+  }, [campaignId]);
+
+  // #1501 — when the seat arms a NEW reversible action (after the first session load), surface the
+  // standard UndoSnackbar so a DM has the same one-click "X — Undo" affordance every soft-delete in
+  // the app offers. The decision (including seeding the "seen" chain id from the first loaded
+  // session so a lever that pre-existed on mount doesn't pop a stale undo) lives in `nextUndoLeverState`.
+  useEffect(() => {
+    const commit = session?.lastUndoableCommit ?? null;
+    const step = nextUndoLeverState({
+      sessionFetched: sessionQuery.isFetched,
+      seeded: undoLeverSeededRef.current,
+      commit,
+      seenChainId: seenUndoChainRef.current,
+    });
+    undoLeverSeededRef.current = step.seeded;
+    seenUndoChainRef.current = step.seenChainId;
+    if (step.pop) {
+      setUndoSnackbar(step.pop);
+    }
+    // `campaignId` is a dep so this re-runs on a table switch. AiTablePage stays mounted across a
+    // /c/:id/table change, and the reset effect above clears the seeded flag on the switch — so
+    // without re-running here, a switch BACK to a table whose session is already cached with
+    // nothing armed (data deps unchanged) would leave `seeded` false and the next armed action
+    // would be absorbed as already-seen (no snackbar) — #1501 review.
+  }, [campaignId, session?.lastUndoableCommit, sessionQuery.isFetched]);
+
+  async function undoAiAction(): Promise<void> {
+    if (campaignId === undefined) return;
+    setUndoBusy(true);
+    setUndoError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
+      setUndoSnackbar(null);
+      invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      // A 404 means the server has nothing left to undo (already reversed or superseded) — it is
+      // the authority, so the cached session MUST be refetched or the header control keeps offering
+      // a reversal that fails every time. Any other failure is surfaced so the DM knows the AI's
+      // action was NOT reversed (issue #1501 review). The 404-refetch rule lives in the pure
+      // helper so it is unit-testable (mirrors nextUndoLeverState / aiDmPauseRequest).
+      const outcome = resolveUndoPostError(
+        err instanceof ApiError ? err.status : undefined,
+        translateApiError(err, t) || t('table.undoAiFailed'),
+      );
+      if (outcome.dismissSnackbar) setUndoSnackbar(null);
+      if (outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
+      if (outcome.errorMessage) setUndoError(outcome.errorMessage);
+    } finally {
+      setUndoBusy(false);
+    }
+  }
+
   async function onTogglePause() {
     if (campaignId === undefined) return;
-    const action = paused ? 'resume' : 'pause';
+    // #1501 — the strict /pause DTO needs { paused }; see aiDmPauseRequest.
+    const { action, body } = aiDmPauseRequest(paused);
     setPauseBusy(true);
     setPauseError(null);
     try {
-      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`, body);
       invalidateAiDm(queryClient, campaignId);
     } catch {
       setPauseError(t('table.pauseFailed'));
@@ -968,9 +1056,24 @@ export default function AiTablePage() {
           <div className="flex flex-col items-end gap-1.5">
             <BudgetMeter used={seat?.tokensUsed ?? 0} budget={seat?.tokenBudget ?? 0} />
             {isDm && (
-              <Btn ghost onClick={onTogglePause} disabled={pauseBusy}>
-                {paused ? t('table.resume') : t('table.pause')}
-              </Btn>
+              <div className="flex items-center justify-end gap-1.5">
+                <Btn ghost onClick={onTogglePause} disabled={pauseBusy}>
+                  {paused ? t('table.resume') : t('table.pause')}
+                </Btn>
+                {/* #1501 — DM-only "Undo the AI's last action". The lever is the server's
+                    `lastUndoableCommit`; the button is hidden entirely (not merely disabled) when
+                    there is nothing to reverse, so it never offers an action the server would 404. */}
+                {session?.lastUndoableCommit && (
+                  <Btn
+                    ghost
+                    onClick={() => void undoAiAction()}
+                    disabled={undoBusy}
+                    title={t('table.undoAiAction')}
+                  >
+                    {t('table.undoAiAction')}
+                  </Btn>
+                )}
+              </div>
             )}
             {/* #1043 — session lifecycle. Start Session is player+ (sitting down to play is a
                 table act); Wrap Up is DM-only (closing a session is a decision). Both are hidden
@@ -1001,6 +1104,7 @@ export default function AiTablePage() {
           </p>
         )}
         {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
+        {undoError && <p className="text-xs text-rose-400 mt-2">{undoError}</p>}
         {lifecycleError && <p className="text-xs text-rose-400 mt-2">{lifecycleError}</p>}
       </Card>
 
@@ -1235,6 +1339,16 @@ export default function AiTablePage() {
         </form>
       ) : (
         <p className="text-xs text-center text-secondary py-2">{t('table.viewerHint')}</p>
+      )}
+      {/* #1501 — the standard "X — Undo" affordance, offered to a DM the moment the AI commits a
+          reversible action. The persistent header button covers the case where this dismisses. */}
+      {isDm && undoSnackbar && (
+        <UndoSnackbar
+          message={t('table.undoAiSnackbar', { action: undoSnackbar.actionName || t('table.undoAiAction') })}
+          onUndo={undoAiAction}
+          onExpire={() => setUndoSnackbar(null)}
+          successMessage={t('table.undoAiDone')}
+        />
       )}
     </div>
   );

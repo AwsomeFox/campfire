@@ -162,3 +162,53 @@ test.describe('transcript preserves tool encounterId across hydrate (#825)', () 
     expect(rehydrated.entries[0]).toMatchObject({ kind: 'tool', encounterId: 11 });
   });
 });
+/**
+ * Issue #1501 — the DM's "undo the AI's last action" control reads
+ * `session.lastUndoableCommit`, which the server arms on a successful resolve_action /
+ * apply_action and clears on undo_action. The `tool` stream frame for those names must
+ * invalidate the ai-dm session read, or the header button + UndoSnackbar stay cached until
+ * an unrelated refresh (Devin review on PR #1813).
+ */
+test.describe('invalidateForToolEvent refreshes the DM undo lever (#1501)', () => {
+  function captureClient(): { client: unknown; calls: unknown[] } {
+    const calls: unknown[] = [];
+    const client = {
+      invalidateQueries: (opts: { queryKey: unknown }) => {
+        calls.push(opts.queryKey);
+        return Promise.resolve();
+      },
+    };
+    return { client, calls };
+  }
+
+  test('resolve_action / apply_action / undo_action invalidate the ai-dm session read', () => {
+    for (const name of ['resolve_action', 'apply_action', 'undo_action'] as const) {
+      const { client, calls } = captureClient();
+      invalidateForToolEvent(client as never, tool({ name }), { campaignId: 1 });
+      expect(
+        calls.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.aiDmSession(1))),
+      ).toBe(true);
+    }
+  });
+
+  test('a non-undo-lever tool does NOT invalidate the ai-dm session read', () => {
+    const { client, calls } = captureClient();
+    invalidateForToolEvent(client as never, tool({ name: 'next_turn' }), {
+      campaignId: 1,
+      encounterId: 3,
+    });
+    expect(
+      calls.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.aiDmSession(1))),
+    ).toBe(false);
+  });
+
+  test('an errored undo-lever tool does NOT invalidate the ai-dm session read', () => {
+    const { client, calls } = captureClient();
+    invalidateForToolEvent(client as never, tool({ name: 'resolve_action', isError: true }), {
+      campaignId: 1,
+    });
+    expect(
+      calls.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.aiDmSession(1))),
+    ).toBe(false);
+  });
+});

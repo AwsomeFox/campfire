@@ -1,0 +1,84 @@
+import type { DriverLastUndoableCommit } from '@campfire/schema';
+
+/**
+ * The DM undo snackbar is short-lived by design: it must only offer to undo an action that
+ * happens WHILE the DM is viewing the AI table (#1501).
+ *
+ * The lever (`session.lastUndoableCommit`) is projected to DMs whenever a reversible action is
+ * armed, so it can already be present when the DM (re)opens the page — either left over from a
+ * prior visit or rehydrated from the react-query cache. Surfacing an undo offer for such a stale
+ * commit defeats the snackbar's purpose. The first LOADED session therefore seeds the "seen"
+ * chain id; only a chain id that arrives AFTER that seed pops the snackbar.
+ *
+ * Extracted as a pure step function so the seeding rule is unit-testable without mounting the
+ * React component (mirrors `aiDmPauseRequest` / `toolActivity`). The component owns the two refs
+ * (`seenUndoChainRef`, the seeded flag) and applies the returned values each render.
+ */
+export interface UndoLeverStep {
+  /** The commit to pop a fresh snackbar for this step, or `null` to leave the snackbar untouched. */
+  pop: DriverLastUndoableCommit | null;
+  /** Whether seeding has happened after this step (sticky once true). */
+  seeded: boolean;
+  /** The new value for the "seen" chain-id ref. */
+  seenChainId: string | null;
+}
+
+export function nextUndoLeverState(args: {
+  /** Has the session query finished loading (not still in its initial undefined state). */
+  sessionFetched: boolean;
+  /** Whether the "seen" chain id has been seeded from the first loaded session yet. */
+  seeded: boolean;
+  /** The current `session.lastUndoableCommit`, or `null` when absent/consumed. */
+  commit: DriverLastUndoableCommit | null;
+  /** The current "seen" chain id (previous step's `seenChainId`). */
+  seenChainId: string | null;
+}): UndoLeverStep {
+  // Until the session has actually loaded, leave the lever untouched — neither a spurious pop
+  // from a transient `undefined` session nor a premature seed.
+  if (!args.sessionFetched) {
+    return { pop: null, seeded: args.seeded, seenChainId: args.seenChainId };
+  }
+  // First loaded session: adopt whatever lever is present as already-seen so a commit that
+  // predates the DM opening the table (prior visit, or rehydrated from cache on reopen) does
+  // NOT pop a stale undo. Subsequent updates fall through to the normal "new chain id" check.
+  if (!args.seeded) {
+    return { pop: null, seeded: true, seenChainId: args.commit?.chainId ?? null };
+  }
+  // New reversible action arrived after the seed → pop. A repeated or absent lever is a no-op,
+  // and the seen ref clears when the lever is consumed (undo applied / superseded) so the next
+  // armed commit always pops.
+  if (args.commit && args.commit.chainId !== args.seenChainId) {
+    return { pop: args.commit, seeded: true, seenChainId: args.commit.chainId };
+  }
+  return { pop: null, seeded: true, seenChainId: args.commit ? args.seenChainId : null };
+}
+
+/**
+ * How the DM's undo POST failed (#1501). Two outcomes matter and they are qualitatively different:
+ *  - 404: the server says there is nothing left to reverse. The lever is ALREADY cleared on the
+ *    server, so the cached session MUST be refetched or the header control keeps offering a
+ *    reversal that fails every time until some unrelated refresh dismisses it. The snackbar is
+ *    dismissed ("nothing left to undo" is not a failure the DM needs to act on) and no error is
+ *    surfaced.
+ *  - any other status, or a non-ApiError: the AI's action was NOT reversed. Surface the error so
+ *    the DM knows; leave the snackbar and the cached lever untouched (the chain may still be
+ *    undoable on a retry).
+ *
+ * Extracted as a pure function so the 404-refetch rule is unit-testable without mounting the
+ * component, mirroring {@link nextUndoLeverState} and the other #1501 helpers.
+ */
+export interface UndoPostErrorOutcome {
+  /** Dismiss the undo snackbar — the server settled the lever (the success path does this directly). */
+  dismissSnackbar: boolean;
+  /** Refetch the session so a lever the server already cleared drops out of the react-query cache. */
+  invalidateSession: boolean;
+  /** A user-facing error message, or `null` when the undo legitimately settled (a 404). */
+  errorMessage: string | null;
+}
+
+export function resolveUndoPostError(status: number | undefined, fallbackMessage: string): UndoPostErrorOutcome {
+  if (status === 404) {
+    return { dismissSnackbar: true, invalidateSession: true, errorMessage: null };
+  }
+  return { dismissSnackbar: false, invalidateSession: false, errorMessage: fallbackMessage };
+}

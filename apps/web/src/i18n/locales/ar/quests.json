@@ -63,6 +63,8 @@
     "moveDown": "Move \"{{text}}\" down",
     "newObjectivePlaceholder": "New objective…",
     "addObjective": "+ objective",
+    "deleteObjective": "حذف الهدف",
+    "deleteObjectiveFailed": "تعذر حذف الهدف.",
     "subquests": "Subquests",
     "addSubquest": "+ sub-quest",
     "dmOnly": "DM only — hidden from players",
