@@ -6162,7 +6162,7 @@ export class AiDriverService {
       // every turn advance and combat op — so a read-then-write CAS keyed on it makes the AI's
       // OWN later edits spuriously 409 (after it advances a turn). A correct combatant/encounter
       // CAS needs a stable per-write version that survives turn advances, which is a separate
-      // change; deferred (see PR #1813). The MCP tools still honor a model-supplied
+      // change and is deferred to a follow-up. The MCP tools still honor a model-supplied
       // `expectedUpdatedAt` opt-in, unchanged.
 
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
@@ -6954,7 +6954,9 @@ export class AiDriverService {
     // capturing the undoToken here, the DM "undo the AI's last action" control would never arm
     // on the very tables it matters most for. Mirrors the capture in executeToolCalls: chainId is
     // the lookup key `undo()` re-reads its snapshot from, taken from the RESULT (the server-issued
-    // token), never from the model's arguments. Persisted at once so a restart keeps the lever.
+    // token), never from the model's arguments. The lever lives in-memory on the session
+    // (lastUndoableCommit is not serialized by persistControlState) so it arms for the current
+    // session but does not survive a server restart.
     if (!res.isError && (pending.tool === 'resolve_action' || pending.tool === 'apply_action')) {
       try {
         const parsed = JSON.parse(res.text) as {
