@@ -43,7 +43,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, null as any);
+    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn(), notifyUser: jest.fn() } as any);
     const actions = new ActionResolverService(orm, events, audit);
     return { orm, service, actions };
   }
