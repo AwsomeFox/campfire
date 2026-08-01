@@ -12,7 +12,6 @@ import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
 import { BrandMark } from '../../components/BrandMark';
-import { Card } from '../../components/ui';
 import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
 import { loginBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import {
@@ -125,7 +124,7 @@ export function SignupPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <Card elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
           <div>
             <h3 style={{ margin: 0 }}>Campfire</h3>
@@ -233,7 +232,7 @@ export function SignupPage() {
           <Link to="/login" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
             Already have an account? Sign in
           </Link>
-        </Card>
+        </div>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
           Self-hosted with ❤️ · campfire v{__APP_VERSION__}

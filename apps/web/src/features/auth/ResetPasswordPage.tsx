@@ -9,7 +9,6 @@ import {
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError, API } from "../../lib/api";
 import { PasswordInput } from "../../components/PasswordInput";
-import { Card } from "../../components/ui";
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -182,9 +181,8 @@ export function ResetPasswordPage() {
         className="flex flex-col gap-4"
         style={{ width: "min(420px, 100%)" }}
       >
-        <Card
-          as="main"
-          elev="md"
+        <main
+          className="card elev-md"
           style={{ padding: "28px 26px", gap: 14 }}
           aria-labelledby="reset-page-title"
         >
@@ -465,7 +463,7 @@ export function ResetPasswordPage() {
               )}
             </section>
           )}
-        </Card>
+        </main>
         <p className="text-center" style={{ fontSize: 12 }}>
           <Link to="/login" className="text-muted">
             ← Back to sign in

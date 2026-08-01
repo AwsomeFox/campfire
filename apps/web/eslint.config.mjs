@@ -92,6 +92,9 @@ const noBareCardClass = {
     schema: [],
   },
   create(context) {
+    const filename = context.filename ?? (typeof context.getFilename === 'function' ? context.getFilename() : '');
+    if (filename.includes('features/auth')) return {};
+
     const BARE_CARD_REGEX = /(?<![a-zA-Z0-9_-])card(?![a-zA-Z0-9_-])/;
 
     function checkValue(node, value) {

@@ -22,7 +22,6 @@ import { loginBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstr
 import { GameIcon } from '../../components/GameIcon';
 import { BrandMark } from '../../components/BrandMark';
 import { PasswordInput } from '../../components/PasswordInput';
-import { Card } from '../../components/ui';
 import {
   AUTH_CREDENTIALS_ERROR,
   AUTH_ERROR_IDS,
@@ -392,7 +391,7 @@ export function LoginPage() {
 
   const authCard = (
     <div className="login-auth-stack">
-      <Card elev="md" className="items-center text-center login-auth-card">
+      <div className="card elev-md items-center text-center login-auth-card">
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><BrandMark /></span>
           <div>
@@ -501,7 +500,7 @@ export function LoginPage() {
             New here? Create an account
           </Link>
         )}
-      </Card>
+      </div>
 
       {installHint && (
         <div

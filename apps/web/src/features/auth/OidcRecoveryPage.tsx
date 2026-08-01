@@ -7,7 +7,6 @@ import {
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { joinPublicBase } from '../../lib/public-base';
 import { BrandMark } from '../../components/BrandMark';
-import { Card } from '../../components/ui';
 
 interface RecoveryCopy {
   title: string;
@@ -88,9 +87,8 @@ export function OidcRecoveryPage() {
         background: 'radial-gradient(90% 55% at 15% 0%, var(--color-neutral-900) 0%, var(--color-bg) 65%)',
       }}
     >
-      <Card
-        elev="md"
-        className="w-full flex flex-col items-center text-center"
+      <section
+        className="card elev-md w-full flex flex-col items-center text-center"
         aria-labelledby="oidc-recovery-title"
         aria-describedby="oidc-recovery-body oidc-recovery-hint"
         style={{ maxWidth: 480, padding: 'clamp(24px, 7vw, 38px)', gap: 16 }}
@@ -148,7 +146,7 @@ export function OidcRecoveryPage() {
             If this keeps happening, contact your server admin. No support reference is available for this attempt.
           </p>
         )}
-      </Card>
+      </section>
     </main>
   );
 }

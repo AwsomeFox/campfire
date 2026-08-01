@@ -12,7 +12,6 @@ import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
 import { BrandMark } from '../../components/BrandMark';
-import { Card } from '../../components/ui';
 import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
 import { setupBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import {
@@ -156,7 +155,7 @@ export function SetupPage() {
       }}
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <Card elev="md" className="items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
           <BrandMark />
           <div>
             <h3 style={{ margin: 0 }}>Campfire</h3>
@@ -260,7 +259,7 @@ export function SetupPage() {
               {submitting ? 'Lighting…' : 'Light the fire'}
             </button>
           </form>
-        </Card>
+        </div>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
           Self-hosted with ❤️ · campfire v{__APP_VERSION__}
