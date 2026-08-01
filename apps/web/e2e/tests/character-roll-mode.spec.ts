@@ -57,8 +57,11 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
+    // Wait for the character sheet data to load
+    await expect(page.getByRole('heading', { name })).toBeVisible({ timeout: 15000 });
+
     const savesSection = page.locator('#character-sheet-section-saves');
-    await expect(savesSection).toBeVisible({ timeout: 15000 });
+    await expect(savesSection).toBeVisible();
 
     const strSave = savesSection.getByRole('button', { name: /STR/i }).first();
     await expect(strSave).toBeVisible();
@@ -77,8 +80,10 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
+    await expect(page.getByRole('heading', { name })).toBeVisible({ timeout: 15000 });
+
     const savesSection = page.locator('#character-sheet-section-saves');
-    await expect(savesSection).toBeVisible({ timeout: 15000 });
+    await expect(savesSection).toBeVisible();
 
     const strSave = savesSection.getByRole('button', { name: /STR/i }).first();
     await expect(strSave).toBeVisible();
@@ -98,8 +103,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesSection = page.locator('#character-sheet-section-saves');
-    await expect(savesSection).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('heading', { name })).toBeVisible({ timeout: 15000 });
 
     const results = await new AxeBuilder({ page })
       .include('#character-sheet-panel-play')
