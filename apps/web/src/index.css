@@ -1120,6 +1120,7 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--color-divider);
   border-radius: var(--cf-density-default-card-radius);
   box-shadow: var(--shadow-sm);
+  gap: 0;
 }
 /* Issue #674 — per-density card geometry. Compose on Card / cf-card surfaces. */
 .cf-card.cf-density-xs {
@@ -1139,7 +1140,9 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--cf-density-comfortable-card-radius);
 }
 /* Media / split tiles that paint their own inner padding (issue #674). */
-.cf-card.cf-card-flush {
+.cf-card.cf-card-flush,
+.card.cf-card-flush,
+.card-flush {
   padding: 0;
 }
 /* Nocturne .card aliases the compact density shell (issue #674). */
@@ -1966,7 +1969,7 @@ a:hover .cf-name-reveal {
   }
 }
 
-/* Mobile bottom tab bar */
+/* Mobile bottom tab bar (issues #637, #1472) — 6 slots: Home, Quests, Party, Encounters/Live, Notes, More */
 .cf-tabbar {
   position: fixed;
   bottom: 0;
@@ -1977,7 +1980,7 @@ a:hover .cf-name-reveal {
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--color-divider);
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
 }
 
 /* Undo snackbar (issue #794) — clears measured tab bar + safe-area + keyboard.
@@ -2216,12 +2219,16 @@ a:hover .cf-name-reveal {
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 0.5rem 0 max(0.5rem, env(safe-area-inset-bottom));
-  font-size: var(--type-label);
+  padding: 0.5rem 2px max(0.5rem, env(safe-area-inset-bottom));
+  font-size: 11px;
   font-weight: 600;
   color: var(--cf-faint);
   text-decoration: none;
   min-height: 48px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cf-tabbar a.active {
   color: var(--color-accent);

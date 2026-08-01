@@ -6,7 +6,7 @@ import { useAuth } from '../../app/auth';
 import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
 import { formatDate, formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { EmptyState } from '../../components/ui';
+import { Card, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { Markdown } from '../../components/Markdown';
 import { entityHref } from '../../lib/entityLinks';
@@ -260,7 +260,7 @@ export function SessionLog({
   const { canDmWrite } = useCampaignAccess();
 
   return (
-    <section className="card elev-sm dashboard-session-log" aria-labelledby="dashboard-session-log-title">
+    <Card density="compact" elev="sm" className="dashboard-session-log" aria-labelledby="dashboard-session-log-title">
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <h2 id="dashboard-session-log-title" className="card-kicker">Session log</h2>
         <div style={{ flex: 1 }} />
@@ -333,6 +333,6 @@ export function SessionLog({
           </Link>
         ))
       )}
-    </section>
+    </Card>
   );
 }

@@ -18,8 +18,8 @@ export type NavGroup = {
   items: NavItem[];
 };
 
-/** Mobile tab bar destinations — excluded from the More sheet to avoid duplicates (issue #643). */
-export const MOBILE_TAB_BAR_KEYS = new Set(['dashboard', 'quests', 'party', 'notes']);
+/** Mobile tab bar destinations — excluded from the More sheet to avoid duplicates (issue #643, #1472). */
+export const MOBILE_TAB_BAR_KEYS = new Set(['dashboard', 'quests', 'party', 'encounters', 'notes']);
 
 const GROUP_LABEL_KEYS: Record<NavGroupKey, string> = {
   play: 'nav.groupPlay',

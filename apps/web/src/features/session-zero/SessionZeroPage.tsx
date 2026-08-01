@@ -36,7 +36,7 @@ import {
   SESSION_ZERO_SUPPORT_HELP,
   SESSION_ZERO_SUPPORT_LABEL,
 } from '../../components/formFieldLabels';
-import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
+import { Card, Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
@@ -334,9 +334,9 @@ export default function SessionZeroPage() {
       {protectedCharter.leavePrompt}
 
       {loading && !charter ? (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           <Skeleton lines={6} />
-        </div>
+        </Card>
       ) : editing && draft ? (
         <CharterForm draft={draft} setDraft={setDraft} />
       ) : charter && isEmptyCharter(charter) ? (
@@ -572,11 +572,11 @@ function SupportSummary({ entries, facilitator }: { entries: ParticipantSupportP
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <div className="card elev-sm">
+    <Card density="compact" elev="sm">
       <div style={{ fontFamily: 'var(--font-heading)', fontSize: 15, fontWeight: 500 }}>{title}</div>
       {hint && <div className="text-muted" style={{ fontSize: 11, marginTop: 2 }}>{hint}</div>}
       <div style={{ marginTop: 10 }}>{children}</div>
-    </div>
+    </Card>
   );
 }
 
@@ -662,8 +662,8 @@ function ListEditor({
 function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | null) => void }) {
   const { t } = useTranslation();
   return (
-    <div
-      className="card elev-sm"
+    <Card
+      density="compact" elev="sm"
       style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
       data-testid="session-zero-charter-form"
     >
@@ -717,6 +717,6 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
         minHeight={96}
         optional
       />
-    </div>
+    </Card>
   );
 }

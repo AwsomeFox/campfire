@@ -11,6 +11,7 @@
  * (unlike the DM `instructions`, which the server redacts per #261). The seat read stops
  * on a 4xx (feature off / not a member), so the badge simply stays hidden then.
  */
+import { Card } from '../../components/ui';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -156,10 +157,10 @@ function AiModePopover({
   }, [popoverRef, position]);
 
   return (
-    <div
+    <Card
       id={id}
       ref={popoverRef}
-      className="card elev-md"
+      density="compact" elev="md"
       style={{
         position: 'fixed',
         top: position?.top ?? 0,
@@ -183,6 +184,6 @@ function AiModePopover({
       >
         <AiTransparencyNote />
       </div>
-    </div>
+    </Card>
   );
 }

@@ -60,6 +60,7 @@ function encounterListUrl(campaignId: number, status: StatusFilter, query: strin
 
 export default function EncounterListPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -75,6 +76,41 @@ export default function EncounterListPage() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const fetchGeneration = useRef(0);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+  const [quickFightLoading, setQuickFightLoading] = useState(false);
+
+  const handleQuickFight = useCallback(async () => {
+    setQuickFightLoading(true);
+    setError(null);
+    try {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const defaultName = `Quick fight - ${dateStr}`;
+      const created = await api.post<Encounter>(`${API}/campaigns/${id}/encounters`, {
+        name: defaultName,
+        hidden: true,
+      });
+      const characters = await api
+        .get<Array<{ id: number; name: string; hpMax: number }>>(`${API}/campaigns/${id}/characters`)
+        .catch(() => []);
+      if (characters.length > 0) {
+        await Promise.all(
+          characters.map((c) =>
+            api
+              .post(`${API}/encounters/${created.id}/combatants`, {
+                kind: 'character',
+                characterId: c.id,
+                name: c.name,
+                hpMax: c.hpMax,
+              })
+              .catch(() => null),
+          ),
+        );
+      }
+      navigate(`/c/${id}/encounters/${created.id}`);
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.create' }));
+      setQuickFightLoading(false);
+    }
+  }, [id, navigate, t]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
@@ -184,10 +220,13 @@ export default function EncounterListPage() {
         primaryAction={
           canDmWrite && !creating && !generating ? (
             <div className="flex gap-2 flex-wrap">
-              <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)}>
+              <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)} disabled={quickFightLoading}>
                 {t('encounters.generate')}
               </Btn>
-              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              <Btn type="button" className="cf-page-header__action" ghost onClick={handleQuickFight} disabled={quickFightLoading} data-testid="quick-fight-button">
+                {quickFightLoading ? 'Creating…' : t('encounters.quickFight', 'Quick fight')}
+              </Btn>
+              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)} disabled={quickFightLoading}>
                 {t('encounters.newEncounter')}
               </Btn>
             </div>
@@ -278,9 +317,9 @@ function EncounterCard({
 }) {
   const { t } = useTranslation();
   return (
-    <ListDetailLink
+    <Card
       to={`/c/${campaignId}/encounters/${encounter.id}`}
-      className="card elev-sm"
+      density="compact" elev="sm" as={ListDetailLink}
       style={{ color: 'var(--color-text)', textDecoration: 'none', gap: 10 }}
     >
       <div className="flex items-center gap-2 flex-wrap">
@@ -305,17 +344,19 @@ function EncounterCard({
           </Chip>
         )}
       </div>
-    </ListDetailLink>
+    </Card>
   );
 }
 
 /** Minimal shapes for the link-picker option lists. */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
 
+const defaultEncounterName = () => `Untitled encounter - ${new Date().toISOString().slice(0, 10)}`;
+
 function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCancel: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [name, setName] = useState('');
+  const [name, setName] = useState(defaultEncounterName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // #754: Preparing encounters default to DM-only.
@@ -349,11 +390,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setError('Enter an encounter name.');
-      return;
-    }
+    const trimmed = name.trim() || defaultEncounterName();
     setSaving(true);
     setError(null);
     try {
@@ -372,13 +409,10 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     }
   }
 
-  const nameInvalid = !!error && !name.trim();
-  const formError = nameInvalid ? error : null;
-
   return (
     <Card className="space-y-3" data-testid="encounter-create-form">
       <h2 className="font-bold text-white text-sm">New encounter</h2>
-      {error && !nameInvalid && (
+      {error && (
         <p className="text-sm text-rose-400" role="alert">
           {error}
         </p>
@@ -399,7 +433,6 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
           autoFocus
           required
           help={ENCOUNTER_NAME_HELP}
-          error={formError}
         />
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
           <Field
@@ -477,7 +510,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
             Cancel
           </Btn>
-          <Btn type="submit" disabled={saving || !name.trim()}>
+          <Btn type="submit" disabled={saving}>
             {saving ? 'Creating…' : 'Create'}
           </Btn>
         </div>

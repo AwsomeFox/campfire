@@ -23,7 +23,7 @@ import {
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useDialog } from './useDialog';
-import { Btn } from './ui';
+import { Card, Btn } from './ui';
 
 export type PageHeaderSecondaryAction = {
   key: string;
@@ -281,13 +281,14 @@ function OverflowMenuPanel({
   }, [actions.length, anchorRef, menuRef]);
 
   return (
-    <div
+    <Card
+      as="div"
       ref={menuRef}
       id={id}
       role="menu"
       aria-labelledby={labelledBy}
       aria-label={t('common.pageActionsMenu')}
-      className="cf-page-header__menu card elev-md"
+      density="compact" elev="md" className="cf-page-header__menu"
       data-testid="page-header-overflow-menu"
       style={{ position: 'fixed', zIndex: 40 }}
     >
@@ -322,6 +323,6 @@ function OverflowMenuPanel({
           </button>
         );
       })}
-    </div>
+    </Card>
   );
 }

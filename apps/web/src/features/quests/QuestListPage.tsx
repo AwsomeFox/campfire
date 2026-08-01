@@ -16,7 +16,7 @@ import type { Quest, QuestChanges, QuestListItem } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
@@ -179,16 +179,16 @@ export default function QuestListPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {loading && !quests.length ? (
-        <div className="card elev-sm">
+        <Card density="compact" elev="sm">
           <Skeleton lines={5} />
-        </div>
+        </Card>
       ) : roots.length === 0 ? (
         <EmptyState icon="scroll-unfurled" title={t('quests.empty.title')} hint={isDm ? t('quests.empty.hintDm') : t('quests.empty.hintPlayer')} />
       ) : (
         roots.map((q) => {
           const kids = childrenOf(q.id);
           return (
-            <div key={q.id} data-testid={`quest-card-${q.id}`} className="card elev-sm quest-list-card">
+            <Card key={q.id} data-testid={`quest-card-${q.id}`} density="compact" elev="sm" className="quest-list-card">
               <div className="quest-card-heading">
                 <QuestStatusBadge status={q.status} />
                 <h2
@@ -279,7 +279,7 @@ export default function QuestListPage() {
                   <ChangeBadge quest={s} kind={changes.get(s.id)} />
                 </div>
               ))}
-            </div>
+            </Card>
           );
         })
       )}

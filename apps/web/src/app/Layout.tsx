@@ -1,9 +1,8 @@
 /**
  * Authenticated app chrome — desktop sidebar + mobile topbar/tabbar/More sheet.
- * Mobile tab bar contract (issue #637): five primary targets — Home, Quests, Party,
- * Notes, and either More or a temporary Live shortcut to the running encounter.
- * Overflow nav stays in the More sheet (reachable from the role chip in the top bar
- * when Live replaces More in the tab bar).
+ * Mobile tab bar contract (issues #637, #1472): six primary targets — Home, Quests, Party,
+ * Encounters (or Live shortcut), Notes, and More.
+ * Overflow nav stays in the More sheet.
  * Mirrors the Nocturne app shell in design/claude-design/Campfire.dc.html
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
@@ -1118,9 +1117,6 @@ function LayoutContent() {
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico"><GameIcon slug="shield" size={UI_ICON_SIZE.md} /></span>Party
           </NavLink>
-          <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
-          </NavLink>
           {liveEncounter ? (
             <NavLink
               to={`/c/${campaignId}/encounters/${liveEncounter.id}`}
@@ -1134,10 +1130,23 @@ function LayoutContent() {
               {t('nav.live')}
             </NavLink>
           ) : (
-            <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
-              <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
-            </button>
+            <NavLink
+              to={`/c/${campaignId}/encounters`}
+              className={({ isActive }) => (isActive ? 'active' : '')}
+              data-testid="tabbar-encounters"
+            >
+              <span className="ico">
+                <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.md} />
+              </span>
+              {t('nav.encounters')}
+            </NavLink>
           )}
+          <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
+            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
+          </NavLink>
+          <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
+            <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
+          </button>
         </nav>
       )}
 
@@ -1211,12 +1220,12 @@ function MoreSheet({
       }}
       onClick={onClose}
     >
-      <div
+      <Card
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
         aria-label={t('nav.moreNavigation')}
-        className="card elev-lg w-full flex flex-col"
+        density="compact" elev="lg" className="w-full flex flex-col"
         style={{
           maxWidth: 440,
           maxHeight: 'calc(100dvh - 16px)',
@@ -1224,7 +1233,7 @@ function MoreSheet({
           padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
           gap: 4,
         }}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
       >
         <div
           className="mx-auto mb-2.5 shrink-0"
@@ -1308,7 +1317,7 @@ function MoreSheet({
             {t('nav.signOut')}
           </button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -1411,11 +1420,11 @@ function UserMenu({
   // through), so no focus trap — outside-click close is handled in Layout.
   const menuRef = useDialog<HTMLDivElement>({ onClose, trapFocus: false });
   return (
-    <div
+    <Card
       ref={menuRef}
       role="menu"
       aria-label="Account menu"
-      className="absolute right-0 top-11 w-56 card elev-md p-2 space-y-1 text-sm z-40"
+      density="compact" elev="md" className="absolute right-0 top-11 w-56 p-2 space-y-1 text-sm z-40"
       style={{ gap: 2 }}
     >
       <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
@@ -1469,6 +1478,6 @@ function UserMenu({
       <button role="menuitem" className="w-full text-left px-2 py-1.5 rounded-md text-rose-400" onClick={onLogout}>
         Logout
       </button>
-    </div>
+    </Card>
   );
 }
