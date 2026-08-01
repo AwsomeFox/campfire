@@ -89,6 +89,8 @@ export interface SeedData {
   linkedEndedEncounterId: number;
   statblockEntryId: number;
   statblockEncounterId: number;
+  archmageCampaignId: number;
+  archmageEncounterId: number;
   npcId: number;
   xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
   semantic: {
@@ -242,6 +244,28 @@ export default async function globalSetup(config: FullConfig) {
 
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  // 13th Age (archmage) campaign + running encounter fixture for ruleset-specific specs (#1465).
+  const archmageCampaign = await okJson(dm, 'post', '/api/v1/campaigns', {
+    name: 'E2E — Archmage 13th Age',
+    ruleSystem: 'archmage',
+  });
+  const archmageCampaignId: number = archmageCampaign.id;
+  await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/members`, { userId: userIds.player, role: 'player' });
+  await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  const archmageEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/encounters`, {
+    name: 'Archmage Escalation Battle',
+    hidden: false,
+  });
+  const archmageEncounterId: number = archmageEncounter.id;
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/combatants`, {
+    kind: 'monster',
+    name: 'Archmage Owlbear',
+    hpMax: 50,
+  });
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/roll-initiative`);
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/start`);
 
   // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
   // compendium reader and combat card consume exactly the same persisted dataJson string.
@@ -683,6 +707,8 @@ export default async function globalSetup(config: FullConfig) {
     linkedEndedEncounterId,
     statblockEntryId,
     statblockEncounterId,
+    archmageCampaignId,
+    archmageEncounterId,
     npcId,
     xpRecipients,
     semantic: {

@@ -195,8 +195,7 @@ test.describe('combat log accessibility — remote clients', () => {
       const refreshed = await dmPage.request.patch(`/api/v1/encounters/${fixture.encounterId}`, { data: { gridSnap: false } });
       expect(refreshed.ok()).toBe(true);
       await expect.poll(() => eventReads).toBeGreaterThan(readsBefore);
-      await viewerPage.waitForTimeout(100);
-      expect((await announcements(viewerPage)).filter((message) => message.includes('Outcome: took 1 damage'))).toHaveLength(1);
+      await expect.poll(async () => (await announcements(viewerPage)).filter((message) => message.includes('Outcome: took 1 damage')).length).toBe(1);
 
       const conditioned = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
@@ -302,10 +301,9 @@ test.describe('combat log accessibility — remote clients', () => {
         .toEqual(await log.evaluate((node) => ({ top: node.scrollHeight - node.clientHeight, max: node.scrollHeight - node.clientHeight })));
       // End proves the focused history is keyboard-scrollable. Use a stable mid-history
       // position for the append assertion after the key scroll has fully settled.
-      await log.evaluate((node) => {
-        node.scrollTop = Math.floor((node.scrollHeight - node.clientHeight) / 2);
-      });
-      await viewerPage.waitForTimeout(100);
+      await expect.poll(async () => (await log.evaluate((node) => node.scrollTop))).toBe(
+        await log.evaluate((node) => Math.floor((node.scrollHeight - node.clientHeight) / 2)),
+      );
       const scrollBefore = await log.evaluate((node) => node.scrollTop);
       await watchAnnouncements(viewerPage);
 

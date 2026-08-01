@@ -165,21 +165,30 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
       }
     }
 
-    // Reset each seed combatant's HP / initiative. EncounterUpdate does not accept
-    // round/turnIndex/combatants (lifecycle endpoints own those); prior restore helpers
-    // patched unrecognized keys and silently no-op'd under .catch().
+    // Reset each seed combatant's HP / initiative / condition / death-save / turn state.
     for (const c of [
       { id: bossId, hpSet: 30, initiative: 18 },
       { id: skirmisherId, hpSet: 12, initiative: 7 },
     ]) {
       const patchRes = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
-        data: { hpSet: c.hpSet, initiative: c.initiative },
+        data: {
+          hpSet: c.hpSet,
+          initiative: c.initiative,
+          deathSaveSuccesses: 0,
+          deathSaveFailures: 0,
+          deathState: 'alive',
+          conditionInstances: [],
+          hpTemp: 0,
+        },
       });
       if (!patchRes.ok()) {
         throw new Error(
           `patch seed combatant ${c.id} -> ${patchRes.status()}: ${await readError(patchRes)}`,
         );
       }
+      await dm.post(`/api/v1/encounters/${encounterId}/combatants/${c.id}/turn-state`, {
+        data: { resetTurn: true },
+      }).catch(() => undefined);
     }
 
     if (status === 'preparing') {

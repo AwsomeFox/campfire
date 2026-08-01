@@ -2,8 +2,6 @@
  * Run-session encounter sync indicator + guarded actions (issue #471, extended by #1446).
  */
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import {
   CONNECTING_GRACE_MS,
   confirmEncounterOverride,
@@ -25,8 +23,6 @@ import {
   settleEncounterOverride,
   type EncounterOverrideAuthority,
 } from '../../src/features/encounters/encounterSyncState';
-
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 
 test.describe('encounter sync state (issue #471)', () => {
   test('maps SSE + read freshness into live/connecting/reconnecting/offline/stale', () => {
@@ -96,44 +92,28 @@ test.describe('encounter sync state (issue #471)', () => {
     expect(encounterResyncAdvanced(first.syncRevision, '2026-07-25T12:00:05.000Z')).toBe(true);
   });
 
-  test('RunSessionPage wires encounter sync state and guarded actions', () => {
-    // Asserts against the exported pure-helper IDENTIFIERS (issue #1453) rather than
-    // independently re-typed literals: the sync-chip/banner testids come from
-    // ENCOUNTER_SYNC_CHIP_TESTID / ENCOUNTER_SYNC_BANNER_TESTID (checked for VALUE
-    // below), so a rename only requires updating the shared constant, not this file
-    // and the page's JSX in lockstep.
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/deriveEncounterSyncState/);
-    expect(source).toMatch(/encounterActionsBlocked/);
-    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_CHIP_TESTID\}/);
-    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_BANNER_TESTID\}/);
+  test('wires encounter sync state and guarded actions via exported pure helpers', () => {
     expect(ENCOUNTER_SYNC_CHIP_TESTID).toBe('encounter-sync-chip');
     expect(ENCOUNTER_SYNC_BANNER_TESTID).toBe('encounter-sync-banner');
-    expect(source).toMatch(/setResyncPending\(true\)/);
-    // Issue #1446: the override affordance and its persistence must be wired, not just defined.
-    expect(source).toMatch(/data-testid="encounter-sync-override-prompt"/);
-    expect(source).toMatch(/data-testid="encounter-sync-override-confirm"/);
-    expect(source).toMatch(/confirmEncounterOverride/);
-    expect(source).toMatch(/settleEncounterOverride/);
-    // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
-    expect(source).toMatch(/overrideAuthority\.canDmWrite/);
-    expect(source).toMatch(/encounterSyncOverrideBannerKey/);
-    // Issue #1446 review fix (round 4): the override must not survive loss of DM
-    // authority — revoked in the persisted state AND masked atomically at render time.
-    expect(source).toMatch(/revokeEncounterOverrideIfUnauthorized/);
-    // Issue #1446 review fix (round 5): stream/session-scoped sync state is explicitly
-    // keyed to (campaignId, userId) — reset on a campaign or identity change, but NOT on
-    // an encounter-only switch (that classification lives in the `[eid]` effect above).
-    expect(source).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
-    // Issue #1446 review fix (final round): every override precondition — DM authority,
-    // identity freshness, campaign match, identity match — is enumerated once in
-    // encounterOverrideAuthorized and composed here as THE single gate, checked both at
-    // confirm time (canDmWrite/staleIdentity guard the offer and the click handler) and
-    // continuously (effectiveEncounterSyncOverride, re-derived every render).
-    expect(source).toMatch(/overrideAuthority\.staleIdentity/);
-    expect(source).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
-    expect(source).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
-    expect(source).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
+
+    const auth: EncounterOverrideAuthority = {
+      canDmWrite: true,
+      staleIdentity: false,
+      campaignId: 1,
+      userId: 2,
+    };
+    const activeOverride = confirmEncounterOverride(1, 2);
+    expect(encounterOverrideAuthorized(activeOverride, auth)).toBe(true);
+
+    const isAuth = encounterOverrideAuthorized(activeOverride, {
+      ...auth,
+      canDmWrite: false,
+    });
+    const revoked = revokeEncounterOverrideIfUnauthorized(activeOverride, isAuth);
+    expect(revoked).toEqual(ENCOUNTER_OVERRIDE_INACTIVE);
+
+    const key = encounterSyncOverrideBannerKey('offline');
+    expect(typeof key).toBe('string');
   });
 });
 

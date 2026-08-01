@@ -1,0 +1,150 @@
+import { expect, request, test } from '@playwright/test';
+import { seed, stateFor } from './seed';
+import { CREDS } from '../global-setup';
+
+/**
+ * Issue #1465 — Multi-client turn loop E2E test.
+ *
+ * Verifies SSE propagation of turn advancement in both directions (Player -> DM, DM -> Player)
+ * and verifies that concurrent advancement attempts (DM Next Turn vs Player End Turn)
+ * advance turn exactly once, surfacing a stale/conflict error banner to the loser.
+ */
+test.describe('encounter turn loop multi-client (issue #1465)', () => {
+  test('turn advancement propagates live over SSE in both directions and guards against concurrent double-advance', async ({ browser }) => {
+    const { baseURL } = seed();
+
+    const dmCtx = await request.newContext({ baseURL });
+    const playerCtx = await request.newContext({ baseURL });
+
+    const dmBrowser = await browser.newContext({ storageState: stateFor('dm') });
+    const playerBrowser = await browser.newContext({ storageState: stateFor('player') });
+
+    const dmPage = await dmBrowser.newPage();
+    const playerPage = await playerBrowser.newPage();
+
+    let campaignId: number | null = null;
+    let encounterId: number | null = null;
+    let characterId: number | null = null;
+
+    try {
+      await dmCtx.post('/api/v1/auth/login', { data: CREDS.dm });
+      await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+
+      const mePlayer = await (await playerCtx.get('/api/v1/me')).json();
+      const playerUserId = mePlayer.user.id;
+
+      const campaign = await (
+        await dmCtx.post('/api/v1/campaigns', { data: { name: 'E2E — Multi-Client Turn Loop' } })
+      ).json();
+      campaignId = campaign.id;
+
+      await dmCtx.post(`/api/v1/campaigns/${campaignId}/members`, {
+        data: { userId: playerUserId, role: 'player' },
+      });
+
+      const character = await (
+        await dmCtx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+          data: {
+            name: 'Turn Hero',
+            className: 'Fighter',
+            level: 3,
+            ownerUserId: String(playerUserId),
+            hpCurrent: 30,
+            hpMax: 30,
+            stats: { DEX: 18 },
+          },
+        })
+      ).json();
+      characterId = character.id;
+
+      const encounter = await (
+        await dmCtx.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+          data: { name: 'Multi-Client Turn Drill', hidden: false },
+        })
+      ).json();
+      encounterId = encounter.id;
+
+      const heroCombatant = (
+        encounter.combatants as Array<{ id: number; characterId: number | null }>
+      ).find((c) => c.characterId === characterId);
+      if (!heroCombatant) throw new Error('Expected auto-added hero combatant');
+
+      const monster = await (
+        await dmCtx.post(`/api/v1/encounters/${encounterId}/combatants`, {
+          data: { kind: 'monster', name: 'Turn Goblin', hpMax: 15 },
+        })
+      ).json();
+
+      await dmCtx.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+      await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatant.id}`, {
+        data: { initiative: 50 },
+      });
+      await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${monster.id}`, {
+        data: { initiative: 10 },
+      });
+      await dmCtx.post(`/api/v1/encounters/${encounterId}/start`);
+
+      // Open encounter on DM and Player browsers
+      await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await playerPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+
+      await expect(dmPage.getByText('Running', { exact: true })).toBeVisible();
+      await expect(playerPage.getByText('Running', { exact: true })).toBeVisible();
+
+      // Turn 1: Hero (Player) has the turn.
+      await expect(playerPage.getByTestId('workspace-end-turn')).toBeVisible();
+
+      // Step A: Player ends turn -> DM screen updates via SSE.
+      await playerPage.getByTestId('workspace-end-turn').click();
+
+      // DM screen should automatically receive SSE update showing Goblin turn.
+      await expect(dmPage.getByTestId(`combatant-row-${monster.id}`)).toHaveAttribute(
+        'data-current-turn',
+        'true',
+      );
+
+      // Step B: DM clicks Next turn -> Player screen updates via SSE.
+      await dmPage.getByTestId('encounter-header-next-turn').click();
+
+      // Player screen should automatically receive SSE update giving turn back to Hero.
+      await expect(playerPage.getByTestId('workspace-end-turn')).toBeVisible();
+
+      // Step C: Concurrent race test — DM Next turn and Player End turn fired together.
+      const playerEndBtn = playerPage.getByTestId('workspace-end-turn');
+      const dmNextBtn = dmPage.getByTestId('encounter-header-next-turn');
+
+      await Promise.allSettled([playerEndBtn.click(), dmNextBtn.click()]);
+
+      // Turn must advance exactly ONCE (to Goblin), not twice (back to Hero in round 3).
+      await expect(dmPage.getByTestId(`combatant-row-${monster.id}`)).toHaveAttribute(
+        'data-current-turn',
+        'true',
+      );
+
+      // Loser should surface error banner.
+      const hasErrorBanner = await Promise.race([
+        dmPage
+          .getByTestId('error-note')
+          .isVisible()
+          .then((v) => v),
+        playerPage
+          .getByTestId('error-note')
+          .isVisible()
+          .then((v) => v),
+      ]);
+      expect(hasErrorBanner).toBe(true);
+    } finally {
+      if (encounterId && campaignId) {
+        await dmCtx.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+        await dmCtx.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
+      }
+      if (characterId) await dmCtx.delete(`/api/v1/characters/${characterId}`).catch(() => undefined);
+      if (campaignId) await dmCtx.delete(`/api/v1/campaigns/${campaignId}`).catch(() => undefined);
+
+      await dmBrowser.close();
+      await playerBrowser.close();
+      await dmCtx.dispose();
+      await playerCtx.dispose();
+    }
+  });
+});

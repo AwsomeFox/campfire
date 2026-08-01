@@ -653,6 +653,48 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(parseResult(missingCharacter)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
   });
 
+  it('set_escalation_die MCP tool updates escalation die on 13th Age encounter', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    const createCamp = parseResult(
+      await dmClient.callTool({
+        name: 'create_campaign',
+        arguments: { name: 'MCP Archmage Table', ruleSystem: 'archmage-srd' },
+      }),
+    ) as { id: number };
+
+    const enc = parseResult(
+      await dmClient.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId: createCamp.id, name: 'MCP 13A Fight' },
+      }),
+    ) as { id: number };
+
+    await dmClient.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Manticore', hpMax: 40 },
+    });
+    await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    await dmClient.callTool({ name: 'start_encounter', arguments: { encounterId: enc.id } });
+
+    // DM can update escalation die
+    const setRes = parseResult(
+      await dmClient.callTool({
+        name: 'set_escalation_die',
+        arguments: { encounterId: enc.id, held: true, override: 5 },
+      }),
+    ) as Record<string, unknown>;
+    expect(setRes).toBeTruthy();
+
+    // Non-DM is refused
+    const denied = await viewerClient.callTool({
+      name: 'set_escalation_die',
+      arguments: { encounterId: enc.id, override: 2 },
+    });
+    expect(denied.isError).toBe(true);
+  });
+
   it('roll catalog (issue #415): list_checks surfaces unproficient skills; roll_check resolves server-side', async () => {
     const client = await mcpClient(dmToken);
     const created = parseResult(
