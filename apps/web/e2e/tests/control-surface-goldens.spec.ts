@@ -99,10 +99,11 @@ test.describe('control surface goldens (#1694)', () => {
     // .toBeGreaterThanOrEqual(24)` here; `measureBox` (e2e/lib/computedStyle.ts) is
     // already set up for it. The screenshot below still catches any visual drift on
     // this surface in the meantime.
-    await expect(workspace).toHaveScreenshot('turn-workspace.png', {
+    const box = await workspace.boundingBox();
+    await expect(page).toHaveScreenshot('turn-workspace.png', {
       animations: 'disabled',
       caret: 'hide',
-      clip: { x: 0, y: 0, width: 1018, height: 729 },
+      clip: box ? { x: box.x, y: box.y, width: box.width, height: 729 } : undefined,
       maxDiffPixelRatio: 0.25,
     });
   });
