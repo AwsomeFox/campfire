@@ -3191,14 +3191,14 @@ export default function RunSessionPage() {
       >
         {canDmWrite ? (
           preparingSetupGuidance && encounter.status === 'preparing' && (
-            <>
+            <div data-testid="encounter-preparing-guidance" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
               <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {preparingSetupGuidance.nextSteps.map((step) => (
                   <li key={step}>{step}</li>
                 ))}
               </ol>
-            </>
+            </div>
           )
         ) : (
           <p style={{ margin: 0 }}>
