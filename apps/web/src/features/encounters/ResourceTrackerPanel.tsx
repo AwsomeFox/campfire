@@ -95,7 +95,9 @@ export function ResourceTrackerPanel({
                       <div className="text-sm">
                         {res.name || key} 
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
-                        {res.source && <span className="ml-2 text-xs opacity-70">[{res.source}]</span>}
+                        {(res as unknown as Record<string, unknown>).source && (
+                          <span className="ml-2 text-xs opacity-70">[{String((res as unknown as Record<string, unknown>).source)}]</span>
+                        )}
                       </div>
                       <Pips 
                         max={res.max} 
@@ -104,7 +106,7 @@ export function ResourceTrackerPanel({
                           if (!canDmWrite && (!c.characterId || c.characterId === 0)) return;
                           if (c.kind === 'character' && c.characterId) {
                             api.post(`${API}/characters/${c.characterId}/resources`, {
-                              [key]: { used: val, max: res.max, name: res.name, recharge: res.recharge, source: res.source }
+                              [key]: { used: val, max: res.max, name: res.name, recharge: res.recharge, source: (res as unknown as Record<string, unknown>).source }
                             });
                           } else if (c.statblock) {
                             const sb = c.statblock as unknown as Record<string, unknown>;
