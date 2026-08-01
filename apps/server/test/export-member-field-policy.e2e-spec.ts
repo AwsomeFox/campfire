@@ -261,7 +261,7 @@ describe('member export field policy (e2e, issue #1680)', () => {
     expect(res.status).toBe(200);
     expect(res.body.manifest).toBeDefined();
     expect(res.body.manifest.version).toBe(1);
-    expect(res.body.manifest.userId).toBe(Number(playerId));
+    expect(String(res.body.manifest.userId)).toBe(playerId);
     expect(res.body.manifest.included).toContain('characters');
     expect(res.body.manifest.included).toContain('auditActions');
     expect(res.body.manifest.excluded).toContain('campaignWorldData');

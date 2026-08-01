@@ -958,7 +958,7 @@ export class ExportService {
       .map(r => ({ ...r, scheduledSessionId: s.id, sessionTitle: s.title }))
     );
 
-    const ownRolls = allRolls.filter(r => r.actor === String(user.id));
+    const ownRolls = allRolls.filter(r => r.rollerUserId === String(user.id));
     
     const ownRevisions = allRevisions.filter(r => r.authorUserId === user.id);
 
