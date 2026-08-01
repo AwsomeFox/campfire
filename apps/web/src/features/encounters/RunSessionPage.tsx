@@ -95,7 +95,8 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
-import { isDown } from './encounterEndedSummary';
+import { isDown, endedSummaryTallies } from './encounterEndedSummary';
+import { safeEncounterForCast } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   canStabilizeCombatant,
@@ -2697,6 +2698,11 @@ export default function RunSessionPage() {
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
+  const endedTallies =
+    encounter.status === 'ended'
+      ? endedSummaryTallies(safeEncounterForCast(encounter).combatants.filter((c) => !c.tokenHiddenByFog))
+      : null;
+
   return (
     <div
       className={`cf-print-root reading-surface max-w-4xl lg:max-w-6xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10${isDm ? ' cf-print-encounter' : ''}`}
@@ -3153,6 +3159,18 @@ export default function RunSessionPage() {
         />
       )}
 
+      {endedTallies && (
+        <Card data-testid="encounter-ended-summary" className="p-4 space-y-2">
+          <h2 className="text-sm font-semibold m-0">Combat Summary</h2>
+          <div className="flex flex-wrap gap-4 text-sm">
+            <div><strong>Rounds:</strong> {encounter.round}</div>
+            <div><strong>Defeated:</strong> {endedTallies.dead.length}</div>
+            <div><strong>Downed:</strong> {endedTallies.downed.length}</div>
+            <div><strong>Survivors:</strong> {endedTallies.survivors.length}</div>
+          </div>
+        </Card>
+      )}
+
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
       )}
@@ -3166,39 +3184,57 @@ export default function RunSessionPage() {
         }}
       />
 
-      {canDmWrite && preparingSetupGuidance && (
-        <div
-          data-testid="encounter-preparing-guidance"
-          className="text-muted"
-          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
+      <div
+        data-testid="encounter-lifecycle-orientation"
+        className="text-muted"
+        style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
+      >
+        {canDmWrite ? (
+          preparingSetupGuidance && encounter.status === 'preparing' && (
+            <div data-testid="encounter-preparing-guidance" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+              <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {preparingSetupGuidance.nextSteps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+            </div>
+          )
+        ) : (
+          <p style={{ margin: 0 }}>
+            {encounter.status === 'preparing' && 'Waiting for the DM to start...'}
+            {encounter.status === 'running' &&
+              (encounter.currentCombatantId
+                ? `It's ${orderedCombatants.find((c) => c.id === encounter.currentCombatantId)?.name ?? 'someone'}'s turn.`
+                : 'Combat is running.')}
+            {encounter.status === 'ended' && 'Combat has ended.'}
+          </p>
+        )}
+        <ol
+          aria-label="Encounter lifecycle"
+          data-testid="encounter-lifecycle-checklist"
+          style={{
+            margin: 0,
+            padding: 0,
+            listStyle: 'none',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 6,
+            alignItems: 'center',
+          }}
         >
-          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
-          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {preparingSetupGuidance.nextSteps.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-          <ol
-            aria-label="Encounter lifecycle"
-            data-testid="encounter-lifecycle-checklist"
-            style={{
-              margin: 0,
-              padding: 0,
-              listStyle: 'none',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 6,
-              alignItems: 'center',
-            }}
-          >
-            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
-              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
-                {i + 1}. {step.label}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+          {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
+            <li
+              key={step.id}
+              className={`tag ${step.id === encounter.status ? 'tag-primary' : 'tag-neutral'}`}
+              style={{ fontSize: 10 }}
+              title={step.detail}
+            >
+              {i + 1}. {step.label}
+            </li>
+          ))}
+        </ol>
+      </div>
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
           tokens. Shown to the DM always (so they can attach one), and to players only once
