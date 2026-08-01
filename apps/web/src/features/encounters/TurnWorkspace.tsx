@@ -121,6 +121,7 @@ export function TurnWorkspace({
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
+  const [activeTab, setActiveTab] = useState<'action' | 'bonus' | 'reaction' | 'other'>('action');
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
@@ -170,12 +171,52 @@ export function TurnWorkspace({
     setReadiedDraft(currentTurnState?.readied ?? '');
   }, [currentTurnState?.readied]);
 
-  const filteredActions = useMemo(() => {
+  const actionItems = useMemo(() => {
     const list = turn?.suggestedActions ?? [];
     const needle = actionFilter.trim().toLowerCase();
-    if (!needle) return list;
-    return list.filter((a) => a.name.toLowerCase().includes(needle) || a.summary.toLowerCase().includes(needle));
+    const filtered = needle ? list.filter((a) => a.name.toLowerCase().includes(needle) || a.summary.toLowerCase().includes(needle)) : list;
+
+    const grouped = {
+      action: [] as typeof list,
+      bonus: [] as typeof list,
+      reaction: [] as typeof list,
+      other: [] as typeof list,
+    };
+
+    filtered.forEach(a => {
+      const slot = a.spec?.cost?.slot?.toLowerCase();
+      const source = a.source?.toLowerCase();
+
+      let cat: keyof typeof grouped = 'other';
+      if (slot === 'bonus' || source === 'bonus' || source === 'bonus action' || source === 'bonus-action') {
+        cat = 'bonus';
+      } else if (slot === 'reaction' || source === 'reaction') {
+        cat = 'reaction';
+      } else if (slot === 'action' || slot === 'actions' || source === 'action') {
+        cat = 'action';
+      }
+
+      grouped[cat].push(a);
+    });
+
+    return grouped;
   }, [turn?.suggestedActions, actionFilter]);
+
+  const tabs = useMemo(() => [
+    { id: 'action', label: 'Actions' },
+    { id: 'bonus', label: 'Bonus Actions' },
+    { id: 'reaction', label: 'Reactions' },
+    { id: 'other', label: 'Other / Limited Use' },
+  ] as const, []);
+
+  useEffect(() => {
+    if (actionItems[activeTab].length === 0) {
+      if (actionItems.action.length > 0) setActiveTab('action');
+      else if (actionItems.bonus.length > 0) setActiveTab('bonus');
+      else if (actionItems.reaction.length > 0) setActiveTab('reaction');
+      else if (actionItems.other.length > 0) setActiveTab('other');
+    }
+  }, [actionItems, activeTab]);
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurnBusy || turnState.isPending;
@@ -404,29 +445,72 @@ export function TurnWorkspace({
             value={actionFilter}
             onChange={(e) => setActionFilter(e.target.value)}
           />
-          <ul className="list-none p-0 m-0 space-y-1 max-h-48 overflow-auto">
-            {filteredActions.map((a, i) => (
-              <li key={`${a.name}-${i}`} className="text-sm flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <span className="text-white font-medium">{a.name}</span>
-                  <span className="text-muted"> · {a.source}</span>
-                  {a.summary && <span className="text-muted"> — {a.summary}</span>}
+          <div role="tablist" className="flex border-b border-neutral-700 mb-3 overflow-x-auto hide-scrollbar">
+            {tabs.map((tab) => {
+              const count = actionItems[tab.id].length;
+              const isSelected = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  aria-selected={isSelected}
+                  type="button"
+                  className={`cf-target-44 px-3 flex items-center gap-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                    isSelected ? 'border-primary text-white' : 'border-transparent text-muted hover:text-white hover:border-neutral-500'
+                  }`}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  {tab.label}
+                  {count > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isSelected ? 'bg-primary text-white' : 'bg-neutral-800 text-muted'}`}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div role="tabpanel" className="space-y-1 max-h-64 overflow-auto px-1">
+            {actionItems[activeTab].map((a, i) => {
+              const range = a.spec?.range?.range;
+              const size = a.spec?.range?.size;
+              const targetCount = a.spec?.targets?.count;
+              let rangeText = '';
+              if (range) rangeText = range;
+              if (size) rangeText += rangeText ? ` (${size})` : size;
+              let targetText = '';
+              if (targetCount !== undefined) {
+                targetText = targetCount > 0 ? `${targetCount} target${targetCount > 1 ? 's' : ''}` : 'AoE';
+              }
+              
+              return (
+                <div key={`${a.name}-${i}`} className="flex items-center justify-between gap-2 border-b border-neutral-700/50 py-2 last:border-0 text-sm">
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-white font-medium">{a.name}</span>
+                    <div className="flex items-center gap-2 text-xs text-muted flex-wrap mt-0.5">
+                      <span className="tag tag-neutral">{a.source}</span>
+                      {rangeText && <span>{rangeText}</span>}
+                      {targetText && <span>{targetText}</span>}
+                    </div>
+                    {a.summary && <span className="text-xs text-muted truncate mt-0.5">{a.summary}</span>}
+                  </div>
+                  {a.resolvable && onUseSuggestedAction && a.actionIndex != null && a.spec && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary cf-target-44 text-xs shrink-0"
+                      disabled={actionsDisabled}
+                      data-testid="suggested-action-use"
+                      onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
+                    >
+                      Use
+                    </button>
+                  )}
                 </div>
-                {a.resolvable && onUseSuggestedAction && a.actionIndex != null && a.spec && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary cf-target-44 text-xs shrink-0"
-                    disabled={actionsDisabled}
-                    data-testid="suggested-action-use"
-                    onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
-                  >
-                    Use
-                  </button>
-                )}
-              </li>
-            ))}
-            {filteredActions.length === 0 && <li className="text-sm text-muted">No matching actions.</li>}
-          </ul>
+              );
+            })}
+            {actionItems[activeTab].length === 0 && <p className="text-sm text-muted py-2 m-0">No matching actions.</p>}
+          </div>
         </section>
       )}
 
