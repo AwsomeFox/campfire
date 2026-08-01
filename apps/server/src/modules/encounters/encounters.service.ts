@@ -9,6 +9,7 @@ import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, 
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
@@ -81,7 +82,7 @@ type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 /** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
-type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number };
+type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number; expectedUpdatedAt?: string };
 type CombatantTransactionHook = (
   tx: SyncDb,
   fresh: typeof combatants.$inferSelect,
@@ -3727,6 +3728,7 @@ export class EncountersService {
     // ended. Let the transaction check that claim first; fresh keyed writes still hit
     // the same guard inside the transaction below.
     if (!patch.idempotencyKey) this.assertMutable(encounterRow);
+    if (patch.expectedUpdatedAt) this.revisions.assertNotStale(encounterRow, patch.expectedUpdatedAt);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
     const isDm = role === 'dm';
@@ -4237,7 +4239,15 @@ export class EncountersService {
         // must not invalidate a player's already-previewed action.
         if (freshEncounter.status === 'running') {
           tx.update(encounters)
-            .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+            .set({
+              combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+              updatedAt: nextUpdatedAt(freshEncounter.updatedAt),
+            })
+            .where(eq(encounters.id, encounterId))
+            .run();
+        } else {
+          tx.update(encounters)
+            .set({ updatedAt: nextUpdatedAt(freshEncounter.updatedAt) })
             .where(eq(encounters.id, encounterId))
             .run();
         }

@@ -70,6 +70,14 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
   // Fake in-process providers bind 127.0.0.1; opt into private hosts so existing
   // AI-provider suites keep working. SSRF suites (#1064) unset this themselves.
   process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
+  delete process.env.HTTP_PROXY;
+  delete process.env.http_proxy;
+  delete process.env.HTTPS_PROXY;
+  delete process.env.https_proxy;
+  delete process.env.ALL_PROXY;
+  delete process.env.all_proxy;
+  process.env.NO_PROXY = '*';
+  process.env.no_proxy = '*';
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
   for (const { token, useValue } of options.overrides ?? []) {

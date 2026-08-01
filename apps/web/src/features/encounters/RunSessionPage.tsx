@@ -95,8 +95,8 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
-import { endedSummaryTallies, isDown } from './encounterEndedSummary';
-import { filterPlayerSafeCombatants } from '../screen/playerSafe';
+import { isDown, endedSummaryTallies } from './encounterEndedSummary';
+import { filterPlayerSafeCombatants, safeEncounterForCast } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   canStabilizeCombatant,
@@ -2698,6 +2698,11 @@ export default function RunSessionPage() {
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
+  const endedTallies =
+    encounter.status === 'ended'
+      ? endedSummaryTallies(safeEncounterForCast(encounter).combatants.filter((c) => !c.tokenHiddenByFog))
+      : null;
+
   return (
     <div
       className={`cf-print-root reading-surface max-w-4xl lg:max-w-6xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10${isDm ? ' cf-print-encounter' : ''}`}
@@ -3225,6 +3230,7 @@ export default function RunSessionPage() {
         return (
           <div
             data-testid="encounter-preparing-guidance"
+            data-lifecycle-orientation="true"
             className="text-muted"
             style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
           >
@@ -8436,6 +8442,30 @@ function AddCombatantPanel({
     }
   }
 
+  async function addAllFromParty() {
+    const available = characters.filter((c) => !existingCombatantCharacterIds.has(c.id));
+    if (available.length === 0) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await Promise.all(
+        available.map((character) =>
+          api.post(`${API}/encounters/${encounterId}/combatants`, {
+            kind: 'character' as CombatantKind,
+            characterId: character.id,
+            name: character.name,
+            hpMax: character.hpMax,
+          }),
+        ),
+      );
+      await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function addFromParty(character: Character) {
     setSaving(true);
     setError(null);
@@ -8700,31 +8730,45 @@ function AddCombatantPanel({
                 </p>
               );
             }
-            return available.map((c) => (
-              <Card
-                key={c.id}
-                density="compact" elev="sm" as="button"
-                style={{
-                  border: 0,
-                  font: 'inherit',
-                  color: 'var(--color-text)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '8px 12px',
-                  width: '100%',
-                }}
-                disabled={saving}
-                onClick={() => addFromParty(c)}
-              >
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
-                <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
-                  {c.hpCurrent}/{c.hpMax}
-                </span>
-              </Card>
-            ));
+            return (
+              <>
+                <Btn
+                  type="button"
+                  ghost
+                  data-testid="add-whole-party-button"
+                  disabled={saving}
+                  onClick={addAllFromParty}
+                  className="w-full text-xs mb-2"
+                >
+                  {t('encounters.addWholeParty', { count: available.length })}
+                </Btn>
+                {available.map((c) => (
+                  <Card
+                    key={c.id}
+                    density="compact" elev="sm" as="button"
+                    style={{
+                      border: 0,
+                      font: 'inherit',
+                      color: 'var(--color-text)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '8px 12px',
+                      width: '100%',
+                    }}
+                    disabled={saving}
+                    onClick={() => addFromParty(c)}
+                  >
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
+                    <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
+                      {c.hpCurrent}/{c.hpMax}
+                    </span>
+                  </Card>
+                ))}
+              </>
+            );
         })()}
       </div>
 
