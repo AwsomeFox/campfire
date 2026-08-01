@@ -4,7 +4,7 @@ import { seed, stateFor } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
- * Issue #713 / #1853 — expose Roll Mode Context Menu (Normal / Advantage / Disadvantage / Crit)
+ * Issue #713 / #1853 — expose Roll Mode Context Menu & Chooser
  * at the character-sheet roll controls.
  */
 
@@ -58,8 +58,10 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
+    const savesCard = page.locator('[data-testid="character-saving-throws"]');
+    await expect(savesCard).toBeVisible();
+
+    const strSave = savesCard.getByRole('button', { name: /Roll .* save/i }).first();
     await expect(strSave).toBeVisible();
 
     // Right-click opens the context menu
@@ -76,8 +78,8 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
-    const strSave = savesCard.getByRole('button', { name: /STR/i }).first();
+    const savesCard = page.locator('[data-testid="character-saving-throws"]');
+    const strSave = savesCard.getByRole('button', { name: /Roll .* save/i }).first();
     await expect(strSave).toBeVisible();
 
     const [rollRequest] = await Promise.all([
@@ -96,7 +98,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
     const results = await new AxeBuilder({ page })
-      .include('section:has-text("Saving throws")')
+      .include('[data-testid="character-saving-throws"]')
       .analyze();
     expect(results.violations).toEqual([]);
   });
