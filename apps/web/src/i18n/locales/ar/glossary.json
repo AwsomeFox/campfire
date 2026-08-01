@@ -47,14 +47,14 @@
         "definition": "Proposals are suggested campaign changes from players, collaborators, Scribe, or co-DM mode. A human DM approves or rejects them; pending proposals do not change canon."
       },
       "compendium": {
-        "label": "الموسوعة",
-        "short": "الموسوعة is the searchable rules reference, separate from campaign secrets.",
-        "definition": "الموسوعة is the installed rules reference for monsters, spells, items, and other game content. It supports play and prep without revealing DM-only campaign notes."
+        "label": "Compendium",
+        "short": "Compendium is the searchable rules reference, separate from campaign secrets.",
+        "definition": "Compendium is the installed rules reference for monsters, spells, items, and other game content. It supports play and prep without revealing DM-only campaign notes."
       },
       "sessionZero": {
-        "label": "الجلسة الصفرية",
-        "short": "الجلسة الصفرية is the shared table agreement for safety, tone, and house rules.",
-        "definition": "الجلسة الصفرية records the table's agreed boundaries, safety tools, tone, and house rules. Everyone in the campaign can read it; DMs maintain it."
+        "label": "Session Zero",
+        "short": "Session Zero is the shared table agreement for safety, tone, and house rules.",
+        "definition": "Session Zero records the table's agreed boundaries, safety tools, tone, and house rules. Everyone in the campaign can read it; DMs maintain it."
       },
       "storylines": {
         "label": "Storylines",

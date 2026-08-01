@@ -27,162 +27,162 @@
       }
     },
     "aiDm": {
-      "title": "AI Dungeon Master",
-      "loading": "Loading AI DM settings…",
-      "saved": "حفظd.",
-      "statusTag": "AI is currently: {{mode}}",
-      "intro": "Experimental. A server admin must enable server-side AI and set the provider + API key in the AI console for any of this to take effect; until then, saving here returns a clear \"disabled\" message. This page carries only the settings that vary per table — mode, budget, and steering.",
-      "inheritedNotice": "Using the server-wide defaults for <0>{{fields}}</0>. This campaign hasn't been configured yet, so it follows the server default and moves when an admin changes it. Saving any setting below keeps the current values and stops following.",
+      "title": "سيد اللعبة بالذكاء الاصطناعي",
+      "loading": "جارٍ تحميل إعدادات سيد اللعبة بالذكاء الاصطناعي…",
+      "saved": "تم الحفظ.",
+      "statusTag": "حالة الذكاء الاصطناعي الآن: {{mode}}",
+      "intro": "ميزة تجريبية. يجب على مسؤول الخادم تفعيل الذكاء الاصطناعي من جهة الخادم وضبط المزوّد ومفتاح API في وحدة تحكم الذكاء الاصطناعي حتى يعمل أي مما يلي؛ وإلى أن يحدث ذلك، يعرض الحفظ هنا رسالة واضحة بأن الميزة معطّلة. تحتوي هذه الصفحة فقط على الإعدادات التي تختلف من طاولة لأخرى — الوضع، والميزانية، والتوجيه.",
+      "inheritedNotice": "تُستخدم حاليًا الإعدادات الافتراضية على مستوى الخادم لـ <0>{{fields}}</0>. لم يتم ضبط هذه الحملة بعد، لذا فهي تتبع الإعداد الافتراضي للخادم وتتغيّر عندما يغيّره المسؤول. حفظ أي إعداد أدناه يثبّت القيم الحالية ويوقف اتباع الإعداد الافتراضي.",
       "modeStatusLabels": {
-        "off": "Off",
-        "co_dm": "Co-DM",
-        "driver": "Driver"
+        "off": "متوقف",
+        "co_dm": "مساعد سيد اللعبة",
+        "driver": "القيادة المباشرة"
       },
       "inheritedFieldLabels": {
-        "mode": "operating mode",
-        "instructions": "steering",
-        "tokenBudget": "token budget",
-        "actionQueueDepth": "action queue depth"
+        "mode": "وضع التشغيل",
+        "instructions": "التوجيه",
+        "tokenBudget": "ميزانية الرموز",
+        "actionQueueDepth": "عمق قائمة الإجراءات"
       },
       "modeOptions": {
         "off": {
-          "label": "Off",
-          "blurb": "No AI participation. The seat is idle — nothing is proposed or narrated."
+          "label": "متوقف",
+          "blurb": "لا مشاركة للذكاء الاصطناعي. المقعد خامل — لا يُقترح ولا يُروى أي شيء."
         },
         "co_dm": {
-          "label": "Co-DM (assist)",
-          "blurb": "Asks. The AI only proposes — every draft lands in your approval queue, and nothing changes until a human DM accepts or rejects it. The AI never writes to canon directly. Recommended."
+          "label": "مساعد سيد اللعبة",
+          "blurb": "يقترح فقط. يقترح الذكاء الاصطناعي فقط — كل مسودة تصل إلى قائمة الموافقات لديك، ولا يتغيّر شيء حتى يوافق عليه سيد اللعبة البشري أو يرفضه. لا يكتب الذكاء الاصطناعي إلى المرجع الرسمي مباشرة أبدًا. موصى به."
         },
         "driver": {
-          "label": "Driver",
-          "blurb": "Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, creates an encounter when the scene calls for one (always as DM-only prep, hidden until you reveal it), reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider."
+          "label": "القيادة المباشرة",
+          "blurb": "يتصرف مباشرة. يتولى الذكاء الاصطناعي مقعد سيد اللعبة ويدير الجلسة مباشرة — فهو يروي القصة، ويرمي النرد، ويطبّق نقاط الحياة والحالات، ويمنح نقاط الخبرة، ويقدّم الأدوار، وينشئ مواجهة عندما يستدعي المشهد ذلك (دائمًا كتحضير خاص بسيد اللعبة، مخفي حتى تكشفه)، ويكشف مناطق الخريطة، ويدوّن ملاحظات على الطاولة ضمن الميزانية التي حددتها. لا تزال تعديلات المرجع الرسمي (شخصيات غير قابلة للعب جديدة، مهام، أماكن) تتحول إلى اقتراحات لمراجعتك. يتطلب تفعيل علم الخادم التجريبي، وميزانية رموز موجبة، ومزوّدًا مضبوطًا."
         }
       },
       "errors": {
-        "load": "تعذّر تحميل AI DM settings.",
-        "saveMode": "Couldn't change the mode.",
-        "saveNarrationLanguage": "تعذّر الحفظ narration language.",
-        "saveBudget": "تعذّر الحفظ the budget.",
-        "saveInstructions": "تعذّر الحفظ the instructions.",
-        "saveTableStyle": "Could not save table style.",
-        "invalidBudget": "Enter a non-negative number."
+        "load": "تعذّر تحميل إعدادات سيد اللعبة بالذكاء الاصطناعي.",
+        "saveMode": "تعذّر تغيير الوضع.",
+        "saveNarrationLanguage": "تعذّر حفظ لغة السرد.",
+        "saveBudget": "تعذّر حفظ الميزانية.",
+        "saveInstructions": "تعذّر حفظ التوجيهات.",
+        "saveTableStyle": "تعذّر حفظ أسلوب الطاولة.",
+        "invalidBudget": "أدخل رقمًا غير سالب."
       },
       "narrationLanguage": {
-        "sectionTitle": "Narration language",
-        "feedbackSubject": "Narration language",
-        "body": "Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your personal UI language in التفضيلات.",
-        "label": "Campaign narration language",
-        "save": "حفظ language",
+        "sectionTitle": "لغة السرد",
+        "feedbackSubject": "لغة السرد",
+        "body": "تحكم لغة السرد الذي يولّده الذكاء الاصطناعي من وضع القيادة المباشرة، ومسودات مساعد سيد اللعبة، وملخصات الكاتب. وهي منفصلة عن لغة واجهتك الشخصية في التفضيلات.",
+        "label": "لغة سرد الحملة",
+        "save": "حفظ اللغة",
         "options": {
-          "en": "English",
-          "fr": "French",
-          "de": "German",
-          "es": "Spanish",
-          "it": "Italian",
-          "pt": "Portuguese",
-          "ja": "Japanese",
-          "ko": "Korean",
-          "zh": "Chinese",
-          "ar": "Arabic",
-          "he": "Hebrew",
-          "ru": "Russian",
-          "multilingual": "Multilingual (match speakers)"
+          "en": "الإنجليزية",
+          "fr": "الفرنسية",
+          "de": "الألمانية",
+          "es": "الإسبانية",
+          "it": "الإيطالية",
+          "pt": "البرتغالية",
+          "ja": "اليابانية",
+          "ko": "الكورية",
+          "zh": "الصينية",
+          "ar": "العربية",
+          "he": "العبرية",
+          "ru": "الروسية",
+          "multilingual": "متعدد اللغات (مطابقة المتحدثين)"
         }
       },
       "mode": {
-        "sectionTitle": "Operating mode"
+        "sectionTitle": "وضع التشغيل"
       },
       "provider": {
-        "sectionTitle": "AI provider",
-        "sourceCampaign": "campaign override",
-        "sourceServer": "server default",
-        "readyTag": "credential ready",
-        "missingTag": "credential missing",
-        "readyDetail": "Credential source: {{source}}. {{scopeNote}}",
+        "sectionTitle": "مزوّد الذكاء الاصطناعي",
+        "sourceCampaign": "تجاوز خاص بالحملة",
+        "sourceServer": "افتراضي الخادم",
+        "readyTag": "بيانات الاعتماد جاهزة",
+        "missingTag": "بيانات الاعتماد مفقودة",
+        "readyDetail": "مصدر بيانات الاعتماد: {{source}}. {{scopeNote}}",
         "credentialSourceLabels": {
-          "stored": "stored encrypted key",
-          "environment": "environment credential",
-          "server": "server-default credential",
-          "not-required": "no credential required",
-          "none": "no credential available"
+          "stored": "مفتاح مشفر مخزّن",
+          "environment": "بيانات اعتماد من البيئة",
+          "server": "بيانات اعتماد افتراضية من الخادم",
+          "not-required": "لا تتطلب بيانات اعتماد",
+          "none": "لا توجد بيانات اعتماد متاحة"
         },
-        "scopeNoteCampaign": "This campaign overrides the server default below.",
-        "scopeNoteServer": "Inherited from the server default set by your server admin.",
-        "missingDetail": "The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.",
-        "noneConfigured": "No AI provider configured — ask your server admin to set one in the AI console. You can also set a campaign-specific override below.",
-        "advancedToggle": "Advanced: override provider for this campaign",
-        "advancedIntro": "Optional. Most campaigns leave this blank and use the server default. Set a provider here to override it for this table only (a key is optional — a keyless override still uses the server key with the server's endpoint)."
+        "scopeNoteCampaign": "تتجاوز هذه الحملة الإعداد الافتراضي للخادم أدناه.",
+        "scopeNoteServer": "موروث من الإعداد الافتراضي للخادم الذي ضبطه مسؤول الخادم.",
+        "missingDetail": "إعدادات المزوّد موجودة، لكن لا تتوفر بيانات اعتماد قابلة للاستخدام. اطلب من مسؤول الخادم ضبط مفتاح أو بيانات اعتماد بيئية.",
+        "noneConfigured": "لم يتم ضبط مزوّد ذكاء اصطناعي — اطلب من مسؤول الخادم ضبط واحد في وحدة تحكم الذكاء الاصطناعي. يمكنك أيضًا ضبط تجاوز خاص بالحملة أدناه.",
+        "advancedToggle": "متقدم: تجاوز المزوّد لهذه الحملة",
+        "advancedIntro": "اختياري. تترك معظم الحملات هذا فارغًا وتستخدم الإعداد الافتراضي للخادم. اضبط مزوّدًا هنا لتجاوزه لهذه الطاولة فقط (المفتاح اختياري — التجاوز بلا مفتاح يستخدم مفتاح الخادم مع نقطة نهاية الخادم)."
       },
       "budget": {
-        "sectionTitle": "Budget & usage",
-        "feedbackSubject": "AI budget",
-        "body": "A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.",
-        "label": "Token budget",
-        "save": "حفظ budget",
-        "usageLine": "{{used}} used · {{reserved}} reserved · {{unknown}} unknown · {{remaining}} / {{budget}} remaining · {{turns}}",
-        "turnsOne": "1 turn",
-        "turnsSome": "{{n}} turns",
-        "lastTurnSuffix": " · last {{when}}",
-        "refundedLine": "{{refunded}} refunded",
-        "overageSuffix": " · {{overage}} overage recorded"
+        "sectionTitle": "الميزانية والاستخدام",
+        "feedbackSubject": "ميزانية الذكاء الاصطناعي",
+        "body": "حد أقصى ثابت للرموز. تتوقف الأدوار عند بلوغه — يلزم وجود ميزانية موجبة لتشغيل وضع القيادة المباشرة.",
+        "label": "ميزانية الرموز",
+        "save": "حفظ الميزانية",
+        "usageLine": "{{used}} مستخدَم · {{reserved}} محجوز · {{unknown}} غير معروف · {{remaining}} / {{budget}} متبقٍ · {{turns}}",
+        "turnsOne": "دور واحد",
+        "turnsSome": "{{n}} أدوار",
+        "lastTurnSuffix": " · آخر مرة {{when}}",
+        "refundedLine": "{{refunded}} مُسترد",
+        "overageSuffix": " · {{overage}} تجاوز مسجَّل"
       },
       "instructions": {
-        "sectionTitle": "Steering instructions",
-        "feedbackSubject": "AI instructions",
-        "body": "DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.",
-        "placeholder": "e.g. Be terse and grim. Never reveal the traitor's identity until Act 3.",
-        "save": "حفظ instructions"
+        "sectionTitle": "توجيهات القيادة",
+        "feedbackSubject": "توجيهات الذكاء الاصطناعي",
+        "body": "شخصية أو قواعد خاصة بسيد اللعبة فقط للذكاء الاصطناعي. لا تُعرض أبدًا للاعبين — هذا هو المكان الذي يمكن أن تبقى فيه أسرار الحبكة.",
+        "placeholder": "مثال: كن مقتضبًا وقاتمًا. لا تكشف هوية الخائن أبدًا حتى الفصل الثالث.",
+        "save": "حفظ التوجيهات"
       },
       "tableStyle": {
-        "sectionTitle": "Table style",
-        "feedbackSubject": "Table style",
-        "body": "Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing about it.",
-        "save": "حفظ table style",
+        "sectionTitle": "أسلوب الطاولة",
+        "feedbackSubject": "أسلوب الطاولة",
+        "body": "يطلب من الذكاء الاصطناعي أن يروي بأسلوب معيّن. كل خيار يضيف سطرًا من التوجيه إلى موجّهه — فهو يوجّه الأسلوب والإيقاع، ولا يغيّر ما هو صحيح، ويمكن للنموذج تجاهله. اترك أي محور على الافتراضي كي لا تقول شيئًا بشأنه.",
+        "save": "حفظ أسلوب الطاولة",
         "axes": {
-          "tone": "Tone",
-          "pacing": "Pacing",
-          "verbosity": "Verbosity",
-          "combatStyle": "Combat style",
-          "npcDepth": "NPC depth"
+          "tone": "النبرة",
+          "pacing": "الإيقاع",
+          "verbosity": "مستوى التفصيل",
+          "combatStyle": "أسلوب القتال",
+          "npcDepth": "عمق الشخصيات غير اللاعبة"
         },
         "options": {
           "tone": {
-            "default": "Default (no preference)",
-            "gritty": "Gritty — consequences bite",
-            "heroic": "Heroic — competent and bright",
-            "whimsical": "Whimsical — playful and absurd",
-            "noir": "Noir — moral greys, rain-slick",
-            "cozy": "Cozy — warm and low-stakes"
+            "default": "افتراضي (بلا تفضيل)",
+            "gritty": "قاسٍ — العواقب مؤلمة",
+            "heroic": "بطولي — كفء ومشرق",
+            "whimsical": "مرح — لعوب وعبثي",
+            "noir": "نوار — رماديات أخلاقية وأجواء مطرية",
+            "cozy": "دافئ — مريح ومنخفض المخاطر"
           },
           "pacing": {
-            "default": "Default (no preference)",
-            "brisk": "Brisk — cut to the moment",
-            "deliberate": "Deliberate — let scenes breathe"
+            "default": "افتراضي (بلا تفضيل)",
+            "brisk": "سريع — انتقل إلى لحظة الحدث",
+            "deliberate": "متأنٍ — دع المشاهد تتنفس"
           },
           "verbosity": {
-            "default": "Default (no preference)",
-            "concise": "Concise — short beats",
-            "vivid": "Vivid — rich description"
+            "default": "افتراضي (بلا تفضيل)",
+            "concise": "موجز — لقطات قصيرة",
+            "vivid": "حي — وصف غني"
           },
           "combatStyle": {
-            "default": "Default (no preference)",
-            "tactical": "Tactical — positions and options",
-            "cinematic": "Cinematic — momentum and imagery",
-            "lethal": "Lethal — enemies fight to win",
-            "forgiving": "Forgiving — setbacks over death"
+            "default": "افتراضي (بلا تفضيل)",
+            "tactical": "تكتيكي — المواقع والخيارات",
+            "cinematic": "سينمائي — زخم وصور حية",
+            "lethal": "قاتل — الأعداء يقاتلون للفوز",
+            "forgiving": "متسامح — انتكاسات بدل الموت"
           },
           "npcDepth": {
-            "default": "Default (no preference)",
-            "light": "Light — a name and a trait",
-            "deep": "Deep — voices and motives"
+            "default": "افتراضي (بلا تفضيل)",
+            "light": "خفيف — اسم وسمة",
+            "deep": "عميق — أصوات ودوافع"
           }
         }
       }
     },
     "providerForm": {
       "feedbackSubject": {
-        "server": "Server AI provider",
-        "campaign": "Campaign AI provider"
+        "server": "مزوّد الذكاء الاصطناعي للخادم",
+        "campaign": "مزوّد الذكاء الاصطناعي للحملة"
       }
     }
   }

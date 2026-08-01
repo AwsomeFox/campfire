@@ -1,90 +1,90 @@
 {
   "campaignOnboarding": {
-    "title": "Run a one-shot from here",
-    "intro": "{{done}} of {{total}} core steps ready. Follow the next action from invite through recap, or open the checklist for the whole path.",
-    "homebrewNote": "Homebrew mode is active: no ruleset compendium is required for this path.",
-    "nextLabel": "Next one-shot action",
-    "checklistLabel": "One-shot onboarding checklist",
+    "title": "شغّل مغامرة من جلسة واحدة من هنا",
+    "intro": "{{done}} من {{total}} خطوات أساسية جاهزة. اتبع الإجراء التالي من الدعوات حتى الملخص، أو افتح قائمة التحقق لرؤية المسار كاملًا.",
+    "homebrewNote": "وضع القواعد المخصصة مفعّل: لا تحتاج إلى موسوعة قواعد لهذا المسار.",
+    "nextLabel": "الإجراء التالي للجلسة الواحدة",
+    "checklistLabel": "قائمة إعداد مغامرة الجلسة الواحدة",
     "actions": {
-      "showChecklist": "Show checklist",
-      "hideChecklist": "Hide checklist",
-      "skip": "Skip tour",
-      "resume": "Resume guide",
-      "solo": "Playing solo"
+      "showChecklist": "إظهار قائمة التحقق",
+      "hideChecklist": "إخفاء قائمة التحقق",
+      "skip": "تخطي الجولة",
+      "resume": "استئناف الدليل",
+      "solo": "اللعب منفردًا"
     },
     "paused": {
-      "title": "One-shot guide paused",
-      "body": "{{done}} of {{total}} core steps were ready when you paused it."
+      "title": "تم إيقاف دليل الجلسة الواحدة مؤقتًا",
+      "body": "{{done}} من {{total}} خطوات أساسية كانت جاهزة عند إيقافه."
     },
     "complete": {
-      "title": "Your one-shot runway is ready",
-      "body": "You have a party, adventure seed, encounter, rewards, and a recap lane. Keep refining modules as needed.",
-      "action": "Open sessions"
+      "title": "مسار جلستك الواحدة جاهز",
+      "body": "لديك فريق، وبذرة مغامرة، ومواجهة، ومكافآت، ومسار للملخص. واصل تحسين الوحدات عند الحاجة.",
+      "action": "فتح الجلسات"
     },
     "badges": {
-      "done": "Done",
-      "todo": "Next",
-      "ready": "Ready",
-      "optional": "Optional"
+      "done": "تم",
+      "todo": "التالي",
+      "ready": "جاهز",
+      "optional": "اختياري"
     },
     "announcements": {
-      "checklistShown": "One-shot checklist expanded.",
-      "checklistHidden": "One-shot checklist collapsed.",
-      "skipped": "One-shot guide skipped. Resume it from the dashboard any time.",
-      "resumed": "One-shot guide resumed.",
-      "soloEnabled": "Solo mode selected. Invitations are skipped for this campaign guide."
+      "checklistShown": "تم توسيع قائمة تحقق الجلسة الواحدة.",
+      "checklistHidden": "تم طي قائمة تحقق الجلسة الواحدة.",
+      "skipped": "تم تخطي دليل الجلسة الواحدة. يمكنك استئنافه من لوحة التحكم في أي وقت.",
+      "resumed": "تم استئناف دليل الجلسة الواحدة.",
+      "soloEnabled": "تم اختيار الوضع الفردي. سيتم تخطي الدعوات في دليل هذه الحملة."
     },
     "steps": {
       "rules": {
-        "homebrewTitle": "Homebrew rules selected",
-        "homebrewBody": "No rule system is selected. Use manual DCs, stat blocks, and rulings; the one-shot path still works.",
-        "rulesetTitle": "Ruleset selected",
-        "rulesetBody": "A ruleset is attached to this campaign, so compendium and encounter helpers can use it.",
-        "action": "Review rules"
+        "homebrewTitle": "تم اختيار قواعد مخصصة",
+        "homebrewBody": "لم يتم اختيار نظام قواعد. استخدم درجات الصعوبة وكتل الإحصاءات والأحكام يدويًا؛ وسيظل مسار الجلسة الواحدة يعمل.",
+        "rulesetTitle": "تم اختيار نظام قواعد",
+        "rulesetBody": "تم ربط نظام قواعد بهذه الحملة، لذا يمكن للموسوعة ومساعدات المواجهات استخدامه.",
+        "action": "مراجعة القواعد"
       },
       "ai": {
-        "title": "AI helper optional",
-        "todoBody": "AI-DM is available if you want a solo or assisted table, but it is not required for the one-shot path.",
-        "doneBody": "AI-DM is enabled for this campaign and can help run or draft parts of the session.",
-        "todoAction": "Configure AI",
-        "doneAction": "Review AI"
+        "title": "مساعد الذكاء الاصطناعي اختياري",
+        "todoBody": "يتوفر AI-DM إذا أردت طاولة فردية أو بمساعدة، لكنه ليس مطلوبًا لمسار الجلسة الواحدة.",
+        "doneBody": "تم تفعيل AI-DM لهذه الحملة ويمكنه المساعدة في إدارة أجزاء من الجلسة أو صياغتها.",
+        "todoAction": "إعداد الذكاء الاصطناعي",
+        "doneAction": "مراجعة الذكاء الاصطناعي"
       },
       "compendium": {
-        "title": "الموسوعة ready",
-        "body": "Use the campaign ruleset's compendium when you need monsters, items, or reference text.",
-        "action": "Open compendium"
+        "title": "الموسوعة جاهزة",
+        "body": "استخدم موسوعة نظام قواعد الحملة عندما تحتاج إلى وحوش أو عناصر أو نصوص مرجعية.",
+        "action": "فتح الموسوعة"
       },
       "invite": {
-        "title": "Invite the table",
-        "body": "Create a player or viewer invite so the group can join the campaign before play.",
-        "unknownBody": "Checking the member roster. If this is a solo or AI-assisted one-shot, you can skip invitations.",
-        "action": "Open invites"
+        "title": "ادعُ المجموعة",
+        "body": "أنشئ دعوة للاعب أو مشاهد حتى تتمكن المجموعة من الانضمام إلى الحملة قبل اللعب.",
+        "unknownBody": "جارٍ التحقق من قائمة الأعضاء. إذا كانت هذه جلسة واحدة فردية أو بمساعدة الذكاء الاصطناعي، يمكنك تخطي الدعوات.",
+        "action": "فتح الدعوات"
       },
       "party": {
-        "title": "Add the party",
-        "body": "Add at least one active character so encounters, HP, XP, and loot have somewhere to land.",
-        "action": "Add party member"
+        "title": "أضف الفريق",
+        "body": "أضف شخصية نشطة واحدة على الأقل حتى تجد المواجهات ونقاط الصحة والخبرة والغنائم مكانًا لها.",
+        "action": "إضافة عضو إلى الفريق"
       },
       "adventure": {
-        "title": "Create a quest or starting location",
-        "body": "Give the one-shot a clear objective or place to begin before building combat.",
-        "questAction": "Create quest",
-        "locationAction": "Add location"
+        "title": "أنشئ مهمة أو موقع بداية",
+        "body": "امنح الجلسة الواحدة هدفًا واضحًا أو مكانًا تبدأ منه قبل بناء القتال.",
+        "questAction": "إنشاء مهمة",
+        "locationAction": "إضافة موقع"
       },
       "encounter": {
-        "title": "Prep the encounter",
-        "body": "Create the first fight or challenge and link it to the quest, location, or session when helpful.",
-        "action": "Create encounter"
+        "title": "حضّر المواجهة",
+        "body": "أنشئ القتال أو التحدي الأول واربطه بالمهمة أو الموقع أو الجلسة عندما يكون ذلك مفيدًا.",
+        "action": "إنشاء مواجهة"
       },
       "rewards": {
-        "title": "Stage rewards and XP",
-        "body": "Track loot, coins, XP, or level progress so the finish line is ready before the dice hit the table.",
-        "action": "Add reward"
+        "title": "جهّز المكافآت ونقاط الخبرة",
+        "body": "تتبّع الغنائم أو العملات أو نقاط الخبرة أو تقدم المستوى حتى تكون النهاية جاهزة قبل رمي النرد.",
+        "action": "إضافة مكافأة"
       },
       "recap": {
-        "title": "Write the recap",
-        "body": "After the one-shot, publish a recap so players have a shared record and next hook.",
-        "action": "Add recap"
+        "title": "اكتب الملخص",
+        "body": "بعد الجلسة الواحدة، انشر ملخصًا حتى يكون لدى اللاعبين سجل مشترك وخطاف لما بعد ذلك.",
+        "action": "إضافة ملخص"
       }
     }
   }

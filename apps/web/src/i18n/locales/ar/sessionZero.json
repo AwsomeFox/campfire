@@ -12,9 +12,9 @@
       "save": "تعذّر الحفظ the charter.",
       "saveSupport": "تعذّر الحفظ your support preference.",
       "deleteSupport": "تعذّر الحذف your support preference.",
-      "loadConsent": "تعذّر تحميل charter consent.",
-      "acknowledge": "Couldn't record your answer.",
-      "publish": "Couldn't publish the charter version."
+      "loadConsent": "تعذّر تحميل موافقة الميثاق.",
+      "acknowledge": "تعذّر تسجيل إجابتك.",
+      "publish": "تعذّر نشر إصدار الميثاق."
     },
     "savedSupport": "Your support preference was saved.",
     "deletedSupport": "Your support preference was deleted.",
@@ -56,50 +56,50 @@
       }
     },
     "preview": {
-      "heading": "This table's boundaries",
-      "intro": "Agreed by the table as charter version {{version}}. Read it before you join — you can decline.",
-      "noneRecorded": "None recorded.",
-      "boundariesOnly": "House rules and tone are shared with the table after you join.",
-      "aiHeading": "AI and your words",
-      "aiDisabled": "This table does not send member-authored material to external AI providers.",
-      "aiMemberConsent": "This table may send member-authored material to external AI providers, but only for members who separately opt in."
+      "heading": "حدود هذه الطاولة",
+      "intro": "اتفقت عليها الطاولة بصفتها الإصدار {{version}} من الميثاق. اقرأها قبل الانضمام — يمكنك الرفض.",
+      "noneRecorded": "لا يوجد شيء مسجّل.",
+      "boundariesOnly": "تُشارَك قواعد المنزل والنبرة مع الطاولة بعد انضمامك.",
+      "aiHeading": "الذكاء الاصطناعي وكلماتك",
+      "aiDisabled": "لا ترسل هذه الطاولة المواد التي يكتبها الأعضاء إلى مزوّدي ذكاء اصطناعي خارجيين.",
+      "aiMemberConsent": "قد ترسل هذه الطاولة المواد التي يكتبها الأعضاء إلى مزوّدي ذكاء اصطناعي خارجيين، لكن فقط للأعضاء الذين وافقوا صراحةً."
     },
     "join": {
-      "charterAgree": "I have read the table's boundaries and agree to play within them.",
-      "decline": "Decline",
-      "declinedMessage": "Your decline has been recorded and the DM can see it. You have not joined.",
-      "charterChanged": "The table's charter changed while you were reviewing it. Please read the updated boundaries and agree again before joining."
+      "charterAgree": "لقد قرأت حدود هذه الطاولة وأوافق على اللعب ضمنها.",
+      "decline": "رفض",
+      "declinedMessage": "تم تسجيل رفضك ويمكن للمدير رؤيته. لم تنضم إلى الطاولة.",
+      "charterChanged": "تغيّر ميثاق الطاولة أثناء مراجعتك له. يرجى قراءة الحدود المحدّثة والموافقة مجدداً قبل الانضمام."
     },
     "consent": {
-      "heading": "Charter versions & consent",
-      "noVersionsDm": "No version published yet. Publish the draft so the table can acknowledge it, and so AI is bound by an agreed version.",
-      "noVersionsPlayer": "The DM has not published a charter version yet.",
-      "effective": "The table is playing under version {{version}}.",
-      "noneEffective": "No version has been agreed yet.",
-      "latest": "latest published: v{{version}}",
-      "awaitingMaterial": "A newer version withdrew a protection. It does not take effect until everyone acknowledges it.",
-      "awaitingRoutine": "A newer version is published and awaiting acknowledgment.",
-      "removedLines": "Lines removed:",
-      "removedVeils": "Veils removed:",
-      "removedSafetyTools": "Safety tools removed:",
-      "addedLines": "Lines added:",
-      "addedVeils": "Veils added:",
-      "addedSafetyTools": "Safety tools added:",
-      "dmNote": "DM's note: {{note}}",
+      "heading": "إصدارات الميثاق والموافقة",
+      "noVersionsDm": "لم يُنشر أي إصدار بعد. انشر المسودة كي تتمكن الطاولة من الإقرار بها، وكي يلتزم الذكاء الاصطناعي بإصدار متفق عليه.",
+      "noVersionsPlayer": "لم ينشر سيد اللعبة أي إصدار من الميثاق بعد.",
+      "effective": "تلعب الطاولة وفق الإصدار {{version}}.",
+      "noneEffective": "لم يُتفق على أي إصدار بعد.",
+      "latest": "آخر إصدار منشور: v{{version}}",
+      "awaitingMaterial": "سحب إصدار أحدث إحدى الحمايات. لن يسري حتى يقرّ به الجميع.",
+      "awaitingRoutine": "نُشر إصدار أحدث وينتظر الإقرار.",
+      "removedLines": "خطوط أُزيلت:",
+      "removedVeils": "حُجُب أُزيلت:",
+      "removedSafetyTools": "أدوات أمان أُزيلت:",
+      "addedLines": "خطوط أُضيفت:",
+      "addedVeils": "حُجُب أُضيفت:",
+      "addedSafetyTools": "أدوات أمان أُضيفت:",
+      "dmNote": "ملاحظة سيد اللعبة: {{note}}",
       "yours": {
-        "acknowledged": "You have acknowledged the latest version.",
-        "discuss": "You asked to discuss the latest version.",
-        "declined": "You declined the latest version."
+        "acknowledged": "لقد أقررت بأحدث إصدار.",
+        "discuss": "طلبت مناقشة أحدث إصدار.",
+        "declined": "رفضت أحدث إصدار."
       },
-      "yoursNone": "You have not answered the latest version yet.",
-      "noteLabel": "Note (required to discuss or decline)",
-      "summaryLabel": "What changed and why (shown to the table)",
-      "acknowledge": "Acknowledge",
-      "discuss": "Discuss",
-      "decline": "Decline",
-      "outstanding": "Still to answer: {{names}}",
-      "publish": "Publish draft as new version",
-      "publishHint": "Snapshots the draft. Removing a line, veil or safety tool requires everyone to acknowledge again."
+      "yoursNone": "لم تجب على أحدث إصدار بعد.",
+      "noteLabel": "ملاحظة (مطلوبة للمناقشة أو الرفض)",
+      "summaryLabel": "ما الذي تغيّر ولماذا (يُعرض للطاولة)",
+      "acknowledge": "إقرار",
+      "discuss": "مناقشة",
+      "decline": "رفض",
+      "outstanding": "بانتظار الإجابة: {{names}}",
+      "publish": "نشر المسودة كإصدار جديد",
+      "publishHint": "يأخذ لقطة من المسودة. إزالة خط أو حجاب أو أداة أمان تتطلب إقرار الجميع من جديد."
     }
   }
 }
