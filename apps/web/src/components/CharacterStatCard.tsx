@@ -314,11 +314,7 @@ export function CharacterStatCard({
                             disabled={roller.rolling}
                             onRoll={(mode) => void roller.roll(toHitExpr(a.toHit, mode === 'advantage' ? 'adv' : mode === 'disadvantage' ? 'dis' : 'flat')!, `${character.name} · ${a.name} to hit${mode !== 'normal' ? ` (${mode})` : ''}`)}
                           >
-<<<<<<< HEAD
                             🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}
-                          </button>
-=======
-                            {a.toHit} to hit
                           </RollContextMenu>
                         ) : (
                           <span className="text-muted">🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}</span>
