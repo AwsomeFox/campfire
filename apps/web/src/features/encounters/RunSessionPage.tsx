@@ -113,6 +113,7 @@ import {
 import { pendingFogForEncounter, reconcileFogSyncState, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
+import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -2671,6 +2672,7 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
+  const myCombatants = orderedCombatants.filter(c => c.characterId != null && ownedCharacterIds.has(c.characterId));
   // Prefer a combatant the viewer can resolve. Fall back only to character combatants
   // (party HP is shared table knowledge); never surface monster/NPC concentration
   // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
@@ -3237,6 +3239,20 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+        />
+      )}
+
+      {/* Sticky Player Vitals Header */}
+      {!isDm && myCombatants.length > 0 && (
+        <PlayerVitalsHeader 
+          combatants={myCombatants} 
+          charactersById={charactersById}
+          onHpDelta={(id, delta) => {
+            if (reconcileBlocks) return;
+            const actorId = hpLogActorId(currentCombatantId, id);
+            hpDelta.mutate({ combatantId: id, delta, actorId });
+          }}
+          onSetHpMax={(id, max) => patchCombatant(id, { hpMax: max })}
         />
       )}
 
