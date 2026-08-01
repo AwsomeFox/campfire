@@ -123,7 +123,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 
-import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
+import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { CombatantActionsList } from './CombatantActionsList';
 import { CombatantStatblockEditor } from './CombatantStatblockEditor';
@@ -2787,11 +2787,6 @@ export default function RunSessionPage() {
             : t('encounters.reconcile.done')}
         </div>
       )}
-
-      {/* Issue #415: the targeted player's in-page check-request prompt(s). Shown for any viewer
-          who owns a targeted character (a player their PC, or the DM their own PC), so a DM asking
-          the party sees the same one-tap prompt for their own character. */}
-      <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
       {canEditEncounter && (
         <VisibleToPlayersBar

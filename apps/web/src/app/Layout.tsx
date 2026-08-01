@@ -53,14 +53,9 @@ import {
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import { SafetyHoldBar } from '../components/SafetyHoldBar';
 import { onPendingProposalsBadgeBump, onPendingProposalsBadgeSet, onInboxCountBadgeSet } from '../lib/proposalsBadgeBus';
-import {
-  buildCampaignNavGroups,
-  isActiveNavPath,
-  navGroupsForMoreSheet,
-  type NavGroup,
-  type NavItem,
-} from './campaignNav';
+import { buildCampaignNavGroups, isActiveNavPath, navGroupsForMoreSheet, type NavGroup, type NavItem } from './campaignNav';
 import { UI_ICON_SIZE } from '../lib/uiIcons';
+import { CheckRequestPrompts } from '../features/encounters/CheckRequests';
 
 function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
   if (campaignId === undefined) return <>{children}</>;
@@ -1100,6 +1095,7 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
+            {campaignId !== undefined && <CheckRequestPrompts campaignId={campaignId} />}
             <Outlet />
           </MentionsProvider>
         </main>

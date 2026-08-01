@@ -28,9 +28,11 @@
  * effectively immediate for a tab that has this campaign open, no polling wait.
  */
 import { useCallback, useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { CampaignEvent } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { invalidateCampaignCheckRequests } from '../../lib/query';
 import {
   openMembershipSyncChannel,
   type MembershipSyncMessage,
@@ -47,6 +49,7 @@ export function useMembershipLiveSync(
   campaignId: number | undefined,
   options?: MembershipLiveSyncOptions,
 ): void {
+  const queryClient = useQueryClient();
   const { me, refresh } = useAuth();
   const userId = me?.user.id;
   const channelRef = useRef<BroadcastChannel | null>(null);
@@ -69,6 +72,9 @@ export function useMembershipLiveSync(
 
   const onEvent = useCallback(
     (event: CampaignEvent) => {
+      if (event.type === 'check.requested' || event.type === 'check.resolved') {
+        invalidateCampaignCheckRequests(queryClient, event.campaignId);
+      }
       if (event.type === 'encounter.updated' || event.type === 'encounter.deleted') {
         optionsRef.current?.onEncounterChange?.();
       }

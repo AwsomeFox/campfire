@@ -35,6 +35,7 @@ import {
 } from './dashboardLoadPolicy';
 import { GameIcon } from '../../components/GameIcon';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { CheckRequestPanel } from '../encounters/CheckRequests';
 
 // Slow fallback poll for summary entities that do not have campaign events yet.
 // Scheduling is event-driven (#790) and does not add a second polling path.
@@ -341,6 +342,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+          {role === 'dm' && <CheckRequestPanel campaignId={id} characters={summary.characters} />}
           <PartyCard campaignId={id} characters={summary.party} accessibleCharacterIds={new Set(summary.characters.map((character) => character.id))} />
           <NpcGrid campaignId={id} npcs={summary.npcs} />
           <HandoutsCard campaignId={id} />
