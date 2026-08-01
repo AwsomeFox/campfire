@@ -253,6 +253,7 @@ import {
   type PinchGesture,
 } from './mapViewport';
 import { tokenDiameterPx } from './tokenFootprint';
+import { tokenIdentityBackground } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -737,6 +738,83 @@ function HpBandBar({ band }: { band: string | null }) {
   return (
     <div className={`cf-hp ${tone}`}>
       <div style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+export function hpDisplay(combatant: Pick<Combatant, 'hpCurrent' | 'hpMax' | 'hpBand'>): string {
+  if (combatant.hpCurrent != null && combatant.hpMax != null) {
+    return `${combatant.hpCurrent} / ${combatant.hpMax}`;
+  }
+  if (combatant.hpBand) {
+    return HP_BAND_LABEL[combatant.hpBand] ?? '—';
+  }
+  return '—';
+}
+
+function InitiativeStrip({
+  combatants,
+  currentCombatantId,
+  charactersById,
+}: {
+  combatants: readonly Combatant[];
+  currentCombatantId: number | null;
+  charactersById: Map<number, Character>;
+}) {
+  return (
+    <div
+      className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
+      style={{
+        scrollSnapType: 'x mandatory',
+        scrollbarWidth: 'none',
+      }}
+      data-testid="initiative-strip"
+    >
+      {combatants.map((c) => {
+        const isCurrent = c.id === currentCombatantId;
+        const character = c.characterId ? charactersById.get(c.characterId) : null;
+        const isSilhouette = c.kind === 'npc' && c.npcId == null;
+
+        return (
+          <div
+            key={c.id}
+            className="flex flex-col items-center gap-1 flex-none"
+            style={{ scrollSnapAlign: 'center' }}
+            ref={(el) => {
+              if (isCurrent && el) {
+                el.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
+              }
+            }}
+          >
+            <div
+              aria-current={isCurrent ? 'true' : undefined}
+              className="flex items-center justify-center overflow-hidden bg-surface"
+              style={{
+                width: isCurrent ? 48 : 40,
+                height: isCurrent ? 48 : 40,
+                transition: 'all 0.2s ease',
+                border: isCurrent ? '2px solid var(--color-accent)' : '2px solid transparent',
+                background: tokenIdentityBackground(c),
+                borderRadius: 6,
+              }}
+              title={c.name}
+            >
+              {character?.portraitUrl ? (
+                <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
+              ) : isSilhouette ? (
+                <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
+              ) : (
+                <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
+                  {tokenInitials(c.name)}
+                </span>
+              )}
+            </div>
+            <span className="text-muted" style={{ fontSize: 10, lineHeight: 1 }}>
+              {hpDisplay(c)}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3456,6 +3534,13 @@ export default function RunSessionPage() {
         className="grid gap-4 min-w-0 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
       >
         <div className="space-y-4 min-w-0">
+          {orderedCombatants.length > 0 && (
+            <InitiativeStrip
+              combatants={orderedCombatants}
+              currentCombatantId={encounter.currentCombatantId}
+              charactersById={charactersById}
+            />
+          )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
             {sheetsStatusLabel && (
               <p
@@ -6010,7 +6095,7 @@ export function BattleMap({
                           fontSize: Math.max(9, Math.round(sizePx * 0.34)),
                           fontWeight: 700,
                           color: '#fff',
-                          background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                          background: tokenIdentityBackground(c),
                           border: '2px solid rgba(15,23,42,.85)',
                           boxShadow: '0 1px 3px rgba(0,0,0,.5)',
                           pointerEvents: 'none',
@@ -7792,7 +7877,7 @@ function CombatantRow({
                   <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em', marginRight: 'auto' }}>HP</span>
                 )}
                 <span>
-                  {combatant.hpCurrent} / {combatant.hpMax}
+                  {hpDisplay(combatant)}
                 </span>
               </div>
               <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
@@ -7832,7 +7917,7 @@ function CombatantRow({
         ) : (
           <>
             <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }} title="Exact HP is hidden for monsters">
-              {combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}
+              {hpDisplay(combatant)}
             </div>
             <HpBandBar band={combatant.hpBand} />
           </>
