@@ -301,9 +301,10 @@ test.describe('combat log accessibility — remote clients', () => {
         .toEqual(await log.evaluate((node) => ({ top: node.scrollHeight - node.clientHeight, max: node.scrollHeight - node.clientHeight })));
       // End proves the focused history is keyboard-scrollable. Use a stable mid-history
       // position for the append assertion after the key scroll has fully settled.
-      await expect.poll(async () => (await log.evaluate((node) => node.scrollTop))).toBe(
-        await log.evaluate((node) => Math.floor((node.scrollHeight - node.clientHeight) / 2)),
-      );
+      await log.evaluate((node) => {
+        node.scrollTop = Math.floor((node.scrollHeight - node.clientHeight) / 2);
+      });
+      await viewerPage.waitForTimeout(100);
       const scrollBefore = await log.evaluate((node) => node.scrollTop);
       await watchAnnouncements(viewerPage);
 
