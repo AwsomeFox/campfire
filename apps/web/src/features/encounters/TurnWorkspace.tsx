@@ -26,6 +26,19 @@ import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
 import { SpellbookPanel, type SpellItem, type SpellSlotMap, type PactSlotPool, type SpellcastingStats } from './SpellbookPanel';
+import { GameIcon } from '../../components/GameIcon';
+
+const STANDARD_ACTIONS = [
+  { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
+  { id: 'dash', label: 'Dash', icon: 'running-shoe', desc: 'Move your speed again' },
+  { id: 'dodge', label: 'Dodge', icon: 'shield', desc: 'Focus on avoiding attacks' },
+  { id: 'disengage', label: 'Disengage', icon: 'evasion', desc: 'Move without provoking opportunity attacks' },
+  { id: 'help', label: 'Help', icon: 'help', desc: 'Grant advantage to an ally' },
+  { id: 'hide', label: 'Hide', icon: 'hood', desc: 'Attempt to hide from enemies' },
+  { id: 'ready', label: 'Ready', icon: 'stopwatch', desc: 'Prepare an action for a specific trigger' },
+  { id: 'search', label: 'Search', icon: 'magnifying-glass', desc: 'Devote your attention to finding something' },
+  { id: 'use', label: 'Use Object', icon: 'grab', desc: 'Interact with a complex object' }
+];
 
 interface TurnWorkspaceProps {
   encounterId: number;
@@ -253,6 +266,10 @@ export function TurnWorkspace({
   const controlsDisabled = busy || actionsDisabled;
   const isDying = turn.current.deathState === 'dying';
 
+  const actionSlot = turn.actionEconomy.find(s => s.key === 'action');
+  const actionSpent = actionSlot ? actionSlot.used >= actionSlot.max : true;
+  const actionDisabled = controlsDisabled || actionSpent;
+
   return (
     <Card className="space-y-3" data-testid="turn-workspace">
       {/* Prominent actor / round / next actor + Spellbook toggle. */}
@@ -355,6 +372,42 @@ export function TurnWorkspace({
               ));
             })()}
           </div>
+          <div className="flex gap-1.5 mt-3 overflow-x-auto py-1 max-w-full flex-wrap sm:flex-nowrap" data-testid="standard-actions-bar">
+            {STANDARD_ACTIONS.map((act) => (
+              <button
+                key={act.id}
+                type="button"
+                title={act.desc}
+                aria-label={act.label}
+                disabled={actionDisabled}
+                className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
+                onClick={() => {
+                  const currentName = turn.current?.name ?? 'Combatant';
+                  if (act.id === 'attack') {
+                    announce(`${currentName} action: Attack`);
+                    const el = document.getElementById('turn-suggested-actions-search');
+                    if (el) {
+                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      el.focus();
+                    }
+                  } else if (act.id === 'ready') {
+                    announce(`${currentName} action: Ready`);
+                    const el = document.getElementById('turn-readied-input');
+                    if (el) {
+                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      el.focus();
+                    }
+                  } else {
+                    announce(`${currentName} action: ${act.label}`);
+                    turnState.mutate({ useSlot: 'action' });
+                  }
+                }}
+              >
+                <GameIcon slug={act.icon} size={20} />
+                <span className="text-[10px] hidden sm:block">{act.label}</span>
+              </button>
+            ))}
+          </div>
         </section>
       )}
 
@@ -394,6 +447,7 @@ export function TurnWorkspace({
               {currentTurnState?.delaying ? 'Resume turn' : 'Delay turn'}
             </button>
             <input
+              id="turn-readied-input"
               type="text"
               className="input cf-target-44"
               placeholder="Ready action trigger…"
@@ -494,6 +548,7 @@ export function TurnWorkspace({
         <section>
           <h3 className="text-sm font-semibold text-white mb-1.5">Suggested actions</h3>
           <input
+            id="turn-suggested-actions-search"
             type="search"
             className="input mb-2 w-full"
             placeholder="Search actions…"
