@@ -49,6 +49,8 @@ interface TurnWorkspaceProps {
    *  is authoritative when the parent's encounter cache is briefly stale. */
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
+  gridUnit?: string | null;
+  gridScale?: number | null;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -57,11 +59,15 @@ function SlotChip({
   onUse,
   onRelease,
   disabled,
+  unit = 'ft',
+  step = 5,
 }: {
   slot: TurnWorkspaceData['actionEconomy'][number];
   onUse: () => void;
   onRelease: () => void;
   disabled: boolean;
+  unit?: string;
+  step?: number;
 }) {
   const isMovement = slot.kind === 'movement';
   const remaining = Math.max(0, slot.max - slot.used);
@@ -76,16 +82,16 @@ function SlotChip({
           {slot.label}
         </span>
         <span className="text-xs text-muted">
-          {isMovement ? `${slot.used}/${slot.max} ft` : `${remaining}/${slot.max}`}
+          {isMovement ? `${slot.used}/${slot.max} ${unit}` : `${remaining}/${slot.max}`}
         </span>
       </div>
       <p className="text-[11px] text-muted m-0 leading-tight">{slot.help}</p>
       <div className="flex gap-1">
         <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled} onClick={onUse}>
-          {isMovement ? '+5 ft' : 'Use'}
+          {isMovement ? `+${step} ${unit}` : 'Use'}
         </button>
         <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={disabled || slot.used <= 0} onClick={onRelease}>
-          {isMovement ? '-5 ft' : 'Undo'}
+          {isMovement ? `-${step} ${unit}` : 'Undo'}
         </button>
       </div>
     </div>
@@ -106,6 +112,8 @@ export function TurnWorkspace({
   onUseSuggestedAction,
   onEndTurn,
   endTurnBusy = false,
+  gridUnit,
+  gridScale,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -238,8 +246,10 @@ export function TurnWorkspace({
                 key={slot.key}
                 slot={slot}
                 disabled={controlsDisabled}
-                onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: 5 } : { useSlot: slot.key })}
-                onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -5 } : { releaseSlot: slot.key })}
+                unit={gridUnit || 'ft'}
+                step={gridScale || 5}
+                onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: gridScale || 5 } : { useSlot: slot.key })}
+                onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -(gridScale || 5) } : { releaseSlot: slot.key })}
               />
             ))}
           </div>
@@ -250,7 +260,7 @@ export function TurnWorkspace({
       <div className="flex gap-4 flex-wrap text-sm">
         {turn.movement && (
           <span className="text-muted">
-            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} ft</span>
+            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {gridUnit || 'ft'}</span>
           </span>
         )}
         <span className="text-muted">
