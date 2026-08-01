@@ -10256,10 +10256,10 @@ export const CombatantUpdate = z.object({
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   // Structured condition instance mutations (issue #423)
-  addConditionInstance: ConditionInstance.optional(),
-  removeConditionInstanceId: z.string().min(1).max(40).optional(),
-  updateConditionInstance: ConditionInstance.optional(),
-  conditionInstances: z.array(ConditionInstance).max(50).optional(),
+  addConditionInstance: ConditionInstance.optional().describe('Add a single structured condition instance. Preferred over addConditions.'),
+  removeConditionInstanceId: z.string().min(1).max(40).optional().describe('Remove a structured condition instance by its ID (e.g. from conditionInstances).'),
+  updateConditionInstance: ConditionInstance.optional().describe('Update an existing structured condition instance (must match its ID).'),
+  conditionInstances: z.array(ConditionInstance).max(50).optional().describe('Absolute set of structured condition instances.'),
   // Nullable so a mistaken value can be cleared back to the unrolled state (issue
   // #715): `initiative: null` writes NULL onto the row (distinguished from omitting
   // the field, which leaves it unchanged). DM only, enforced server-side. A cleared
