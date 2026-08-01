@@ -11093,7 +11093,7 @@ export type CheckRollResponse = z.infer<typeof CheckRollResponse>;
 // request(s) over a permission-checked REST read (the thin `check.requested` SSE tick only
 // tells them to refetch), rolls ONCE via the existing catalog-roll path, and sees the DM's
 // consequence text alongside the outcome. The request is then marked resolved.
-export const CheckRequestMode = z.enum(['flat', 'advantage', 'disadvantage']);
+export const CheckRequestMode = z.enum(['normal', 'advantage', 'disadvantage', 'crit']);
 export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
 export const CheckRequestStatus = z.enum(['pending', 'resolved']);
 export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
@@ -11102,7 +11102,7 @@ export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
 export const CheckRequestCreate = z.object({
   characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
   checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
-  mode: CheckRequestMode.default('flat').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: CheckRequestMode.default('normal').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text surfaced to the player with the prompt/result'),
   encounterId: Id.optional().describe('Optional encounter this request is tied to (context only)'),

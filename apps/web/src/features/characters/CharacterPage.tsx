@@ -107,6 +107,7 @@ import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
 import { RollContextMenu, type RollMode } from '../../components/RollContextMenu';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { NotesRail } from '../notes/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
@@ -1349,7 +1350,7 @@ function RollChip({
 }: {
   label: string;
   title: string;
-  onClick: (e: MouseEvent) => void;
+  onClick: (mode: RollMode) => void;
   disabled: boolean;
 }) {
   return (
@@ -1362,7 +1363,7 @@ function RollChip({
 function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
-  const [mode, setMode] = useState<RollMode>('flat');
+  const [mode, setMode] = useState<RollMode>('normal');
   const pb = profBonus(character.level);
   const profs = new Set<string>(character.saveProficiencies);
 
@@ -1465,7 +1466,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
-  const [mode, setMode] = useState<RollMode>('flat');
+  const [mode, setMode] = useState<RollMode>('normal');
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const skillChecks = useMemo(() => catalog.filter((c) => c.category === 'skill'), [catalog]);
@@ -1574,7 +1575,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   // Roll-mode chooser (issue #713): the attack "to hit" roll mode. Applies to
   // every action's attack roll in this card; a shift/alt-click still overrides
   // once (resolveRollMode) so the desktop shortcut keeps working.
-  const [mode, setMode] = useState<RollMode>('flat');
+  const [mode, setMode] = useState<RollMode>('normal');
   // In-place edit (issue #718): editingIndex is the position in character.actions
   // being edited, or null when not editing an existing row. The row collapses into
   // the same form Add uses, so order is preserved by writing back to the same index.

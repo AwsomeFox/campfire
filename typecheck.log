@@ -1,0 +1,12 @@
+
+> campfire@0.14.1 typecheck
+> npm run build -w packages/schema && npm run typecheck --workspaces
+
+
+> @campfire/schema@0.14.1 build
+> rm -rf dist && tsc -p tsconfig.json && tsc -p tsconfig.esm.json && printf '{"type":"module"}' > dist/esm/package.json
+
+
+> @campfire/server@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.jest.json --rootDir ../..
+
