@@ -89,7 +89,7 @@ test.describe('Character sheet roll-mode context menu (issues #713 / #1853)', ()
       strSave.click({ modifiers: ['Shift'] }),
     ]);
     expect(rollRequest.status()).toBeLessThan(300);
-  ]);
+  });
 
   test('roll controls are axe-clean', async ({ page }) => {
     const { campaignId } = seed();
