@@ -689,7 +689,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.check.modifier).toBe(3);
     expect(rolled.check.breakdownText).toBe('DEX +3 = +3');
     expect(rolled.roll.expr).toBe('1d20+3');
-    expect(rolled.mode).toBe('flat');
+    expect(rolled.mode).toBe('normal');
     expect(typeof rolled.roll.success).toBe('boolean');
   });
 
