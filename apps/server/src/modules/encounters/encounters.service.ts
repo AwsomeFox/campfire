@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -6766,6 +6766,8 @@ export class EncountersService {
           name: a.name.slice(0, 160),
           source,
           summary: bits.join(' · ').slice(0, 600),
+          toHit: a.toHit ?? '',
+          damage: a.damage ?? '',
           actionIndex: startIndex + i,
           resolvable: isResolvableSpec(a.spec),
           spec: a.spec ?? null,
@@ -6785,6 +6787,8 @@ export class EncountersService {
           name: a.name.slice(0, 160),
           source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
           summary: bits.join(' · ').slice(0, 600),
+          toHit: typeof a.toHit === 'string' ? a.toHit : '',
+          damage: typeof a.damage === 'string' ? a.damage : '',
           actionIndex: i,
           resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
           spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
@@ -7598,6 +7602,198 @@ export class EncountersService {
     });
 
     return persisted;
+  }
+
+  /**
+   * Quick-roll a weapon attack (to-hit) or spell damage in an encounter (issue #1850).
+   * Rolls the dice, records the entry in the campaign's shared dice_rolls log, AND
+   * appends an event to the encounter's encounter_events feed with character identity,
+   * formula breakdown, nat20/nat1 visual flags, and damage type icon.
+   */
+  async quickRoll(
+    encounterId: number,
+    body: QuickRollRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{
+    roll: DiceRoll;
+    event: EncounterEvent;
+    breakdown: string;
+    isNat20: boolean;
+    isNat1: boolean;
+    total: number;
+  }> {
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+
+    const isDm = role === 'dm';
+    const actorId: number | null = body.combatantId ?? null;
+    let actorName = body.actorName?.trim() || '';
+    let combatantRow: typeof combatants.$inferSelect | null = null;
+
+    if (actorId != null) {
+      const [found] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!found) {
+        throw new NotFoundException(`Combatant ${actorId} not found in encounter ${encounterId}`);
+      }
+      combatantRow = found;
+      actorName = combatantRow.name;
+
+      if (!isDm) {
+        if (combatantRow.kind !== 'character' || combatantRow.characterId === null) {
+          throw new ForbiddenException('Only the DM may quick-roll for monsters or NPCs');
+        }
+        const [char] = await this.db
+          .select({ ownerUserId: characters.ownerUserId })
+          .from(characters)
+          .where(eq(characters.id, combatantRow.characterId))
+          .limit(1);
+        if (!char || char.ownerUserId !== user.id) {
+          throw new ForbiddenException('You may only quick-roll for your own character');
+        }
+      }
+    } else {
+      if (!isDm) {
+        actorName = user.name || 'Player';
+      } else if (!actorName) {
+        actorName = user.name || 'DM';
+      }
+    }
+
+    // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
+    let isActorHidden = false;
+    if (encounter.hidden) {
+      isActorHidden = true;
+    } else if (combatantRow) {
+      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+        const [npc] = await this.db
+          .select({ hidden: npcs.hidden })
+          .from(npcs)
+          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .limit(1);
+        if (npc?.hidden) {
+          isActorHidden = true;
+        }
+      }
+    }
+
+    const mode = body.mode || 'flat';
+    let formula = '';
+    const isToHit = body.kind === 'to-hit';
+    let damageTypeIcon = '⚔️';
+    let damageType = '';
+
+    if (isToHit) {
+      const trimmed = body.expr.trim();
+      let mod = 0;
+      if (/^[+-]?\d+$/.test(trimmed)) {
+        mod = parseInt(trimmed, 10);
+      } else {
+        const match = /^([+-]?\d+)/.exec(trimmed);
+        if (match) mod = parseInt(match[1], 10);
+      }
+      const sign = mod >= 0 ? `+${mod}` : `${mod}`;
+      if (mode === 'advantage') formula = `2d20kh1${sign}`;
+      else if (mode === 'disadvantage') formula = `2d20kl1${sign}`;
+      else formula = `1d20${sign}`;
+    } else {
+      formula = body.expr.trim();
+      const match = /^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s*(.*)$/i.exec(formula);
+      if (match) {
+        formula = match[1].replace(/\s+/g, '');
+        damageType = match[2].trim();
+      }
+      if (damageType) {
+        const t = damageType.toLowerCase();
+        if (t.includes('fire')) damageTypeIcon = '🔥';
+        else if (t.includes('cold') || t.includes('ice')) damageTypeIcon = '❄️';
+        else if (t.includes('lightning') || t.includes('electric')) damageTypeIcon = '⚡';
+        else if (t.includes('thunder')) damageTypeIcon = '🔊';
+        else if (t.includes('acid') || t.includes('poison')) damageTypeIcon = '🧪';
+        else if (t.includes('radiant') || t.includes('holy')) damageTypeIcon = '✨';
+        else if (t.includes('necrotic') || t.includes('dark')) damageTypeIcon = '💀';
+        else if (t.includes('psychic') || t.includes('mind')) damageTypeIcon = '🧠';
+        else if (t.includes('force')) damageTypeIcon = '💥';
+      }
+    }
+
+    const rollRes = rollDice(formula);
+    const naturalRoll = rollRes.rolls.length > 0 ? rollRes.rolls[0] : null;
+    const isNat20 = isToHit && (naturalRoll === 20 || rollRes.rolls.includes(20));
+    const isNat1 = isToHit && (naturalRoll === 1 || (rollRes.rolls.length === 1 && naturalRoll === 1));
+
+    const breakdown = `${formula} (${rollRes.rolls.join(', ')}) = ${rollRes.total}`;
+    const detail = isToHit
+      ? `${body.actionName} (to-hit): ${rollRes.total} [${breakdown}]${isNat20 ? ' — CRITICAL HIT! (Nat 20)' : isNat1 ? ' — CRITICAL MISS! (Nat 1)' : ''}`
+      : `${body.actionName} (damage): ${rollRes.total} ${damageTypeIcon} [${breakdown}]`;
+
+    const diceActor = isActorHidden ? UNKNOWN_COMBATANT_LABEL : actorName;
+    const diceLabel = `${diceActor} · ${body.actionName} (${body.kind})`;
+
+    const roll = await this.rolls.record(
+      encounter.campaignId,
+      {
+        expr: formula,
+        rolls: rollRes.rolls,
+        total: rollRes.total,
+        label: diceLabel,
+        actor: diceActor,
+        natural20: isNat20 ? 1 : 0,
+      },
+      user,
+    );
+
+    const now = nowIso();
+    const performedBy = { userId: user.id, role, kind: 'human' };
+
+    const [eventRow] = await this.db
+      .insert(encounterEvents)
+      .values({
+        encounterId,
+        round: encounter.round,
+        type: 'roll',
+        actor: actorName,
+        actorId,
+        target: null,
+        targetId: null,
+        detail,
+        chainId: null,
+        parentEventId: null,
+        phase: 'roll',
+        performedByJson: JSON.stringify(performedBy),
+        metadataJson: JSON.stringify({
+          actionName: body.actionName,
+          kind: body.kind,
+          expr: body.expr,
+          formulaBreakdown: breakdown,
+          naturalRoll,
+          natural20: isNat20,
+          natural1: isNat1,
+          damageType,
+          damageIcon: damageTypeIcon,
+          total: rollRes.total,
+        }),
+        createdAt: now,
+      })
+      .returning()
+      .all();
+
+    if (!encounter.hidden) {
+      this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId });
+    }
+
+    return {
+      roll,
+      event: eventToDomain(eventRow),
+      breakdown,
+      isNat20,
+      isNat1,
+      total: rollRes.total,
+    };
   }
 
   /**

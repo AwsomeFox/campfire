@@ -10490,6 +10490,8 @@ export const TurnSuggestedAction = z.object({
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
   source: z.string().max(40),
   summary: z.string().max(600).default(''),
+  toHit: z.string().default(''),
+  damage: z.string().default(''),
   // Index into the combatant's usable-actions list (issue #425). Omitted for prose-only rows.
   actionIndex: z.number().int().min(0).optional(),
   // True when the action carries a structured spec the Use flow can resolve.
@@ -10498,6 +10500,18 @@ export const TurnSuggestedAction = z.object({
   spec: ActionSpec.nullable().optional(),
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
+
+/** Quick-roll request body for one-tap attack or damage roll in an encounter (issue #1850). */
+export const QuickRollRequest = z.object({
+  combatantId: Id.optional(),
+  actorName: z.string().max(200).optional(),
+  actionName: z.string().min(1).max(160),
+  kind: z.enum(['to-hit', 'damage']),
+  expr: z.string().min(1).max(100),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat'),
+});
+export type QuickRollRequest = z.infer<typeof QuickRollRequest>;
+
 
 /** What a turn prompt is about, so the client can group/iconify it. */
 export const TurnPromptKind = z.enum([

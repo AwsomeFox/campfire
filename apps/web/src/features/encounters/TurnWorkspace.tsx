@@ -27,6 +27,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
 import { SpellbookPanel, type SpellItem, type SpellSlotMap, type PactSlotPool, type SpellcastingStats } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
+import { QuickRollButtons } from './QuickRollButtons';
 
 const STANDARD_ACTIONS = [
   { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
@@ -598,7 +599,19 @@ export function TurnWorkspace({
               return (
                 <div key={`${a.name}-${i}`} className="flex items-center justify-between gap-2 border-b border-neutral-700/50 py-2 last:border-0 text-sm">
                   <div className="flex flex-col min-w-0">
-                    <span className="text-white font-medium">{a.name}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-white font-medium">{a.name}</span>
+                      <QuickRollButtons
+                        encounterId={encounterId}
+                        combatantId={turn.current?.combatantId}
+                        actorName={turn.current?.name}
+                        actionName={a.name}
+                        toHit={(a as Record<string, any>).toHit}
+                        damage={(a as Record<string, any>).damage}
+                        spec={a.spec}
+                        disabled={controlsDisabled}
+                      />
+                    </div>
                     <div className="flex items-center gap-2 text-xs text-muted flex-wrap mt-0.5">
                       <span className="tag tag-neutral">{a.source}</span>
                       {rangeText && <span>{rangeText}</span>}
