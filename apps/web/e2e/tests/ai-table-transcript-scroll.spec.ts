@@ -41,7 +41,7 @@ async function mockDriverTable(page: Page, campaignId: number) {
   const fixtures = driverAiDmRoutes(campaignId);
   await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/ai-dm/stream')) {
+    if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': keepalive\n\n' });
     }
     if (path.endsWith('/ai-dm/seat')) {

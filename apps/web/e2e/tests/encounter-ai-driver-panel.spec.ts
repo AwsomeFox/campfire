@@ -68,7 +68,7 @@ async function mockAiDm(page: Page, campaignId: number, resolved: string[]) {
     const json = (body: unknown) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 
-    if (path.endsWith('/ai-dm/stream')) {
+    if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': keepalive\n\n' });
     }
     if (path.endsWith('/ai-dm/tool-confirmations')) {
