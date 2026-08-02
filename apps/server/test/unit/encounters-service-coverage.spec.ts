@@ -57,6 +57,8 @@ describe('EncountersService unit coverage tests', () => {
       revisions,
       attachmentsService,
       campaignLibrary,
+      { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any,
+      null as any,
     );
 
     const [camp] = await db

@@ -23,13 +23,12 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
   CampaignSummary,
   Encounter,
   EncounterWithCombatants,
   HpBand,
-  MapPing,
   PartyCharacter,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -350,7 +349,7 @@ export default function PlayerDisplayPage() {
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
-  const addMapPing = useCallback((ping: MapPing) => {
+  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++mapPingSeq.current;
     if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);
@@ -376,6 +375,13 @@ export default function PlayerDisplayPage() {
   useCampaignEvents(Number.isFinite(cid) && !isCastMode ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        if (event.type === 'player-display-scene') {
+          if (isSceneId(event.scene)) {
+            setScene(event.scene);
+            if (Number.isFinite(cid)) writeStoredScene(cid, event.scene);
+          }
+          return;
+        }
         if (
           event.type === 'encounter.ping' &&
           event.ping &&
@@ -423,7 +429,12 @@ export default function PlayerDisplayPage() {
   const selectScene = useCallback(
     (next: SceneId) => {
       setScene(next);
-      if (Number.isFinite(cid)) writeStoredScene(cid, next);
+      if (Number.isFinite(cid)) {
+        writeStoredScene(cid, next);
+        void api.post(`${API}/campaigns/${cid}/cast-sessions/scene`, { scene: next }).catch(() => {
+          // ignore errors, fallback to local storage
+        });
+      }
     },
     [cid],
   );
@@ -828,7 +839,9 @@ export default function PlayerDisplayPage() {
     if (keepControlsVisible) node.removeAttribute('inert');
     else node.setAttribute('inert', '');
   }, [keepControlsVisible]);
-  const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
+  const [searchParams] = useSearchParams();
+  const fromPath = searchParams.get('from');
+  const exitPath = fromPath ? fromPath : Number.isFinite(cid) ? `/c/${cid}` : '/';
   const requestExit = useCallback(() => {
     if (isCastMode) {
       setExitPromptOpen(true);
@@ -1585,11 +1598,24 @@ function InitiativeRow({
   const charTone = charPct <= 25 ? 'crit' : charPct <= 50 ? 'low' : '';
 
   return (
-    <li className={`cf-init ${isCurrent ? 'current' : ''}`}>
+    <li
+      className={`cf-init ${isCurrent ? 'current' : ''}`}
+      style={{
+        opacity: combatant.down ? 0.55 : 1,
+        filter: combatant.down ? 'grayscale(0.75)' : 'none',
+      }}
+    >
       <span className="cf-init-num">{combatant.initiative ?? '–'}</span>
       <div className="cf-init-main">
         <div className="cf-init-name">
-          <span className="cf-clamp-1" title={combatant.name}>
+          <span
+            className="cf-clamp-1"
+            title={combatant.name}
+            style={combatant.down ? { textDecoration: 'line-through' } : undefined}
+          >
+            {combatant.down && (
+              <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />
+            )}
             {combatant.name}
           </span>
           <span className={`cf-screen-chip cf-screen-chip-sm ${isMonster ? '' : 'cf-screen-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
@@ -1884,7 +1910,7 @@ const SCREEN_CSS = `
   font-family: var(--font-heading);
   font-weight: 800;
   color: #fff;
-  font-size: 5cqh;
+  font-size: max(15px, 5cqh);
   line-height: 1.05;
   max-width: 68cqw;
   overflow: hidden;
@@ -1897,14 +1923,14 @@ const SCREEN_CSS = `
   flex-wrap: wrap;
   align-items: center;
   gap: 2.4cqw;
-  font-size: 2.7cqh;
+  font-size: max(15px, 2.7cqh);
   color: var(--color-neutral-200);
 }
 .cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
 .cf-screen .cf-status-round { font-weight: 600; }
 .cf-screen .cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
 .cf-screen .cf-status-turn-label {
-  font-size: 1.9cqh;
+  font-size: max(15px, 1.9cqh);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--color-neutral-400);
@@ -1912,7 +1938,7 @@ const SCREEN_CSS = `
 .cf-screen .cf-status-turn-name { font-weight: 700; color: #fff; max-width: 24cqw; }
 .cf-screen .cf-status-next .cf-status-turn-label { color: var(--color-neutral-500); }
 .cf-screen .cf-status-next .cf-status-turn-name { color: var(--color-neutral-200); }
-.cf-screen .cf-status-idle { color: var(--color-neutral-400); font-size: 2.5cqh; }
+.cf-screen .cf-status-idle { color: var(--color-neutral-400); font-size: max(15px, 2.5cqh); }
 
 /* Issue #1685: named cf-screen-chip*, NOT the app-wide .cf-chip (index.css) —
    reusing the bare .cf-chip name here silently overrode every .cf-chip in the
@@ -1930,11 +1956,11 @@ const SCREEN_CSS = `
   border: 1px solid var(--color-divider);
   border-radius: 999px;
   padding: 0.5cqh 1.4cqw;
-  font-size: 2cqh;
+  font-size: max(15px, 2cqh);
   white-space: nowrap;
   max-width: 100%;
 }
-.cf-screen .cf-screen-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
+.cf-screen .cf-screen-chip-sm { padding: 0.3cqh 1cqw; font-size: max(15px, 1.7cqh); text-transform: capitalize; }
 .cf-screen .cf-screen-chip-accent {
   border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
@@ -1949,7 +1975,7 @@ const SCREEN_CSS = `
   background: color-mix(in srgb, var(--color-surface) 88%, transparent);
   color: var(--color-neutral-200);
   padding: 0.8cqh 1.4cqw;
-  font-size: 2cqh;
+  font-size: max(15px, 2cqh);
   line-height: 1.35;
 }
 .cf-screen .cf-screen-sync.offline {
@@ -1957,7 +1983,7 @@ const SCREEN_CSS = `
 }
 .cf-screen .cf-ai-ticker {
   margin: 1cqh 0 0;
-  font-size: 2.2cqh;
+  font-size: max(15px, 2.2cqh);
   color: var(--color-accent-2, var(--color-accent));
   opacity: 0.9;
   max-width: 90cqw;
@@ -1971,7 +1997,7 @@ const SCREEN_CSS = `
   font-family: var(--font-heading);
   font-weight: 700;
   color: #fff;
-  font-size: 3.4cqh;
+  font-size: max(15px, 3.4cqh);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   display: flex;
@@ -1980,7 +2006,7 @@ const SCREEN_CSS = `
   gap: 2cqw;
 }
 .cf-screen .cf-scene-pageflag {
-  font-size: 2cqh;
+  font-size: max(15px, 2cqh);
   color: var(--color-neutral-400);
   font-weight: 600;
   letter-spacing: normal;
@@ -1996,8 +2022,8 @@ const SCREEN_CSS = `
   color: var(--color-neutral-400);
   text-align: center;
 }
-.cf-screen .cf-scene-empty-title { margin: 0; font-size: 3.2cqh; font-weight: 700; color: var(--color-text); }
-.cf-screen .cf-scene-empty-sub { margin: 0; font-size: 2.2cqh; color: var(--color-neutral-500); max-width: 60cqw; }
+.cf-screen .cf-scene-empty-title { margin: 0; font-size: max(15px, 3.2cqh); font-weight: 700; color: var(--color-text); }
+.cf-screen .cf-scene-empty-sub { margin: 0; font-size: max(15px, 2.2cqh); color: var(--color-neutral-500); max-width: 60cqw; }
 .cf-screen .cf-rail-retry { margin-top: 1.5cqh; align-self: center; }
 
 /* Initiative */
@@ -2022,7 +2048,7 @@ const SCREEN_CSS = `
   text-align: center;
   font-family: var(--font-heading);
   font-weight: 800;
-  font-size: 4cqh;
+  font-size: max(15px, 4cqh);
   color: var(--color-accent-2);
 }
 .cf-screen .cf-init.current .cf-init-num { color: var(--color-accent); }
@@ -2033,7 +2059,7 @@ const SCREEN_CSS = `
   gap: 1.5cqw;
   font-weight: 600;
   color: #fff;
-  font-size: 3cqh;
+  font-size: max(15px, 3cqh);
   min-width: 0;
 }
 .cf-screen .cf-init-name .cf-clamp-1 { max-width: 34cqw; }
@@ -2058,7 +2084,7 @@ const SCREEN_CSS = `
 .cf-screen .cf-screen-hp > div { height: 100%; background: var(--cf-success); border-radius: 999px; transition: width 0.4s ease; }
 .cf-screen .cf-screen-hp.low > div { background: var(--color-accent); }
 .cf-screen .cf-screen-hp.crit > div { background: var(--cf-danger); }
-.cf-screen .cf-hp-num { font-size: 2.3cqh; font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
+.cf-screen .cf-hp-num { font-size: max(15px, 2.3cqh); font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
 .cf-screen .cf-hp-row { display: flex; align-items: center; gap: 1.5cqw; margin-top: 0.8cqh; }
 .cf-screen .cf-hp-row .cf-screen-hp { flex: 1; margin-top: 0; }
 
@@ -2073,7 +2099,7 @@ const SCREEN_CSS = `
   gap: 1cqw;
   font-weight: 700;
   color: #fff;
-  font-size: 2.6cqh;
+  font-size: max(15px, 2.6cqh);
   min-width: 0;
 }
 .cf-screen .cf-party-name .cf-clamp-1 { max-width: 15cqw; }
@@ -2082,7 +2108,7 @@ const SCREEN_CSS = `
   color: var(--color-neutral-300);
   border-color: color-mix(in srgb, var(--color-neutral-400) 45%, transparent);
 }
-.cf-screen .cf-party-sub { color: var(--color-neutral-400); font-size: 2cqh; margin-top: 0.4cqh; text-transform: capitalize; }
+.cf-screen .cf-party-sub { color: var(--color-neutral-400); font-size: max(15px, 2cqh); margin-top: 0.4cqh; text-transform: capitalize; }
 
 /* Conditions */
 .cf-screen .cf-conds { display: flex; flex-wrap: wrap; gap: 0.6cqw; margin-top: 0.8cqh; align-items: center; }
@@ -2090,26 +2116,26 @@ const SCREEN_CSS = `
   border: 1px solid var(--color-divider);
   border-radius: 999px;
   padding: 0.3cqh 1cqw;
-  font-size: 1.8cqh;
+  font-size: max(15px, 1.8cqh);
   color: var(--color-accent-2);
   max-width: 20cqw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.cf-screen .cf-cond-more { color: var(--color-neutral-400); font-size: 1.8cqh; }
+.cf-screen .cf-cond-more { color: var(--color-neutral-400); font-size: max(15px, 1.8cqh); }
 
 /* Quests */
 .cf-screen .cf-quests { display: flex; flex-direction: column; gap: 1.5cqh; overflow: hidden; }
 .cf-screen .cf-quest-top { display: flex; align-items: center; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
-.cf-screen .cf-quest-title { font-weight: 700; color: #fff; font-size: 2.8cqh; max-width: 70cqw; }
+.cf-screen .cf-quest-title { font-weight: 700; color: #fff; font-size: max(15px, 2.8cqh); max-width: 70cqw; }
 .cf-screen .cf-objs { list-style: none; margin: 0.8cqh 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.6cqh; }
 .cf-screen .cf-objs li {
   display: flex;
   gap: 1.2cqw;
   align-items: baseline;
   color: var(--color-neutral-200);
-  font-size: 2.2cqh;
+  font-size: max(15px, 2.2cqh);
   min-width: 0;
 }
 .cf-screen .cf-objs li.done { color: var(--color-neutral-500); text-decoration: line-through; }
@@ -2123,14 +2149,14 @@ const SCREEN_CSS = `
   font-family: var(--font-heading);
   font-weight: 700;
   color: #fff;
-  font-size: 2.6cqh;
+  font-size: max(15px, 2.6cqh);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 .cf-screen .cf-npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(22cqw, 1fr)); gap: 1.2cqw; }
 .cf-screen .cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1cqh 1.3cqw; min-width: 0; }
-.cf-screen .cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: 2.3cqh; }
-.cf-screen .cf-npc-role { display: block; color: var(--color-neutral-400); font-size: 1.9cqh; }
+.cf-screen .cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: max(15px, 2.3cqh); }
+.cf-screen .cf-npc-role { display: block; color: var(--color-neutral-400); font-size: max(15px, 1.9cqh); }
 .cf-screen .cf-npc-disposition { margin-top: 0.8cqh; }
 
 /* Map */
@@ -2140,9 +2166,9 @@ const SCREEN_CSS = `
 
 /* Intermission */
 .cf-screen .cf-intermission { align-items: center; justify-content: center; text-align: center; gap: 2cqh; color: var(--color-neutral-300); }
-.cf-screen .cf-intermission h2 { margin: 0; font-family: var(--font-heading); font-size: 6cqh; color: #fff; }
-.cf-screen .cf-intermission p { margin: 0; font-size: 3cqh; }
-.cf-screen .cf-intermission-loc { font-size: 2.4cqh; color: var(--color-neutral-400); }
+.cf-screen .cf-intermission h2 { margin: 0; font-family: var(--font-heading); font-size: max(15px, 6cqh); color: #fff; }
+.cf-screen .cf-intermission p { margin: 0; font-size: max(15px, 3cqh); }
+.cf-screen .cf-intermission-loc { font-size: max(15px, 2.4cqh); color: var(--color-neutral-400); }
 
 /* Blackout */
 .cf-screen .cf-blackout { position: absolute; inset: 0; background: #000; }

@@ -111,6 +111,9 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'safety.hold') {
     return typeof v.active === 'boolean';
   }
+  if (v.type === 'player-display-scene') {
+    return typeof v.scene === 'string';
+  }
   return false;
 }
 
