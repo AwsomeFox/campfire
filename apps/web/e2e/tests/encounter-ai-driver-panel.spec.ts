@@ -61,7 +61,7 @@ async function mockAiDm(page: Page, campaignId: number, resolved: string[]) {
     takeoverRequestedBy: null,
   };
 
-  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+  await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();

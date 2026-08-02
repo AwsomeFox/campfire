@@ -95,7 +95,7 @@ async function mockTable(
   store: TranscriptStore,
   opts: { sseGate?: () => boolean } = {},
 ): Promise<void> {
-  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+  await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();

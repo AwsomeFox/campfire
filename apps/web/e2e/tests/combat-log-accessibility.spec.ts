@@ -115,7 +115,7 @@ async function mockDriverToolEvent(page: Page, campaignId: number, toolName: str
     takeoverRequestedBy: null,
   };
   let sentToolEvent = false;
-  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+  await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
     if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       const payload = sentToolEvent
