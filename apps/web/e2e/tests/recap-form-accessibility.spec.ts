@@ -108,7 +108,7 @@ test.describe('session recap form accessibility (#859)', () => {
     // only when focused from the date field — next stop is the Recap textarea or Insert template.
     // Walk until Publish so the smoke covers a complete keyboard path.
     let guard = 0;
-    while (!(await publish.evaluate((el) => el === document.activeElement)) && guard < 8) {
+    while (!(await publish.evaluate((el) => el === document.activeElement)) && guard < 15) {
       await page.keyboard.press('Tab');
       guard += 1;
     }

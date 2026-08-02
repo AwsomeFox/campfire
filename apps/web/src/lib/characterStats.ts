@@ -262,6 +262,15 @@ export function damageExpr(damage: string): string | null {
   return dice.join('+');
 }
 
+export function critDamageExpr(damage: string): string | null {
+  const expr = damageExpr(damage);
+  if (!expr) return null;
+  return expr.replace(/(\d*)d(\d{1,3})/gi, (match, n, d) => {
+    const num = n ? parseInt(n, 10) : 1;
+    return `${num * 2}d${d}`;
+  });
+}
+
 const ALLOWED_DIE_SIDES = new Set([2, 4, 6, 8, 10, 12, 20, 100]);
 
 /**

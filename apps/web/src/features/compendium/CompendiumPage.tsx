@@ -13,7 +13,8 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage, HomebrewRuleEntryInput } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage, HomebrewRuleEntryInput, CampaignLibraryMonster } from '@campfire/schema';
+import { CampaignLibraryCard } from './CampaignLibraryCard';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
@@ -128,6 +129,7 @@ export default function CompendiumPage() {
   }
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
+  const [libraryMonsters, setLibraryMonsters] = useState<CampaignLibraryMonster[]>([]);
   const [results, setResults] = useState<RuleEntry[] | null>(null);
   const [facets, setFacets] = useState<RuleSearchFacet[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -191,20 +193,27 @@ export default function CompendiumPage() {
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
         if (urlCursor) params.set('cursor', urlCursor);
-        const [page, homebrew] = await Promise.all([
+        const [page, homebrew, libMonsters] = await Promise.all([
           campaignPack ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
-          api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`),
+          api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`).catch(() => []),
+          api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${id}/library/monsters`).catch(() => []),
         ]);
         const needle = searchQuery.trim().toLowerCase();
         const campaignEntries = homebrew.filter((entry) =>
           (type === 'all' || entry.type === type) && (!needle || `${entry.name} ${entry.summary} ${entry.body}`.toLowerCase().includes(needle)),
         );
-        setHomebrewCount(homebrew.length);
+        const filteredLibMonsters = (type === 'all' || type === 'monster')
+          ? libMonsters.filter((m) => !needle || m.name.toLowerCase().includes(needle))
+          : [];
+        setLibraryMonsters(filteredLibMonsters);
+        setHomebrewCount(homebrew.length + libMonsters.length);
         if (cancelled || gen !== fetchGeneration.current) return;
-        listedHomebrewCount.current = campaignEntries.length;
+        listedHomebrewCount.current = campaignEntries.length + filteredLibMonsters.length;
         setResults([...campaignEntries, ...page.items]);
         setFacets(page.facets ?? []);
-        setTotal(page.total + campaignEntries.length);
+        setTotal(page.total + campaignEntries.length + filteredLibMonsters.length);
+        setHasMore(page.hasMore);
+        setNextCursor(page.nextCursor);
         setHasMore(page.hasMore);
         setNextCursor(page.nextCursor);
       } catch (err) {
@@ -562,6 +571,17 @@ export default function CompendiumPage() {
                     transition: 'opacity 160ms ease',
                   }}
                 >
+                  {libraryMonsters.map((monster) => (
+                    <CampaignLibraryCard
+                      key={`lib-${monster.id}`}
+                      monster={monster}
+                      campaignId={id}
+                      isDm={isDm}
+                      canDmWrite={canDmWrite}
+                      ruleSystem={campaignPack}
+                      onUpdated={() => setReloadToken((n) => n + 1)}
+                    />
+                  ))}
                   {results.map((entry) => (
                     <Card
                       key={entry.id}

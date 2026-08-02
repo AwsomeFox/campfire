@@ -7,6 +7,7 @@ import { RevisionsModule } from '../revisions/revisions.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { CampaignLibraryModule } from '../campaign-library/campaign-library.module';
 import { TableSafetyModule } from '../safety/table-safety.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { EncountersService } from './encounters.service';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
@@ -23,6 +24,7 @@ import { CampaignEncountersController, CampaignRollController, EncountersControl
     CampaignLibraryModule,
     // #599 — turn advancement is gated on the table safety hold.
     TableSafetyModule,
+    NotificationsModule,
   ],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
   providers: [EncountersService, EncounterMapService, ActionResolverService],

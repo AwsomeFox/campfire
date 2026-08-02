@@ -10,6 +10,7 @@ import {
   isDead,
   isDowned,
 } from '../../src/features/encounters/encounterEndedSummary';
+import { filterPlayerSafeCombatants } from '../../src/features/screen/playerSafe';
 
 test.describe('encounter ended summary tallies (issue #492)', () => {
   test('stable PC at 0 is downed, not dead', () => {
@@ -67,4 +68,19 @@ test.describe('encounter ended summary tallies (issue #492)', () => {
     expect(downed.map((c) => c.name)).toEqual(['Aria']);
     expect(survivors.map((c) => c.name)).toEqual(['Ember']);
   });
+
+  test('filterPlayerSafeCombatants excludes hidden combatants from player view (issue #1470)', () => {
+    const roster = [
+      { name: 'Ember', kind: 'character' as const, hpCurrent: 12, hidden: false },
+      { name: 'Goblin', kind: 'monster' as const, hpCurrent: 0, hidden: false },
+      { name: 'Hidden Assassin', kind: 'monster' as const, hpCurrent: 0, hidden: true },
+    ];
+    const safeRoster = filterPlayerSafeCombatants(roster);
+    expect(safeRoster.map((c) => c.name)).toEqual(['Ember', 'Goblin']);
+
+    const { dead, survivors } = endedSummaryTallies(safeRoster);
+    expect(dead.map((c) => c.name)).toEqual(['Goblin']);
+    expect(survivors.map((c) => c.name)).toEqual(['Ember']);
+  });
 });
+

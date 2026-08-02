@@ -53,14 +53,10 @@ import {
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import { SafetyHoldBar } from '../components/SafetyHoldBar';
 import { onPendingProposalsBadgeBump, onPendingProposalsBadgeSet, onInboxCountBadgeSet } from '../lib/proposalsBadgeBus';
-import {
-  buildCampaignNavGroups,
-  isActiveNavPath,
-  navGroupsForMoreSheet,
-  type NavGroup,
-  type NavItem,
-} from './campaignNav';
+import { buildCampaignNavGroups, isActiveNavPath, navGroupsForMoreSheet, type NavGroup, type NavItem } from './campaignNav';
 import { UI_ICON_SIZE } from '../lib/uiIcons';
+import { CheckRequestPrompts } from '../features/encounters/CheckRequests';
+import { deriveCampaignAccess } from './campaignAccess';
 
 function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
   if (campaignId === undefined) return <>{children}</>;
@@ -531,7 +527,7 @@ function LayoutContent() {
   const liveActivity = useAiDmLiveActivityState(campaignId);
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = deriveCampaignAccess(role, campaign);
 
   const { liveEncounter, refresh: refreshLiveEncounter } = useLiveEncounterState(
     Number.isFinite(campaignId) ? campaignId : undefined,
@@ -785,13 +781,14 @@ function LayoutContent() {
       campaignId !== undefined
         ? buildCampaignNavGroups(t, campaignId, {
             isDm,
+            canCast: canDmWrite,
             aiDriverActive,
             inboxCount,
             pendingProposals,
             trashCount,
           })
         : [],
-    [campaignId, t, isDm, aiDriverActive, inboxCount, pendingProposals, trashCount],
+    [campaignId, t, role, isDm, aiDriverActive, inboxCount, pendingProposals, trashCount],
   );
 
   const moreSheetNavGroups = useMemo(
@@ -1100,6 +1097,7 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
+            {campaignId !== undefined && <CheckRequestPrompts campaignId={campaignId} />}
             <Outlet />
           </MentionsProvider>
         </main>

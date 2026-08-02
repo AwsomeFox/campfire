@@ -202,6 +202,7 @@ export const MACHINE_EXPORT_MODULES = [
   'revisions',
   'scheduledSessions',
   'sessionAttendance',
+  'libraryMonsters',
   'attachments',
   'attachmentsNote',
   'compendiumDependencies',

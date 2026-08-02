@@ -28,6 +28,7 @@ import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { MarkdownEditor } from '../../components/MarkdownEditor';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
 import { CopyControl } from '../../components/CopyControl';
@@ -1069,7 +1070,7 @@ function SessionDetail({
                 <div className="flex-1 min-w-0" />
                 <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
               </div>
-              <TextArea
+              <MarkdownEditor
                 id={fieldIds.recap.controlId}
                 name="recap"
                 className="min-w-0"
@@ -1081,6 +1082,7 @@ function SessionDetail({
                   setFieldErrors((current) => ({ ...current, recap: undefined }));
                 }}
                 placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
+                showToolbar
                 aria-invalid={fieldErrors.recap ? true : undefined}
                 aria-describedby={recapDescribedBy(fieldIds.recap, {
                   error: Boolean(fieldErrors.recap),
@@ -1996,16 +1998,18 @@ function AddRecapForm({
             <div className="flex-1 min-w-0" />
             <TemplateButton value={recap} onInsert={setRecap} />
           </div>
-          <TextArea
+          <MarkdownEditor
             id={fieldIds.recap.controlId}
             name="recap"
-            className="!min-h-[100px] min-w-0"
             value={recap}
             onChange={(e) => {
               setRecap(e.target.value);
               setFieldErrors((current) => ({ ...current, recap: undefined }));
             }}
-            placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
+            placeholder="Add recap notes…"
+            showToolbar
+            rows={10}
+            className="w-full"
             aria-invalid={fieldErrors.recap ? true : undefined}
             aria-describedby={recapDescribedBy(fieldIds.recap, {
               error: Boolean(fieldErrors.recap),

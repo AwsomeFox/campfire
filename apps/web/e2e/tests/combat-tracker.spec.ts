@@ -42,8 +42,8 @@ test.describe('combat tracker — DM view', () => {
 
     // Both monsters present with exact HP "current / max" (issue #81 HP math).
     await expect(page.getByText(boss.name).first()).toBeVisible();
-    await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`)).toBeVisible();
-    await expect(page.getByText(`${skirmisher.hpMax} / ${skirmisher.hpMax}`)).toBeVisible();
+    await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`).first()).toBeVisible();
+    await expect(page.getByText(`${skirmisher.hpMax} / ${skirmisher.hpMax}`).first()).toBeVisible();
 
     // Exact initiative is editable by the DM (aria-labelled number inputs).
     await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveValue(String(boss.initiative));

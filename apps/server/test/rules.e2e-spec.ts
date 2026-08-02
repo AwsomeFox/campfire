@@ -2377,6 +2377,29 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
     expect(res.status).toBe(400);
     expect(String(res.body.message)).toMatch(/open license/i);
   });
+
+  it('accepts self-authored licenses on upload (issue #1504)', async () => {
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'self-authored-pack', name: 'Self Authored Pack', license: 'My own work' },
+      entries: [
+        { slug: 'homebrew-monster', name: 'Homebrew Monster', type: 'monster', body: 'original creation' },
+      ],
+    });
+    expect(res.status).toBe(202);
+  });
+
+  it('rejects CC-BY-NC-ND redistribution forbidden licenses on upload (issue #1504)', async () => {
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'nc-nd-pack', name: 'NC ND Pack', license: 'CC-BY-NC-ND-4.0' },
+      entries: [
+        { slug: 'nc-nd-monster', name: 'NC ND Monster', type: 'monster', body: 'restricted' },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toMatch(/redistribution|NonCommercial|NoDerivatives/i);
+  });
 });
 
 

@@ -1,0 +1,23 @@
+
+> @campfire/server@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.jest.json --rootDir ../..
+
+
+> @campfire/web@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.json && npm run test:e2e:typecheck
+
+src/features/ai-dm/aiDmUndoLever.ts(1,15): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+src/features/ai-dm/AiTablePage.tsx(53,15): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+src/lib/query.ts(21,47): error TS2305: Module '"@campfire/schema"' has no exported member 'DriverLastUndoableCommit'.
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path /Users/anthonyanderson/Documents/wt-1853/apps/web
+npm error workspace @campfire/web@0.14.1
+npm error location /Users/anthonyanderson/Documents/wt-1853/apps/web
+npm error command failed
+npm error command sh -c tsc --noEmit -p tsconfig.json && npm run test:e2e:typecheck
+
+
+> @campfire/schema@0.14.1 typecheck
+> tsc --noEmit -p tsconfig.json
+

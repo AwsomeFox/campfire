@@ -2934,6 +2934,7 @@ export const RevisionEntityType = z.enum([
   'session_zero',
   'comment',
   'story_beat',
+  'campaign_library_monster',
 ]);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
 
@@ -3176,6 +3177,11 @@ export const NotificationType = z.enum([
   // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
   // Maps to the always-on `security` category below: a safety stop must not be mutable by a
   // notification preference or deferrable into a digest.
+  // Live play events (issue #1322)
+  'encounter_started',
+  'encounter_ended',
+  'encounter_turn',
+  'character_downed',
   'safety_hold',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
@@ -3291,6 +3297,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
+  'live_play', // encounter_started, encounter_ended, encounter_turn, character_downed
   'access', // added_to_campaign, removed_from_campaign, campaign_trashed, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
@@ -3338,6 +3345,10 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_submitted: 'proposals',
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
+  encounter_started: 'live_play',
+  encounter_ended: 'live_play',
+  encounter_turn: 'live_play',
+  character_downed: 'live_play',
   ai_dm_alert: 'security',
   // 'access' rather than a category of its own, and therefore ALWAYS ON. A published
   // charter version can withdraw a protection the recipient previously agreed to, and
@@ -5148,7 +5159,7 @@ export function formatCheckBreakdown(def: Pick<RollCheckDefinition, 'breakdown' 
 }
 
 /** The three roll modes a d20-style check can be taken with (mirrors the sheet's chooser). */
-export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+export type CheckRollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 /**
  * Build the restricted dice expression for a catalog check + roll mode (issue #415). Uses the
@@ -5157,7 +5168,7 @@ export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
  */
 export function checkRollExpr(
   def: Pick<RollCheckDefinition, 'modifier' | 'die' | 'supportsAdvantage'>,
-  mode: CheckRollMode = 'flat',
+  mode: CheckRollMode = 'normal',
 ): string {
   const die = def.die > 0 ? def.die : 20;
   const tail = def.modifier === 0 ? '' : signedModifier(def.modifier);
@@ -6076,37 +6087,59 @@ const OPEN_LICENSE_KEYWORDS = [
   'gnu free documentation',
 ];
 
+const SELF_AUTHORED_LICENSE_KEYWORDS = [
+  'my own work',
+  'custom',
+  'self',
+  'homebrew',
+  'original work',
+  'author reserved',
+];
+
+/**
+ * Whether a license string names self-authored original work by the author/DM (issue #1504).
+ */
+export function isSelfAuthoredLicense(license: string): boolean {
+  const l = (license ?? '').trim().toLowerCase();
+  if (!l) return false;
+  return SELF_AUTHORED_LICENSE_KEYWORDS.some((k) => l.includes(k) || l === k);
+}
+
 /**
  * Whether a license string names a recognized open/free-culture license. Used to
  * gate uploaded rule packs (issue #19) so only open-licensed content can be added —
  * proprietary strings ("All Rights Reserved", a publisher name, "Proprietary") are
  * rejected. Substring match, case-insensitive, intentionally permissive about
  * formatting ("OGL 1.0a", "CC-BY-4.0", "Creative Commons Attribution 4.0" all pass).
+ * NC-ND and self-authored licenses are not open licenses (issue #1504).
  */
 export function isOpenLicense(license: string): boolean {
   const l = (license ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (licenseForbidsRedistribution(l)) return false;
   return OPEN_LICENSE_KEYWORDS.some((k) => l.includes(k));
 }
 
 /**
  * Whether a license string carries a Creative Commons NonCommercial (NC) or NoDerivatives
- * (ND) restriction, which forbids the redistribution/re-serving that bundling a map into a
- * campaign entails. This is the failure mode for battle-map content specifically (issue
- * #303): nearly every 'free map' pack is CC-BY-NC-ND, and — because `isOpenLicense` is a
- * permissive substring match — the string "CC-BY-NC-ND" itself sneaks past that gate on the
- * "cc-by" substring. This is an ADDITIVE guard layered on top of `isOpenLicense` (it does
- * not change that shared gate's behaviour): content-import paths that redistribute the bytes
- * must reject anything this flags, even when `isOpenLicense` returns true. Matches the "nc"/
- * "nd" tokens in CC short-forms ("by-nc", "by-nc-nd", "by-nd", "noncommercial",
- * "no derivatives") but not incidental substrings of unrelated words.
+ * (ND) restriction, or is self-authored original work (issue #1504), which forbids
+ * general redistribution.
  */
 export function licenseForbidsRedistribution(license: string): boolean {
   const l = (license ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (isSelfAuthoredLicense(l)) return true;
   if (/\bnoncommercial\b|\bnon-commercial\b|\bno[\s-]?deriv\w*/.test(l)) return true;
   // CC short-form tokens: an "-nc" or "-nd" segment, or a bare "nc"/"nd" token.
   return /(^|[\s-])n[cd]([\s-]|$)/.test(l);
+}
+
+/**
+ * Whether a license string is acceptable for rule pack upload (issue #1504): either a recognized
+ * open license or self-authored original work.
+ */
+export function isValidUploadLicense(license: string): boolean {
+  return isOpenLicense(license) || isSelfAuthoredLicense(license);
 }
 
 export const RulePackUploadEntry = z.object({
@@ -7106,6 +7139,11 @@ export const AiGenerationProvenance = z.object({
   sourceHash: z.string().nullable().default(null),
   promptVersion: z.string().max(80),
   promptHash: z.string(),
+  ruleset: z.object({
+    id: z.string(),
+    pack: z.string().nullable().default(null),
+    version: z.string().nullable().default(null),
+  }).optional(),
   consent: z.object({
     campaignPolicy: AiExternalContentPolicy,
     /**
@@ -9073,6 +9111,8 @@ export const MapPing = z.object({
   y: z.number().min(0).max(100),
   color: z.string().max(24).nullable().default(null),
   label: z.string().max(40).nullable().default(null),
+  senderId: z.string().nullable().default(null),
+  senderName: z.string().nullable().default(null),
 });
 export type MapPing = z.infer<typeof MapPing>;
 
@@ -10226,10 +10266,10 @@ export const CombatantUpdate = z.object({
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   // Structured condition instance mutations (issue #423)
-  addConditionInstance: ConditionInstance.optional(),
-  removeConditionInstanceId: z.string().min(1).max(40).optional(),
-  updateConditionInstance: ConditionInstance.optional(),
-  conditionInstances: z.array(ConditionInstance).max(50).optional(),
+  addConditionInstance: ConditionInstance.optional().describe('Add a single structured condition instance. Preferred over addConditions.'),
+  removeConditionInstanceId: z.string().min(1).max(40).optional().describe('Remove a structured condition instance by its ID (e.g. from conditionInstances).'),
+  updateConditionInstance: ConditionInstance.optional().describe('Update an existing structured condition instance (must match its ID).'),
+  conditionInstances: z.array(ConditionInstance).max(50).optional().describe('Absolute set of structured condition instances.'),
   // Nullable so a mistaken value can be cleared back to the unrolled state (issue
   // #715): `initiative: null` writes NULL onto the row (distinguished from omitting
   // the field, which leaves it unchanged). DM only, enforced server-side. A cleared
@@ -10905,6 +10945,7 @@ export const CampaignEventType = z.enum([
   // the anonymity rules. Putting the actor on the wire would hand every connected browser
   // the one field the whole feature exists to withhold.
   'safety.hold',
+  'player-display-scene',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -10939,6 +10980,12 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('player-display-scene'),
+    campaignId: Id,
+    scene: z.string(),
     at: IsoDate,
   }),
   z.object({
@@ -11078,7 +11125,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 // records the roll to the shared dice log, and returns the transparent breakdown + outcome.
 export const CheckRollRequest = z.object({
   checkId: z.string().min(1).max(60).describe('Stable catalog id from GET .../checks, e.g. "skill:Athletics", "save:DEX", "initiative"'),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).default('normal').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
 });
@@ -11097,7 +11144,7 @@ export const CheckRollResponse = z.object({
     breakdownText: z.string(),
     incomplete: z.boolean().optional(),
   }),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']),
   roll: DiceRoll,
   // PF2e degree of success (only present when the system reports degrees AND a dc was given).
   degree: z.enum(['criticalFailure', 'failure', 'success', 'criticalSuccess']).optional(),
@@ -11111,7 +11158,7 @@ export type CheckRollResponse = z.infer<typeof CheckRollResponse>;
 // request(s) over a permission-checked REST read (the thin `check.requested` SSE tick only
 // tells them to refetch), rolls ONCE via the existing catalog-roll path, and sees the DM's
 // consequence text alongside the outcome. The request is then marked resolved.
-export const CheckRequestMode = z.enum(['flat', 'advantage', 'disadvantage']);
+export const CheckRequestMode = z.enum(['normal', 'advantage', 'disadvantage', 'crit']);
 export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
 export const CheckRequestStatus = z.enum(['pending', 'resolved']);
 export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
@@ -11120,7 +11167,7 @@ export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
 export const CheckRequestCreate = z.object({
   characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
   checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
-  mode: CheckRequestMode.default('flat').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: CheckRequestMode.default('normal').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text surfaced to the player with the prompt/result'),
   encounterId: Id.optional().describe('Optional encounter this request is tied to (context only)'),

@@ -95,7 +95,8 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
-import { isDown } from './encounterEndedSummary';
+import { isDown, endedSummaryTallies } from './encounterEndedSummary';
+import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import {
   canStabilizeCombatant,
@@ -122,7 +123,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 
-import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
+import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { CombatantActionsList } from './CombatantActionsList';
 import { CombatantStatblockEditor } from './CombatantStatblockEditor';
@@ -198,7 +199,7 @@ import {
   snapMapPercentToHex,
   tokenFootprintDiameterPx,
 } from './hexGeometry';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { scrollBehavior, prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
@@ -226,7 +227,7 @@ import {
   type EncounterOverrideState,
   type EncounterSyncRevision,
 } from './encounterSyncState';
-import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
+import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
 import {
   armMapPingTap,
   decideMapPingTapRelease,
@@ -253,6 +254,7 @@ import {
   type PinchGesture,
 } from './mapViewport';
 import { tokenDiameterPx } from './tokenFootprint';
+import { tokenIdentityBackground } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -741,6 +743,83 @@ function HpBandBar({ band }: { band: string | null }) {
   );
 }
 
+export function hpDisplay(combatant: Pick<Combatant, 'hpCurrent' | 'hpMax' | 'hpBand'>): string {
+  if (combatant.hpCurrent != null && combatant.hpMax != null) {
+    return `${combatant.hpCurrent} / ${combatant.hpMax}`;
+  }
+  if (combatant.hpBand) {
+    return HP_BAND_LABEL[combatant.hpBand] ?? '—';
+  }
+  return '—';
+}
+
+function InitiativeStrip({
+  combatants,
+  currentCombatantId,
+  charactersById,
+}: {
+  combatants: readonly Combatant[];
+  currentCombatantId: number | null;
+  charactersById: Map<number, Character>;
+}) {
+  return (
+    <div
+      className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
+      style={{
+        scrollSnapType: 'x mandatory',
+        scrollbarWidth: 'none',
+      }}
+      data-testid="initiative-strip"
+    >
+      {combatants.map((c) => {
+        const isCurrent = c.id === currentCombatantId;
+        const character = c.characterId ? charactersById.get(c.characterId) : null;
+        const isSilhouette = c.kind === 'npc' && c.npcId == null;
+
+        return (
+          <div
+            key={c.id}
+            className="flex flex-col items-center gap-1 flex-none"
+            style={{ scrollSnapAlign: 'center' }}
+            ref={(el) => {
+              if (isCurrent && el) {
+                el.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
+              }
+            }}
+          >
+            <div
+              aria-current={isCurrent ? 'true' : undefined}
+              className="flex items-center justify-center overflow-hidden bg-surface"
+              style={{
+                width: isCurrent ? 48 : 40,
+                height: isCurrent ? 48 : 40,
+                transition: 'all 0.2s ease',
+                border: isCurrent ? '2px solid var(--color-accent)' : '2px solid transparent',
+                background: tokenIdentityBackground(c),
+                borderRadius: 6,
+              }}
+              title={c.name}
+            >
+              {character?.portraitUrl ? (
+                <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
+              ) : isSilhouette ? (
+                <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
+              ) : (
+                <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
+                  {tokenInitials(c.name)}
+                </span>
+              )}
+            </div>
+            <span className="text-muted" style={{ fontSize: 10, lineHeight: 1 }}>
+              {hpDisplay(c)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Stable', dead: 'Dead' };
 
 /**
@@ -1057,12 +1136,23 @@ export default function RunSessionPage() {
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
-  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
   const pingSeq = useRef(0);
-  const addPing = useCallback((ping: MapPing) => {
+  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++pingSeq.current;
-    setPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
-    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 2600);
+    if (ping.senderName) {
+      announce(`${ping.senderName} pinged the map`);
+    } else {
+      announce('A map ping arrived');
+    }
+    setPings((prev) => {
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      return next.slice(-10);
+    });
+    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
+  }, [announce]);
+  const dismissPing = useCallback((key: number) => {
+    setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
@@ -1229,7 +1319,7 @@ export default function RunSessionPage() {
     // Preserve the click's user activation by handing `clipboard.write` a Promise
     // that resolves to the link text once the server mints it (Safari/WebKit).
     const textPromise = mintCastLink().then((url) => new Blob([url], { type: 'text/plain' }));
-    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as any).ClipboardItem) as typeof ClipboardItem | undefined;
+    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as unknown as { ClipboardItem: typeof ClipboardItem }).ClipboardItem) as typeof ClipboardItem | undefined;
     const writePromise =
       ClipboardItemCtor && navigator.clipboard?.write
         ? navigator.clipboard.write([new ClipboardItemCtor({ 'text/plain': textPromise })])
@@ -2507,7 +2597,7 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null });
+  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null } as unknown as MapPing);
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
@@ -2781,11 +2871,6 @@ export default function RunSessionPage() {
             : t('encounters.reconcile.done')}
         </div>
       )}
-
-      {/* Issue #415: the targeted player's in-page check-request prompt(s). Shown for any viewer
-          who owns a targeted character (a player their PC, or the DM their own PC), so a DM asking
-          the party sees the same one-tap prompt for their own character. */}
-      <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
       {canEditEncounter && (
         <VisibleToPlayersBar
@@ -3153,6 +3238,49 @@ export default function RunSessionPage() {
         />
       )}
 
+      {encounter.status === 'ended' && (() => {
+        const visibleCombatants = isDm
+          ? encounter.combatants
+          : filterPlayerSafeCombatants(encounter.combatants);
+        const { dead, downed, survivors } = endedSummaryTallies(visibleCombatants);
+        return (
+          <Card
+            density="comfortable"
+            className="space-y-2"
+            role="region"
+            aria-labelledby="encounter-ended-summary-heading"
+            data-testid="encounter-ended-summary"
+          >
+            <h2 id="encounter-ended-summary-heading" className="text-sm font-bold text-white m-0">
+              Combat Summary
+            </h2>
+            <div className="flex gap-4 flex-wrap text-[13px]" data-testid="encounter-ended-summary-tallies">
+              <span>
+                Rounds: <b>{encounter.round}</b>
+              </span>
+              <span>
+                Dead: <b>{dead.length}</b>
+                {dead.length > 0 && (
+                  <span className="text-muted"> ({dead.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+              <span>
+                Downed: <b>{downed.length}</b>
+                {downed.length > 0 && (
+                  <span className="text-muted"> ({downed.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+              <span>
+                Survivors: <b>{survivors.length}</b>
+                {survivors.length > 0 && (
+                  <span className="text-muted"> ({survivors.map((c) => c.name).join(', ')})</span>
+                )}
+              </span>
+            </div>
+          </Card>
+        );
+      })()}
+
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
       )}
@@ -3166,39 +3294,74 @@ export default function RunSessionPage() {
         }}
       />
 
-      {canDmWrite && preparingSetupGuidance && (
-        <div
-          data-testid="encounter-preparing-guidance"
-          className="text-muted"
-          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
-        >
-          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
-          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {preparingSetupGuidance.nextSteps.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-          <ol
-            aria-label="Encounter lifecycle"
-            data-testid="encounter-lifecycle-checklist"
-            style={{
-              margin: 0,
-              padding: 0,
-              listStyle: 'none',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 6,
-              alignItems: 'center',
-            }}
+      {(() => {
+        const visibleGuidanceCombatants = isDm
+          ? encounter.combatants
+          : filterPlayerSafeCombatants(encounter.combatants);
+        const partyCombatantCount = visibleGuidanceCombatants.filter((c) => c.kind === 'character').length;
+        const enemyCombatantCount = visibleGuidanceCombatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length;
+        const needsInitCount = visibleGuidanceCombatants.filter((c) => c.initiative === null || c.initiative === undefined).length;
+        const activeStepId = activeLifecycleStepId(encounter.status, {
+          partyCombatantCount,
+          enemyCombatantCount,
+          needsInitiativeCount: needsInitCount,
+        });
+        return (
+          <div
+            data-testid="encounter-preparing-guidance"
+            data-lifecycle-orientation="true"
+            className="text-muted"
+            style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
           >
-            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
-              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
-                {i + 1}. {step.label}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+            {canDmWrite && encounter.status === 'preparing' && preparingSetupGuidance ? (
+              <>
+                <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+                <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {preparingSetupGuidance.nextSteps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+              </>
+            ) : (
+              <p style={{ margin: 0 }} data-testid="encounter-status-guidance-lead">
+                {playerGuidance({
+                  status: encounter.status,
+                  currentCombatantName: currentCombatant?.name,
+                })}
+              </p>
+            )}
+            <ol
+              aria-label="Encounter lifecycle"
+              data-testid="encounter-lifecycle-checklist"
+              style={{
+                margin: 0,
+                padding: 0,
+                listStyle: 'none',
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                alignItems: 'center',
+              }}
+            >
+              {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => {
+                const isActive = step.id === activeStepId;
+                return (
+                  <li
+                    key={step.id}
+                    className={`tag ${isActive ? 'tag-accent' : 'tag-neutral'}`}
+                    style={{ fontSize: 10 }}
+                    title={step.detail}
+                    aria-current={isActive ? 'step' : undefined}
+                    data-active={isActive ? 'true' : undefined}
+                  >
+                    {i + 1}. {step.label}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        );
+      })()}
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
           tokens. Shown to the DM always (so they can attach one), and to players only once
@@ -3238,6 +3401,7 @@ export default function RunSessionPage() {
           onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
           pings={pings}
+          onDismissPing={dismissPing}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
@@ -3456,6 +3620,13 @@ export default function RunSessionPage() {
         className="grid gap-4 min-w-0 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
       >
         <div className="space-y-4 min-w-0">
+          {orderedCombatants.length > 0 && (
+            <InitiativeStrip
+              combatants={orderedCombatants}
+              currentCombatantId={encounter.currentCombatantId}
+              charactersById={charactersById}
+            />
+          )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
             {sheetsStatusLabel && (
               <p
@@ -3888,6 +4059,7 @@ export function BattleMap({
   onDismissGuidance,
   onPing,
   pings,
+  onDismissPing,
   onError,
   onAoeHitLayoutChange,
   projection = 'session',
@@ -3924,7 +4096,8 @@ export function BattleMap({
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
   onPing: (x: number, y: number) => void;
-  pings: ReadonlyArray<{ key: number; x: number; y: number }>;
+  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>;
+  onDismissPing: (key: number) => void;
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
@@ -5674,7 +5847,13 @@ export function BattleMap({
                 <input
                   type="checkbox"
                   checked={fogOn}
-                  onChange={(e) => commitFogEdit(e.target.checked ? { enabled: true, revealed: fog?.revealed ?? [] } : null)}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    commitFogEdit(enabled ? { enabled: true, revealed: fog?.revealed ?? [] } : null);
+                    if (enabled) {
+                      setTool('reveal');
+                    }
+                  }}
                 />
                 Fog
               </label>
@@ -5808,6 +5987,7 @@ export function BattleMap({
                   : tool !== 'move' || draggingId != null || aoeDrag != null
                     ? 'none'
                     : undefined,
+              userSelect: tool !== 'move' || draggingId != null || aoeDrag != null || viewportPan ? 'none' : undefined,
               cursor: viewportPan
                 ? 'grab'
                 : tool === 'measure'
@@ -5826,6 +6006,7 @@ export function BattleMap({
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
             onKeyDown={onViewportKeyDown}
+            onDragStart={(e) => e.preventDefault()}
           >
             <div
               data-testid="battle-map-viewport"
@@ -5840,6 +6021,7 @@ export function BattleMap({
               srcSet={mapSrcSet}
               sizes={mapSrcSet ? '100vw' : undefined}
               alt="Battle map"
+              draggable={false}
               className="absolute inset-0 w-full h-full object-contain"
               style={{ background: 'rgba(15,23,42,.4)' }}
               onLoad={(e) => setImgNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
@@ -6010,7 +6192,7 @@ export function BattleMap({
                           fontSize: Math.max(9, Math.round(sizePx * 0.34)),
                           fontWeight: 700,
                           color: '#fff',
-                          background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                          background: tokenIdentityBackground(c),
                           border: '2px solid rgba(15,23,42,.85)',
                           boxShadow: '0 1px 3px rgba(0,0,0,.5)',
                           pointerEvents: 'none',
@@ -6250,26 +6432,67 @@ export function BattleMap({
                 )}
 
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
-                {pings.map((p) => (
-                  <div
-                    key={p.key}
-                    className="absolute -translate-x-1/2 -translate-y-1/2"
-                    style={{
-                      left: `${p.x}%`,
-                      top: `${p.y}%`,
-                      width: 20,
-                      height: 20,
-                      borderRadius: '50%',
-                      border: '3px solid var(--color-accent)',
-                      zIndex: 10,
-                      animation: 'cfPing 2.4s ease-out forwards',
-                    }}
-                  />
+                {pings.map((p) => {
+                  const isReduced = prefersReducedMotion();
+                  const color = p.color || 'var(--color-accent)';
+                  return (
+                    <div
+                      key={p.key}
+                      className="absolute z-10 flex flex-col items-center justify-center pointer-events-none"
+                      style={{
+                        left: `${p.x}%`,
+                        top: `${p.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                      }}
+                    >
+                      <div className="relative flex items-center justify-center" style={{ width: 24, height: 24 }}>
+                        {!isReduced && (
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              borderRadius: '50%',
+                              border: `3px solid ${color}`,
+                              animation: 'cfPing 2.4s ease-out forwards',
+                            }}
+                          />
+                        )}
+                        <div
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: '50%',
+                            backgroundColor: color,
+                            boxShadow: '0 0 4px rgba(0,0,0,0.5)',
+                            border: '1px solid white', // high contrast
+                          }}
+                        />
+                      </div>
+                      {p.senderName && (
+                        <div className="mt-1 px-1 rounded text-xs whitespace-nowrap bg-surface-raised font-semibold shadow-sm" style={{ color: 'var(--color-text)', border: `1px solid ${color}` }}>
+                          {p.senderName}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Ping Log */}
+            {pings.length > 0 && (
+              <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
+                {pings.slice().reverse().map((p) => (
+                  <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
+                    <span className="truncate mr-2 font-medium">{p.senderName || 'Someone'} pinged</span>
+                    <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
+                      <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
             </div>
-            <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
+            <style>{'@keyframes cfPing{0%{transform:scale(.4);opacity:.9}70%{opacity:.55}100%{transform:scale(3);opacity:0}}'}</style>
           </div>
 
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
@@ -7736,6 +7959,7 @@ function CombatantRow({
             <CombatantStatblockEditor
               value={combatant.statblock}
               onChange={(next) => onPatchCombatant?.({ statblock: next })}
+              ruleSystem={ruleSystem}
             />
           </details>
         )}
@@ -7792,7 +8016,7 @@ function CombatantRow({
                   <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em', marginRight: 'auto' }}>HP</span>
                 )}
                 <span>
-                  {combatant.hpCurrent} / {combatant.hpMax}
+                  {hpDisplay(combatant)}
                 </span>
               </div>
               <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
@@ -7832,7 +8056,7 @@ function CombatantRow({
         ) : (
           <>
             <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }} title="Exact HP is hidden for monsters">
-              {combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}
+              {hpDisplay(combatant)}
             </div>
             <HpBandBar band={combatant.hpBand} />
           </>
@@ -8526,7 +8750,7 @@ function AddCombatantPanel({
         <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
           {COMBATANT_STATBLOCK_HELP.library}
         </p>
-        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} />
+        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} ruleSystem={rulePack} />
       </div>
 
       <div

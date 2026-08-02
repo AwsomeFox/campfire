@@ -93,6 +93,7 @@ import {
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { GroundingPanel } from './GroundingPanel';
+import { CheckRequestPanel } from '../encounters/CheckRequests';
 import { TranscriptRow, systemText } from './AiDmTranscriptUi';
 import { Field } from '../../components/Field';
 import { Toggle } from '../../components/Toggle';
@@ -1156,6 +1157,7 @@ export default function AiTablePage() {
         as unverified, shows the provider/model that produced them plus evidence links for the
         citations that DID check out, and lets a DM correct one into every later turn.
       */}
+      {isDm && campaignId !== undefined && <CheckRequestPanel campaignId={campaignId} />}
       {campaignId !== undefined && <GroundingPanel campaignId={campaignId} isDm={isDm} />}
 
       {/* Transcript — named log landmark with aria-live=off so token deltas

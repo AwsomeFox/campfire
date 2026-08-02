@@ -31,17 +31,12 @@ import {
   abilityFieldsForCharacter,
   signed,
   toHitExpr,
-  damageExpr,
-  advFromEvent,
+  damageExpr, critDamageExpr,
 } from '../lib/characterStats';
-import { useRoller, type CheckRollMode } from '../lib/useRoller';
+import { RollContextMenu, type RollMode } from './RollContextMenu';
+import { useRoller } from '../lib/useRoller';
 import { useDisclosure } from './useDisclosure';
 
-/** Map a modifier-key click to a catalog roll mode (shift = advantage, alt/ctrl/⌘ = disadvantage). */
-function checkModeFromEvent(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): CheckRollMode {
-  const adv = advFromEvent(e);
-  return adv === 'adv' ? 'advantage' : adv === 'dis' ? 'disadvantage' : 'flat';
-}
 
 const NOOP = () => {};
 
@@ -140,10 +135,10 @@ export function CharacterStatCard({
   const spellLevels = SPELL_LEVELS.filter((lvl) => (character.spellSlots[lvl]?.max ?? 0) > 0);
 
   /** Roll a catalog check server-side (the server owns the proficiency math). */
-  function rollCheck(def: RollCheckDefinition, e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): void {
+  function rollCheck(def: RollCheckDefinition, mode: RollMode): void {
     if (!interactive) return;
-    const mode = def.supportsAdvantage ? checkModeFromEvent(e) : 'flat';
-    void roller.rollCheck(character.id, def.id, mode);
+    const resolvedMode = def.supportsAdvantage ? mode : 'normal';
+    void roller.rollCheck(character.id, def.id, resolvedMode);
   }
 
   const subtitle = [character.species, character.className && `${character.className} ${character.level}`]
@@ -170,18 +165,17 @@ export function CharacterStatCard({
     }
     const advHint = def.supportsAdvantage ? ROLL_HINT : '';
     return (
-      <button
-        type="button"
+      <RollContextMenu
         className={cls}
         style={{ ...PILL, cursor: 'pointer', border: 0 }}
         disabled={roller.rolling}
         data-testid={`check-roll-${def.id}`}
         title={`Roll ${def.label} — ${breakdown}${incomplete}${advHint}`}
         aria-label={`Roll ${def.label}: ${breakdown}${incomplete}`}
-        onClick={(e) => rollCheck(def, e)}
+        onRoll={(mode) => rollCheck(def, mode)}
       >
         {text}
-      </button>
+      </RollContextMenu>
     );
   }
 
@@ -240,19 +234,16 @@ export function CharacterStatCard({
               const def = catalog.find((c) => c.id === `ability:${k}`);
               if (!interactive || !def) return <StatChip key={k} label={label} value={value} />;
               return (
-                <button
+                <RollContextMenu
                   key={k}
-                  type="button"
                   disabled={roller.rolling}
                   data-testid={`check-roll-ability:${k}`}
-                  // No aria-label: the accessible name stays the chip's own text ("STR 10 (+0)")
-                  // so existing name-based locators keep working; the breakdown rides in the title.
                   title={`Roll ${k} check (${mod === null ? '—' : signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
-                  onClick={(e) => rollCheck(def, e)}
+                  onRoll={(mode) => rollCheck(def, mode)}
                   style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
                 >
                   <StatChip label={label} value={value} />
-                </button>
+                </RollContextMenu>
               );
             })}
           </div>
@@ -317,35 +308,32 @@ export function CharacterStatCard({
                       )}
                       {a.toHit &&
                         (canRollHit ? (
-                          <button
-                            type="button"
+                          <RollContextMenu
                             className="cf-roll-control"
-                            disabled={roller.rolling}
-                            title={`Roll ${a.name} to hit${ROLL_HINT}`}
-                            onClick={(e) => void roller.roll(toHitExpr(a.toHit, advFromEvent(e))!, `${character.name} · ${a.name} to hit`)}
                             data-testid="attack-roll-control"
+                            disabled={roller.rolling}
+                            onRoll={(mode) => void roller.roll(toHitExpr(a.toHit, mode === 'advantage' ? 'adv' : mode === 'disadvantage' ? 'dis' : 'flat')!, `${character.name} · ${a.name} to hit${mode !== 'normal' ? ` (${mode})` : ''}`)}
                           >
                             🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}
-                          </button>
+                          </RollContextMenu>
                         ) : (
                           <span className="text-muted">🎯 {a.toHit.startsWith('+') || a.toHit.startsWith('-') ? a.toHit : `+${a.toHit}`}</span>
                         ))}
                       {a.damage &&
                         (canRollDmg ? (
-                          <button
-                            type="button"
+                          <RollContextMenu
                             className="cf-roll-control"
-                            disabled={roller.rolling}
-                            title={`Roll ${a.name} damage${onApplyDamage ? ' — apply from the roll toast in combat' : ''}`}
-                            onClick={() =>
-                              void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
-                                onApply: onApplyDamage,
-                              })
-                            }
                             data-testid="damage-roll-control"
+                            disabled={roller.rolling}
+                            onRoll={(mode) => {
+                               // For damage, crit implies doubling dice via roller API/logic if supported, but for now we just label it or handle it in roller.
+                               void roller.roll(mode === 'crit' ? critDamageExpr(dmgExpr!) || dmgExpr! : dmgExpr!, `${character.name} · ${a.name} damage${mode !== 'normal' ? ` (${mode})` : ''}`, {
+                                onApply: onApplyDamage,
+                              });
+                            }}
                           >
                             💥 {a.damage}
-                          </button>
+                          </RollContextMenu>
                         ) : (
                           <span className="text-muted">💥 {a.damage}</span>
                         ))}

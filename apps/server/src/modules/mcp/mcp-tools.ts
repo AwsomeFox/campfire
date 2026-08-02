@@ -4028,7 +4028,7 @@ export class McpToolsService {
           characterId as number,
           {
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
           },
@@ -4066,7 +4066,7 @@ export class McpToolsService {
           {
             characterIds: characterIds as number[],
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
             encounterId: encounterId as number | undefined,
@@ -4350,9 +4350,11 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), addConditions/removeConditions. Use roll_death_save for a server-authoritative d20. ' +
-        'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
-        'the DM may mint custom condition labels. ' +
+        'successes = stable). Use roll_death_save for a server-authoritative d20. ' +
+        'Structured conditions are PREFERRED over flat string labels: use addConditionInstance, removeConditionInstanceId, ' +
+        'updateConditionInstance, or conditionInstances. A ConditionInstance supports { name, durationRounds, ' +
+        'roundsRemaining, saveDc, saveAbility, isConcentration, source, sourceCombatantId, ruleEntryId, stacks }. ' +
+        'Legacy addConditions/removeConditions flat strings are still supported. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
@@ -4363,10 +4365,11 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...CombatantUpdate.shape,
         deathSaveRoll: z.number().optional().describe('Removed: use roll_death_save instead'),
       },
-      async ({ encounterId, combatantId, deathSaveRoll, ...fields }) => {
+      async ({ encounterId, combatantId, deathSaveRoll, expectedUpdatedAt, ...fields }) => {
         if (deathSaveRoll !== undefined) {
           throw new BadRequestException({
             code: 'validation_failed',
@@ -4382,7 +4385,13 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantUpdate.parse(fields);
-        return this.encounters.updateCombatant(encounterId as number, combatantId as number, validated, user, role);
+        return this.encounters.updateCombatant(
+          encounterId as number,
+          combatantId as number,
+          { ...validated, expectedUpdatedAt: expectedUpdatedAt as string | undefined },
+          user,
+          role,
+        );
       },
     );
 

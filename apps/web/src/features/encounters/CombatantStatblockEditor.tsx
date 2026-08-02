@@ -9,35 +9,44 @@ import {
   COMBATANT_STATBLOCK_HELP,
   defaultCombatantStatblock,
   isResolvableSpec,
+  ruleSystemAdapter,
+  statblockPresentation,
+  STANDARD_D20_ABILITY_FIELDS,
 } from '@campfire/schema';
 import { Btn } from '../../components/ui';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 
-const ABILITIES = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
-
-function emptyAction(): CharacterAction {
-  return { name: '', kind: 'melee', toHit: '', damage: '', targetAc: 'AC', notes: '' };
+function emptyAction(targetAc = 'AC'): CharacterAction {
+  return { name: '', kind: 'melee', toHit: '', damage: '', targetAc, notes: '' };
 }
 
 export function CombatantStatblockEditor({
   value,
   onChange,
   disabled = false,
+  ruleSystem,
 }: {
   value: CombatantStatblock | null;
   onChange: (next: CombatantStatblock) => void;
   disabled?: boolean;
+  ruleSystem?: string | null;
 }) {
   useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
+  const presentation = useMemo(() => statblockPresentation(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const abilityFields = useMemo(
+    () => adapter.characterSheet?.abilityFields ?? STANDARD_D20_ABILITY_FIELDS,
+    [adapter],
+  );
 
   const patch = (partial: Partial<CombatantStatblock>) => onChange({ ...statblock, ...partial });
 
   const [acDraft, setAcDraft] = useState<string>(() => String(statblock.ac ?? 10));
   const [abilityDrafts, setAbilityDrafts] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
-    for (const ab of ABILITIES) {
-      initial[ab] = String(statblock.abilityScores[ab] ?? 10);
+    for (const field of abilityFields) {
+      initial[field.key] = String(statblock.abilityScores[field.key] ?? 10);
     }
     return initial;
   });
@@ -46,12 +55,12 @@ export function CombatantStatblockEditor({
     setAcDraft(String(statblock.ac ?? 10));
     setAbilityDrafts(() => {
       const next: Record<string, string> = {};
-      for (const ab of ABILITIES) {
-        next[ab] = String(statblock.abilityScores[ab] ?? 10);
+      for (const field of abilityFields) {
+        next[field.key] = String(statblock.abilityScores[field.key] ?? 10);
       }
       return next;
     });
-  }, [statblock.ac, statblock.abilityScores]);
+  }, [statblock.ac, statblock.abilityScores, abilityFields]);
 
   const patchAction = (index: number, partial: Partial<CharacterAction>) => {
     const actions = [...statblock.actions];
@@ -59,13 +68,13 @@ export function CombatantStatblockEditor({
     patch({ actions });
   };
 
-  const addAction = () => patch({ actions: [...statblock.actions, emptyAction()] });
+  const addAction = () => patch({ actions: [...statblock.actions, emptyAction(presentation.defense.short)] });
   const removeAction = (index: number) => patch({ actions: statblock.actions.filter((_, i) => i !== index) });
 
   return (
     <div className="flex flex-col gap-3" data-testid="combatant-statblock-editor">
       <label className="flex flex-col gap-1 text-sm">
-        <span title={COMBATANT_STATBLOCK_HELP.ac}>Armor Class</span>
+        <span title={COMBATANT_STATBLOCK_HELP.ac}>{presentation.defense.full}</span>
         <input
           type="number"
           className="input"
@@ -95,28 +104,28 @@ export function CombatantStatblockEditor({
           Abilities
         </legend>
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-          {ABILITIES.map((ab) => (
-            <label key={ab} className="flex flex-col gap-0.5 text-xs">
-              <span>{ab}</span>
+          {abilityFields.map((field) => (
+            <label key={field.key} className="flex flex-col gap-0.5 text-xs">
+              <span>{field.label}</span>
               <input
                 type="number"
                 className="input !min-h-8"
                 disabled={disabled}
-                value={abilityDrafts[ab] ?? String(statblock.abilityScores[ab] ?? 10)}
+                value={abilityDrafts[field.key] ?? String(statblock.abilityScores[field.key] ?? 10)}
                 onChange={(e) => {
                   const raw = e.target.value;
-                  setAbilityDrafts((prev) => ({ ...prev, [ab]: raw }));
+                  setAbilityDrafts((prev) => ({ ...prev, [field.key]: raw }));
                   const parsed = parseLocalizedInteger(raw);
                   if (parsed.ok) {
                     patch({
-                      abilityScores: { ...statblock.abilityScores, [ab]: parsed.value },
+                      abilityScores: { ...statblock.abilityScores, [field.key]: parsed.value },
                     });
                   }
                 }}
                 onBlur={() => {
-                  const parsed = parseLocalizedInteger(abilityDrafts[ab] ?? '');
+                  const parsed = parseLocalizedInteger(abilityDrafts[field.key] ?? '');
                   if (!parsed.ok) {
-                    setAbilityDrafts((prev) => ({ ...prev, [ab]: String(statblock.abilityScores[ab] ?? 10) }));
+                    setAbilityDrafts((prev) => ({ ...prev, [field.key]: String(statblock.abilityScores[field.key] ?? 10) }));
                   }
                 }}
               />

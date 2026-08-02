@@ -30,7 +30,7 @@ export class EncounterEscalationUpdateDto extends createZodDto(EncounterEscalati
 // field is `hpSet`/`hpDelta`) previously validated fine (the pipe just stripped
 // the unrecognized key) and silently did nothing.
 export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {}
-export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {}
+export class CombatantUpdateDto extends createZodDto(CombatantUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 export class CombatantRemoveRequestDto extends createZodDto(CombatantRemoveRequest.strict().default({})) {}
 export class DeathSaveRollDto extends createZodDto(DeathSaveRollRequest.strict()) {}
 export class CombatantRemoveUndoDto extends createZodDto(CombatantRemoveUndo.strict()) {}

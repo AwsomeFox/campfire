@@ -14,10 +14,10 @@ import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, type Rol
 
 test.describe('roll-mode vocabulary (issue #713)', () => {
   test('exposes exactly Flat / Advantage / Disadvantage, in that order', () => {
-    expect(ROLL_MODES).toEqual(['flat', 'adv', 'dis']);
+    expect(ROLL_MODES).toEqual(['normal', 'advantage', 'disadvantage']);
     const opts = rollModeOptions();
-    expect(opts.map((o) => o.mode)).toEqual(['flat', 'adv', 'dis']);
-    expect(opts.map((o) => o.label)).toEqual(['Flat', 'Advantage', 'Disadvantage']);
+    expect(opts.map((o) => o.mode)).toEqual(['normal', 'advantage', 'disadvantage']);
+    expect(opts.map((o) => o.label)).toEqual(['Normal', 'Advantage', 'Disadvantage']);
   });
 
   test('every option has a descriptive accessible name (not just the short label)', () => {
@@ -32,9 +32,9 @@ test.describe('roll-mode vocabulary (issue #713)', () => {
 
 test.describe('roll-mode summary shown before submission (issue #713)', () => {
   const cases: Array<[RollMode, RegExp]> = [
-    ['flat', /^flat roll$/i],
-    ['adv', /advantage/i],
-    ['dis', /disadvantage/i],
+    ['normal', /^normal roll$/i],
+    ['advantage', /advantage/i],
+    ['disadvantage', /disadvantage/i],
   ];
   for (const [mode, re] of cases) {
     test(`${mode} announces the active mode`, () => {
@@ -47,37 +47,37 @@ test.describe('modifier-key shortcut coexists with the chooser (issue #713)', ()
   const noMods = { shiftKey: false, altKey: false, ctrlKey: false, metaKey: false };
 
   test('a plain tap rolls the chosen persistent mode', () => {
-    expect(resolveRollMode('flat', noMods)).toBe('flat');
-    expect(resolveRollMode('adv', noMods)).toBe('adv');
-    expect(resolveRollMode('dis', noMods)).toBe('dis');
+    expect(resolveRollMode('normal', noMods)).toBe('normal');
+    expect(resolveRollMode('advantage', noMods)).toBe('advantage');
+    expect(resolveRollMode('disadvantage', noMods)).toBe('disadvantage');
   });
 
   test('shift-click overrides ANY chosen mode with advantage for this roll only', () => {
     for (const chosen of ROLL_MODES) {
-      expect(resolveRollMode(chosen, { ...noMods, shiftKey: true })).toBe('adv');
+      expect(resolveRollMode(chosen, { ...noMods, shiftKey: true })).toBe('advantage');
     }
   });
 
   test('alt/ctrl/meta-click overrides ANY chosen mode with disadvantage for this roll only', () => {
     for (const chosen of ROLL_MODES) {
-      expect(resolveRollMode(chosen, { ...noMods, altKey: true })).toBe('dis');
-      expect(resolveRollMode(chosen, { ...noMods, ctrlKey: true })).toBe('dis');
-      expect(resolveRollMode(chosen, { ...noMods, metaKey: true })).toBe('dis');
+      expect(resolveRollMode(chosen, { ...noMods, altKey: true })).toBe('disadvantage');
+      expect(resolveRollMode(chosen, { ...noMods, ctrlKey: true })).toBe('disadvantage');
+      expect(resolveRollMode(chosen, { ...noMods, metaKey: true })).toBe('disadvantage');
     }
   });
 
   test('shift wins over alt/ctrl/meta (advantage takes precedence, matching advFromEvent)', () => {
     expect(
-      resolveRollMode('flat', { shiftKey: true, altKey: true, ctrlKey: true, metaKey: true }),
-    ).toBe('adv');
+      resolveRollMode('normal', { shiftKey: true, altKey: true, ctrlKey: true, metaKey: true }),
+    ).toBe('advantage');
   });
 
   test('the override does not mutate the chosen default — a following plain tap reverts', () => {
     // resolveRollMode is pure: it returns the EFFECTIVE mode for one roll, never
     // signals a state change. The chooser keeps its selection; the next no-mod
     // tap rolls the chosen mode again. (The component holds the state, not this fn.)
-    const chosen: RollMode = 'dis';
+    const chosen: RollMode = 'disadvantage';
     resolveRollMode(chosen, { ...noMods, shiftKey: true });
-    expect(resolveRollMode(chosen, noMods)).toBe('dis');
+    expect(resolveRollMode(chosen, noMods)).toBe('disadvantage');
   });
 });
