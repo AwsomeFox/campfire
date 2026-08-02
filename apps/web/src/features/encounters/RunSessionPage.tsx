@@ -540,7 +540,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSave: (patch: Record<string, number | null>) => Promise<void>;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
@@ -1040,7 +1040,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function RunSessionPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
   const cid = Number(campaignId);
   const eid = Number(encounterId);
@@ -4117,7 +4117,7 @@ export function BattleMap({
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const announce = useAnnounce();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
@@ -7020,7 +7020,7 @@ function CombatantRow({
   onReleaseLegendary?: () => void;
   onRemove: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
@@ -8306,7 +8306,7 @@ function AddCombatantPanel({
   rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const announce = useAnnounce();
   const [tab, setTab] = useState<AddTab>('manual');
   const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
