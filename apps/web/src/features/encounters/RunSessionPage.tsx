@@ -2979,7 +2979,7 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('run.rollInitiative')}
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
@@ -3019,7 +3019,7 @@ export default function RunSessionPage() {
             {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
-                    keep Roll initiative reachable so the DM can fill them (issue #54).
+                    keep {t('run.rollInitiative')} reachable so the DM can fill them (issue #54).
                     Already-set initiatives are left untouched server-side. Once every
                     combatant has a value, disable the control rather than firing a no-op
                     roll (issue #702), and surface how many still need rolling. */}
@@ -3029,7 +3029,7 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('run.rollInitiative')}
                 </Btn>
                 <Btn
                   data-testid="encounter-header-next-turn"
@@ -3038,7 +3038,7 @@ export default function RunSessionPage() {
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
                   title={`Next turn${nextTurnShortcut.titleSuffix}`}
                 >
-                  Next turn →
+                  {t('run.nextTurn')}
                 </Btn>
               </>
             )}
@@ -3800,10 +3800,10 @@ export default function RunSessionPage() {
 
       {confirmEnd && (
         <ConfirmDialog
-          title="End this encounter?"
-          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
-          confirmLabel="End encounter"
-          pendingLabel="Ending encounter…"
+          title={t('run.endDialog.title')}
+          body={t('run.endDialog.body')}
+          confirmLabel={t('run.endDialog.confirm')}
+          pendingLabel={t('run.endDialog.pending')}
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -3811,17 +3811,15 @@ export default function RunSessionPage() {
       )}
       {confirmReopen && (
         <ConfirmDialog
-          title="Reopen this encounter?"
+          title={t('run.reopenDialog.title')}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <p style={{ margin: 0 }}>
-                It returns to Running where combat left off. Character sheets were synced when it
-                ended — if a sheet has healed, rested, or otherwise changed since then, choose which
-                HP to keep before reopening.
+                {t('run.reopenDialog.body')}
               </p>
               {hpSyncConflicts.length === 0 ? (
                 <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                  No sheet HP conflicts — combatant snapshots still match the sheets.
+                  {t('run.reopenDialog.noConflicts')}
                 </p>
               ) : (
                 <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -3872,7 +3870,7 @@ export default function RunSessionPage() {
               )}
             </div>
           }
-          confirmLabel="Reopen encounter"
+          confirmLabel="{t('run.reopenDialog.confirm')}"
           pendingLabel="Reopening encounter…"
 
           busy={runControl.isPending}
@@ -8687,14 +8685,14 @@ function AddCombatantPanel({
       }}
       onDrop={(event: React.DragEvent<HTMLElement>) => void addDroppedRuleEntry(event)}
     >
-      <span className="card-kicker">Add combatant</span>
+      <span className="card-kicker">{t('run.addCombatant')}</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
-        Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
+        {t('run.addCombatantHint')}
       </p>
       <div
         className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
-        aria-label="Add combatant"
+        aria-label="{t('run.addCombatant')}"
         data-testid="add-combatant-tabs"
       >
         {ADD_TAB_ORDER.map((t) => {

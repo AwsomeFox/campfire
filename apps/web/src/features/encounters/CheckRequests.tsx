@@ -107,7 +107,7 @@ export function CheckRequestPanel({
 
   return (
     <Card className="space-y-2.5" data-testid="request-check-panel">
-      <span className="card-kicker">Request a check</span>
+      <span className="card-kicker">{t('checks.requestCheck')}</span>
       <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
         Ask a player to roll a check or save. They get an in-page prompt and roll once; the result
         lands in the shared dice log with your consequence text.
@@ -115,7 +115,7 @@ export function CheckRequestPanel({
       {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
-          <label htmlFor="check-request-character">Character</label>
+          <label htmlFor="check-request-character">{t('checks.character')}</label>
           <select
             id="check-request-character"
             aria-label="Character"
@@ -126,7 +126,7 @@ export function CheckRequestPanel({
               setCheckId('');
             }}
           >
-            <option value="">Choose a character…</option>
+            <option value="">{t('checks.chooseCharacter')}</option>
             {availableCharacters.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
@@ -135,7 +135,7 @@ export function CheckRequestPanel({
           </select>
         </div>
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
-          <label htmlFor="check-request-check">Check</label>
+          <label htmlFor="check-request-check">{t('checks.check')}</label>
           <select
             id="check-request-check"
             aria-label="Check"
@@ -153,7 +153,7 @@ export function CheckRequestPanel({
           </select>
         </div>
         <div className="field" style={{ width: 80 }}>
-          <label htmlFor="check-request-dc">DC</label>
+          <label htmlFor="check-request-dc">{t('checks.dc')}</label>
           <TextInput
             id="check-request-dc"
             aria-label="DC"
@@ -167,7 +167,7 @@ export function CheckRequestPanel({
         </div>
       </div>
       <div className="field">
-        <label htmlFor="check-request-consequence">Consequence (optional)</label>
+        <label htmlFor="check-request-consequence">{t('checks.consequenceOptional')}</label>
         <TextInput
           id="check-request-consequence"
           aria-label="Consequence"
