@@ -1539,6 +1539,9 @@ export const encounters = sqliteTable('encounters', {
   endedAt: text('ended_at'),
   // Issue #473: DM deferred the post-encounter aftermath panel (idempotent resume).
   aftermathDismissedAt: text('aftermath_dismissed_at'),
+  // Issue #1448: Aftermath mutations tracking (XP award timestamp and stored loot list package).
+  aftermathXpAwardedAt: text('aftermath_xp_awarded_at'),
+  aftermathLoot: text('aftermath_loot'),
   // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
