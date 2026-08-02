@@ -3870,7 +3870,7 @@ export default function RunSessionPage() {
               )}
             </div>
           }
-          confirmLabel="{t('run.reopenDialog.confirm')}"
+          confirmLabel={t('run.reopenDialog.confirm')}
           pendingLabel="Reopening encounter…"
 
           busy={runControl.isPending}
@@ -8692,7 +8692,7 @@ function AddCombatantPanel({
       <div
         className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
-        aria-label="{t('run.addCombatant')}"
+        aria-label={t('run.addCombatant')}
         data-testid="add-combatant-tabs"
       >
         {ADD_TAB_ORDER.map((t) => {
