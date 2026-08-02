@@ -2674,6 +2674,9 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterAftermath> {
     const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath quest updates can only be applied to ended encounters');
+    }
     const questId = input.questId ?? row.questId;
     if (!questId) {
       throw new BadRequestException('No quest specified or linked to encounter aftermath');
@@ -2743,6 +2746,9 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterAftermath> {
     const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath beats can only be updated for ended encounters');
+    }
 
     if (input.beatId && this.storylinesService) {
       await this.storylinesService.updateBeat(
@@ -2797,6 +2803,9 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterAftermath> {
     const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath timeline events can only be added for ended encounters');
+    }
 
     if (this.timelineService) {
       await this.timelineService.createEvent(
