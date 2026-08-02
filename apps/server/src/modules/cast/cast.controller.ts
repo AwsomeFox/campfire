@@ -111,6 +111,7 @@ export class CampaignCastSessionsController {
   }
 
   @Post('scene')
+  @HttpCode(200)
   @ApiOperation({ summary: 'Broadcast a new scene to all player displays', description: 'DM or co-DM role required.' })
   @ApiResponse({ status: 200, description: 'Broadcasted.' })
   async broadcastScene(
