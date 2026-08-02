@@ -1643,15 +1643,17 @@ export class CharactersService {
         );
       }
 
-      const changed = targets.map((target) => {
+      const changed: Character[] = [];
+      for (const target of targets) {
         const [row] = tx
           .update(characters)
-          .set({ xp: sql`${characters.xp} + ${award.amount}`, updatedAt: ts })
+          .set({ xp: target.xp + award.amount, updatedAt: ts })
           .where(eq(characters.id, target.id))
-          .returning()
-          .all();
-        return row;
-      });
+          .returning();
+        if (row) {
+          changed.push(row);
+        }
+      }
 
       tx.insert(auditLog)
         .values({
