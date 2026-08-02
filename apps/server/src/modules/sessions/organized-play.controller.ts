@@ -373,12 +373,12 @@ export class CampaignSeriesController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
   ): Promise<SessionSeriesWithOccurrences> {
-    await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId);
     // The series must belong to the campaign in the PATH — see
     // getSeriesRowInCampaignOrThrow. Holding rights in some campaign is not
     // authorization to address a series in another one.
     await this.organizedPlay.getSeriesRowInCampaignOrThrow(campaignId, id);
-    return this.organizedPlay.getSeries(id);
+    return this.organizedPlay.getSeries(id, role);
   }
 
   @Patch(':id')

@@ -17,6 +17,7 @@ import { QuestsService } from '../quests/quests.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { SchedulingService } from '../sessions/scheduling.service';
+import { redactPrepNotes } from '../../common/redact';
 
 /** Cap per group so long absences stay bounded (#549 acceptance). */
 const MAX_PER_GROUP = 30;
@@ -109,7 +110,7 @@ export class CatchUpService {
       this.quests.changesSince(campaignId, since, role),
       this.sessions.listForCampaign(campaignId, role),
       this.timeline.listEvents(campaignId, role),
-      this.scheduling.listForCampaign(campaignId),
+      this.scheduling.listForCampaign(campaignId, role),
     ]);
 
     const quests: CatchUpQuestItem[] = questChanges.quests.map((quest) => {

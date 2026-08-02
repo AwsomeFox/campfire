@@ -293,7 +293,7 @@ export class SearchService {
       // The bounded search projections self-cap (min(limit, 50)), so they need no
       // further cap here; their own ordering/visibility is authoritative.
       this.encounters.searchForCampaign(campaignId, role, needle, limit),
-      this.scheduling.searchForCampaign(campaignId, needle, limit),
+      this.scheduling.searchForCampaign(campaignId, needle, limit, role),
       this.sessions.searchForCampaign(campaignId, role, needle, limit),
     ]);
     // The bounded search projections (encounters / scheduled sessions / sessions)

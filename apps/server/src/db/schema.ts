@@ -654,6 +654,7 @@ export const scheduledSessions = sqliteTable('scheduled_sessions', {
   title: text('title').notNull().default(''),
   location: text('location').notNull().default(''),
   notes: text('notes').notNull().default(''),
+  prepNotes: text('prep_notes').notNull().default(''),
   status: text('status').notNull().default('scheduled'),
   cancelledAt: text('cancelled_at'),
   cancelledBy: text('cancelled_by'),
