@@ -9,7 +9,7 @@ test.describe('MarkdownEditor', () => {
     await page.goto(`/c/${campaignId}/sessions`);
     await page.getByRole('button', { name: /^\+ Add recap$/ }).click();
 
-    const editor = page.locator('.cf-markdown-editor').first();
+    const editor = page.locator('.cf-modal .cf-markdown-editor').first();
     await expect(editor).toBeVisible();
 
     const writeTab = editor.getByRole('tab', { name: 'Write' });
@@ -32,7 +32,7 @@ test.describe('MarkdownEditor', () => {
     await page.goto(`/c/${campaignId}/sessions`);
     await page.getByRole('button', { name: /^\+ Add recap$/ }).click();
 
-    const editor = page.locator('.cf-markdown-editor').first();
+    const editor = page.locator('.cf-modal .cf-markdown-editor').first();
     const textarea = editor.getByRole('textbox', { name: /Recap/i });
     
     await textarea.fill('test');
@@ -48,7 +48,7 @@ test.describe('MarkdownEditor', () => {
     await page.goto(`/c/${campaignId}/sessions`);
     await page.getByRole('button', { name: /^\+ Add recap$/ }).click();
 
-    const editor = page.locator('.cf-markdown-editor').first();
+    const editor = page.locator('.cf-modal .cf-markdown-editor').first();
     const textarea = editor.getByRole('textbox', { name: /Recap/i });
     
     await textarea.fill('test');
