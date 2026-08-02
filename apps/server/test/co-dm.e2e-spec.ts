@@ -437,6 +437,7 @@ describe('co-DM authoring — adapter vocabulary & ruleset provenance', () => {
 
   it('injects correct adapter identity and neutral requirements for non-5e systems', async () => {
     const campaignId = await h.createCampaign('PF2e Campaign');
+    await request(h.server).post('/api/v1/rules/packs/install').set({ 'x-dev-role': 'admin', 'x-dev-user': 'ai-eval-admin' }).send({ source: 'pf2e' });
     await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: 'pf2e-srd' });
     await h.configureSeat(campaignId, { model: 'eval-model', instructions: 'Be terse.', tokenBudget: 1_000_000 });
 
