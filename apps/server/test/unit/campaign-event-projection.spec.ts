@@ -1,10 +1,9 @@
-import type { Role } from '@campfire/schema';
-import type { AiDmStreamEvent } from '../../src/modules/ai-driver/ai-driver-stream.service';
+import type { Role, CampaignEvent } from '@campfire/schema';
 import {
-  AI_DM_BROADCAST_SAFE_FRAMES,
+  CAMPAIGN_BROADCAST_SAFE_FRAMES as AI_DM_BROADCAST_SAFE_FRAMES,
   PROJECTED_FRAME_TYPES,
-  projectAiDmStreamEventForRole,
-} from '../../src/modules/ai-driver/ai-driver-stream-projection';
+  projectCampaignEventForRole,
+} from '../../src/modules/events/campaign-event-projection';
 
 /**
  * Role projection at the AI-DM SSE boundary (#1552).
@@ -43,6 +42,8 @@ const SAMPLES = [
   { type: 'takeover', campaignId: 1, action: 'requested', memberId: 'm1', at },
   { type: 'secret-approval', campaignId: 1, action: 'granted', tool: 'get_npc', entityId: 4242, at },
   { type: 'tool-confirmation', campaignId: 1, action: 'queued', confirmationId: 'c1', tool: 'end_encounter', at },
+  { type: 'phase', campaignId: 1, phase: 'greeting', at },
+  { type: 'narration.withheld', campaignId: 1, reason: 'content_filter', message: 'redacted', at },
   {
     type: 'transcript',
     campaignId: 1,
@@ -56,14 +57,14 @@ const SAMPLES = [
   { type: 'session.reset', campaignId: 1, voteExpired: false, approvalsRevoked: 2, confirmationsDiscarded: 0, at },
   { type: 'transcript.reset', campaignId: 1, at },
   { type: 'grounding', campaignId: 1, status: 'clean', supportedCount: 1, unsupportedCount: 0, provider: 'mock', model: 'm', claimIds: [1], at },
-] satisfies AiDmStreamEvent[];
+] satisfies CampaignEvent[];
 
 const NON_DM_ROLES: Role[] = ['player', 'viewer'];
 
 describe('#1552 every frame type is classified', () => {
   it('covers the whole union: each frame is projected or explicitly broadcast-safe', () => {
     // The runtime half of the guarantee. The compile-time half is
-    // `Record<Exclude<AiDmStreamEvent['type'], ProjectedFrameType>, string>`, which stops
+    // `Record<Exclude<CampaignEvent['type'], ProjectedFrameType>, string>`, which stops
     // type-checking when a union member is added without a reason. This catches the case where
     // someone silences that with a cast.
     for (const sample of SAMPLES) {
@@ -86,9 +87,9 @@ describe('#1552 every frame type is classified', () => {
   it('DROPS an unclassified frame rather than forwarding it', () => {
     // Fail closed at runtime too. A hand-rolled or cast frame that no branch recognises must
     // not reach the wire just because nothing said it could not.
-    const rogue = { type: 'totally.new', campaignId: 1, entityId: 99, at } as unknown as AiDmStreamEvent;
-    expect(projectAiDmStreamEventForRole(rogue, 'player')).toBeNull();
-    expect(projectAiDmStreamEventForRole(rogue, 'dm')).toBeNull();
+    const rogue = { type: 'totally.new', campaignId: 1, entityId: 99, at } as unknown as CampaignEvent;
+    expect(projectCampaignEventForRole(rogue, 'player')).toBeNull();
+    expect(projectCampaignEventForRole(rogue, 'dm')).toBeNull();
   });
 });
 
@@ -101,14 +102,14 @@ describe('#1552 secret-approval is withheld from non-DMs', () => {
     // cannot read, and the EXISTENCE of an approval already tells the table there is something
     // hidden to know.
     for (const role of NON_DM_ROLES) {
-      expect(projectAiDmStreamEventForRole(secretApproval, role)).toBeNull();
+      expect(projectCampaignEventForRole(secretApproval, role)).toBeNull();
     }
   });
 
   it('still delivers the full frame to the DM', () => {
     // As important as the leak test: a fix that projected everyone's frames into uselessness
     // would pass the assertion above and break the feature.
-    const forDm = projectAiDmStreamEventForRole(secretApproval, 'dm') as Record<string, unknown>;
+    const forDm = projectCampaignEventForRole(secretApproval, 'dm') as Record<string, unknown>;
     expect(forDm).not.toBeNull();
     expect(forDm.entityId).toBe(4242);
     expect(forDm.tool).toBe('get_npc');
@@ -120,13 +121,13 @@ describe('#1552 the previously-projected frames still behave', () => {
   it('strips a hidden encounter id from a tool frame for non-DMs, keeps it for the DM', () => {
     const tool = SAMPLES.find((s) => s.type === 'tool')!;
     for (const role of NON_DM_ROLES) {
-      const projected = projectAiDmStreamEventForRole(tool, role) as Record<string, unknown>;
+      const projected = projectCampaignEventForRole(tool, role) as Record<string, unknown>;
       expect(projected).not.toBeNull();
       expect(projected.encounterId).toBeUndefined();
       // The internal hint never leaves the server for anyone.
       expect(projected.encounterHidden).toBeUndefined();
     }
-    const forDm = projectAiDmStreamEventForRole(tool, 'dm') as Record<string, unknown>;
+    const forDm = projectCampaignEventForRole(tool, 'dm') as Record<string, unknown>;
     expect(forDm.encounterId).toBe(9);
     expect(forDm.encounterHidden).toBeUndefined();
   });
@@ -134,9 +135,9 @@ describe('#1552 the previously-projected frames still behave', () => {
   it('drops a DM-only transcript frame for non-DMs and strips the internal visibility hint', () => {
     const transcript = SAMPLES.find((s) => s.type === 'transcript')!;
     for (const role of NON_DM_ROLES) {
-      expect(projectAiDmStreamEventForRole(transcript, role)).toBeNull();
+      expect(projectCampaignEventForRole(transcript, role)).toBeNull();
     }
-    const forDm = projectAiDmStreamEventForRole(transcript, 'dm') as Record<string, unknown>;
+    const forDm = projectCampaignEventForRole(transcript, 'dm') as Record<string, unknown>;
     expect(forDm).not.toBeNull();
     expect(forDm.visibility).toBeUndefined();
   });
@@ -148,7 +149,7 @@ describe('#1552 broadcast-safe frames reach everyone unchanged', () => {
     // vote signals are the table's shared experience and must not be degraded by this fix.
     for (const sample of SAMPLES) {
       if (!(sample.type in AI_DM_BROADCAST_SAFE_FRAMES)) continue;
-      expect(projectAiDmStreamEventForRole(sample, 'player')).toEqual(sample);
+      expect(projectCampaignEventForRole(sample, 'player')).toEqual(sample);
     }
   });
 
@@ -157,7 +158,7 @@ describe('#1552 broadcast-safe frames reach everyone unchanged', () => {
     // its restraint must survive the fix rather than being undone by it.
     const reset = SAMPLES.find((s) => s.type === 'session.reset')!;
     for (const role of [...NON_DM_ROLES, 'dm' as Role]) {
-      const out = projectAiDmStreamEventForRole(reset, role) as Record<string, unknown>;
+      const out = projectCampaignEventForRole(reset, role) as Record<string, unknown>;
       expect(out.approvalsRevoked).toBe(2);
       expect(JSON.stringify(out)).not.toContain('4242');
     }

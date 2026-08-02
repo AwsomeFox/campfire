@@ -94,7 +94,7 @@ describe('CampaignsService unit coverage tests', () => {
       emitCampaignDeleted: jest.fn(),
       emit: jest.fn(),
     } as unknown as CampaignEventsService;
-    const dummyAiDm = { syncProactiveWatcher: jest.fn() } as unknown as AiDmService;
+    const dummyAiDm = { syncProactiveWatcher: jest.fn(), isExperimentalEnabled: jest.fn().mockResolvedValue(true) } as unknown as AiDmService;
     const dummyNotifications = {
       queueCampaignLifecycleNotification: jest.fn(),
       notifyCampaign: jest.fn().mockResolvedValue(undefined),

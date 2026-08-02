@@ -99,7 +99,7 @@ describe('AiDriverService — secret-read approvals are bounded (#1059)', () => 
   function makeService() {
     const audit = { log: jest.fn().mockResolvedValue(undefined) };
     const stream = { emit: jest.fn() };
-    const aiDm = { registerDriverSessionTeardown: jest.fn() };
+    const aiDm = { registerDriverSessionTeardown: jest.fn(), isExperimentalEnabled: jest.fn(() => Promise.resolve(true)) };
     const { db, rows } = makeInMemoryDb();
     const transcript = new AiDmTranscriptService(db, stream as unknown as ConstructorParameters<typeof AiDmTranscriptService>[1]);
     // Only aiDm (constructor teardown hook), audit, stream, and transcript are touched by the

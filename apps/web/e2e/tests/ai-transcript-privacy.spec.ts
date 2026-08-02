@@ -41,9 +41,9 @@ function driverAiDmRoutes(campaignId: number) {
  */
 async function mockDriverTable(page: Page, campaignId: number, transcriptStatus = 200) {
   const seat = driverAiDmRoutes(campaignId);
-  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+  await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/ai-dm/stream')) {
+    if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': keepalive\n\n' });
     }
     if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && route.request().method() === 'GET')) {
@@ -137,7 +137,7 @@ test.describe('AI transcript privacy (#573)', () => {
   // This test signs in as two different accounts across THREE full navigations
   // (`openTable`/`signIn` both `page.goto`), which is enough time for the SW's install →
   // activate → claim sequence to complete partway through. On the run where it does, the
-  // THIRD `openTable`'s `GET **/api/v1/campaigns/${campaignId}/ai-dm**` bypasses
+  // THIRD `openTable`'s `GET **/api/v1/campaigns/${campaignId}/**` bypasses
   // `mockDriverTable`'s route entirely and returns the campaign's real (non-driver) seat —
   // confirmed by capturing the
   // response body during a failing run: `{"mode":"co_dm",...}` instead of the mocked

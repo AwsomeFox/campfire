@@ -22,7 +22,7 @@ import {
   type DmEntry,
   type TranscriptEntry,
 } from '../../src/features/ai-dm/transcript';
-import type { AiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import type { CampaignEvent as AiDmStreamEvent } from '@campfire/schema';
 
 /**
  * Issue #1077 — streaming AI narration must reach screen readers without

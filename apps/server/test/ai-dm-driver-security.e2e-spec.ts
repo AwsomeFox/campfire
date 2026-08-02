@@ -1,8 +1,8 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
-import type { AiDmTranscriptEvent } from '@campfire/schema';
+import type { CampaignEvent, AiDmTranscriptEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 
 /**
  * Driver-runtime SECURITY + correctness regressions (post-merge review of the AI-DM program).
@@ -445,7 +445,7 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     // On the FIRST streamed token, pause the seat — i.e. a pause lands mid-turn.
     let paused = false;
-    const sub = streamSvc.streamFor(campaignId).subscribe((e: AiDmStreamEvent) => {
+    const sub = streamSvc.streamFor(campaignId).subscribe((e: CampaignEvent) => {
       if (e.type === 'narration.delta' && !paused) {
         paused = true;
         driver.setPaused(campaignId, true);

@@ -27,6 +27,7 @@ describe('ProactiveService', () => {
 
     aiDm = {
       registerProactiveSettingsCallback: jest.fn(),
+      isExperimentalEnabled: jest.fn().mockResolvedValue(true),
     } as any;
 
     const module: TestingModule = await Test.createTestingModule({

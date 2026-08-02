@@ -51,7 +51,7 @@ import {
   invalidateAiDmToolConfirmations,
 } from '../../lib/query';
 import type { DriverLastUndoableCommit } from '@campfire/schema';
-import { useAiDmStream } from '../../lib/useAiDmStream';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { aiDmPauseRequest } from './aiDmPause';
 import { nextUndoLeverState, resolveUndoPostError } from './aiDmUndoLever';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
@@ -446,92 +446,99 @@ export default function AiTablePage() {
     transcriptFetched,
   ]);
 
-  // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
-  // stops on a 401/403 (feature off / not a member), so a non-member simply gets nothing.
-  useAiDmStream(
-    campaignId,
-    {
-      onEvent: (event) => {
-        if (campaignId === undefined) return;
-        dispatch({ type: 'stream', event });
-        if (event.type === 'turn.start') setStreaming(true);
-        else if (event.type === 'turn.end' || event.type === 'turn.error') setStreaming(false);
-        else if (event.type === 'tool') {
-          invalidateForToolEvent(queryClient, event, {
-            campaignId,
-            encounterId: event.encounterId ?? activeEncounterId,
-          });
-        } else if (event.type === 'transcript.reset') {
-          // The DM erased the log and `seq` restarted; the reducer cleared our copy, so
-          // re-seed from an empty server transcript rather than a stale watermark (#572).
-          // The paint cache must go too, or a reload would repaint erased scrollback that
-          // the (now empty) server transcript has nothing to correct.
-          clearTranscript(viewerId, campaignId);
-          lastSeqRef.current = 0;
-          void fetchTranscript();
-        } else if (event.type === 'grounding') {
-          // #577: thin signal — refetch the claim list so the review card reconciles with the
-          // server's verdict on the turn that just ended.
-          void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
-        } else if (event.type === 'tool-confirmation') {
-          // #1558: thin signal — refetch the authoritative queue. Without this the panel would
-          // only update on its poll, and "the AI is waiting on you" would arrive up to 30s late
-          // in the one situation where the delay is the whole problem.
-          invalidateAiDmToolConfirmations(queryClient, campaignId);
-          // #1501: a DM-APPROVED mechanical commit arms the undo lever server-side on this path
-          // (collaborative handoff promotes resolve_action/apply_action to `confirm`), but an
-          // approval emits a tool-confirmation frame — not a tool/state frame — so the session
-          // invalidation those paths drive never fires, and useAiDmSession has no poll. Refetch the
-          // session on approval so the just-armed "undo the AI's last action" control appears.
-          if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
-        } else if (
-          event.type === 'state' ||
-          event.type === 'stuck' ||
-          event.type === 'recovered' ||
-          event.type === 'vote' ||
-          event.type === 'takeover' ||
-          event.type === 'phase'
-        ) {
-          // Lifecycle signals move the thin server truth — reconcile the session/seat reads
-          // so the header + composer-lock reflect the new state (#340 reads the same truth).
-          // #1043: `phase` belongs here for the same reason as its siblings, and more sharply.
-          // Only the member who pressed Start Session / Wrap Up gets a response carrying the new
-          // phase; everyone else learns it from this frame alone. Without the refetch they keep a
-          // stale phase and can type into an ended session, collecting a 409 nothing warned them
-          // about.
-          invalidateAiDm(queryClient, campaignId);
-          if (event.type === 'state' && event.state !== 'running') setStreaming(false);
-        }
-      },
-      onReconnect: () => {
-        if (campaignId === undefined) return;
-        // Transport drop healed — refetch session + live surfaces we may have missed.
-        // #572: replay exactly the transcript events that happened while we were offline,
-        // from our own watermark. Gap-free by construction — `seq` is a dense per-campaign
-        // sequence, so "everything after N" has one correct answer.
-        void fetchTranscript(lastSeqRef.current || undefined);
-        setStreaming(false);
+  // Subscribe to the shared campaign event stream (Issue #880).
+  // Opened in Driver mode. If a transport drop heals, onReconnect fetches missed events.
+  useCampaignEvents(isDriver ? campaignId : undefined, {
+    onEvent: (event) => {
+      if (campaignId === undefined) return;
+      dispatch({ type: 'stream', event });
+      if (event.type === 'turn.start') setStreaming(true);
+      else if (event.type === 'turn.end' || event.type === 'turn.error') setStreaming(false);
+      else if (event.type === 'tool') {
+        invalidateForToolEvent(queryClient, event, {
+          campaignId,
+          encounterId: event.encounterId ?? activeEncounterId,
+        });
+      } else if (event.type === 'transcript.reset') {
+        // The DM erased the log and `seq` restarted; the reducer cleared our copy, so
+        // re-seed from an empty server transcript rather than a stale watermark (#572).
+        // The paint cache must go too, or a reload would repaint erased scrollback that
+        // the (now empty) server transcript has nothing to correct.
+        clearTranscript(viewerId, campaignId);
+        lastSeqRef.current = 0;
+        void fetchTranscript();
+      } else if (event.type === 'grounding') {
+        // #577: thin signal — refetch the claim list so the review card reconciles with the
+        // server's verdict on the turn that just ended.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
+      } else if (event.type === 'tool-confirmation') {
+        // #1558: thin signal — refetch the authoritative queue. Without this the panel would
+        // only update on its poll, and "the AI is waiting on you" would arrive up to 30s late
+        // in the one situation where the delay is the whole problem.
+        invalidateAiDmToolConfirmations(queryClient, campaignId);
+        // #1501: a DM-APPROVED mechanical commit arms the undo lever server-side on this path
+        // (collaborative handoff promotes resolve_action/apply_action to `confirm`), but an
+        // approval emits a tool-confirmation frame — not a tool/state frame — so the session
+        // invalidation those paths drive never fires, and useAiDmSession has no poll. Refetch the
+        // session on approval so the just-armed "undo the AI's last action" control appears.
+        if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
+      } else if (
+        event.type === 'state' ||
+        event.type === 'stuck' ||
+        event.type === 'recovered' ||
+        event.type === 'vote' ||
+        event.type === 'takeover' ||
+        event.type === 'phase'
+      ) {
+        // Lifecycle signals move the thin server truth — reconcile the session/seat reads
+        // so the header + composer-lock reflect the new state (#340 reads the same truth).
+        // #1043: `phase` belongs here for the same reason as its siblings, and more sharply.
+        // Only the member who pressed Start Session / Wrap Up gets a response carrying the new
+        // phase; everyone else learns it from this frame alone. Without the refetch they keep a
+        // stale phase and can type into an ended session, collecting a 409 nothing warned them
+        // about.
         invalidateAiDm(queryClient, campaignId);
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
-      },
-      // Parser recovery keeps the connection; still refetch skipped stream state.
-      onStreamRecovery: () => {
-        if (campaignId === undefined) return;
-        // Discarded bytes may have eaten transcript frames — recover from the watermark (#572).
-        void fetchTranscript(lastSeqRef.current || undefined);
-        setStreaming(false);
-        invalidateAiDm(queryClient, campaignId);
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
-      },
+        if (event.type === 'state' && event.state !== 'running') setStreaming(false);
+      }
     },
-    { enabled: campaignId !== undefined && isDriver },
-  );
+    onReconnect: () => {
+      if (campaignId === undefined) return;
+      // Transport drop healed — refetch session + live surfaces we may have missed.
+      // #572: replay exactly the transcript events that happened while we were offline,
+      // from our own watermark. Gap-free by construction — `seq` is a dense per-campaign
+      // sequence, so "everything after N" has one correct answer.
+      void fetchTranscript(lastSeqRef.current || undefined);
+      
+      // Issue #880: Reconcile local turnActive/streaming state from authoritative session state
+      // upon reconnection instead of simply resetting it to false.
+      invalidateAiDm(queryClient, campaignId);
+      api.get<any>(`${API}/campaigns/${campaignId}/ai-dm/session`)
+        .then((freshSession) => setStreaming(freshSession?.state === 'running'))
+        .catch(() => setStreaming(false));
+
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+    },
+    // Parser recovery keeps the connection; still refetch skipped stream state.
+    onStreamRecovery: () => {
+      if (campaignId === undefined) return;
+      // Discarded bytes may have eaten transcript frames — recover from the watermark (#572).
+      void fetchTranscript(lastSeqRef.current || undefined);
+
+      // Issue #880: Same reconciliation for stream recovery
+      invalidateAiDm(queryClient, campaignId);
+      api.get<any>(`${API}/campaigns/${campaignId}/ai-dm/session`)
+        .then((freshSession) => setStreaming(freshSession?.state === 'running'))
+        .catch(() => setStreaming(false));
+
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+    },
+  });
 
   // Auto-scroll only while the reader is pinned to the tail (#590).
   const transcriptRef = useRef<HTMLDivElement>(null);

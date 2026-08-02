@@ -1,7 +1,8 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { AiConsoleService } from '../src/modules/ai-console/ai-console.service';
 import {
   NARRATION_QUARANTINE_CHARS,
@@ -42,7 +43,7 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
     const driver = h.ctx.app.get(AiDriverService);
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     let paused = false;
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       events.push(e);
       if (e.type === 'narration.delta' && !paused) {
@@ -94,7 +95,7 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
     const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
     let killed = false;
     let killSwitchPromise: Promise<unknown> | undefined;
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       events.push(e);
       if (e.type === 'narration.delta' && !killed) {
@@ -128,7 +129,7 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
     const driver = h.ctx.app.get(AiDriverService);
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     let paused = false;
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       events.push(e);
       if (e.type === 'narration.message' && !paused) {

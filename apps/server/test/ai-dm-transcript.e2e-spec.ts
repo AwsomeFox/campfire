@@ -2,7 +2,8 @@ import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS, type AiDmTranscriptEvent } from '@campfire/schema';
 import { AiDmTranscriptService } from '../src/modules/ai-driver/ai-driver-transcript.service';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 
 /**
  * Issue #572 — the authoritative multi-player AI-DM table transcript.
@@ -272,7 +273,7 @@ describe('ai-dm authoritative table transcript (#572)', () => {
     const transcript = h.ctx.app.get(AiDmTranscriptService);
     const stream = h.ctx.app.get(AiDmStreamService);
 
-    const seen: AiDmStreamEvent[] = [];
+    const seen: CampaignEvent[] = [];
     const sub = stream.streamFor(campaignId).subscribe((e) => seen.push(e));
     const dmOnly = transcript.record({
       campaignId,

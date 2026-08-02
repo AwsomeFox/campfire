@@ -1,203 +1,21 @@
 import { Injectable } from '@nestjs/common';
-import { Subject, type Observable } from 'rxjs';
-import { filter } from 'rxjs/operators';
-import type { AiDmTranscriptEvent, AiDmTranscriptVisibility } from '@campfire/schema';
-import { nowIso } from '../../common/time';
+import { Observable } from 'rxjs';
+import type { CampaignEventInput, CampaignEvent } from '@campfire/schema';
+import { CampaignEventsService } from '../events/campaign-events.service';
 
 /**
- * One AI-DM narration/turn event pushed to every subscriber of a campaign's driver
- * stream (GET /campaigns/:id/ai-dm/stream). Deliberately thin and non-secret:
- *
- *  - `narration.delta` carries a token-by-token text chunk as the model streams it —
- *    this is what makes the DM "type" live to every player at the table.
- *  - `narration.message` is the fully-aggregated narration for one step (so a client
- *    that missed deltas, or a late joiner, still gets the whole line).
- *  - `tool` is a thin signal that the AI invoked a Campfire tool (name + whether it
- *    errored + whether it was routed to the proposal queue + optional resource identity
- *    such as `encounterId` for encounter mutations, #825) — clients refetch the affected
- *    resource through the normal permission-checked REST reads, exactly like the encounter
- *    SSE channel. `encounterHidden` is an INTERNAL projection hint stripped before the
- *    frame hits the wire; non-DMs never receive a hidden encounter's id.
- *  - `turn.start` / `turn.end` bracket a turn with its stop reason + budget snapshot.
+ * Pushes AI-DM narration events to the shared campaign stream (Issue #880).
  */
-export type AiDmStreamEvent =
-  | { type: 'turn.start'; campaignId: number; at: string }
-  | { type: 'narration.delta'; campaignId: number; text: string; at: string }
-  | { type: 'narration.message'; campaignId: number; text: string; at: string }
-  // #598 — the turn just streamed was WITHHELD: a provider content filter or model refusal
-  // ended it, so no `narration.message` will follow and no transcript row was written. Two
-  // jobs: tell the table, in neutral terms, that a reply was withheld rather than letting the
-  // bubble simply trail off; and instruct clients to DISCARD the in-progress narration deltas
-  // they have buffered. The second matters because `turn.end` otherwise promotes trailing live
-  // deltas into the client's permanent transcript. `reason` is the normalized terminal state
-  // (`content_filter` = the vendor's policy layer, `refusal` = the model itself) and `message`
-  // is neutral copy that deliberately says nothing about WHAT was withheld — describing it
-  // would hand the table the very content the withhold exists to keep from them.
-  | {
-      type: 'narration.withheld';
-      campaignId: number;
-      reason: 'content_filter' | 'refusal';
-      message: string;
-      at: string;
-    }
-  | {
-      type: 'tool';
-      campaignId: number;
-      name: string;
-      isError: boolean;
-      proposed: boolean;
-      /** True when the call is queued for DM confirmation (#474). */
-      pendingConfirmation?: boolean;
-      /** Encounter the tool mutated, when derived server-side from validated args/results (#825). */
-      encounterId?: number;
-      /**
-       * INTERNAL only — whether that encounter is DM-prep hidden. Stripped by
-       * `projectAiDmToolEventForRole` before SSE delivery; never sent to clients.
-       */
-      encounterHidden?: boolean;
-      at: string;
-    }
-  | {
-      /** Terminal stop signal emitted before `turn.end` when a stop control aborts mid-generation (#558). */
-      type: 'turn.cancelled';
-      campaignId: number;
-      narration: string;
-      stopReason: string;
-      at: string;
-    }
-  | {
-      type: 'turn.error';
-      campaignId: number;
-      stopReason: 'provider_error';
-      code: string;
-      message: string;
-      retryable: boolean;
-      steps: number;
-      tokensUsed: number;
-      /** True when no provider usage was reported and partial output could not be estimated (#560). */
-      tokensUsageUnknown?: boolean;
-      budgetRemaining: number;
-      at: string;
-    }
-  | {
-      type: 'turn.end';
-      campaignId: number;
-      stopReason: string;
-      steps: number;
-      tokensUsed: number;
-      /** True when the turn ended after a provider failure with no meterable usage (#560). */
-      tokensUsageUnknown?: boolean;
-      budgetRemaining: number;
-      at: string;
-    }
-  // Stuck ladder (#314). `stuck` fires when detection trips (repeated tool errors, budget
-  // exhaustion, max-steps-without-progress, empty narration, a loop, or a raised dispute) and
-  // moves the seat to `awaiting_players`; `recovered` fires when a lever gets it running again;
-  // `state` announces any other session-state transition (pause, human takeover, handback, and
-  // Driver-mode teardown when the seat leaves Driver — #1071);
-  // `vote` and `takeover` narrate the player levers. All are thin signals — clients refetch
-  // GET /ai-dm/session for the authoritative state, exactly like the `tool` signal.
-  | { type: 'stuck'; campaignId: number; reason: string; detail: string; state: string; levers: string[]; at: string }
-  | { type: 'recovered'; campaignId: number; state: string; at: string }
-  | { type: 'state'; campaignId: number; state: string; at: string }
-  // #1043 — the session lifecycle phase changed (greeting / active / wrap_up / ended). Thin like
-  // every other signal here: clients refetch GET /ai-dm/session for the authoritative state. The
-  // phase is not secret and carries no payload beyond itself.
-  | { type: 'phase'; campaignId: number; phase: string; at: string }
-  | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
-  | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
-  // #557 — a DM granted or revoked a narrowly-scoped secret-read approval (the seat may now
-  // read ONE secret entity under the DM principal). Thin signal: clients refetch GET
-  // /ai-dm/session for the authoritative approval list.
-  | { type: 'secret-approval'; campaignId: number; action: 'granted' | 'revoked'; tool: string; entityId: number; at: string }
-  // #474 — a confirm-policy tool was queued or resolved by a DM. Thin signal: clients refetch
-  // GET /ai-dm/tool-confirmations for the authoritative pending list.
-  | {
-      type: 'tool-confirmation';
-      campaignId: number;
-      action: 'queued' | 'approved' | 'rejected';
-      confirmationId: string;
-      tool: string;
-      at: string;
-    }
-  // #572 — one durably-persisted transcript event, broadcast AFTER its row commits. This
-  // is the authoritative multi-player table log: it carries the accepted PLAYER ACTION
-  // (which had no frame at all before #572, so only the sender ever saw it) alongside
-  // narration steps, tool summaries, cancellations, votes and control changes, each with
-  // a stable `eventId` and a per-campaign `seq` a client can merge and resume from.
-  //
-  // `visibility` is an INTERNAL row-level redaction hint: the controller drops 'dm' frames
-  // for players/viewers via `projectTranscriptEventForRole` and strips this field before
-  // the frame reaches the wire. A player must never be handed a DM-only event and merely
-  // trusted not to render it.
-  | {
-      type: 'transcript';
-      campaignId: number;
-      event: AiDmTranscriptEvent;
-      visibility: AiDmTranscriptVisibility;
-      at: string;
-    }
-  // #1042 — a restart discarded outstanding session state that could not be carried across the
-  // process boundary: an open table vote whose ballot window lapsed while the server was down,
-  // secret-read approvals, and queued confirm-policy tool calls. Emitted ONCE, on the first
-  // touch of the seat after the restart, and never re-emitted (the reconciled row is written
-  // back with the discarded state cleared).
-  //
-  // Thin like every other signal here: the counts are enough for a client to render "the
-  // restart cleared N approvals" and refetch GET /ai-dm/session + /ai-dm/tool-confirmations for
-  // the authoritative lists. The DISCARDED ITEMS THEMSELVES ARE NOT ON THIS WIRE — a secret-read
-  // approval names a hidden entity, and this frame reaches every member of the table. The
-  // per-item detail lives in the audit log and in a DM-only transcript row.
-  | {
-      type: 'session.reset';
-      campaignId: number;
-      voteExpired: boolean;
-      approvalsRevoked: number;
-      confirmationsDiscarded: number;
-      at: string;
-    }
-  // #572 — the DM erased the transcript. Purging resets the per-campaign `seq`, so every
-  // open table must drop its local copy and refetch rather than resume from a watermark
-  // that no longer refers to anything.
-  | { type: 'transcript.reset'; campaignId: number; at: string }
-  // #577 — the server's verdict on the factual claims in the turn that just ended. Thin, like
-  // every other signal here: clients refetch GET /ai-dm/grounding for the claim text, the
-  // per-citation reasons, and the evidence links. `provider`/`model` are the ruling's
-  // provenance badge and are deliberately the ONLY provider details ever put on this wire —
-  // no key, no base URL, no headers. `status: 'unverified'` means the narration the table just
-  // watched contains at least one assertion the server could not trace to an authorized read.
-  | {
-      type: 'grounding';
-      campaignId: number;
-      status: 'clean' | 'unverified';
-      supportedCount: number;
-      unsupportedCount: number;
-      provider: string;
-      model: string;
-      /** Ids of the persisted claim rows, for a direct refetch. Empty if persistence failed. */
-      claimIds: number[];
-      at: string;
-    };
-
-/**
- * In-process pub/sub for the AI DM driver's narration stream (#312), modelled on the
- * existing CampaignEventsService (#4): a single Subject fanned out to every open SSE
- * connection on a single-instance deploy. Kept separate from the encounter event
- * channel so narration deltas (a high-frequency, AI-only stream) never mix with the
- * thin entity-invalidation signals, and so the CampaignEvent schema stays untouched.
- */
-/** Distributive Omit so each union member keeps its own discriminated shape. */
-type WithoutAt<T> = T extends unknown ? Omit<T, 'at'> : never;
-
 @Injectable()
 export class AiDmStreamService {
-  private readonly subject = new Subject<AiDmStreamEvent>();
+  constructor(private readonly events: CampaignEventsService) {}
 
-  emit(event: WithoutAt<AiDmStreamEvent>): void {
-    this.subject.next({ ...event, at: nowIso() } as AiDmStreamEvent);
+  emit(event: CampaignEventInput): void {
+    this.events.emit(event);
   }
 
-  streamFor(campaignId: number): Observable<AiDmStreamEvent> {
-    return this.subject.asObservable().pipe(filter((event) => event.campaignId === campaignId));
+  streamFor(campaignId: number): Observable<CampaignEvent> {
+    return this.events.streamFor(campaignId);
   }
 }
+
