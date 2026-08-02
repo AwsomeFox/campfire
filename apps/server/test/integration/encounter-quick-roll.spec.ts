@@ -30,7 +30,8 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
+    const notifications = { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any;
+    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, notifications);
     return { orm, service, rolls };
   }
 
