@@ -475,6 +475,7 @@ function RosterSlotRow({
   onRemove: () => void;
   onCount: (count: number) => void;
 }) {
+  const { t } = useTranslation('encounters');
   const insp = slot.inspection;
   return (
     <div className="rounded-lg border border-white/10 p-2">
