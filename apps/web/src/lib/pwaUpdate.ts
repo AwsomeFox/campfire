@@ -92,6 +92,11 @@ export async function triggerUpdateNow(): Promise<boolean> {
     }
     if (typeof window !== 'undefined') {
       window.location.reload();
+    } else if (
+      typeof globalThis !== 'undefined' &&
+      (globalThis as unknown as { window?: { location?: { reload?: () => void } } }).window?.location?.reload
+    ) {
+      (globalThis as unknown as { window: { location: { reload: () => void } } }).window.location.reload();
     }
     return true;
   } catch (err) {

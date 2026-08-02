@@ -325,7 +325,6 @@ const GENERIC_HTTP_CODES = new Set([
   'too_many_requests',
   'unprocessable_entity',
   'internal_error',
-  'error',
 ]);
 
 export function translateApiError(
