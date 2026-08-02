@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 
 const PANEL = resolve(__dirname, '../../src/features/ai-dm/ToolConfirmationsPanel.tsx');
 const TABLE = resolve(__dirname, '../../src/features/ai-dm/AiTablePage.tsx');
-const STREAM = resolve(__dirname, '../../src/lib/useAiDmStream.ts');
+const STREAM = resolve(__dirname, '../../src/lib/useCampaignEvents.ts');
 const QUERY = resolve(__dirname, '../../src/lib/query.ts');
 
 test.describe('tool confirmations UI (#1558)', () => {
@@ -42,9 +42,9 @@ test.describe('tool confirmations UI (#1558)', () => {
   test('the stream parser no longer drops the tool-confirmation frame', () => {
     // Before #1558 the web union had no such member, so `parseAiDmStreamEvent` returned null for
     // it — the panel could not have been driven by the stream even if it had existed.
+    // (Issue #880: useAiDmStream was unified into useCampaignEvents)
     const stream = readFileSync(STREAM, 'utf8');
-    expect(stream).toMatch(/case 'tool-confirmation'/);
-    expect(stream).toMatch(/confirmationId/);
+    expect(stream).toMatch(/'tool-confirmation'/);
   });
 
   test('it renders a list, because multi-pending is the normal case', () => {

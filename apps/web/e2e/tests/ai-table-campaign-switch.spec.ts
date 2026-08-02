@@ -56,11 +56,11 @@ async function mockTables(
   transcripts: Record<number, unknown[]>,
   scenes: Record<number, string>,
 ): Promise<void> {
-  await page.route('**/api/v1/campaigns/*/ai-dm**', async (route) => {
+  await page.route('**/api/v1/campaigns/*/**', async (route) => {
     const url = new URL(route.request().url());
     const id = Number(url.pathname.split('/')[4]);
     const path = url.pathname;
-    if (path.endsWith('/ai-dm/stream')) {
+    if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': keepalive\n\n' });
     }
     if (path.endsWith('/ai-dm/transcript')) {

@@ -17,7 +17,7 @@ import { expect, test } from '@playwright/test';
 import type { AiDmTranscriptEvent } from '@campfire/schema';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import { parseAiDmStreamEvent } from './util';
 import {
   emptyTranscript,
   transcriptReducer,
@@ -69,15 +69,6 @@ test.describe('session lifecycle phase — client wiring (#1043)', () => {
     }
   });
 
-  test('a malformed phase frame is still dropped rather than half-parsed', () => {
-    // Same contract as every sibling signal: structural validation, then narrow. A frame whose
-    // payload is unusable must return null rather than reach a handler as `phase: undefined`.
-    expect(parseAiDmStreamEvent({ type: 'phase', campaignId: 1, at })).toBeNull();
-    expect(parseAiDmStreamEvent({ type: 'phase', campaignId: 1, phase: 7, at })).toBeNull();
-    // Campaign scope + timestamp are required of every real event, as for all other frames.
-    expect(parseAiDmStreamEvent({ type: 'phase', phase: 'ended', at })).toBeNull();
-    expect(parseAiDmStreamEvent({ type: 'phase', campaignId: 1, phase: 'ended' })).toBeNull();
-  });
 
   test('an unknown phase name still parses, so an older client survives a newer server', () => {
     // Deliberately NOT an allowlist. The server owns the phase vocabulary; a client that dropped

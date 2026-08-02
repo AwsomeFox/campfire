@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { NARRATION_QUARANTINE_CHARS } from '../src/modules/ai-driver/driver-safety';
 import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
@@ -25,9 +26,9 @@ async function withStream<T>(
   h: AiEvalHarness,
   campaignId: number,
   fn: () => Promise<T>,
-): Promise<{ result: T; events: AiDmStreamEvent[] }> {
+): Promise<{ result: T; events: CampaignEvent[] }> {
   const streamSvc = h.ctx.app.get(AiDmStreamService);
-  const events: AiDmStreamEvent[] = [];
+  const events: CampaignEvent[] = [];
   const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
   try {
     return { result: await fn(), events };
@@ -191,7 +192,7 @@ describe('ai-dm driver — provider content filters / refusals are withheld turn
     expect(res.body.stopReason).toBe('content_withheld');
 
     const delivered = events
-      .filter((e): e is Extract<AiDmStreamEvent, { type: 'narration.delta' }> => e.type === 'narration.delta')
+      .filter((e): e is Extract<CampaignEvent, { type: 'narration.delta' }> => e.type === 'narration.delta')
       .map((e) => e.text)
       .join('');
 

@@ -11,7 +11,8 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
-import { campaigns } from '../../src/db/schema';
+import { campaigns, characters, npcs } from '../../src/db/schema';
+import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
 
 describe('EncountersService unit coverage tests', () => {
@@ -38,6 +39,7 @@ describe('EncountersService unit coverage tests', () => {
     const audit = new AuditService(db);
     const events = new CampaignEventsService();
     const rolls = {
+      record: jest.fn().mockResolvedValue({ id: 1 }),
       recordRoll: jest.fn().mockResolvedValue({ id: 1 }),
       recordInTransaction: jest.fn().mockReturnValue({ id: 1 }),
     } as unknown as RollsService;
@@ -198,6 +200,24 @@ describe('EncountersService unit coverage tests', () => {
 
     const aftermath = await encountersService.getAftermath(enc.id, 'dm');
     expect(aftermath).toBeDefined();
+    expect(aftermath.loot).toBeDefined();
+    expect(aftermath.loot.items.length).toBeGreaterThan(0);
+
+    const xpResult = await encountersService.applyAftermathXp(enc.id, { amount: 100 }, dmActor, 'dm');
+    expect(xpResult.xpAwarded).toBe(true);
+
+    const lootItem = aftermath.loot.items[0];
+    const lootResult = await encountersService.transferAftermathLoot(enc.id, { itemId: lootItem.id, ownerType: 'party' }, dmActor, 'dm');
+    expect(lootResult.loot.items.find((i) => i.id === lootItem.id)?.claimed).toBe(true);
+
+    const coinsResult = await encountersService.transferAftermathLoot(enc.id, { transferCoins: { gp: 50 } }, dmActor, 'dm');
+    expect(coinsResult.loot.coinsClaimed).toBe(true);
+
+    const beatResult = await encountersService.updateAftermathBeat(enc.id, { title: 'Victorious Raid', status: 'done' }, dmActor, 'dm');
+    expect(beatResult).toBeDefined();
+
+    const timelineResult = await encountersService.addAftermathTimelineEvent(enc.id, { title: 'Raid Defeated' }, dmActor, 'dm');
+    expect(timelineResult).toBeDefined();
 
     await encountersService.reopen(enc.id, dmActor, 'dm');
     await encountersService.remove(enc.id, dmActor, 'dm');
@@ -269,5 +289,81 @@ describe('EncountersService unit coverage tests', () => {
     await encountersService.deleteTokenFormation(campaignId, formation.id, 'dm');
     const formationsAfter = await encountersService.listTokenFormations(campaignId, 'dm');
     expect(formationsAfter.length).toBe(0);
+  });
+
+  it('quickRoll enforces authorization for non-DM player and redacts hidden NPC identity in campaign dice feed', async () => {
+    const player1: RequestUser = { id: 'player-1', name: 'Bob', serverRole: 'user' };
+    const player2: RequestUser = { id: 'player-2', name: 'Charlie', serverRole: 'user' };
+
+    const [char1] = await db
+      .insert(characters)
+      .values({ campaignId, ownerUserId: player1.id, name: 'Hero 1', createdAt: nowIso(), updatedAt: nowIso() })
+      .returning();
+    const [char2] = await db
+      .insert(characters)
+      .values({ campaignId, ownerUserId: player2.id, name: 'Hero 2', createdAt: nowIso(), updatedAt: nowIso() })
+      .returning();
+
+    const [hiddenNpc] = await db
+      .insert(npcs)
+      .values({ campaignId, name: 'Secret Boss', hidden: true, createdAt: nowIso(), updatedAt: nowIso() })
+      .returning();
+
+    const enc = await encountersService.create(campaignId, { name: 'Quick Roll Test' }, dmActor, 'dm');
+    const hero1Combatant = enc.combatants.find((c) => c.characterId === char1.id)!;
+    const hero2Combatant = enc.combatants.find((c) => c.characterId === char2.id)!;
+    const monsterCombatant = await encountersService.addCombatant(enc.id, { name: 'Goblin', kind: 'monster', hpMax: 10 }, dmActor, 'dm');
+    const npcCombatant = await encountersService.addCombatant(enc.id, { name: 'Secret Boss', kind: 'npc', npcId: hiddenNpc.id, hpMax: 50 }, dmActor, 'dm');
+
+    // 1. Player 1 quick-rolls for their own character -> succeeds
+    const res1 = await encountersService.quickRoll(
+      enc.id,
+      { combatantId: hero1Combatant.id, actionName: 'Longsword', kind: 'to-hit', expr: '+5', mode: 'flat' },
+      player1,
+      'player',
+    );
+    expect(res1.roll).toBeDefined();
+
+    // 2. Player 1 tries to quick-roll for Player 2's character -> throws ForbiddenException
+    await expect(
+      encountersService.quickRoll(
+        enc.id,
+        { combatantId: hero2Combatant.id, actionName: 'Fireball', kind: 'to-hit', expr: '+4', mode: 'flat' },
+        player1,
+        'player',
+      ),
+    ).rejects.toThrow('You may only quick-roll for your own character');
+
+    // 3. Player 1 tries to quick-roll for a monster -> throws ForbiddenException
+    await expect(
+      encountersService.quickRoll(
+        enc.id,
+        { combatantId: monsterCombatant.id, actionName: 'Bite', kind: 'to-hit', expr: '+3', mode: 'flat' },
+        player1,
+        'player',
+      ),
+    ).rejects.toThrow('Only the DM may quick-roll for monsters or NPCs');
+
+    // 4. DM quick-rolls for hidden NPC -> campaign dice feed records actor as 'Unknown combatant'
+    let recordedLabel = '';
+    let recordedActor = '';
+    const mockRollsService = {
+      record: jest.fn().mockImplementation((_cid, data) => {
+        recordedLabel = data.label;
+        recordedActor = data.actor;
+        return Promise.resolve({ id: 99 });
+      }),
+    };
+    (encountersService as any).rolls = mockRollsService;
+
+    await encountersService.quickRoll(
+      enc.id,
+      { combatantId: npcCombatant.id, actionName: 'Dark Blast', kind: 'to-hit', expr: '+8', mode: 'flat' },
+      dmActor,
+      'dm',
+    );
+
+    expect(recordedActor).toBe(UNKNOWN_COMBATANT_LABEL);
+    expect(recordedLabel).toBe(`${UNKNOWN_COMBATANT_LABEL} · Dark Blast (to-hit)`);
   });
 });

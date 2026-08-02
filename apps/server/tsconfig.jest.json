@@ -4,7 +4,7 @@
     "outDir": "dist-test",
     "baseUrl": ".",
     "paths": {
-      "@campfire/schema": ["../../packages/schema/src/index.ts"]
+      "@campfire/schema": ["../../packages/schema/dist/types/index.d.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],

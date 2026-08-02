@@ -15,7 +15,7 @@
  */
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { queryKeys } from '../../lib/query';
-import type { AiDmStreamEvent } from '../../lib/useAiDmStream';
+import type { CampaignEvent as AiDmStreamEvent } from '@campfire/schema';
 
 /** Narrowed `tool` event shape. */
 export type ToolStreamEvent = Extract<AiDmStreamEvent, { type: 'tool' }>;

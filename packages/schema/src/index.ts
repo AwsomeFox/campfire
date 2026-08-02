@@ -10490,6 +10490,8 @@ export const TurnSuggestedAction = z.object({
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
   source: z.string().max(40),
   summary: z.string().max(600).default(''),
+  toHit: z.string().default(''),
+  damage: z.string().default(''),
   // Index into the combatant's usable-actions list (issue #425). Omitted for prose-only rows.
   actionIndex: z.number().int().min(0).optional(),
   // True when the action carries a structured spec the Use flow can resolve.
@@ -10498,6 +10500,18 @@ export const TurnSuggestedAction = z.object({
   spec: ActionSpec.nullable().optional(),
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
+
+/** Quick-roll request body for one-tap attack or damage roll in an encounter (issue #1850). */
+export const QuickRollRequest = z.object({
+  combatantId: Id.optional(),
+  actorName: z.string().max(200).optional(),
+  actionName: z.string().min(1).max(160),
+  kind: z.enum(['to-hit', 'damage']),
+  expr: z.string().min(1).max(100),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat'),
+});
+export type QuickRollRequest = z.infer<typeof QuickRollRequest>;
+
 
 /** What a turn prompt is about, so the client can group/iconify it. */
 export const TurnPromptKind = z.enum([
@@ -10931,6 +10945,26 @@ export const CampaignEventType = z.enum([
   // the anonymity rules. Putting the actor on the wire would hand every connected browser
   // the one field the whole feature exists to withhold.
   'safety.hold',
+  'turn.start',
+  'narration.delta',
+  'narration.message',
+  'narration.withheld',
+  'tool',
+  'turn.cancelled',
+  'turn.error',
+  'turn.end',
+  'stuck',
+  'recovered',
+  'state',
+  'phase',
+  'vote',
+  'takeover',
+  'secret-approval',
+  'tool-confirmation',
+  'transcript',
+  'session.reset',
+  'transcript.reset',
+  'grounding',
   'player-display-scene',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
@@ -11071,6 +11105,127 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('safety.hold'),
     campaignId: Id,
     active: z.boolean(),
+    at: IsoDate,
+  }),
+  z.object({ type: z.literal('turn.start'), campaignId: Id, at: IsoDate }),
+  z.object({ type: z.literal('narration.delta'), campaignId: Id, text: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('narration.message'), campaignId: Id, text: z.string(), at: IsoDate }),
+  z.object({
+    type: z.literal('narration.withheld'),
+    campaignId: Id,
+    reason: z.enum(['content_filter', 'refusal']),
+    message: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('tool'),
+    campaignId: Id,
+    name: z.string(),
+    isError: z.boolean(),
+    proposed: z.boolean(),
+    pendingConfirmation: z.boolean().optional(),
+    encounterId: Id.optional(),
+    encounterHidden: z.boolean().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.cancelled'),
+    campaignId: Id,
+    narration: z.string(),
+    stopReason: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.error'),
+    campaignId: Id,
+    stopReason: z.literal('provider_error'),
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    steps: z.number().int(),
+    tokensUsed: z.number().int(),
+    tokensUsageUnknown: z.boolean().optional(),
+    budgetRemaining: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.end'),
+    campaignId: Id,
+    stopReason: z.string(),
+    steps: z.number().int(),
+    tokensUsed: z.number().int(),
+    tokensUsageUnknown: z.boolean().optional(),
+    budgetRemaining: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('stuck'),
+    campaignId: Id,
+    reason: z.string(),
+    detail: z.string(),
+    state: z.string(),
+    levers: z.array(z.string()),
+    at: IsoDate,
+  }),
+  z.object({ type: z.literal('recovered'), campaignId: Id, state: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('state'), campaignId: Id, state: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('phase'), campaignId: Id, phase: z.string(), at: IsoDate }),
+  z.object({
+    type: z.literal('vote'),
+    campaignId: Id,
+    action: z.string(),
+    kind: z.string(),
+    outcome: z.string().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('takeover'),
+    campaignId: Id,
+    action: z.string(),
+    memberId: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('secret-approval'),
+    campaignId: Id,
+    action: z.enum(['granted', 'revoked']),
+    tool: z.string(),
+    entityId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('tool-confirmation'),
+    campaignId: Id,
+    action: z.enum(['queued', 'approved', 'rejected']),
+    confirmationId: z.string(),
+    tool: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('transcript'),
+    campaignId: Id,
+    event: AiDmTranscriptEvent,
+    visibility: AiDmTranscriptVisibility.optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('session.reset'),
+    campaignId: Id,
+    voteExpired: z.boolean(),
+    approvalsRevoked: z.number().int(),
+    confirmationsDiscarded: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({ type: z.literal('transcript.reset'), campaignId: Id, at: IsoDate }),
+  z.object({
+    type: z.literal('grounding'),
+    campaignId: Id,
+    status: z.enum(['clean', 'unverified']),
+    supportedCount: z.number().int(),
+    unsupportedCount: z.number().int(),
+    provider: z.string(),
+    model: z.string(),
+    claimIds: z.array(Id),
     at: IsoDate,
   }),
 ]);

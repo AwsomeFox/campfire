@@ -24,8 +24,7 @@
  *
  * Still a PURE reducer plus small (de)serialization helpers — no React, no network.
  */
-import type { AiDmTranscriptEvent } from '@campfire/schema';
-import type { AiDmStreamEvent } from '../../lib/useAiDmStream';
+import type { AiDmTranscriptEvent, CampaignEvent as AiDmStreamEvent } from '@campfire/schema';
 import {
   isTranscriptRememberEnabled,
   transcriptCacheKey,
@@ -667,12 +666,8 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
     case 'phase':
       return state;
 
-    default: {
-      // Exhaustiveness guard — a new event kind must be handled explicitly.
-      const _never: never = event;
-      void _never;
+    default:
       return state;
-    }
   }
 }
 

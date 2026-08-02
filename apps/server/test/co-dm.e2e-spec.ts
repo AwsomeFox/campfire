@@ -1,3 +1,5 @@
+import { rulePacks } from '../src/db/schema';
+import { DB } from '../src/db/db.module';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
@@ -437,7 +439,9 @@ describe('co-DM authoring — adapter vocabulary & ruleset provenance', () => {
 
   it('injects correct adapter identity and neutral requirements for non-5e systems', async () => {
     const campaignId = await h.createCampaign('PF2e Campaign');
-    await request(h.server).put(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: 'pf2e' });
+    const db = h.ctx.app.get(DB);
+    await db.insert(rulePacks).values({ slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: '', sourceUrl: '', installedAt: new Date().toISOString(), entryCount: 0 }).onConflictDoNothing();
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: 'pf2e-srd' });
     await h.configureSeat(campaignId, { model: 'eval-model', instructions: 'Be terse.', tokenBudget: 1_000_000 });
 
     h.script({ text: JSON.stringify({ name: 'Bob' }) });

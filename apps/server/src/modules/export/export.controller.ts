@@ -213,6 +213,21 @@ export class ExportController {
     }
   }
 
+  @Get('me/preview')
+  @ApiOperation({
+    summary: 'Preview your own data export',
+    description: 'Returns the manifest and counts of your own data in the campaign without generating the full file.',
+  })
+  @ApiResponse({ status: 200, description: 'Export manifest.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  async exportOwnPreview(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.exportService.buildMemberExport(campaignId, user, role, true);
+  }
+
   @Get('me')
   @ApiOperation({
     summary: 'Export your own data in a campaign',

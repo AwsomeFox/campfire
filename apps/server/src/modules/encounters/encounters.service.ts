@@ -1,18 +1,24 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { CharactersService } from '../characters/characters.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { QuestsService } from '../quests/quests.service';
+import { StorylinesService } from '../storylines/storylines.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
@@ -744,6 +750,12 @@ export class EncountersService {
      * shape for a unit test of turn logic. Every use is `?.`-guarded.
      */
     @Optional() private readonly safety?: TableSafetyService,
+    @Optional() @Inject(forwardRef(() => CharactersService)) private readonly charactersService?: CharactersService,
+    @Optional() @Inject(forwardRef(() => InventoryService)) private readonly inventoryService?: InventoryService,
+    @Optional() @Inject(forwardRef(() => QuestsService)) private readonly questsService?: QuestsService,
+    @Optional() @Inject(forwardRef(() => StorylinesService)) private readonly storylinesService?: StorylinesService,
+    @Optional() @Inject(forwardRef(() => TimelineService)) private readonly timelineService?: TimelineService,
+    @Optional() @Inject(forwardRef(() => CampaignsService)) private readonly campaignsService?: CampaignsService,
   ) {}
 
   /**
@@ -2350,9 +2362,55 @@ export class EncountersService {
     });
   }
 
+  private generateDefaultAftermathLoot(
+    outcome: EncounterAftermathOutcome,
+    suggestedPartyXp: number | null,
+  ): EncounterAftermathLoot {
+    const deadMonsters = outcome.dead.filter((c: EncounterAftermathCombatant) => c.kind === 'monster' || c.kind === 'npc');
+    const items: EncounterAftermathLootItem[] = [];
+
+    if (deadMonsters.length > 0) {
+      deadMonsters.forEach((monster: EncounterAftermathCombatant, index: number) => {
+        items.push({
+          id: `item-${index + 1}`,
+          name: `${monster.name}'s Gear`,
+          qty: 1,
+          notes: `Looted from defeated ${monster.name}`,
+          claimed: false,
+          claimedByCharacterId: null,
+          claimedToParty: false,
+        });
+      });
+    } else {
+      items.push({
+        id: 'item-1',
+        name: 'Spoils of War',
+        qty: 1,
+        notes: 'Combat trophies and supplies',
+        claimed: false,
+        claimedByCharacterId: null,
+        claimedToParty: false,
+      });
+    }
+
+    const gpAmount = suggestedPartyXp && suggestedPartyXp > 0 ? Math.max(10, Math.round(suggestedPartyXp / 10)) : 25;
+
+    return {
+      items,
+      coins: {
+        cp: 0,
+        sp: 0,
+        ep: 0,
+        gp: gpAmount,
+        pp: 0,
+      },
+      coinsClaimed: false,
+    };
+  }
+
   /**
-   * Post-encounter aftermath read model (issue #473): outcome review, recap draft seeded
-   * from combat events, adapter-aware XP guidance, and deep-link hand-offs. DM-only;
+   * Post-encounter aftermath read model (issue #473, #1448): outcome review, recap draft seeded
+   * from combat events, adapter-aware XP guidance, loot list package, mutation controls, and deep-link hand-offs. DM-only;
    * only meaningful for ended encounters.
    */
   async getAftermath(encounterId: number, role: Role): Promise<EncounterAftermath> {
@@ -2368,6 +2426,38 @@ export class EncountersService {
     const characterCount = encounter.combatants.filter((c) => c.kind === 'character').length;
     const xp = suggestedXpFromDifficulty(difficulty, characterCount);
     const campaignId = encounter.campaignId;
+
+    const campaignRow = this.db
+      .select({ dmControlsProgression: campaigns.dmControlsProgression })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    const milestoneMode = !!campaignRow?.dmControlsProgression || !xp.supported;
+
+    const outcomeRead: EncounterAftermathOutcome = {
+      rounds: outcome.rounds,
+      dead: outcome.dead.map((c) => ({ name: c.name, kind: c.kind })),
+      downed: outcome.downed.map((c) => ({ name: c.name, kind: c.kind })),
+      survivors: outcome.survivors.map((c) => ({ name: c.name, kind: c.kind })),
+    };
+
+    let loot: EncounterAftermathLoot;
+    if (row.aftermathLoot) {
+      const parsed = EncounterAftermathLoot.safeParse(fromJsonText(row.aftermathLoot, null));
+      if (parsed.success) {
+        loot = parsed.data;
+      } else {
+        loot = this.generateDefaultAftermathLoot(outcomeRead, xp.suggestedPartyTotal);
+      }
+    } else {
+      loot = this.generateDefaultAftermathLoot(outcomeRead, xp.suggestedPartyTotal);
+      this.db
+        .update(encounters)
+        .set({ aftermathLoot: toJsonText(loot) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+    }
+
     const base = `/c/${campaignId}`;
     const recapPath =
       encounter.sessionId == null
@@ -2385,12 +2475,7 @@ export class EncountersService {
     return {
       encounterId,
       campaignId,
-      outcome: {
-        rounds: outcome.rounds,
-        dead: outcome.dead.map((c) => ({ name: c.name, kind: c.kind })),
-        downed: outcome.downed.map((c) => ({ name: c.name, kind: c.kind })),
-        survivors: outcome.survivors.map((c) => ({ name: c.name, kind: c.kind })),
-      },
+      outcome: outcomeRead,
       recapDraft,
       combatLogHighlights,
       xp: {
@@ -2401,13 +2486,353 @@ export class EncountersService {
         difficultyLabel: xp.difficultyLabel,
         warnings: xp.warnings,
       },
+      xpAwardedAt: row.aftermathXpAwardedAt ?? null,
+      xpAwarded: row.aftermathXpAwardedAt != null,
+      milestoneMode,
+      loot,
       difficulty,
       handoffs,
       questId: encounter.questId,
       sessionId: encounter.sessionId,
       locationId: encounter.locationId,
-      dismissedAt: row.aftermathDismissedAt,
+      dismissedAt: row.aftermathDismissedAt ?? null,
     };
+  }
+
+  async applyAftermathXp(
+    encounterId: number,
+    input: EncounterAftermathApplyXpInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath XP can only be applied for ended encounters');
+    }
+
+    if (row.aftermathXpAwardedAt && input.amount === undefined && !input.isMilestone) {
+      return this.getAftermath(encounterId, role);
+    }
+
+    const encounter = await this.getWithCombatantsOrThrow(encounterId, role);
+    const difficulty = await this.getDifficulty(encounterId, role);
+    const characterCombatants = encounter.combatants.filter((c) => c.kind === 'character');
+    const characterCount = characterCombatants.length;
+    const xp = suggestedXpFromDifficulty(difficulty, characterCount);
+
+    const amount = input.amount ?? xp.suggestedPerCharacter ?? xp.suggestedPartyTotal ?? 0;
+    const recipientIds =
+      input.characterIds ?? characterCombatants.map((c) => c.characterId).filter((id): id is number => id != null);
+
+    const ts = nowIso();
+
+    if (amount > 0 && recipientIds.length > 0) {
+      if (this.charactersService) {
+        await this.charactersService.awardXp(
+          row.campaignId,
+          { amount, includeNonActive: false, characterIds: recipientIds },
+          user,
+          role,
+        );
+      } else {
+        this.db.transaction((tx) => {
+          for (const charId of recipientIds) {
+            tx.update(characters)
+              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: ts })
+              .where(eq(characters.id, charId))
+              .run();
+          }
+        });
+      }
+    }
+
+    this.db
+      .update(encounters)
+      .set({ aftermathXpAwardedAt: ts, updatedAt: ts })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_apply_xp',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify({ amount, characterIds: recipientIds, isMilestone: !!input.isMilestone, note: input.milestoneNote }),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async transferAftermathLoot(
+    encounterId: number,
+    input: EncounterAftermathLootTransferInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath loot can only be transferred for ended encounters');
+    }
+
+    const aftermath = await this.getAftermath(encounterId, role);
+    const loot = aftermath.loot;
+    const ts = nowIso();
+
+    if (input.itemId) {
+      const item = loot.items.find((i) => i.id === input.itemId);
+      if (!item) {
+        throw new BadRequestException(`Loot item ${input.itemId} not found in aftermath`);
+      }
+      if (item.claimed) {
+        throw new BadRequestException(`Loot item ${input.itemId} has already been claimed`);
+      }
+
+      const ownerType = input.ownerType ?? 'party';
+      const characterId = ownerType === 'character' ? (input.characterId ?? null) : null;
+      const qty = input.qty ?? item.qty;
+
+      if (this.inventoryService) {
+        await this.inventoryService.create(
+          row.campaignId,
+          {
+            name: item.name,
+            qty,
+            notes: item.notes || `Looted from encounter #${encounterId}`,
+            ownerType,
+            characterId: characterId ?? undefined,
+          },
+          user,
+          role,
+        );
+      } else {
+        this.db
+          .insert(inventoryItems)
+          .values({
+            campaignId: row.campaignId,
+            ownerType,
+            characterId,
+            name: item.name,
+            qty,
+            notes: item.notes || `Looted from encounter #${encounterId}`,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      item.claimed = true;
+      item.claimedByCharacterId = characterId;
+      item.claimedToParty = ownerType === 'party';
+    }
+
+    if (input.transferCoins) {
+      const coinsToTransfer = {
+        cp: input.transferCoins.cp ?? loot.coins.cp,
+        sp: input.transferCoins.sp ?? loot.coins.sp,
+        ep: input.transferCoins.ep ?? loot.coins.ep,
+        gp: input.transferCoins.gp ?? loot.coins.gp,
+        pp: input.transferCoins.pp ?? loot.coins.pp,
+      };
+
+      if (this.inventoryService) {
+        await this.inventoryService.patchTreasury(
+          row.campaignId,
+          { delta: coinsToTransfer },
+          user,
+          role,
+        );
+      }
+
+      loot.coinsClaimed = true;
+    }
+
+    this.db
+      .update(encounters)
+      .set({ aftermathLoot: toJsonText(loot), updatedAt: ts })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_transfer_loot',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async updateAftermathQuest(
+    encounterId: number,
+    input: EncounterAftermathQuestUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath quest updates can only be applied to ended encounters');
+    }
+    const questId = input.questId ?? row.questId;
+    if (!questId) {
+      throw new BadRequestException('No quest specified or linked to encounter aftermath');
+    }
+
+    if (this.questsService) {
+      if (input.objectiveIndex != null) {
+        const objectives = await this.db
+          .select()
+          .from(questObjectives)
+          .where(eq(questObjectives.questId, questId))
+          .orderBy(questObjectives.sortOrder, questObjectives.id);
+        const obj = objectives[input.objectiveIndex];
+        if (obj) {
+          await this.questsService.patchObjective(
+            questId,
+            obj.id,
+            { done: input.objectiveCompleted ?? !obj.done },
+            user,
+            role,
+          );
+        }
+      }
+      if (input.questStatus) {
+        await this.questsService.setStatus(questId, { status: input.questStatus }, user, role);
+      }
+    } else {
+      const objectives = await this.db
+        .select()
+        .from(questObjectives)
+        .where(eq(questObjectives.questId, questId))
+        .orderBy(questObjectives.sortOrder, questObjectives.id);
+      if (input.objectiveIndex != null && objectives[input.objectiveIndex]) {
+        const targetObj = objectives[input.objectiveIndex];
+        this.db
+          .update(questObjectives)
+          .set({ done: input.objectiveCompleted ?? !targetObj.done })
+          .where(eq(questObjectives.id, targetObj.id))
+          .run();
+      }
+      if (input.questStatus) {
+        this.db
+          .update(quests)
+          .set({ status: input.questStatus, updatedAt: nowIso() })
+          .where(eq(quests.id, questId))
+          .run();
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_update_quest',
+      entityType: 'quest',
+      entityId: questId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async updateAftermathBeat(
+    encounterId: number,
+    input: EncounterAftermathBeatUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath beats can only be updated for ended encounters');
+    }
+
+    if (input.beatId && this.storylinesService) {
+      await this.storylinesService.updateBeat(
+        input.beatId,
+        {
+          ...(input.title ? { title: input.title } : {}),
+          ...(input.body ? { body: input.body } : {}),
+        },
+        user,
+        role,
+      );
+      if (input.status) {
+        await this.storylinesService.setBeatStatus(input.beatId, { status: input.status }, user, role);
+      }
+    } else if (this.storylinesService && input.title) {
+      let arcId = input.arcId;
+      if (!arcId) {
+        const arcs = await this.storylinesService.listArcs(row.campaignId);
+        arcId = arcs[0]?.id;
+      }
+      if (arcId) {
+        await this.storylinesService.addBeat(
+          arcId,
+          {
+            title: input.title,
+            body: input.body ?? `Resolved in encounter #${encounterId}`,
+            status: input.status ?? 'done',
+          },
+          user,
+          role,
+        );
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_update_beat',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async addAftermathTimelineEvent(
+    encounterId: number,
+    input: EncounterAftermathTimelineEventInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath timeline events can only be added for ended encounters');
+    }
+
+    if (this.timelineService) {
+      await this.timelineService.createEvent(
+        row.campaignId,
+        {
+          title: input.title,
+          body: input.description ?? `Encounter #${encounterId} concluded.`,
+          inWorldDate: input.inGameDate ?? '',
+          era: input.era ?? '',
+          sortIndex: input.sortIndex ?? 0,
+        },
+        user,
+        role,
+      );
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_add_timeline_event',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
   }
 
   /**
@@ -6341,6 +6766,8 @@ export class EncountersService {
           name: a.name.slice(0, 160),
           source,
           summary: bits.join(' · ').slice(0, 600),
+          toHit: a.toHit ?? '',
+          damage: a.damage ?? '',
           actionIndex: startIndex + i,
           resolvable: isResolvableSpec(a.spec),
           spec: a.spec ?? null,
@@ -6360,6 +6787,8 @@ export class EncountersService {
           name: a.name.slice(0, 160),
           source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
           summary: bits.join(' · ').slice(0, 600),
+          toHit: typeof a.toHit === 'string' ? a.toHit : '',
+          damage: typeof a.damage === 'string' ? a.damage : '',
           actionIndex: i,
           resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
           spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
@@ -7173,6 +7602,198 @@ export class EncountersService {
     });
 
     return persisted;
+  }
+
+  /**
+   * Quick-roll a weapon attack (to-hit) or spell damage in an encounter (issue #1850).
+   * Rolls the dice, records the entry in the campaign's shared dice_rolls log, AND
+   * appends an event to the encounter's encounter_events feed with character identity,
+   * formula breakdown, nat20/nat1 visual flags, and damage type icon.
+   */
+  async quickRoll(
+    encounterId: number,
+    body: QuickRollRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{
+    roll: DiceRoll;
+    event: EncounterEvent;
+    breakdown: string;
+    isNat20: boolean;
+    isNat1: boolean;
+    total: number;
+  }> {
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+
+    const isDm = role === 'dm';
+    const actorId: number | null = body.combatantId ?? null;
+    let actorName = body.actorName?.trim() || '';
+    let combatantRow: typeof combatants.$inferSelect | null = null;
+
+    if (actorId != null) {
+      const [found] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!found) {
+        throw new NotFoundException(`Combatant ${actorId} not found in encounter ${encounterId}`);
+      }
+      combatantRow = found;
+      actorName = combatantRow.name;
+
+      if (!isDm) {
+        if (combatantRow.kind !== 'character' || combatantRow.characterId === null) {
+          throw new ForbiddenException('Only the DM may quick-roll for monsters or NPCs');
+        }
+        const [char] = await this.db
+          .select({ ownerUserId: characters.ownerUserId })
+          .from(characters)
+          .where(eq(characters.id, combatantRow.characterId))
+          .limit(1);
+        if (!char || char.ownerUserId !== user.id) {
+          throw new ForbiddenException('You may only quick-roll for your own character');
+        }
+      }
+    } else {
+      if (!isDm) {
+        actorName = user.name || 'Player';
+      } else if (!actorName) {
+        actorName = user.name || 'DM';
+      }
+    }
+
+    // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
+    let isActorHidden = false;
+    if (encounter.hidden) {
+      isActorHidden = true;
+    } else if (combatantRow) {
+      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+        const [npc] = await this.db
+          .select({ hidden: npcs.hidden })
+          .from(npcs)
+          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .limit(1);
+        if (npc?.hidden) {
+          isActorHidden = true;
+        }
+      }
+    }
+
+    const mode = body.mode || 'flat';
+    let formula = '';
+    const isToHit = body.kind === 'to-hit';
+    let damageTypeIcon = '⚔️';
+    let damageType = '';
+
+    if (isToHit) {
+      const trimmed = body.expr.trim();
+      let mod = 0;
+      if (/^[+-]?\d+$/.test(trimmed)) {
+        mod = parseInt(trimmed, 10);
+      } else {
+        const match = /^([+-]?\d+)/.exec(trimmed);
+        if (match) mod = parseInt(match[1], 10);
+      }
+      const sign = mod >= 0 ? `+${mod}` : `${mod}`;
+      if (mode === 'advantage') formula = `2d20kh1${sign}`;
+      else if (mode === 'disadvantage') formula = `2d20kl1${sign}`;
+      else formula = `1d20${sign}`;
+    } else {
+      formula = body.expr.trim();
+      const match = /^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s*(.*)$/i.exec(formula);
+      if (match) {
+        formula = match[1].replace(/\s+/g, '');
+        damageType = match[2].trim();
+      }
+      if (damageType) {
+        const t = damageType.toLowerCase();
+        if (t.includes('fire')) damageTypeIcon = '🔥';
+        else if (t.includes('cold') || t.includes('ice')) damageTypeIcon = '❄️';
+        else if (t.includes('lightning') || t.includes('electric')) damageTypeIcon = '⚡';
+        else if (t.includes('thunder')) damageTypeIcon = '🔊';
+        else if (t.includes('acid') || t.includes('poison')) damageTypeIcon = '🧪';
+        else if (t.includes('radiant') || t.includes('holy')) damageTypeIcon = '✨';
+        else if (t.includes('necrotic') || t.includes('dark')) damageTypeIcon = '💀';
+        else if (t.includes('psychic') || t.includes('mind')) damageTypeIcon = '🧠';
+        else if (t.includes('force')) damageTypeIcon = '💥';
+      }
+    }
+
+    const rollRes = rollDice(formula);
+    const naturalRoll = rollRes.rolls.length > 0 ? rollRes.rolls[0] : null;
+    const isNat20 = isToHit && (naturalRoll === 20 || rollRes.rolls.includes(20));
+    const isNat1 = isToHit && (naturalRoll === 1 || (rollRes.rolls.length === 1 && naturalRoll === 1));
+
+    const breakdown = `${formula} (${rollRes.rolls.join(', ')}) = ${rollRes.total}`;
+    const detail = isToHit
+      ? `${body.actionName} (to-hit): ${rollRes.total} [${breakdown}]${isNat20 ? ' — CRITICAL HIT! (Nat 20)' : isNat1 ? ' — CRITICAL MISS! (Nat 1)' : ''}`
+      : `${body.actionName} (damage): ${rollRes.total} ${damageTypeIcon} [${breakdown}]`;
+
+    const diceActor = isActorHidden ? UNKNOWN_COMBATANT_LABEL : actorName;
+    const diceLabel = `${diceActor} · ${body.actionName} (${body.kind})`;
+
+    const roll = await this.rolls.record(
+      encounter.campaignId,
+      {
+        expr: formula,
+        rolls: rollRes.rolls,
+        total: rollRes.total,
+        label: diceLabel,
+        actor: diceActor,
+        natural20: isNat20 ? 1 : 0,
+      },
+      user,
+    );
+
+    const now = nowIso();
+    const performedBy = { userId: user.id, role, kind: 'human' };
+
+    const [eventRow] = await this.db
+      .insert(encounterEvents)
+      .values({
+        encounterId,
+        round: encounter.round,
+        type: 'roll',
+        actor: actorName,
+        actorId,
+        target: null,
+        targetId: null,
+        detail,
+        chainId: null,
+        parentEventId: null,
+        phase: 'roll',
+        performedByJson: JSON.stringify(performedBy),
+        metadataJson: JSON.stringify({
+          actionName: body.actionName,
+          kind: body.kind,
+          expr: body.expr,
+          formulaBreakdown: breakdown,
+          naturalRoll,
+          natural20: isNat20,
+          natural1: isNat1,
+          damageType,
+          damageIcon: damageTypeIcon,
+          total: rollRes.total,
+        }),
+        createdAt: now,
+      })
+      .returning()
+      .all();
+
+    if (!encounter.hidden) {
+      this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId });
+    }
+
+    return {
+      roll,
+      event: eventToDomain(eventRow),
+      breakdown,
+      isNat20,
+      isNat1,
+      total: rollRes.total,
+    };
   }
 
   /**
