@@ -141,7 +141,7 @@ export function TurnWorkspace({
   spellStats,
   onUpdateSpellSlot,
 }: TurnWorkspaceProps) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
@@ -646,13 +646,13 @@ export function TurnWorkspace({
             onClick={() => onEndTurn?.(turn.current!.combatantId)}
             data-testid="workspace-end-turn"
           >
-            {turn.isYourTurn ? t('workspace.endMyTurn') : t('workspace.endTurn')}
+            {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">{t('workspace.dmAdvancesTurns')}</span>
+          <span className="text-sm text-muted">{t('encounters.workspace.dmAdvancesTurns')}</span>
         ) : null}
         {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">{t('workspace.endingTurnAsksDm')}</span>
+          <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
         )}
       </div>
     </Card>
