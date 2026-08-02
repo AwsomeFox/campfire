@@ -51,6 +51,7 @@ export const CAMPAIGN_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, stri
   'session.reset': 'COUNTS ONLY, deliberately (#1042): a burst of one frame per revoked approval would have handed the table the DM’s entire approved-secrets set. The discarded items live in the audit log and a DM-only transcript row. Do not add detail to this frame.',
   'transcript.reset': 'Carries only the campaign id — every member must drop stale local scrollback and refetch.',
   grounding: 'Verdict counts plus the ruling’s provider/model provenance badge and claim row ids for a refetch. The claim read itself is role-gated (#577), and the counts are already on this frame, so the ids disclose nothing further.',
+  'player-display-scene': 'Public player display scene update.',
 };
 
 /**
