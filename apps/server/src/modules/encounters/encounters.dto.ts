@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, DeathSaveRollRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, DeathSaveRollRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -69,3 +69,11 @@ export class TokenBatchPreviewDto extends createZodDto(TokenBatchPreviewRequest.
 export class TokenBatchApplyDto extends createZodDto(TokenBatchApply.strict()) {}
 export class TokenBatchUndoDto extends createZodDto(TokenBatchUndo.strict()) {}
 export class SavedTokenFormationDto extends createZodDto(SavedTokenFormation.strict()) {}
+
+// Issue #1448: Encounter aftermath mutation DTOs
+export class EncounterAftermathApplyXpInputDto extends createZodDto(EncounterAftermathApplyXpInput.strict().default({})) {}
+export class EncounterAftermathLootTransferInputDto extends createZodDto(EncounterAftermathLootTransferInput.strict().default({})) {}
+export class EncounterAftermathQuestUpdateInputDto extends createZodDto(EncounterAftermathQuestUpdateInput.strict()) {}
+export class EncounterAftermathBeatUpdateInputDto extends createZodDto(EncounterAftermathBeatUpdateInput.strict().default({})) {}
+export class EncounterAftermathTimelineEventInputDto extends createZodDto(EncounterAftermathTimelineEventInput.strict()) {}
+

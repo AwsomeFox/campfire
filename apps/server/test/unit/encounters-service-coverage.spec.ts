@@ -200,6 +200,24 @@ describe('EncountersService unit coverage tests', () => {
 
     const aftermath = await encountersService.getAftermath(enc.id, 'dm');
     expect(aftermath).toBeDefined();
+    expect(aftermath.loot).toBeDefined();
+    expect(aftermath.loot.items.length).toBeGreaterThan(0);
+
+    const xpResult = await encountersService.applyAftermathXp(enc.id, { amount: 100 }, dmActor, 'dm');
+    expect(xpResult.xpAwarded).toBe(true);
+
+    const lootItem = aftermath.loot.items[0];
+    const lootResult = await encountersService.transferAftermathLoot(enc.id, { itemId: lootItem.id, ownerType: 'party' }, dmActor, 'dm');
+    expect(lootResult.loot.items.find((i) => i.id === lootItem.id)?.claimed).toBe(true);
+
+    const coinsResult = await encountersService.transferAftermathLoot(enc.id, { transferCoins: { gp: 50 } }, dmActor, 'dm');
+    expect(coinsResult.loot.coinsClaimed).toBe(true);
+
+    const beatResult = await encountersService.updateAftermathBeat(enc.id, { title: 'Victorious Raid', status: 'done' }, dmActor, 'dm');
+    expect(beatResult).toBeDefined();
+
+    const timelineResult = await encountersService.addAftermathTimelineEvent(enc.id, { title: 'Raid Defeated' }, dmActor, 'dm');
+    expect(timelineResult).toBeDefined();
 
     await encountersService.reopen(enc.id, dmActor, 'dm');
     await encountersService.remove(enc.id, dmActor, 'dm');

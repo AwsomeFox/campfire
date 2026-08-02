@@ -1362,6 +1362,168 @@ export class McpToolsService {
       },
     );
 
+    this.writeTool(
+      server,
+      user,
+      'apply_encounter_aftermath_xp',
+      'DM only: apply XP or milestone awards for an ended encounter aftermath (issue #1448). Idempotent award of encounter XP or milestone progress to party characters.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        amount: z.number().int().min(1).optional().describe('Optional custom XP amount per character (defaults to suggested per-character XP)'),
+        characterIds: z.array(Id).optional().describe('Optional target character IDs (defaults to character combatants)'),
+        isMilestone: z.boolean().optional().describe('Flag indicating milestone award mode'),
+        milestoneNote: z.string().optional().describe('Optional note for milestone progression'),
+      },
+      async ({ encounterId, amount, characterIds, isMilestone, milestoneNote }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.applyAftermathXp(
+          encounterId as number,
+          {
+            amount: amount as number | undefined,
+            characterIds: characterIds as number[] | undefined,
+            isMilestone: isMilestone as boolean | undefined,
+            milestoneNote: milestoneNote as string | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'transfer_encounter_aftermath_loot',
+      'DM only: transfer loot item or currency from an ended encounter aftermath directly to character inventory or party treasury (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        itemId: z.string().optional().describe('Loot item id in aftermath to transfer'),
+        ownerType: z.enum(['character', 'party']).optional().default('party').describe('Target owner: character or party'),
+        characterId: Id.nullable().optional().describe('Target character id if ownerType is character'),
+        qty: z.number().int().min(1).optional().describe('Quantity to transfer'),
+        transferCoins: z
+          .object({
+            cp: z.number().int().min(0).optional(),
+            sp: z.number().int().min(0).optional(),
+            ep: z.number().int().min(0).optional(),
+            gp: z.number().int().min(0).optional(),
+            pp: z.number().int().min(0).optional(),
+          })
+          .optional()
+          .describe('Coins to transfer to party treasury'),
+      },
+      async ({ encounterId, itemId, ownerType, characterId, qty, transferCoins }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.transferAftermathLoot(
+          encounterId as number,
+          {
+            itemId: itemId as string | undefined,
+            ownerType: (ownerType as 'character' | 'party') ?? 'party',
+            characterId: characterId as number | null | undefined,
+            qty: qty as number | undefined,
+            transferCoins: transferCoins as any,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_encounter_aftermath_quest',
+      'DM only: update quest status or objectives from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        questId: Id.optional().describe('Quest id (defaults to linked quest)'),
+        objectiveIndex: z.number().int().min(0).optional().describe('Objective index to update'),
+        objectiveCompleted: z.boolean().optional().describe('Objective completion status'),
+        questStatus: z.enum(['available', 'active', 'completed', 'failed']).optional().describe('New quest status'),
+        note: z.string().optional().describe('Optional note'),
+      },
+      async ({ encounterId, questId, objectiveIndex, objectiveCompleted, questStatus, note }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.updateAftermathQuest(
+          encounterId as number,
+          {
+            questId: (questId as number) ?? row.questId ?? 0,
+            objectiveIndex: objectiveIndex as number | undefined,
+            objectiveCompleted: objectiveCompleted as boolean | undefined,
+            questStatus: questStatus as any,
+            note: note as string | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_encounter_aftermath_beat',
+      'DM only: update or create a storyline beat from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        beatId: Id.optional().describe('Story beat id to update (omit to create a new beat)'),
+        arcId: Id.optional().describe('Story arc id when creating a new beat'),
+        title: z.string().optional().describe('Beat title'),
+        body: z.string().optional().describe('Beat markdown body/notes'),
+        status: z.enum(['planned', 'active', 'done', 'skipped']).optional().describe('Beat status'),
+      },
+      async ({ encounterId, beatId, arcId, title, body, status }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.updateAftermathBeat(
+          encounterId as number,
+          {
+            beatId: beatId as number | undefined,
+            arcId: arcId as number | undefined,
+            title: title as string | undefined,
+            body: body as string | undefined,
+            status: status as any,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'add_encounter_aftermath_timeline_event',
+      'DM only: add a campaign timeline event from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        title: z.string().min(1).max(200).describe('Timeline event title'),
+        description: z.string().optional().describe('Event description'),
+        inGameDate: z.string().optional().describe('In-game date string'),
+        era: z.string().optional().describe('Era name'),
+        sortIndex: z.number().int().optional().describe('Sort order index'),
+      },
+      async ({ encounterId, title, description, inGameDate, era, sortIndex }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.addAftermathTimelineEvent(
+          encounterId as number,
+          {
+            title: title as string,
+            description: description as string | undefined,
+            inGameDate: inGameDate as string | undefined,
+            era: era as string | undefined,
+            sortIndex: sortIndex as number | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
     this.tool(
       server,
       'list_encounter_events',
