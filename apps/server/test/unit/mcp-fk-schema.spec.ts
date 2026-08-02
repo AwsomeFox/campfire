@@ -1,4 +1,4 @@
-import { normaltenNullableNumericFks } from '../../src/modules/mcp/mcp-tools';
+import { flattenNullableNumericFks } from '../../src/modules/mcp/mcp-tools';
 
 // Issue #371: nullable numeric FK fields must serialize with a concrete top-level
 // numeric `type`, not an untyped `anyOf` union that MCP clients can't read.
@@ -14,7 +14,7 @@ describe('flattenNullableNumericFks (#371)', () => {
         },
       },
     };
-    const out = normaltenNullableNumericFks(input) as {
+    const out = flattenNullableNumericFks(input) as {
       properties: { giverNpcId: { type?: unknown; exclusiveMinimum?: unknown; default?: unknown; description?: unknown; anyOf?: unknown } };
     };
     const fk = out.properties.giverNpcId;
@@ -26,27 +26,27 @@ describe('flattenNullableNumericFks (#371)', () => {
   });
 
   it('flattens the null-first ordering too', () => {
-    const out = normaltenNullableNumericFks({ anyOf: [{ type: 'null' }, { type: 'number' }] }) as { type?: unknown };
+    const out = flattenNullableNumericFks({ anyOf: [{ type: 'null' }, { type: 'number' }] }) as { type?: unknown };
     expect(out.type).toEqual(['number', 'null']);
   });
 
   it('leaves already-flat nullable numbers untouched (mapX/mapY)', () => {
     const node = { type: ['number', 'null'], default: null };
-    expect(normaltenNullableNumericFks(node)).toEqual(node);
+    expect(flattenNullableNumericFks(node)).toEqual(node);
   });
 
   it('leaves non-null numeric FKs untouched', () => {
     const node = { type: 'integer', exclusiveMinimum: 0, description: 'Campaign id' };
-    expect(normaltenNullableNumericFks(node)).toEqual(node);
+    expect(flattenNullableNumericFks(node)).toEqual(node);
   });
 
   it('does not touch non-numeric nullable unions (e.g. string|null)', () => {
     const node = { anyOf: [{ type: 'string' }, { type: 'null' }] };
-    expect(normaltenNullableNumericFks(node)).toEqual(node);
+    expect(flattenNullableNumericFks(node)).toEqual(node);
   });
 
   it('recurses into nested properties', () => {
-    const out = normaltenNullableNumericFks({
+    const out = flattenNullableNumericFks({
       type: 'object',
       properties: {
         nested: {
