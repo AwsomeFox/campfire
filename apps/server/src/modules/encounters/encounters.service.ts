@@ -4160,11 +4160,8 @@ export class EncountersService {
 
     const isDm = role === 'dm';
     if (!isDm) {
-      // Identity + initiative edits are DM-only (issue #114): a player must not be
-      // able to rename a combatant or rewrite its hpMax/initMod, only adjust HP.
-      if (patch.initiative !== undefined) {
-        throw new ForbiddenException('Only dm may set initiative');
-      }
+      // Identity edits and combat-log actor are DM-only.
+      // Players may set initiative on their own combatant (#1457).
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
       // patching their own combatant must not spoof who dealt the damage/heal.
       //
@@ -4254,7 +4251,9 @@ export class EncountersService {
     // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
+    // Initiative: DMs can set on any combatant; players can set on their own (#1457).
+    // The ownership guard above already rejected non-owned combatants for non-DMs.
+    if (patch.initiative !== undefined) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
@@ -6865,6 +6864,10 @@ export class EncountersService {
       const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
       const effects = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(fresh.activeEffects, null));
       const activeEffects: ActiveEffectType[] = effects.success ? effects.data : [];
+
+      // Unconditionally nudge so the client receives the update (issue #1457)
+      shouldNudge = true;
+
 
       // #1674 — bound EVERY slot against the same adapter-owned action-economy model the
       // action-resolver's apply_action spend path consumes (#1637), not a second copy of the
