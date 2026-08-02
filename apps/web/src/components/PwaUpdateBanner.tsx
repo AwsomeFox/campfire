@@ -52,7 +52,7 @@ export function PwaUpdateBanner() {
         <div
           id="pwa-update-banner"
           data-testid="pwa-update-banner"
-          className="pointer-events-none bg-slate-900/95 border border-purple-500/40 text-slate-100 p-4 rounded-xl shadow-2xl backdrop-blur-md space-y-3"
+          className="pointer-events-auto bg-slate-900/95 border border-purple-500/40 text-slate-100 p-4 rounded-xl shadow-2xl backdrop-blur-md space-y-3"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
@@ -100,7 +100,7 @@ export function PwaUpdateBanner() {
         <div
           id="pwa-update-error"
           data-testid="pwa-update-error"
-          className="pointer-events-none bg-rose-950/95 border border-rose-700/60 text-slate-100 p-4 rounded-xl shadow-2xl backdrop-blur-md space-y-3"
+          className="pointer-events-auto bg-rose-950/95 border border-rose-700/60 text-slate-100 p-4 rounded-xl shadow-2xl backdrop-blur-md space-y-3"
         >
           <div className="space-y-1">
             <p className="text-xs font-semibold text-rose-400 uppercase tracking-wider">

@@ -314,6 +314,19 @@ export function isTransientError(err: unknown): boolean {
  *
  * `t` is typed loosely so this helper stays dependency-free; pass react-i18next's `t`.
  */
+const GENERIC_HTTP_CODES = new Set([
+  'bad_request',
+  'validation_failed',
+  'unauthorized',
+  'forbidden',
+  'not_found',
+  'conflict',
+  'payload_too_large',
+  'too_many_requests',
+  'unprocessable_entity',
+  'internal_error',
+]);
+
 export function translateApiError(
   err: unknown,
   t: (key: string, opts?: { defaultValue?: string }) => string,
@@ -326,11 +339,16 @@ export function translateApiError(
         ? err.message
         : String(err);
   }
-  if (err.code) {
-    return t(`errors.${err.code}`, { defaultValue: err.message });
+  if (err.code && !GENERIC_HTTP_CODES.has(err.code)) {
+    const translated = t(`errors.${err.code}`, { defaultValue: err.message });
+    if (translated && translated !== `errors.${err.code}`) return translated;
   }
   if (err.message) {
     return err.message;
+  }
+  if (err.code) {
+    const translated = t(`errors.${err.code}`, { defaultValue: '' });
+    if (translated) return translated;
   }
   if (opts?.fallbackKey) {
     return t(opts.fallbackKey);

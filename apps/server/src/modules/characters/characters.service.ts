@@ -1643,7 +1643,7 @@ export class CharactersService {
         );
       }
 
-            const changed = targets.map((target) => {
+      const changed = targets.map((target) => {
         const [row] = tx
           .update(characters)
           .set({ xp: target.xp + award.amount, updatedAt: ts })
