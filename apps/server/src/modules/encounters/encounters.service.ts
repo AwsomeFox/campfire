@@ -7112,22 +7112,59 @@ export class EncountersService {
     const encounter = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounter);
 
-    let actorName = body.actorName?.trim() || '';
+    const isDm = role === 'dm';
     const actorId: number | null = body.combatantId ?? null;
+    let actorName = body.actorName?.trim() || '';
+    let combatantRow: typeof combatants.$inferSelect | null = null;
 
     if (actorId != null) {
-      const [combatant] = await this.db
-        .select({ name: combatants.name, id: combatants.id })
+      const [found] = await this.db
+        .select()
         .from(combatants)
         .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
         .limit(1);
-      if (combatant) {
-        actorName = combatant.name;
+      if (!found) {
+        throw new NotFoundException(`Combatant ${actorId} not found in encounter ${encounterId}`);
+      }
+      combatantRow = found;
+      actorName = combatantRow.name;
+
+      if (!isDm) {
+        if (combatantRow.kind !== 'character' || combatantRow.characterId === null) {
+          throw new ForbiddenException('Only the DM may quick-roll for monsters or NPCs');
+        }
+        const [char] = await this.db
+          .select({ ownerUserId: characters.ownerUserId })
+          .from(characters)
+          .where(eq(characters.id, combatantRow.characterId))
+          .limit(1);
+        if (!char || char.ownerUserId !== user.id) {
+          throw new ForbiddenException('You may only quick-roll for your own character');
+        }
+      }
+    } else {
+      if (!isDm) {
+        actorName = user.name || 'Player';
+      } else if (!actorName) {
+        actorName = user.name || 'DM';
       }
     }
 
-    if (!actorName) {
-      actorName = user.name || 'Unknown';
+    // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
+    let isActorHidden = false;
+    if (encounter.hidden) {
+      isActorHidden = true;
+    } else if (combatantRow) {
+      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+        const [npc] = await this.db
+          .select({ hidden: npcs.hidden })
+          .from(npcs)
+          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .limit(1);
+        if (npc?.hidden) {
+          isActorHidden = true;
+        }
+      }
     }
 
     const mode = body.mode || 'flat';
@@ -7180,14 +7217,21 @@ export class EncountersService {
       ? `${body.actionName} (to-hit): ${rollRes.total} [${breakdown}]${isNat20 ? ' — CRITICAL HIT! (Nat 20)' : isNat1 ? ' — CRITICAL MISS! (Nat 1)' : ''}`
       : `${body.actionName} (damage): ${rollRes.total} ${damageTypeIcon} [${breakdown}]`;
 
-    const roll = await this.rolls.record(encounter.campaignId, {
-      expr: formula,
-      rolls: rollRes.rolls,
-      total: rollRes.total,
-      label: `${actorName} · ${body.actionName} (${body.kind})`,
-      actor: actorName,
-      natural20: isNat20 ? 1 : 0,
-    }, user);
+    const diceActor = isActorHidden ? UNKNOWN_COMBATANT_LABEL : actorName;
+    const diceLabel = `${diceActor} · ${body.actionName} (${body.kind})`;
+
+    const roll = await this.rolls.record(
+      encounter.campaignId,
+      {
+        expr: formula,
+        rolls: rollRes.rolls,
+        total: rollRes.total,
+        label: diceLabel,
+        actor: diceActor,
+        natural20: isNat20 ? 1 : 0,
+      },
+      user,
+    );
 
     const now = nowIso();
     const performedBy = { userId: user.id, role, kind: 'human' };

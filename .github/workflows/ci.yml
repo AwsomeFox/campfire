@@ -221,6 +221,7 @@ jobs:
           key: jest-unit-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json', 'apps/server/jest*.config.js', 'apps/server/tsconfig.jest.json') }}-${{ github.sha }}
           restore-keys: |
             jest-unit-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json', 'apps/server/jest*.config.js', 'apps/server/tsconfig.jest.json') }}-
+      - run: npm run build -w packages/schema
       - run: npm run test:cov
       - name: Upload coverage report
         if: always()
