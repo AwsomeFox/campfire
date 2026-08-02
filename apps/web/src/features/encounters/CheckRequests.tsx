@@ -48,7 +48,7 @@ export function CheckRequestPanel({
   encounterId?: number;
   onError?: (msg: string | null) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [characterId, setCharacterId] = useState<number | ''>('');
@@ -196,7 +196,7 @@ function PromptCard({
   onResolved: (res: CheckRequestResolution) => void;
   onError?: (msg: string | null) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [localError, setLocalError] = useState<string | null>(null);

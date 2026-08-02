@@ -141,7 +141,7 @@ export function TurnWorkspace({
   spellStats,
   onUpdateSpellSlot,
 }: TurnWorkspaceProps) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');

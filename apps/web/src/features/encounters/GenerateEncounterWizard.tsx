@@ -74,7 +74,7 @@ export function GenerateEncounterWizard({
   presetLocationId?: number;
   presetQuestId?: number;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const navigate = useNavigate();
 
   // ── generation params ──

@@ -18,7 +18,7 @@ type Props = {
 };
 
 export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('encounters');
   const [aftermath, setAftermath] = useState<EncounterAftermath | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
