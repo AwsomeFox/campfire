@@ -1245,6 +1245,18 @@ function migrateEncountersTableForAftermathDismissed(sqlite: Database.Database):
   sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_dismissed_at TEXT');
 }
 
+function migrateEncountersTableForAftermathMutations1448(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('aftermath_xp_awarded_at')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_xp_awarded_at TEXT');
+  if (!has('aftermath_loot')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_loot TEXT');
+}
+
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
 function migrateEncountersTableForBossTurnPhase(sqlite: Database.Database): void {
   const hasEncountersTable = sqlite
@@ -4973,6 +4985,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0156_ai_scribe_jobs_dedupe_1530', run: migrateAiScribeDedupeIndex1530 },
   // #841: campaign position needs the highest canonical session number, not the recap COUNT(*).
   { name: '0157_campaigns_latest_session_number_841', run: migrateCampaignsTableForLatestSessionNumber },
+  { name: '0158_encounters_aftermath_mutations_1448', run: migrateEncountersTableForAftermathMutations1448 },
 ];
 
 /**
