@@ -7233,7 +7233,7 @@ function CombatantRow({
               disabled={busy || syncBlocked}
               title={combatant.initiativeBreakdown?.formula || "Roll initiative"}
               onClick={() => {
-                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initiativeMod ?? 0);
+                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initMod ?? 0);
                 onSetInitiative(roll);
               }}
             >

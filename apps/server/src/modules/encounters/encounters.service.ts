@@ -4163,7 +4163,7 @@ export class EncountersService {
       // Identity edits are DM-only (issue #114): a player must not be
       // able to rename a combatant or rewrite its hpMax/initMod.
       // We allow players to set their own initiative (issue #1457).
-      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initiativeMod !== undefined) {
+      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined) {
         throw new ForbiddenException('Only dm may change combatant identity');
       }
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
