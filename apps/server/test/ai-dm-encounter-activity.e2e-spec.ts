@@ -34,7 +34,7 @@ function collectSseToolEvents(
       {
         host: '127.0.0.1',
         port,
-        path: `/api/v1/campaigns/${campaignId}/ai-dm/stream`,
+        path: `/api/v1/campaigns/${campaignId}/events`,
         headers: { accept: 'text/event-stream', ...headers },
       },
       (res) => {
