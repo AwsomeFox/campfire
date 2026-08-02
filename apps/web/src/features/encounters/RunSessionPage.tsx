@@ -7225,23 +7225,39 @@ function CombatantRow({
         </div>
       ) : (
         <div className="flex items-center" style={{ gap: 2 }}>
-          <span
-            title={combatant.initiativeBreakdown?.formula}
-            style={{
-              width: 30,
-              height: 30,
-              flex: 'none',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--color-divider)',
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 13,
-              fontFamily: 'var(--font-heading)',
-              color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
-            }}
-          >
-            {combatant.initiative ?? '–'}
-          </span>
+          {combatant.initiative === null && canEditPermission && onSetInitiative ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
+              disabled={busy || syncBlocked}
+              title={combatant.initiativeBreakdown?.formula || "Roll initiative"}
+              onClick={() => {
+                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initiativeMod ?? 0);
+                onSetInitiative(roll);
+              }}
+            >
+              Roll Init
+            </button>
+          ) : (
+            <span
+              title={combatant.initiativeBreakdown?.formula}
+              style={{
+                width: 30,
+                height: 30,
+                flex: 'none',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-divider)',
+                display: 'grid',
+                placeItems: 'center',
+                fontSize: 13,
+                fontFamily: 'var(--font-heading)',
+                color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+              }}
+            >
+              {combatant.initiative ?? '–'}
+            </span>
+          )}
           {adapter.initiativeModel?.mode === 'group' && (
             <select
               className="input cf-target-44"
