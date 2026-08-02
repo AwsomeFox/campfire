@@ -2983,15 +2983,17 @@ export default function RunSessionPage() {
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
-                    disabled={headerBusy || riskyBlocked || hasNoCombatants}
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
                     onClick={startEncounter}
-                    aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
+                    aria-describedby={hasNoCombatants || needsInitiativeCount > 0 ? 'start-roster-hint' : undefined}
                   >
                     Start
                   </Btn>
-                  {hasNoCombatants && (
-                    <p id="start-empty-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
-                      Add at least one combatant before starting
+                  {(hasNoCombatants || needsInitiativeCount > 0) && (
+                    <p id="start-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
+                      {hasNoCombatants
+                        ? 'Add at least one combatant before starting'
+                        : 'Roll initiative for all combatants before starting'}
                     </p>
                   )}
                 </div>

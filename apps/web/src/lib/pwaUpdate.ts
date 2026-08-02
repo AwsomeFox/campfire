@@ -89,7 +89,8 @@ export async function triggerUpdateNow(): Promise<boolean> {
   try {
     if (updateSWFn) {
       await updateSWFn(true);
-    } else if (typeof window !== 'undefined') {
+    }
+    if (typeof window !== 'undefined') {
       window.location.reload();
     }
     return true;
