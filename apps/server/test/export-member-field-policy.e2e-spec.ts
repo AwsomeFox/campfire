@@ -321,9 +321,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
     // 3. Create a revision by editing a note authored by player
     const note = await playerAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
-      .send({ body: 'Initial note', visibility: 'private' });
+      .send({ body: 'Initial note', visibility: 'private' })
+      .expect(201);
     await playerAgent
-      .patch(`/api/v1/campaigns/${campaignId}/notes/${note.body.id}`)
+      .patch(`/api/v1/notes/${note.body.id}`)
       .send({ body: 'Edited note' })
       .expect(200);
       
