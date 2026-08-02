@@ -13,7 +13,7 @@ const t = ((key: string) => key) as TFunction;
 test.describe('campaign nav IA (#643)', () => {
   test('groups routes into Play, Prepare, World, Records, Manage', () => {
     const groups = buildCampaignNavGroups(t, 42, {
-      isDm: true,
+      isDm: true, canCast: true,
       aiDriverActive: true,
       inboxCount: 2,
       pendingProposals: 1,
@@ -25,6 +25,7 @@ test.describe('campaign nav IA (#643)', () => {
       'party',
       'inventory',
       'encounters',
+      'screen',
       'table',
       'notes',
     ]);
@@ -43,7 +44,7 @@ test.describe('campaign nav IA (#643)', () => {
 
   test('player Manage group exposes my proposals and your data', () => {
     const groups = buildCampaignNavGroups(t, 7, {
-      isDm: false,
+      isDm: false, canCast: false,
       aiDriverActive: false,
       inboxCount: 0,
       pendingProposals: 0,
@@ -62,7 +63,7 @@ test.describe('campaign nav IA (#643)', () => {
 
   test('More sheet omits tab-bar duplicates', () => {
     const groups = buildCampaignNavGroups(t, 1, {
-      isDm: true,
+      isDm: true, canCast: true,
       aiDriverActive: false,
       inboxCount: 0,
       pendingProposals: 0,

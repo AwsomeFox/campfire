@@ -163,6 +163,7 @@ export interface SafeCombatant {
   name: string;
   initiative: number | null;
   conditions: string[];
+  down: boolean;
   /** Exact HP — only ever populated for characters (party HP is shared). */
   hpCurrent: number | null;
   hpMax: number | null;
@@ -177,6 +178,7 @@ export function safeCombatant(c: Combatant): SafeCombatant {
     name: c.name,
     initiative: c.initiative,
     conditions: c.conditions,
+    down: c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down',
   };
   // Characters expose exact HP to the table; monsters are banded, exact numbers withheld.
   if (c.kind === 'character') {
@@ -184,7 +186,7 @@ export function safeCombatant(c: Combatant): SafeCombatant {
   }
   const band =
     c.hpBand ?? (c.hpCurrent != null && c.hpMax != null ? hpBandFor(c.hpCurrent, c.hpMax) : null);
-  return { ...base, hpCurrent: null, hpMax: null, hpBand: band };
+  return { ...base, hpCurrent: null, hpMax: null, hpBand: band, down: base.down || band === 'down' };
 }
 
 export function filterPlayerSafeCombatants<T>(combatants: T[]): T[] {

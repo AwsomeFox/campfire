@@ -3177,6 +3177,11 @@ export const NotificationType = z.enum([
   // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
   // Maps to the always-on `security` category below: a safety stop must not be mutable by a
   // notification preference or deferrable into a digest.
+  // Live play events (issue #1322)
+  'encounter_started',
+  'encounter_ended',
+  'encounter_turn',
+  'character_downed',
   'safety_hold',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
@@ -3292,6 +3297,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
+  'live_play', // encounter_started, encounter_ended, encounter_turn, character_downed
   'access', // added_to_campaign, removed_from_campaign, campaign_trashed, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
@@ -3339,6 +3345,10 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_submitted: 'proposals',
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
+  encounter_started: 'live_play',
+  encounter_ended: 'live_play',
+  encounter_turn: 'live_play',
+  character_downed: 'live_play',
   ai_dm_alert: 'security',
   // 'access' rather than a category of its own, and therefore ALWAYS ON. A published
   // charter version can withdraw a protection the recipient previously agreed to, and
@@ -10941,6 +10951,7 @@ export const CampaignEventType = z.enum([
   'session.reset',
   'transcript.reset',
   'grounding',
+  'player-display-scene',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -10975,6 +10986,12 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('player-display-scene'),
+    campaignId: Id,
+    scene: z.string(),
     at: IsoDate,
   }),
   z.object({
