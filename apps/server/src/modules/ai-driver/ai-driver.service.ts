@@ -1554,6 +1554,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_note',
   // session recap
   'add_session_recap',
+  // aftermath mutations (#1448)
+  'apply_encounter_aftermath_xp',
+  'transfer_encounter_aftermath_loot',
+  'update_encounter_aftermath_quest',
+  'update_encounter_aftermath_beat',
+  'add_encounter_aftermath_timeline_event',
 ]);
 
 /**
@@ -1646,6 +1652,11 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'whisper_to_player',
   'add_note',
   'add_session_recap',
+  'apply_encounter_aftermath_xp',
+  'transfer_encounter_aftermath_loot',
+  'update_encounter_aftermath_quest',
+  'update_encounter_aftermath_beat',
+  'add_encounter_aftermath_timeline_event',
 ]);
 
 export {

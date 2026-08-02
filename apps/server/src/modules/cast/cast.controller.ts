@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, Param, ParseIntPipe, Post, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, ParseIntPipe, Post, Query, Req, Res } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -111,6 +111,7 @@ export class CampaignCastSessionsController {
   }
 
   @Post('scene')
+  @HttpCode(200)
   @ApiOperation({ summary: 'Broadcast a new scene to all player displays', description: 'DM or co-DM role required.' })
   @ApiResponse({ status: 200, description: 'Broadcasted.' })
   async broadcastScene(

@@ -44,9 +44,89 @@ export const EncounterAftermathHandoffs = z.object({
 });
 export type EncounterAftermathHandoffs = z.infer<typeof EncounterAftermathHandoffs>;
 
+/** Single loot item in an aftermath package (issue #1448). */
+export const EncounterAftermathLootItem = z.object({
+  id: z.string(),
+  name: z.string(),
+  qty: z.number().int().min(1).default(1),
+  notes: z.string().default(''),
+  claimed: z.boolean().default(false),
+  claimedByCharacterId: Id.nullable().default(null),
+  claimedToParty: z.boolean().default(false),
+});
+export type EncounterAftermathLootItem = z.infer<typeof EncounterAftermathLootItem>;
+
+/** Currency loot in an aftermath package (issue #1448). */
+export const EncounterAftermathCoins = z.object({
+  cp: z.number().int().min(0).default(0),
+  sp: z.number().int().min(0).default(0),
+  ep: z.number().int().min(0).default(0),
+  gp: z.number().int().min(0).default(0),
+  pp: z.number().int().min(0).default(0),
+});
+export type EncounterAftermathCoins = z.infer<typeof EncounterAftermathCoins>;
+
+/** Loot summary for aftermath (issue #1448). */
+export const EncounterAftermathLoot = z.object({
+  items: z.array(EncounterAftermathLootItem),
+  coins: EncounterAftermathCoins,
+  coinsClaimed: z.boolean().default(false),
+});
+export type EncounterAftermathLoot = z.infer<typeof EncounterAftermathLoot>;
+
+/** Input for applying XP / milestone award from aftermath (issue #1448). */
+export const EncounterAftermathApplyXpInput = z.object({
+  amount: z.number().int().min(1).optional(),
+  characterIds: z.array(Id).optional(),
+  isMilestone: z.boolean().optional(),
+  milestoneNote: z.string().optional(),
+});
+export type EncounterAftermathApplyXpInput = z.infer<typeof EncounterAftermathApplyXpInput>;
+
+/** Input for transferring loot from aftermath to inventory or treasury (issue #1448). */
+export const EncounterAftermathLootTransferInput = z.object({
+  itemId: z.string().optional(),
+  ownerType: z.enum(['character', 'party']).default('party').optional(),
+  characterId: Id.nullable().optional(),
+  qty: z.number().int().min(1).optional(),
+  transferCoins: EncounterAftermathCoins.partial().optional(),
+});
+export type EncounterAftermathLootTransferInput = z.infer<typeof EncounterAftermathLootTransferInput>;
+
+/** Input for updating quest objectives / status from aftermath (issue #1448). */
+export const EncounterAftermathQuestUpdateInput = z.object({
+  questId: Id,
+  objectiveIndex: z.number().int().min(0).optional(),
+  objectiveCompleted: z.boolean().optional(),
+  questStatus: z.enum(['available', 'active', 'completed', 'failed']).optional(),
+  note: z.string().optional(),
+});
+export type EncounterAftermathQuestUpdateInput = z.infer<typeof EncounterAftermathQuestUpdateInput>;
+
+/** Input for updating or creating a storyline beat from aftermath (issue #1448). */
+export const EncounterAftermathBeatUpdateInput = z.object({
+  beatId: Id.optional(),
+  arcId: Id.optional(),
+  title: z.string().min(1).max(200).optional(),
+  body: z.string().max(50_000).optional(),
+  status: z.enum(['planned', 'active', 'done', 'skipped']).optional(),
+});
+export type EncounterAftermathBeatUpdateInput = z.infer<typeof EncounterAftermathBeatUpdateInput>;
+
+/** Input for adding a timeline event from aftermath (issue #1448). */
+export const EncounterAftermathTimelineEventInput = z.object({
+  title: z.string().min(1).max(200),
+  description: z.string().max(50_000).optional(),
+  inGameDate: z.string().optional(),
+  era: z.string().optional(),
+  sortIndex: z.number().int().optional(),
+});
+export type EncounterAftermathTimelineEventInput = z.infer<typeof EncounterAftermathTimelineEventInput>;
+
 /**
- * Read model for the post-encounter aftermath workflow (issue #473): outcome review,
- * recap draft seeded from combat events, adapter-aware XP guidance, and hand-off links.
+ * Read model for the post-encounter aftermath workflow (issue #473, #1448): outcome review,
+ * recap draft seeded from combat events, adapter-aware XP guidance, in-panel XP and loot transfers,
+ * quest/storyline/timeline mutation controls, and hand-off links.
  * `dismissedAt` is set when the DM defers the panel (idempotent resume).
  */
 export const EncounterAftermath = z.object({
@@ -57,6 +137,10 @@ export const EncounterAftermath = z.object({
   /** Notable combat-log lines woven into the recap scaffold. */
   combatLogHighlights: z.array(z.string()),
   xp: EncounterAftermathXp,
+  xpAwardedAt: IsoDate.nullable(),
+  xpAwarded: z.boolean(),
+  milestoneMode: z.boolean(),
+  loot: EncounterAftermathLoot,
   difficulty: EncounterDifficulty,
   handoffs: EncounterAftermathHandoffs,
   questId: Id.nullable(),
@@ -65,3 +149,4 @@ export const EncounterAftermath = z.object({
   dismissedAt: IsoDate.nullable(),
 });
 export type EncounterAftermath = z.infer<typeof EncounterAftermath>;
+
