@@ -1018,6 +1018,19 @@ function YourMembershipCard({
   const [confirming, setConfirming] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [previewManifest, setPreviewManifest] = useState<any>(null);
+
+  useEffect(() => {
+    let active = true;
+    api.get(`${API}/campaigns/${campaignId}/export/me/preview`)
+      .then((res: any) => {
+        if (active) setPreviewManifest(res.manifest);
+      })
+      .catch((err) => {
+        console.error('Failed to load export preview:', err);
+      });
+    return () => { active = false; };
+  }, [campaignId]);
 
   const myMember = myUserId != null ? members.find((m) => m.userId === myUserId) : undefined;
   if (!myMember) return null;
@@ -1045,6 +1058,24 @@ function YourMembershipCard({
         notes you wrote and the proposals you submitted — not the DM's secrets or anyone else's private data.
       </p>
       {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
+      
+      {previewManifest && (
+        <div className="bg-gray-800/50 p-2 rounded text-[11px] text-muted space-y-1">
+          <p className="m-0 font-medium text-gray-300">Data included in your export:</p>
+          <ul className="m-0 pl-4 list-disc">
+            <li>Characters: {previewManifest.counts.characters}</li>
+            <li>Notes: {previewManifest.counts.notes}</li>
+            <li>Comments & replies: {previewManifest.counts.comments}</li>
+            <li>Proposals: {previewManifest.counts.proposals}</li>
+            <li>RSVPs: {previewManifest.counts.rsvps}</li>
+            <li>Dice rolls: {previewManifest.counts.diceRolls} (subject to retention limits)</li>
+            <li>Revisions: {previewManifest.counts.revisions}</li>
+            <li>Audit actions: {previewManifest.counts.auditActions}</li>
+          </ul>
+          <p className="m-0 mt-1 italic">{previewManifest.excludedReason}</p>
+        </div>
+      )}
+
       <div className="flex gap-2 flex-wrap items-center">
         <a
           className="btn btn-secondary"
