@@ -114,14 +114,10 @@ async function mockDriverToolEvent(page: Page, campaignId: number, toolName: str
     vote: null,
     takeoverRequestedBy: null,
   };
-  let sentToolEvent = false;
   await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
     if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
-      const payload = sentToolEvent
-        ? ': keepalive\n\n'
-        : `data: ${JSON.stringify({ type: 'tool', campaignId, name: toolName, isError: false, proposed: false, at })}\n\n`;
-      sentToolEvent = true;
+      const payload = `data: ${JSON.stringify({ type: 'tool', campaignId, name: toolName, isError: false, proposed: false, at })}\n\n: keepalive\n\n`;
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: payload });
     }
     if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && route.request().method() === 'GET')) {
