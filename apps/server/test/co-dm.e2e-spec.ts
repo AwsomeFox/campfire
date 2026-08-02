@@ -1,4 +1,4 @@
-import { rulePacks } from '@campfire/schema';
+import { rulePacks } from '../src/db/schema';
 import { DB } from '../src/db/db.module';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
