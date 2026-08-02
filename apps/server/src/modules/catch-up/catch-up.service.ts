@@ -17,7 +17,6 @@ import { QuestsService } from '../quests/quests.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { SchedulingService } from '../sessions/scheduling.service';
-import { redactPrepNotes } from '../../common/redact';
 
 /** Cap per group so long absences stay bounded (#549 acceptance). */
 const MAX_PER_GROUP = 30;
