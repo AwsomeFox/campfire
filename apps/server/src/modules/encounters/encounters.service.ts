@@ -4251,7 +4251,9 @@ export class EncountersService {
     // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
+    // Initiative: DMs can set on any combatant; players can set on their own (#1457).
+    // The ownership guard above already rejected non-owned combatants for non-DMs.
+    if (patch.initiative !== undefined) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
