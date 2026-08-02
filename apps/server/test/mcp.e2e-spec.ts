@@ -2468,7 +2468,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
         encounterId: encounter.id,
         combatantId: heroCombatant!.id,
         idempotencyKey: 'test-structured-cond',
-        addConditionInstance: { name: 'Charmed', durationRounds: 10, saveDc: 15 }
+        addConditionInstance: { id: 'cond-charmed-1', name: 'Charmed', durationRounds: 10, saveDc: 15 }
       },
     });
     expect(structured.isError).toBeFalsy();
