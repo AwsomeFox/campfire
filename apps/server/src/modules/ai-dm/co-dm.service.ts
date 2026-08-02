@@ -163,6 +163,7 @@ export class CoDmService {
       count,
       await this.resolveLanguageContract(campaignId, input.narrationLanguage),
       adapter,
+      campaign?.ruleSystem,
     );
     // `endpointScope` here is the scope that OWNS the resolved endpoint, not merely
     // whether a campaign override row exists — a keyless override executes against the
@@ -388,6 +389,7 @@ export class CoDmService {
     count: number,
     languageContract: string,
     adapter: RuleSystemAdapter,
+    ruleSystem?: string,
   ): string {
     const base = persona ? `${persona}\n\n` : '';
     const shape = DRAFT_JSON_SHAPE(adapter)[target];
@@ -396,10 +398,10 @@ export class CoDmService {
         ? `Return a JSON ARRAY of exactly ${count} such objects.`
         : 'Return a single JSON object.';
     let systemPrompt = `You are drafting tabletop RPG content for ${adapter.label}.`;
-    if (adapter.id === 'dnd5e') {
+    if (!ruleSystem || ruleSystem === 'neutral') {
+      systemPrompt = `You are drafting tabletop RPG content. Ask for assumptions before applying mechanics.`;
+    } else if (adapter.id === 'dnd5e') {
       systemPrompt = `You are drafting D&D content for the DM to review.`;
-    } else if (adapter.id === '' || adapter.id === 'neutral') {
-      systemPrompt += ` Ask for assumptions before applying mechanics.`;
     }
     return (
       `${base}${languageContract}\n\n` +
