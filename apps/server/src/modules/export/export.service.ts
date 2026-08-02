@@ -931,7 +931,7 @@ export class ExportService {
       this.supportPreferences.getOwn(campaignId, user.id),
       this.audit.listForCampaignExport(campaignId),
       this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
-      this.scheduling.listForExport(campaignId),
+      this.scheduling.listForExport(campaignId, role),
       this.revisions.listForCampaign(campaignId),
     ]);
 
