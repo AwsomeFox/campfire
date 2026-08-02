@@ -636,13 +636,18 @@ describe('encounters (e2e)', () => {
       expect(res.status).toBe(403);
     });
 
-    it('player cannot set initiative on their own combatant', async () => {
+    it('player can set initiative on their own combatant (#1457)', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)
         .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
         .set(player)
         .send({ initiative: 5 });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
+      const get = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const aria = (get.body.combatants as Array<{ id: number; initiative: number | null }>).find(
+        (c) => c.id === ariaCombatantId,
+      );
+      expect(aria?.initiative).toBe(5);
     });
 
     it('player cannot modify a monster combatant (not theirs)', async () => {
