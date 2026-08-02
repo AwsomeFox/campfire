@@ -1326,6 +1326,8 @@ CREATE TABLE IF NOT EXISTS encounters (
   hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
   aftermath_dismissed_at TEXT,
+  aftermath_xp_awarded_at TEXT,
+  aftermath_loot TEXT,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

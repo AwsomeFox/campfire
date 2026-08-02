@@ -151,4 +151,39 @@ describe('encounter aftermath logic (issue #473)', () => {
     ]);
     expect(highlights.some((h) => h.includes('Goblin fell'))).toBe(true);
   });
+
+  it('validates aftermath mutation input schemas (issue #1448)', () => {
+    const {
+      EncounterAftermathApplyXpInput,
+      EncounterAftermathLootTransferInput,
+      EncounterAftermathQuestUpdateInput,
+      EncounterAftermathBeatUpdateInput,
+      EncounterAftermathTimelineEventInput,
+    } = require('@campfire/schema');
+
+    expect(EncounterAftermathApplyXpInput.parse({ amount: 150, characterIds: [1, 2] })).toEqual({
+      amount: 150,
+      characterIds: [1, 2],
+    });
+
+    expect(EncounterAftermathLootTransferInput.parse({ itemId: 'item-1', ownerType: 'party' })).toEqual({
+      itemId: 'item-1',
+      ownerType: 'party',
+    });
+
+    expect(EncounterAftermathQuestUpdateInput.parse({ questId: 42, questStatus: 'completed' })).toEqual({
+      questId: 42,
+      questStatus: 'completed',
+    });
+
+    expect(EncounterAftermathBeatUpdateInput.parse({ title: 'Defeated Boss', status: 'done' })).toEqual({
+      title: 'Defeated Boss',
+      status: 'done',
+    });
+
+    expect(EncounterAftermathTimelineEventInput.parse({ title: 'Battle of Oakhaven', era: 'Third Age' })).toEqual({
+      title: 'Battle of Oakhaven',
+      era: 'Third Age',
+    });
+  });
 });
