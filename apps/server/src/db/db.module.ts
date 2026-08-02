@@ -2993,6 +2993,18 @@ function migrateCampaignsTableForNarrationLanguage(sqlite: Database.Database): v
   }
 }
 
+function migrateScheduledSessionsForPrepNotes883(sqlite: Database.Database): void {
+  const hasScheduledSessionsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (!hasScheduledSessionsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'prep_notes')) {
+    sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN prep_notes TEXT NOT NULL DEFAULT ''");
+  }
+}
+
 /**
  * Issue #841: campaign position needs the highest canonical session number, not the
  * recap COUNT(*). Existing rows get a one-time backfill from live (non-trashed) sessions.
@@ -4986,6 +4998,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #841: campaign position needs the highest canonical session number, not the recap COUNT(*).
   { name: '0157_campaigns_latest_session_number_841', run: migrateCampaignsTableForLatestSessionNumber },
   { name: '0158_encounters_aftermath_mutations_1448', run: migrateEncountersTableForAftermathMutations1448 },
+  { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
 ];
 
 /**

@@ -987,7 +987,7 @@ export class OrganizedPlayService {
     return rows.map(seriesToDomain);
   }
 
-  async getSeries(id: number): Promise<SessionSeriesWithOccurrences> {
+  async getSeries(id: number, role: Role): Promise<SessionSeriesWithOccurrences> {
     const row = await this.getSeriesRowOrThrow(id);
     const [occurrences, exceptions] = await Promise.all([
       this.db
@@ -1004,7 +1004,7 @@ export class OrganizedPlayService {
       // coordinator calendar (scheduleEffectiveStatusSql) and the Schedule tab
       // (projectLink) already show it. Mapping the raw `status` column left series
       // detail as the one surface that disagreed.
-      occurrences: await reconcileScheduledSessions(this.db, occurrences),
+      occurrences: await reconcileScheduledSessions(this.db, occurrences, role),
       exceptions: exceptions.map(exceptionToDomain),
       // Reads never force anything; only a forced write populates this.
       conflicts: [],
@@ -1226,7 +1226,7 @@ export class OrganizedPlayService {
     this.events.emit({ type: 'schedule.updated', campaignId, scheduleId: created.id });
     // NOTIFIES ('created'). One ping for the request, anchored on the first night.
     await this.notifyOccurrenceChange(campaignId, user, createdRows, 'created');
-    return this.withForcedConflicts(await this.getSeries(created.id), forced, batchConflicts, user);
+    return this.withForcedConflicts(await this.getSeries(created.id, role), forced, batchConflicts, user);
   }
 
   /** Insert one materialized occurrence row. Sync: called inside a transaction. */
@@ -1602,7 +1602,7 @@ export class OrganizedPlayService {
     if (shouldNotifyScheduleUpdate(changedFields)) {
       await this.notifyOccurrenceChange(before.campaignId, user, notifyRows, 'updated', changedFields);
     }
-    return this.withForcedConflicts(await this.getSeries(id), forced, forcedBatch, user);
+    return this.withForcedConflicts(await this.getSeries(id, role), forced, forcedBatch, user);
   }
 
   /**
@@ -1714,7 +1714,7 @@ export class OrganizedPlayService {
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
     // NOTIFIES ('created'): an extension puts new nights on the party's calendar.
     await this.notifyOccurrenceChange(existing.campaignId, user, addedRows, 'created');
-    return this.withForcedConflicts(await this.getSeries(id), forced, batchConflicts, user);
+    return this.withForcedConflicts(await this.getSeries(id, role), forced, batchConflicts, user);
   }
 
   /**
@@ -1802,7 +1802,7 @@ export class OrganizedPlayService {
     // NOTIFIES ('cancelled'). The whole reason this exists: a member who is not
     // watching the page must not turn up to a night cancelled with the series.
     await this.notifyOccurrenceChange(existing.campaignId, user, cancelled, 'cancelled');
-    return this.getSeries(id);
+    return this.getSeries(id, role);
   }
 
   // ----- per-occurrence exceptions -----
@@ -2019,7 +2019,7 @@ export class OrganizedPlayService {
       occurrence: (
         await reconcileScheduledSessions(this.db, [
           kind !== null ? await this.getOccurrenceRowOrThrow(id) : existing,
-        ])
+        ], role)
       )[0],
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
@@ -2147,7 +2147,7 @@ export class OrganizedPlayService {
     );
     return {
       occurrence: (
-        await reconcileScheduledSessions(this.db, [await this.getOccurrenceRowOrThrow(id)])
+        await reconcileScheduledSessions(this.db, [await this.getOccurrenceRowOrThrow(id)], role)
       )[0],
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
