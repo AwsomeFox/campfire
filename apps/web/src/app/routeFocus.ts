@@ -177,6 +177,17 @@ export type FocusMainOptions = {
 };
 
 /**
+ * How long a late h1 may still claim focus after the fallback settles on `<main>`.
+ * Long enough to cover a realistically slow async fetch-then-render (the reproduction
+ * for issue #591 gated the Dashboard's summary fetch well past the initial ~2-frame
+ * window and the heading still arrived comfortably inside this margin); short enough
+ * that a route which never renders an h1 stops paying for the MutationObserver and
+ * loses recovery eligibility within a few seconds of navigating, not for the entire
+ * time the user stays on the page (review findings: Devin, Copilot on routeFocus.ts).
+ */
+export const FALLBACK_UPGRADE_GRACE_MS = 5_000;
+
+/**
  * Focus the main destination (h1 or main) without scrolling the viewport.
  * Waits briefly for async h1 text via MutationObserver, mirroring EntityDeepLinkFocus.
  */
@@ -195,12 +206,62 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   // only a little later: the observer used to stop mattering the instant it settled on the
   // fallback, so focus stayed on `main` forever even after the real h1 showed up (issue #591
   // regression — the h1 element itself was present and stable, just never focused). This
-  // flag keeps the fallback recoverable instead of permanent.
+  // flag keeps the fallback recoverable, but only within a bounded window (below) and only
+  // while the fallback focus has not itself been overtaken by the user.
   let settledOnMainFallback = false;
+  let fallbackGraceTimeout = 0;
+  // Guards the fallback-recovery `focusin` listener against the focus calls this closure
+  // makes on its own behalf, so only genuine user-driven focus changes are treated as
+  // "the user took over" (review finding: P2 codex on routeFocus.ts — a skip-link
+  // reactivation onto the same `<main>` landmark must not be mistaken for the untouched
+  // fallback and then overridden by a later h1).
+  let expectingOwnFocus = false;
+  let fallbackListenersInstalled = false;
 
   const cancelFrames = () => {
     for (const id of frames) window.cancelAnimationFrame(id);
     frames.clear();
+  };
+
+  const focusOwned = (el: HTMLElement) => {
+    expectingOwnFocus = true;
+    focusProgrammatically(el);
+    expectingOwnFocus = false;
+  };
+
+  // Any focus change or pointer interaction that this closure did not itself cause means
+  // the user has moved on from the untouched fallback — a skip-link activation, a click, or
+  // a tab all land here. Once that happens the late h1 must never steal focus back.
+  const handleUserTookOver = () => {
+    if (expectingOwnFocus) return;
+    teardownFallbackWatch();
+  };
+
+  const installFallbackWatchListeners = () => {
+    if (fallbackListenersInstalled) return;
+    fallbackListenersInstalled = true;
+    document.addEventListener('focusin', handleUserTookOver, true);
+    document.addEventListener('pointerdown', handleUserTookOver, true);
+  };
+
+  const removeFallbackWatchListeners = () => {
+    if (!fallbackListenersInstalled) return;
+    fallbackListenersInstalled = false;
+    document.removeEventListener('focusin', handleUserTookOver, true);
+    document.removeEventListener('pointerdown', handleUserTookOver, true);
+  };
+
+  // Ends the late-h1 recovery window: stops watching for a heading, and stops listening for
+  // user interaction. Idempotent — called from whichever of "user took over", "grace window
+  // elapsed", or "h1 arrived and was focused" happens first.
+  const teardownFallbackWatch = () => {
+    settledOnMainFallback = false;
+    if (fallbackGraceTimeout) {
+      window.clearTimeout(fallbackGraceTimeout);
+      fallbackGraceTimeout = 0;
+    }
+    removeFallbackWatchListeners();
+    observer?.disconnect();
   };
 
   const scheduleFrame = (cb: () => void) => {
@@ -228,15 +289,23 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     if (moveFocus) {
       scheduleFrame(() => {
         if (shouldPreserveFocusInsideMain(main, document)) return;
-        focusProgrammatically(target);
+        focusOwned(target);
       });
     }
-    // A fallback settle keeps the observer/timeout alive so a real h1 that arrives shortly
-    // afterward can still take over focus below — see `settledOnMainFallback`'s doc comment.
+    if (timeout) {
+      window.clearTimeout(timeout);
+      timeout = 0;
+    }
     if (!isFallback) {
       observer?.disconnect();
-      if (timeout) window.clearTimeout(timeout);
+      return;
     }
+    // A fallback settle keeps the observer alive so a real h1 that arrives shortly afterward
+    // can still take over focus — but only for a bounded grace window (see
+    // `FALLBACK_UPGRADE_GRACE_MS`), and only until the user acts on the page themselves (see
+    // `handleUserTookOver`). Either one ends the recovery window early.
+    installFallbackWatchListeners();
+    fallbackGraceTimeout = window.setTimeout(teardownFallbackWatch, FALLBACK_UPGRADE_GRACE_MS);
   };
 
   const tryFocusHeading = (): boolean => {
@@ -247,21 +316,21 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   };
 
   // If the fallback already settled on `main`, upgrade to the real h1 the instant one
-  // appears — but only while focus is still exactly where the fallback left it. Anything
-  // else (the user tabbed away, a dialog opened and took focus, a page control claimed it)
-  // must not be overridden, matching `shouldPreserveFocusInsideMain`'s existing contract.
+  // appears — but only while the fallback focus is still untouched (bounded by the grace
+  // window above, and never once the user has acted — see `handleUserTookOver`). That
+  // guards the case `shouldPreserveFocusInsideMain` cannot: a skip-link activation lands
+  // focus back on this exact same `<main>` element, so comparing `activeElement` alone
+  // cannot distinguish it from the fallback state (review finding: P2 codex).
   const upgradeFromFallback = (): boolean => {
     if (!settledOnMainFallback) return false;
     const h1 = main.querySelector('h1');
     if (!(h1 instanceof HTMLElement)) return false;
-    settledOnMainFallback = false;
-    observer?.disconnect();
-    if (timeout) window.clearTimeout(timeout);
+    teardownFallbackWatch();
     if (moveFocus) {
       scheduleFrame(() => {
         if (document.activeElement !== main) return;
         if (shouldPreserveFocusInsideMain(main, document)) return;
-        focusProgrammatically(h1);
+        focusOwned(h1);
       });
     }
     return true;
@@ -309,6 +378,8 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   return () => {
     observer?.disconnect();
     if (timeout) window.clearTimeout(timeout);
+    if (fallbackGraceTimeout) window.clearTimeout(fallbackGraceTimeout);
+    removeFallbackWatchListeners();
     cancelFrames();
   };
 }
