@@ -1022,6 +1022,36 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summarizeDdbImport(c).textOnly).toContain('Overloaded Strike');
   });
 
+  // Regression for a PR #1950 review finding (Codex, round 17): a feature that is BOTH
+  // attack-shaped (attackTypeRange) and save-shaped (a valid fixedSaveDc/saveStatId) at once
+  // — e.g. an on-hit maneuver followed by a saving throw — used to keep both attackBonus and
+  // savingThrow set. `expandRawStatblockAction` always builds its attack branch first when
+  // attackBonus is non-null, so the save was silently discarded even though the entry still
+  // looked (and was reported as) fully resolvable.
+  it('a feature that is both attack-shaped and save-shaped lands text-only instead of silently dropping the save', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [
+          {
+            name: 'Piercing Strike',
+            attackTypeRange: 1,
+            abilityModifierStatId: 1,
+            dice: { diceString: '1d6' },
+            activation: { activationType: 1 },
+            fixedSaveDc: 15,
+            saveStatId: 2,
+          },
+        ],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Piercing Strike');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Piercing Strike');
+  });
+
   // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.
   // A fractional `definition.level` like 1.5 passed the earlier range check and reached
   // `CharacterAction.parse` unvalidated, throwing an uncaught ZodError that aborted the

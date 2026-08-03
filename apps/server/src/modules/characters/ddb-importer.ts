@@ -952,6 +952,20 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       if (invalidFlat || flatOutOfRange || invalidDice || !diceString) {
         savingThrow = null;
       }
+      // A feature that is BOTH attack-shaped (attackTypeRange resolved to a real
+      // attackBonus) AND save-shaped (a valid fixedSaveDc/saveStatId also resolved) at once
+      // — e.g. an on-hit maneuver followed by a saving throw — cannot be faithfully
+      // represented here: `expandRawStatblockAction` always builds its ATTACK branch first
+      // whenever `attackBonus !== null`, silently discarding the save entirely. With usable
+      // damage dice this still looked fully resolvable and was never flagged in
+      // `summary.textOnly`, even though using it would never actually roll the required save
+      // (review finding on PR #1950 round 17). There is no "attack, then also a save"
+      // outcome shape in `ActionSpec` today, so force the whole entry text-only rather than
+      // silently keep only one of the two mechanics.
+      if (attackBonus !== null && savingThrow !== null) {
+        attackBonus = null;
+        savingThrow = null;
+      }
       out.push(
         expandRawStatblockAction(
           { name, desc, attackBonus, damage, savingThrow, noSaveInference: savingThrow === null },
