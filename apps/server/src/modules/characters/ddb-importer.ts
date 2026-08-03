@@ -483,6 +483,24 @@ function weaponAbilityKey(def: NonNullable<DdbInventoryItem['definition']>, stat
 }
 
 /**
+ * Classes with a well-documented core-rules feature letting them attack with a weapon
+ * using an ability OTHER than the RAW default (issue #1903 review) — Monk (Martial Arts:
+ * STR or DEX with monk weapons/unarmed), Warlock (Hex Warrior invocation: CHA with a
+ * chosen weapon), Artificer (Battle Smith's Battle Ready: INT with any weapon while
+ * holding their spellcasting focus). None of these are reliably detectable from the
+ * simplified item/character shape read here (which monk weapons the sheet has, whether
+ * Hex Warrior/Battle Smith was actually taken), so `weaponAbilityKey`'s STR default for a
+ * non-finesse, non-ranged weapon is NOT trustworthy for these classes specifically — unlike
+ * a generic Fighter/Barbarian/etc., where STR-by-default is the safe, RAW-correct read.
+ */
+const AMBIGUOUS_MELEE_ABILITY_CLASSES = new Set(['monk', 'warlock', 'artificer']);
+
+function hasAmbiguousMeleeAbilityClass(classes: DdbClass[] | null | undefined): boolean {
+  if (!Array.isArray(classes)) return false;
+  return classes.some((c) => AMBIGUOUS_MELEE_ABILITY_CLASSES.has((c.definition?.name ?? '').trim().toLowerCase()));
+}
+
+/**
  * Equipped-weapon attacks (issue #1903). Assumes proficiency with the character's own
  * equipped weapons — true for the overwhelming majority of DDB-built PCs (the DDB
  * character builder only lets you equip what your class/background/feats grant
@@ -500,6 +518,7 @@ function weaponAbilityKey(def: NonNullable<DdbInventoryItem['definition']>, stat
  */
 function computeWeaponActions(data: DdbCharacterData, stats: Record<string, number>, proficiencyBonus: number): CharacterActionType[] {
   const items = Array.isArray(data.inventory) ? data.inventory : [];
+  const ambiguousMeleeAbility = hasAmbiguousMeleeAbilityClass(data.classes);
   const out: CharacterActionType[] = [];
   for (const item of items) {
     if (out.length >= RAW_ENTRY_SAFETY_CAP) break;
@@ -528,6 +547,20 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
       out.push(
         expandRawStatblockAction(
           { name, desc: 'Missing ability score data — check attack bonus and damage manually.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
+    if (abilityKey === 'STR' && ambiguousMeleeAbility) {
+      // weaponAbilityKey only returns 'STR' here because the weapon is neither Finesse nor
+      // ranged — the RAW default. For Monk/Warlock/Artificer specifically that default is
+      // not safe to assume (see AMBIGUOUS_MELEE_ABILITY_CLASSES) — leave text-only rather
+      // than presenting a plausibly-wrong ability as a confident number.
+      out.push(
+        expandRawStatblockAction(
+          { name, desc: 'This class can attack with an alternate ability for some weapons — check attack bonus and damage manually.', attackBonus: null },
           'attack',
           'dnd5e',
         ),
@@ -766,10 +799,23 @@ export function computeSpellSlots(
     if (entry.progression === 'full') {
       fullEquivalentLevel += entry.level;
     } else if (entry.progression === 'half') {
-      // A solo Paladin/Ranger gets no Spellcasting at all until class level 2 (PHB) — the
-      // ceil(level/2) read of the full-caster table is only equivalent to their own class
-      // table from level 2 up; at level 1 it would wrongly read row 1 (2 first-level slots).
-      // The multiclass floor(level/2) branch doesn't need this guard: floor(1/2) is already 0.
+      // A solo Paladin/Ranger gets no Spellcasting at all until class level 2 under the
+      // 2014 PHB — the ceil(level/2) read of the full-caster table is only equivalent to
+      // their own class table from level 2 up; at level 1 it would wrongly read row 1 (2
+      // first-level slots).
+      //
+      // KNOWN LIMITATION (issue #1903 review): the 2024 PHB revision moved Paladin/Ranger
+      // Spellcasting to level 1 (2 first-level slots), so this level<2 guard under-reports
+      // for a 2024-rules character. Distinguishing a 2014 vs. 2024 class definition would
+      // need a DDB field this importer cannot presently verify the shape of on the public
+      // sheet endpoint (the same category of gap already documented throughout this file
+      // for a spell's target-save ability and a weapon's magic bonus) — guessing at an
+      // unconfirmed field risks being wrong in a DIFFERENT, worse way: overstating slots a
+      // 2014 character doesn't have. Keeping the conservative (never-overstate) 2014 default
+      // is deliberate and consistent with every other simplification in this importer; a DM
+      // importing a 2024-rules level-1 Paladin/Ranger adds the 2 slots by hand.
+      // The multiclass floor(level/2) branch doesn't need this guard: floor(1/2) is already 0
+      // either way.
       fullEquivalentLevel += entry === solo ? (entry.level < 2 ? 0 : Math.ceil(entry.level / 2)) : Math.floor(entry.level / 2);
     } else if (entry.progression === 'halfRoundUp') {
       // Artificer rounds up whether solo or multiclassed, AND (unlike Paladin/Ranger) does

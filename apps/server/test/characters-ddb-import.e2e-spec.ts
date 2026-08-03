@@ -417,6 +417,43 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summary.textOnly).toContain('Mystery Sword');
   });
 
+  // Regression for a PR #1950 review finding: a Monk/Warlock/Artificer can attack with a
+  // non-STR ability for some weapons (Martial Arts, Hex Warrior, Battle Ready) that this
+  // importer cannot detect from the sparse item shape it reads. A non-finesse, non-ranged
+  // weapon used to default to STR unconditionally and stay resolvable even for these
+  // classes, presenting a plausibly-wrong to-hit/damage as confident.
+  it('a Monk/Warlock/Artificer non-finesse weapon lands text-only instead of assuming STR', () => {
+    const inventory = [
+      { equipped: true, definition: { name: 'Quarterstaff', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d6' }, damageType: 'Bludgeoning' } },
+    ];
+    const stats = [
+      { id: 1, value: 10 },
+      { id: 2, value: 16 },
+    ];
+    for (const className of ['Monk', 'Warlock', 'Artificer']) {
+      const c = mapDdbCharacter({ classes: [{ level: 1, definition: { name: className } }], stats, inventory });
+      const weapon = c.actions?.find((a) => a.name === 'Quarterstaff');
+      expect(weapon).toBeDefined();
+      expect(weapon?.spec).toBeUndefined();
+      expect(summarizeDdbImport(c).textOnly).toContain('Quarterstaff');
+    }
+  });
+
+  it('a Fighter still gets a resolvable STR attack for the same non-finesse weapon (STR default is safe for this class)', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [
+        { id: 1, value: 16 },
+        { id: 2, value: 10 },
+      ],
+      inventory: [
+        { equipped: true, definition: { name: 'Quarterstaff', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d6' }, damageType: 'Bludgeoning' } },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Quarterstaff');
+    expect(weapon?.spec).toBeDefined();
+  });
+
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not
   // plain text, and the character sheet renders notes as plain text — so literal tags were
   // showing up on imported characters' sheets.
