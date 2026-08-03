@@ -361,27 +361,22 @@ export default function PlayerDisplayPage() {
    * the rest of this page — comfortably inside the 15s bound raising a hold must
    * blank the display within.
    *
-   * A `/safety` request that outruns the poll interval must never overlap the
-   * next one — an unconditional "apply whatever comes back" update let a slow
-   * pre-hold `false` land after a fresh post-hold `true` and clear the curtain
-   * while the X-Card was still raised. So this goes through
-   * `CastSafetyPollSequencer`/`runCastSafetyPoll`: a tick that finds a poll
-   * already in flight is skipped outright rather than aborting it — cancelling
-   * a slow request just to restart an equally slow one would starve the
-   * display at its initial state forever under sustained latency, which is
-   * worse than the race it would "fix". With at most one request ever in
-   * flight, out-of-order application is impossible by construction. A per-poll
-   * deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, generous relative to normal
-   * latency — see that constant's doc for why a tighter one is wrong) then
-   * guards the narrower failure mode that skip-not-abort would otherwise
-   * reopen — a single stalled request latching the in-flight gate forever —
-   * by aborting a request that never settles and always releasing the gate in
-   * a `finally`. Fail safe throughout: a skipped/aborted/timed-out tick and a
-   * genuine failure on the current request all leave the last-known hold
-   * state alone rather than guessing a new value — it can never clear an
-   * active curtain, and a timeout is never read as "no hold". The regular
-   * projection poll already surfaces a hard failure (expired/revoked token)
-   * for the page as a whole.
+   * `runCastSafetyPoll`/`CastSafetyPollSequencer` (see that module's doc for
+   * the full history) starts a genuinely new request on every tick — never
+   * skipped, never aborting a still-running earlier one — so an outstanding
+   * request, however slow or stalled, can never delay a later tick from
+   * running and observing a freshly-raised hold. Ordering is handled
+   * separately: a response may only be applied if it is strictly newer than
+   * the last-applied poll, so a late, out-of-order response (a slow pre-hold
+   * `false` arriving after a fresh post-hold `true`) can never clear the
+   * curtain. Nothing about correctness or the 15s bound depends on
+   * `CAST_SAFETY_POLL_TIMEOUT_MS`'s value — it is a resource-hygiene cap on
+   * one request's lifetime, not a gate anything else waits on. Fail safe
+   * throughout: a stale/aborted tick and a genuine failure on the current
+   * request all leave the last-known hold state alone rather than guessing a
+   * new value — it can never clear an active curtain. The regular projection
+   * poll already surfaces a hard failure (expired/revoked token) for the page
+   * as a whole.
    *
    * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
    * separately from the last-known `active` value: "no hold" and "never
@@ -402,9 +397,9 @@ export default function PlayerDisplayPage() {
       setCastSafetyActive(result.active);
       setCastSafetyKnown(true);
     }
-    // 'skipped' (already in flight), 'ignored' (aborted), and 'failed'
-    // (transient) all leave castSafetyActive/castSafetyKnown untouched — see
-    // fail-safe note above.
+    // 'stale' (out-of-order), 'ignored' (aborted), and 'failed' (transient)
+    // all leave castSafetyActive/castSafetyKnown untouched — see fail-safe
+    // note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {

@@ -210,62 +210,68 @@ export class PlayerDisplayLoadSequencer {
  * Cast-token X-Card safety poll sequencing (issue #1908 rework).
  *
  * The safety poll is a single anonymous `GET /cast/:token/safety` on the same
- * visible-tab cadence as the rest of this page. An earlier version of this
- * gate aborted whichever poll was in flight every time a new tick fired —
- * closing the out-of-order race (a slow pre-hold `false` landing after a
- * fresh post-hold `true`) but opening a starvation one: if every response
- * takes longer than the interval, each new tick keeps cancelling the last
- * before it can ever complete, and the display can sit at its initial
- * `false` forever even while a hold is active.
+ * visible-tab cadence as the rest of this page. This mechanism went through
+ * several shapes, each closing one failure mode and (because it coupled
+ * "when the next tick may run" to "when this one finishes") opening another:
  *
- * Polls are therefore never overlapped at all: a tick that fires while a
- * poll is already in flight is skipped outright (`begin()` returns `null`),
- * letting the in-flight request run to completion rather than restarting it.
- * With at most one request in flight, out-of-order application is impossible
- * by construction — there is nothing to be superseded by. The only abort is
- * `invalidate()` on unmount / cast identity (token) change, so a request
- * still running past that point cannot call back into stale-scope state.
+ *  1. Abort whichever poll was in flight on every new tick, apply whatever
+ *     comes back: an out-of-order stale response can resolve after a fresher
+ *     one and clear the curtain while the X-Card is still raised.
+ *  2. Fix (1) by aborting on every tick + a generation guard: closes the
+ *     race, but under sustained latency (every response ≥ the interval)
+ *     every tick cancels the last before it can ever complete — the display
+ *     can sit at its initial state forever even with an active hold.
+ *  3. Fix (2) by never overlapping — skip a tick while one is in flight
+ *     instead of aborting it: closes the abort-starvation mode, but with no
+ *     deadline a single stalled (hung, never-settling) request leaves the
+ *     gate latched forever, silently disabling every later tick.
+ *  4. Fix (3) with a deadline that releases the gate: the *value* chosen
+ *     (4s, "comfortably under the 5s interval") was itself wrong — an
+ *     endpoint healthily responding in 4–5s would have every request
+ *     aborted before completion, so the poll could never resolve `ok` at
+ *     all. Widening the deadline (30s) fixes that, but reopens (3) in a
+ *     bounded form: coupling "next tick may run" to "this request settled"
+ *     means a single hang can still delay observing a freshly-raised hold by
+ *     up to the deadline — incompatible with the 15s acceptance bound this
+ *     feature is built around, however generous the deadline's own value.
  *
- * Skip-instead-of-abort trades the original starvation mode for a narrower
- * one: with no deadline, a single request that stalls (connection hangs, no
- * response ever arrives) would leave `inFlight` true forever, silently
- * disabling every later tick — the exact failure this feature exists to
- * prevent, since the display would never learn a hold went active. So every
- * poll carries a deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`): a request that
- * never settles on its own is aborted on its own timer, and the flight flag
- * is always released in a `finally` — on success, on a real failure, or on
- * the timeout's own abort — so a hang can delay observing a hold for at most
- * one deadline, never indefinitely. A timeout is classified `ignored`, the
- * same as any other abort: it must never be read as "no hold".
+ * The fix is to stop coupling those two things. Every visible-tab tick
+ * starts a genuinely NEW request — never skipped, never aborted just because
+ * a new tick fired — so an outstanding request (however slow, however hung)
+ * can never block a later one from running. Ordering is handled separately,
+ * by a monotonic generation: each poll gets a generation number, and a
+ * response may only be applied if its generation is strictly newer than the
+ * highest generation already applied (`shouldApply`/`markApplied`). This
+ * keeps the out-of-order guarantee from (1)/(2) — a late, low-numbered
+ * response can never overwrite a result a higher-numbered one already
+ * applied, even if it "completes" without ever being aborted — while making
+ * (2)'s and (3)'s starvation modes structurally impossible: no tick is ever
+ * skipped, and no in-flight request is ever aborted by a newer tick starting.
  *
- * That deadline must be GENEROUS relative to normal latency, not tight
- * against the poll interval — an earlier version set it to 4s (just under
- * the 5s interval) on the reasoning that it only needed to be "comfortably
- * under" the next tick. That reasoning was wrong: an endpoint that healthily
- * but consistently responds in, say, 4–5s lives entirely inside that
- * shorter deadline, so every single request would be aborted before it could
- * complete — `runCastSafetyPoll` would never resolve `ok`, and a display that
- * has never seen a successful poll would sit at its initial state
- * indefinitely, which is worse than the stall this deadline exists to guard
- * against. The two goals — "a hung request must not block forever" and "a
- * slow-but-completing request must still be allowed to finish" — are not in
- * tension; the deadline just needs to sit well above realistic response
- * times (several poll intervals), not below the next tick.
+ * `CAST_SAFETY_POLL_TIMEOUT_MS` still exists, but its job changed: it is no
+ * longer a correctness deadline (nothing depends on it to keep polling
+ * alive), only a resource-hygiene cap so a connection that hangs forever
+ * doesn't accumulate open requests indefinitely. Because nothing depends on
+ * its exact value for correctness anymore, it can be — and is — set
+ * generously, with no tension against the 15s bound: a freshly-raised hold
+ * is observed by the next scheduled tick (at most one 5s poll interval away)
+ * succeeding on its own, entirely independent of whatever a prior hung
+ * request is still doing.
  */
 export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
 
-/** Deadline for a single safety poll request. Generous relative to normal
- * latency (several 5s poll intervals) so only a genuinely hung connection is
- * ever aborted — a slow-but-completing response must always be allowed to
- * resolve normally. See the module doc above for why a tighter, sub-interval
- * deadline is the wrong shape here. */
+/** Resource-hygiene cap on a single safety poll request — NOT a correctness
+ * deadline. No poll's ability to run or to be applied depends on this value;
+ * it only bounds how long a connection that never settles on its own stays
+ * open before being cleaned up. See the module doc above. */
 export const CAST_SAFETY_POLL_TIMEOUT_MS = 30_000;
 
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }
-  /** A poll was already in flight — this tick did not fetch at all. */
-  | { kind: 'skipped' }
-  /** The in-flight request was aborted (unmount / identity change). */
+  /** This response arrived, but a newer generation was already applied —
+   * out-of-order, correctly ignored. */
+  | { kind: 'stale' }
+  /** Aborted (unmount / identity change, or the hygiene timeout). */
   | { kind: 'ignored' }
   /** Real (non-abort) failure. Callers must fail safe: leave the last-known
    * hold state untouched rather than clearing an active curtain or guessing
@@ -273,73 +279,80 @@ export type CastSafetyPollResult =
   | { kind: 'failed' };
 
 export class CastSafetyPollSequencer {
-  private controller: AbortController | null = null;
-  private inFlight = false;
+  private generation = 0;
+  private appliedGeneration = 0;
+  private inFlight = new Map<number, AbortController>();
 
-  /** True while a poll is in flight — callers use this to skip a tick rather
-   * than overlap or restart it. */
-  get isInFlight(): boolean {
-    return this.inFlight;
-  }
-
-  /**
-   * Start a new poll, or `null` if one is already in flight — the caller must
-   * skip this tick (never overlap/abort a slow request just to start a fresh
-   * one, or a persistently slow endpoint would never get to resolve).
-   */
-  begin(): { signal: AbortSignal; token: AbortController } | null {
-    if (this.inFlight) return null;
+  /** Start a new poll. Always succeeds — never blocked or superseded by a
+   * prior poll that hasn't settled yet, so an outstanding request (slow,
+   * stalled, or otherwise) can never prevent this one from running. */
+  begin(): { generation: number; controller: AbortController } {
+    this.generation += 1;
+    const generation = this.generation;
     const controller = new AbortController();
-    this.controller = controller;
-    this.inFlight = true;
-    return { signal: controller.signal, token: controller };
+    this.inFlight.set(generation, controller);
+    return { generation, controller };
+  }
+
+  /** Stop tracking a settled poll (success, failure, or abort) so it no
+   * longer counts toward in-flight bookkeeping / `invalidate()`'s abort set. */
+  end(generation: number): void {
+    this.inFlight.delete(generation);
+  }
+
+  /** True when `generation` is newer than the highest generation already
+   * applied — the only responses allowed to update state. */
+  shouldApply(generation: number): boolean {
+    return generation > this.appliedGeneration;
+  }
+
+  /** Record that `generation`'s result was applied, raising the watermark so
+   * no older generation can ever apply after it, regardless of arrival order. */
+  markApplied(generation: number): void {
+    if (generation > this.appliedGeneration) this.appliedGeneration = generation;
   }
 
   /**
-   * Mark a poll settled (success or failure) so the next tick may start a new
-   * one. Takes the `token` `begin()` returned so a stale settle — a request
-   * that was already aborted by `invalidate()`, and possibly superseded by a
-   * fresh `begin()` since — cannot clear the flight flag out from under the
-   * poll that is actually current.
+   * Abort every currently in-flight poll. Call on unmount / cast identity
+   * (token) change so a response arriving after that point cannot commit.
+   * Also raises the applied watermark to the current generation, so even a
+   * request that ignores its abort signal and "completes" later can never
+   * apply — the same backstop-beyond-cancellation property as the generation
+   * guard elsewhere. Future `begin()` calls (e.g. cast mode re-entered) are
+   * unaffected — this is a one-time flush, not a permanent shutdown.
    */
-  end(token: AbortController): void {
-    if (this.controller !== token) return;
-    this.controller = null;
-    this.inFlight = false;
-  }
-
-  /** Abort in-flight work. Call on unmount / cast identity (token) change so
-   * a response arriving after that point cannot commit. */
   invalidate(): void {
-    this.controller?.abort();
-    this.controller = null;
-    this.inFlight = false;
+    for (const controller of this.inFlight.values()) controller.abort();
+    this.inFlight.clear();
+    this.appliedGeneration = this.generation;
   }
 }
 
 /**
- * Run one cast-safety poll tick. A tick that finds a poll already in flight
- * is skipped (never overlapped, never aborts the in-flight request); only a
- * poll that actually ran can resolve `ok`, and only when it was not aborted
- * mid-flight (by `invalidate()` or by its own deadline). A genuine failure
- * resolves `failed` so the caller can fail safe (keep last-known state)
- * instead of guessing a value. The flight flag is always released in a
- * `finally` — success, failure, or timeout-triggered abort all clear it, so a
- * stalled request can never latch it past this one poll.
+ * Run one cast-safety poll tick. Always starts a fresh request — never
+ * skipped, never aborts a still-running earlier poll — so an outstanding
+ * request can never block this or any later tick. Only a response whose
+ * generation is still the newest may ever be applied (`kind: 'ok'`); an
+ * out-of-order arrival resolves `stale`, aborted work resolves `ignored`, and
+ * a genuine failure resolves `failed` so the caller can fail safe (keep
+ * last-known state) instead of guessing a value. `timeoutMs` bounds this
+ * one request's own lifetime purely for resource hygiene — see
+ * `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no correctness
+ * weight here.
  */
 export async function runCastSafetyPoll(
   sequencer: CastSafetyPollSequencer,
   fetchSafety: CastSafetyFetcher,
   options: { timeoutMs?: number } = {},
 ): Promise<CastSafetyPollResult> {
-  const begun = sequencer.begin();
-  if (!begun) return { kind: 'skipped' };
-  const { signal, token } = begun;
+  const { generation, controller } = sequencer.begin();
+  const { signal } = controller;
   const timeoutMs = options.timeoutMs ?? CAST_SAFETY_POLL_TIMEOUT_MS;
-  const deadline = setTimeout(() => token.abort(), timeoutMs);
+  const deadline = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const state = await fetchSafety(signal);
-    if (signal.aborted) return { kind: 'ignored' };
+    if (!sequencer.shouldApply(generation)) return { kind: 'stale' };
+    sequencer.markApplied(generation);
     return { kind: 'ok', active: state.active };
   } catch (error) {
     if (isAbortError(error) || signal.aborted) {
@@ -348,7 +361,7 @@ export async function runCastSafetyPoll(
     return { kind: 'failed' };
   } finally {
     clearTimeout(deadline);
-    sequencer.end(token);
+    sequencer.end(generation);
   }
 }
 
