@@ -595,6 +595,13 @@ export class InventoryService {
     let committed!: InventoryItem;
     let replayed = false;
     let qtyConflict: InventoryItem | null = null;
+    // Issue #1901 rework (review: devin-ai-integration + chatgpt-codex-connector P2 on
+    // PR #1951): populated when `input.displaceEquipped` unequips a slot-conflicting
+    // incumbent as part of THIS transaction — audited once the transaction commits (see
+    // below). At most one entry (this item has at most one slot conflict), but an array
+    // sidesteps TypeScript narrowing a `T | null` local reassigned only inside the
+    // transaction closure down to `null` at every read site outside it.
+    const displacedIncumbents: Array<{ id: number; name: string; equipSlot: string | null }> = [];
 
     try {
       this.db.transaction((tx) => {
@@ -661,7 +668,7 @@ export class InventoryService {
             // (character, slot) pair rather than silently displacing the incumbent. Read
             // inside this transaction so two concurrent equips into the same slot serialize.
             const conflict = tx
-              .select({ id: inventoryItems.id, name: inventoryItems.name })
+              .select({ id: inventoryItems.id, name: inventoryItems.name, equipSlot: inventoryItems.equipSlot })
               .from(inventoryItems)
               .where(
                 and(
@@ -676,16 +683,36 @@ export class InventoryService {
               .limit(1)
               .all();
             if (conflict.length > 0) {
-              throw new ConflictException({
-                code: 'INVENTORY_SLOT_CONFLICT',
-                message: `Slot "${nextEquipSlot}" is already occupied by "${conflict[0].name}" on this character — unequip it first.`,
-                // Issue #1901: the incumbent's id + name + the contested slot, additive to the
-                // existing {code, message} shape, so the web one-tap swap can unequip the
-                // incumbent and retry without re-parsing the human message string.
-                conflictingItemId: conflict[0].id,
-                conflictingItemName: conflict[0].name,
-                equipSlot: nextEquipSlot,
-              });
+              if (!input.displaceEquipped) {
+                throw new ConflictException({
+                  code: 'INVENTORY_SLOT_CONFLICT',
+                  message: `Slot "${nextEquipSlot}" is already occupied by "${conflict[0].name}" on this character — unequip it first.`,
+                  // Issue #1901: the incumbent's id + name + the contested slot, additive to the
+                  // existing {code, message} shape, so the web one-tap swap can unequip the
+                  // incumbent and retry without re-parsing the human message string.
+                  conflictingItemId: conflict[0].id,
+                  conflictingItemName: conflict[0].name,
+                  equipSlot: nextEquipSlot,
+                });
+              }
+              // Issue #1901 rework (review: devin-ai-integration + chatgpt-codex-connector P2):
+              // `displaceEquipped` turns the 409 into an atomic swap — the incumbent is
+              // unequipped IN THIS SAME transaction rather than requiring the caller to issue
+              // an unequip PATCH and then a separate equip PATCH. That two-request sequence
+              // (still available for a caller who wants the confirmation step) has a window
+              // where the incumbent is off and nothing is on: another writer can claim the
+              // slot before the second request lands, or the second request can simply fail
+              // over the network, leaving the character wearing neither item. One transaction
+              // makes that state unreachable.
+              const [displaced] = tx
+                .update(inventoryItems)
+                .set({ equipped: false, equipSlot: null, updatedAt: ts })
+                .where(and(eq(inventoryItems.id, conflict[0].id), isNull(inventoryItems.deletedAt)))
+                .returning()
+                .all();
+              if (displaced) {
+                displacedIncumbents.push({ id: displaced.id, name: displaced.name, equipSlot: conflict[0].equipSlot ?? nextEquipSlot });
+              }
             }
           }
           update.equipped = nextEquipped;
@@ -798,7 +825,17 @@ export class InventoryService {
     // does, but leaves `equipped`/`equipSlot` — and so `equipChanged` — untouched. Gate on
     // `committed.equipped` so an edit to an unequipped item's dormant equippedAction
     // (never part of the merge) doesn't trigger a needless invalidation.
-    const actionContentChanged = input.equippedAction !== undefined && committed.equipped;
+    const equippedActionEdited = input.equippedAction !== undefined && committed.equipped;
+    // Issue #1901 rework (review: chatgpt-codex-connector P2): a name-only PATCH on an
+    // equipped, action-granting item changes the merged list's DERIVED `source` label
+    // (`equipped: <item name>` — see EncountersService.suggestedActionsForCombatant /
+    // ActionResolverService.equippedItemActionRows) without touching equipped/equipSlot/
+    // equippedAction, so none of the other flags below would catch it. Gated on
+    // `committed.equippedAction != null` — renaming a plain (non-action) piece of
+    // equipped gear doesn't change anything the merge renders.
+    const renamedGrantingItem =
+      input.name !== undefined && input.name !== existing.name && committed.equipped && committed.equippedAction != null;
+    const actionContentChanged = equippedActionEdited || renamedGrantingItem;
 
     await this.audit.log({
       actor: auditActor(user),
@@ -830,6 +867,28 @@ export class InventoryService {
           })
         : undefined,
     });
+
+    // Issue #1901 rework: `displaceEquipped` unequipped a slot-conflicting incumbent inside
+    // the same transaction as this write — audit it as its own `item.update` (its own
+    // entityId), same shape as an explicit unequip PATCH would produce.
+    for (const displaced of displacedIncumbents) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'item.update',
+        entityType: 'inventory_item',
+        entityId: displaced.id,
+        campaignId: existing.campaignId,
+        detail: JSON.stringify({
+          actor: { id: user.id, name: user.name, role },
+          equip: {
+            from: { equipped: true, equipSlot: displaced.equipSlot },
+            to: { equipped: false, equipSlot: null },
+          },
+          displacedBy: id,
+        }),
+      });
+    }
 
     // Issue #1901: an equip/unequip (or a move that carries/drops equip state), or a rewrite
     // of an already-equipped item's granted action, changes which combat actions a character's

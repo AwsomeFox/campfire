@@ -727,6 +727,72 @@ describe('inventory & treasury (e2e)', () => {
       expect(retry.status).toBe(200);
     });
 
+    it('issue #1901 rework: displaceEquipped resolves a slot conflict atomically — one request, no half-applied state', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const sword = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Rapier', ownerType: 'character', characterId: ownCharacterId });
+      const dagger = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${sword.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(first.status).toBe(200);
+
+      // Without displaceEquipped, still a plain 409 (existing behavior unchanged).
+      const stillConflicts = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand' });
+      expect(stillConflicts.status).toBe(409);
+
+      // ONE request, with displaceEquipped: true, atomically unequips the incumbent and
+      // equips the new item — no separate unequip PATCH, no window where neither item
+      // (or, on a client retry bug, both items) is equipped.
+      const swap = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'main-hand', displaceEquipped: true });
+      expect(swap.status).toBe(200);
+      expect(swap.body.equipped).toBe(true);
+      expect(swap.body.equipSlot).toBe('main-hand');
+
+      const incumbentAfter = await request(server).get(`/api/v1/inventory/${sword.body.id}`).set(player);
+      expect(incumbentAfter.body.equipped).toBe(false);
+      expect(incumbentAfter.body.equipSlot).toBeNull();
+
+      // Exactly one item holds the slot afterward.
+      const list = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(player);
+      const inSlot = (list.body as Array<{ id: number; equipped: boolean; equipSlot: string | null }>).filter(
+        (it) => (it.id === sword.body.id || it.id === dagger.body.id) && it.equipped && it.equipSlot === 'main-hand',
+      );
+      expect(inSlot).toHaveLength(1);
+      expect(inSlot[0].id).toBe(dagger.body.id);
+    });
+
+    it('issue #1901 rework: displaceEquipped is a no-op flag when there is no conflict', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const item = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Buckler', ownerType: 'character', characterId: ownCharacterId });
+
+      const res = await request(server)
+        .patch(`/api/v1/inventory/${item.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: 'off-hand', displaceEquipped: true });
+      expect(res.status).toBe(200);
+      expect(res.body.equipped).toBe(true);
+      expect(res.body.equipSlot).toBe('off-hand');
+    });
+
     it('moving an equipped character item to the party stash auto-unequips it', async () => {
       const server = ctx.app.getHttpServer();
 

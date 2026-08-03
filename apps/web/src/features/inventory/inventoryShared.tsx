@@ -152,18 +152,41 @@ export function ItemRow({
     }
   }
 
-  /** One-tap swap (issue #1901): unequip the incumbent, then retry the original equip. */
+  /**
+   * One-tap swap (issue #1901 rework, review: devin-ai-integration + chatgpt-codex-connector
+   * P2 on PR #1951): a single atomic PATCH — `displaceEquipped: true` tells the server to
+   * unequip the slot-conflicting incumbent and equip THIS item in the same transaction. This
+   * used to be two client-orchestrated requests (unequip incumbent, then retry the original
+   * equip) with a real half-applied window: another writer could claim the slot between the
+   * two requests, or the second request could simply fail — either way leaving the character
+   * wearing neither item, and (because the second request went through `submitEquip`, which
+   * silently returns without touching `equipBusy` when its slot argument is empty) the equip
+   * controls could stay disabled forever with no error shown. One request removes both the
+   * race and the swallowed-failure path entirely; there's no intermediate committed state to
+   * roll back because the server never applies the unequip half without the equip half.
+   */
   async function swapEquip() {
     if (!slotConflict) return;
+    const trimmed = (slotDraft.trim() || slotConflict.slot).trim();
+    if (!trimmed) {
+      setEquipError(t('inventory.equip.slotRequired'));
+      return;
+    }
     setEquipBusy(true);
     setEquipError(null);
     try {
-      await api.patch(`${API}/inventory/${slotConflict.itemId}`, { equipped: false });
-      onChanged();
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, {
+        equipped: true,
+        equipSlot: trimmed,
+        displaceEquipped: true,
+      });
+      setCommitted(updated);
       setSlotConflict(null);
-      await submitEquip(slotDraft);
+      setEquipOpen(false);
+      onChanged();
     } catch (err) {
       setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+    } finally {
       setEquipBusy(false);
     }
   }

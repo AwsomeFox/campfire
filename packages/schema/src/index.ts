@@ -10757,6 +10757,18 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   equipped: z.boolean().optional(),
   equipSlot: z.string().max(60).nullable().optional(),
   equippedAction: CharacterAction.nullable().optional(),
+  /**
+   * Issue #1901 rework: when equipping (equipped:true) into a slot another of this
+   * character's items already occupies, the server normally rejects with 409
+   * INVENTORY_SLOT_CONFLICT so the caller can choose what to do. Setting this true
+   * instead makes the whole swap ATOMIC — the incumbent is unequipped in the SAME
+   * transaction as this equip, rather than the caller issuing an unequip PATCH followed
+   * by a separate equip PATCH (a sequence with a real window: another writer can claim
+   * the slot between the two requests, or the second request can simply fail, leaving
+   * the character wearing neither item). Ignored when there is no conflict, or when
+   * this write isn't an equip transition at all.
+   */
+  displaceEquipped: z.boolean().optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).

@@ -77,13 +77,31 @@ test.describe('inventory equip/unequip UI (#1901)', () => {
     expect(inventoryShared).toContain("t('inventory.equip.grantsAction', { name: committed.equippedAction.name })");
   });
 
-  test('a 409 INVENTORY_SLOT_CONFLICT surfaces a one-tap swap (unequip incumbent, retry)', () => {
+  test('a 409 INVENTORY_SLOT_CONFLICT surfaces a one-tap swap', () => {
     expect(inventoryShared).toContain("err.code === 'INVENTORY_SLOT_CONFLICT'");
     expect(inventoryShared).toContain('data-testid="inventory-slot-swap-btn"');
     expect(inventoryShared).toContain('async function swapEquip()');
-    // Unequips the INCUMBENT (the conflict's item), then retries the ORIGINAL equip.
-    expect(inventoryShared).toMatch(/inventory\/\$\{slotConflict\.itemId\}`,\s*\{\s*equipped:\s*false\s*\}/);
-    expect(inventoryShared).toContain('await submitEquip(slotDraft)');
+  });
+
+  // Rework round (PR #1951 re-review): the swap used to be two client-orchestrated
+  // requests — unequip the incumbent, then retry the original equip — with a real
+  // half-applied window (another writer claims the slot between requests, or the second
+  // request fails) and a swallowed-failure path (submitEquip silently returns without
+  // touching equipBusy when given an empty slot, so the controls froze disabled forever).
+  // The fix is server-side atomicity, not client rollback: one PATCH on THIS item with
+  // `displaceEquipped: true` unequips the incumbent and equips this item in the SAME
+  // server transaction, so there is no intermediate state to land in or roll back.
+  test('the swap is ONE atomic PATCH (displaceEquipped), not an unequip-then-equip sequence', () => {
+    expect(inventoryShared).toMatch(
+      /inventory\/\$\{committed\.id\}`,\s*\{\s*equipped:\s*true,\s*equipSlot:\s*trimmed,\s*displaceEquipped:\s*true,\s*\}/,
+    );
+    // No separate PATCH against the incumbent (slotConflict.itemId) inside swapEquip —
+    // the server displaces it as part of the equip write above.
+    expect(inventoryShared).not.toMatch(/inventory\/\$\{slotConflict\.itemId\}`,\s*\{\s*equipped:\s*false\s*\}/);
+    // Always clears equipBusy via finally — no early return before the try/finally that
+    // could leave the controls stuck disabled (the bug the old submitEquip(slotDraft)
+    // delegation had on an empty slot).
+    expect(inventoryShared).toMatch(/async function swapEquip\(\)[\s\S]{0,1200}?finally\s*\{\s*setEquipBusy\(false\);/);
   });
 });
 
