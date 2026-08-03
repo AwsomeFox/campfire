@@ -78,7 +78,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import {
   beginReconcile,
@@ -1641,12 +1641,15 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
-          // Issue #1901: an inventory equip/unequip also emits character.updated (the
-          // combat-action list changed, not just the sheet fields campaignCharacters
-          // covers) — bust this encounter's per-combatant actions queries too, cheap
-          // since they're cached under the SAME ['encounter', eid] prefix as everything
-          // else this stream already invalidates.
-          invalidateEncounter(queryClient, eid);
+          // Issue #1901 review (devin-ai-integration): an inventory equip/unequip also
+          // emits character.updated (the combat-action list changed, not just the sheet
+          // fields campaignCharacters covers) — but a character change can only ever affect
+          // the DERIVED action reads (the per-combatant actions query, the turn workspace's
+          // suggestedActions), never the encounter root, its difficulty derivation, or its
+          // combat log. The broader invalidateEncounter() used here originally busted all of
+          // those on every sheet edit — a refetch storm during busy play (party rest
+          // follow-ups, several players editing sheets at once) on the app's heaviest screen.
+          invalidateEncounterActions(queryClient, eid);
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
