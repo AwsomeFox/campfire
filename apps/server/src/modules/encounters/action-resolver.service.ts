@@ -1520,6 +1520,12 @@ export class ActionResolverService {
     let actorConcentrationTouched = false;
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
+    // Issue #1902 rework (round 19, codex P2): set true only when this specific apply
+    // ACTUALLY mirrored something onto a linked character sheet (HP/condition or a
+    // spell-slot spend) — most actions (a monster-only fight, a roll with no
+    // consequence) touch no sheet at all, so the emitted `encounter.updated` should not
+    // claim one and trigger every client's `campaignCharacters` refetch for nothing.
+    let sheetMirrored = false;
 
     const earlyToken = this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
@@ -1894,6 +1900,7 @@ export class ActionResolverService {
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          sheetMirrored = true;
         }
 
         // Issue #1452: if a concentrating target is dropped by the resolved attack, break
@@ -1955,6 +1962,7 @@ export class ActionResolverService {
           .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nextUpdatedAt(spellSlotSpend.priorUpdatedAt) })
           .where(eq(characters.id, spellSlotSpend.characterId))
           .run();
+        sheetMirrored = true;
       }
 
       // Issue #1449: persist the pre-apply snapshot server-side, keyed by chainId, so undo()
@@ -2009,7 +2017,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id });
+    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id, sheetMirrored });
 
     return ActionUndoToken.parse({
       encounterId: committedEncounter.id,

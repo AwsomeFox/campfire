@@ -8011,7 +8011,10 @@ export class EncountersService {
         .run();
     });
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    // Issue #1902 rework (round 19, codex P2): `sheetMirrored: true` unconditionally — this
+    // method's entire purpose is spending/restoring a linked character's spell slot or
+    // resource, so every call here writes the sheet (see the `characters` update above).
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored: true });
 
     return this.getRowOrThrow(encounterId);
   }

@@ -10987,6 +10987,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('encounter.updated'),
     campaignId: Id,
     encounterId: Id,
+    // Issue #1902 rework (round 19, codex P2): most `encounter.updated` frames are pure
+    // combat-log/turn activity (a roll, a token move) with NO character-sheet write behind
+    // them — every connected client refetching the WHOLE campaign character list on each
+    // one is wasted work during a busy fight. Set `true` only by the specific writers that
+    // ACTUALLY mirror onto a linked character sheet in the same commit (the apply-action
+    // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
+    // invalidate `campaignCharacters` precisely instead of on every encounter update.
+    sheetMirrored: z.boolean().optional(),
     at: IsoDate,
   }),
   z.object({
