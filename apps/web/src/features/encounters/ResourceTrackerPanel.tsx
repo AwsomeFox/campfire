@@ -145,12 +145,19 @@ export function ResourceTrackerPanel({
   // once the network/server recovered. Tracked in a ref (not state) since it's mutated from
   // inside a query-cache subscription callback, not a render; `stuckKeysVersion` exists only
   // to force a re-render when the ref's contents actually change the set of stuck keys.
-  // Issue #1902 rework (round 22, codex P2): the value is whether the outcome that got a
-  // key stuck was an AMBIGUOUS mutation (as opposed to a stale-write reconcile, or the
+  // Issue #1902 rework (round 22, codex P2): `wasAmbiguous` is whether the outcome that got
+  // a key stuck was an AMBIGUOUS mutation (as opposed to a stale-write reconcile, or the
   // encounter-CAS `forceReconcile` path with no error at all) — the auto-release below
   // needs it to decide whether to also replace that key's failure banner, matching
   // `endPendingAfterReconciling`'s own direct (non-stuck) reconciliation path.
-  const stuckKeysRef = useRef<Map<string, boolean>>(new Map());
+  // Issue #1902 rework (round 23, codex P2): `needsCharacters` is whether THIS target's own
+  // CAS token/rendered state actually depends on the `campaignCharacters` query — true for
+  // the three character-scoped mutations, false for `statblockMutation` (a monster/NPC
+  // combatant's token is the ENCOUNTER's own `updatedAt`; see `endPendingAfterReconciling`'s
+  // own doc comment). Without this, a monster pip that succeeded outright could still get
+  // stuck-then-never-released whenever an unrelated `campaignCharacters` fetch was failing,
+  // even though that query has nothing to do with the monster's own state.
+  const stuckKeysRef = useRef<Map<string, { wasAmbiguous: boolean; needsCharacters: boolean }>>(new Map());
   const [, setStuckKeysVersion] = useState(0);
   useEffect(() => {
     // Issue #1902 rework (round 18, codex P2 — corrected from round 16's passive design):
@@ -171,9 +178,19 @@ export function ResourceTrackerPanel({
       ]).then(() => {
         const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
         const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
-        if (!encounterOk || !charactersOk) return;
-        const releasing = stuckKeysRef.current;
-        stuckKeysRef.current = new Map();
+        // Issue #1902 rework (round 23, codex P2): release PER KEY, not all-or-nothing — a
+        // stuck monster pip (`needsCharacters: false`) only needs `encounterOk`; only a
+        // stuck character-scoped key actually needs `charactersOk` too. Keeping a monster
+        // pip stuck on an unrelated `campaignCharacters` failure locks up a DM's statblock
+        // controls for no reason tied to that combatant's own state.
+        const releasing = new Map<string, boolean>();
+        const stillStuck = new Map<string, { wasAmbiguous: boolean; needsCharacters: boolean }>();
+        for (const [key, entry] of stuckKeysRef.current) {
+          if (encounterOk && (!entry.needsCharacters || charactersOk)) releasing.set(key, entry.wasAmbiguous);
+          else stillStuck.set(key, entry);
+        }
+        if (releasing.size === 0) return;
+        stuckKeysRef.current = stillStuck;
         setStuckKeysVersion((v) => v + 1);
         for (const [key, wasAmbiguous] of releasing) if (wasAmbiguous) setAmbiguousResolvedFor(key);
         setPendingKeys((prev) => {
@@ -211,7 +228,16 @@ export function ResourceTrackerPanel({
   // refetch on SUCCESS too, not only on an ambiguous/stale-write error, or an immediate
   // second click resends the now-provably-stale encounter revision and 409s against its
   // own prior write.
-  const endPendingAfterReconciling = async (key: string, error: unknown, forceReconcile = false) => {
+  // Issue #1902 rework (round 23, codex P2): `needsCharacters` (default true) says whether
+  // the CALLER's target actually depends on the `campaignCharacters` query at all. The three
+  // character-scoped mutations do (their CAS token and rendered resource values live on the
+  // character row), but `statblockMutation` — a monster/NPC combatant, no linked sheet —
+  // depends only on the `encounter` query (see the `forceReconcile` doc comment just above:
+  // its CAS token IS the encounter's own `updatedAt`). Demanding `charactersOk` regardless
+  // meant a successful monster pip could still get stuck (and keep retrying every 5s) purely
+  // because an UNRELATED `campaignCharacters` fetch was failing — a failure that target's own
+  // state never depended on.
+  const endPendingAfterReconciling = async (key: string, error: unknown, forceReconcile = false, needsCharacters = true) => {
     // Issue #1902 rework (round 22, codex P2): an ambiguous (response-lost) outcome is the
     // one case where the write may have actually landed despite `onError` already having
     // shown a definite-failure banner — a stale-write 409 is a genuine, confirmed rejection
@@ -220,8 +246,8 @@ export function ResourceTrackerPanel({
     if (forceReconcile || (error && (isAmbiguousMutation(error) || isStaleWrite(error)))) {
       await Promise.allSettled([
         queryClient.invalidateQueries({ queryKey: queryKeys.encounter(encounterId) }),
-        campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }) : Promise.resolve(),
-        campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) }) : Promise.resolve(),
+        needsCharacters && campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }) : Promise.resolve(),
+        needsCharacters && campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) }) : Promise.resolve(),
       ]);
       // Issue #1902 rework (round 14, codex P2): `invalidateQueries()`'s own promise
       // settles once a refetch ATTEMPT completes, successful or not — awaiting it alone
@@ -236,9 +262,9 @@ export function ResourceTrackerPanel({
       // moment either query actually recovers, rather than requiring this exact promise
       // chain to resolve again (it never will) or the panel to remount.
       const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
-      const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
+      const charactersOk = !needsCharacters || campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
       if (!encounterOk || !charactersOk) {
-        stuckKeysRef.current.set(key, wasAmbiguous);
+        stuckKeysRef.current.set(key, { wasAmbiguous, needsCharacters });
         return;
       }
       if (wasAmbiguous) setAmbiguousResolvedFor(key);
@@ -360,7 +386,11 @@ export function ResourceTrackerPanel({
       expectedUpdatedAt: string | undefined;
     }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock, expectedUpdatedAt }),
     onMutate: (vars) => beginPending(pendingTargetKey({ combatantId: vars.combatantId })),
-    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error, true),
+    // Issue #1902 rework (round 23, codex P2): a monster/NPC statblock combatant's CAS
+    // token and rendered state depend only on the `encounter` query, never `campaignCharacters`
+    // — pass `needsCharacters: false` so reconciliation (and the stuck-key auto-release) never
+    // gates this target's release on an unrelated character-list failure.
+    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error, true, false),
     onSuccess: (updated, vars) => {
       clearErrorFor(pendingTargetKey({ combatantId: vars.combatantId }));
       reconcileCombatant(updated);

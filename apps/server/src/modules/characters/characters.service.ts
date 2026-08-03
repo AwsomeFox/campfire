@@ -1283,6 +1283,11 @@ export class CharactersService {
     // that gap was invisible to it — the write proceeded and silently overwrote whatever
     // changed, instead of the documented 409. Re-validate against THIS fresh read too, not
     // just use it to advance the token.
+    // The same "re-read fresh, then nextUpdatedAt from THAT" rule applies to every
+    // `updatedAt` CAS token in this codebase, not just this one — round 23 applied it to
+    // `encounters.service.ts`'s post-transaction turnIndex reconciliation write, which had
+    // been stamping a bare `nowIso()` and could tie or roll the encounter's own token
+    // backward relative to a write its own transaction had already committed.
     const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
     this.revisions.assertNotStale({ updatedAt: freshUpdatedAt }, opts?.expectedUpdatedAt);
     update.updatedAt = nextUpdatedAt(freshUpdatedAt);

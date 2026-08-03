@@ -4992,9 +4992,24 @@ export class EncountersService {
         adapter,
       );
       const turnIndex = turnIndexFor(sortedAfter, encounterRow.currentCombatantId);
+      // Issue #1902 rework (round 23, codex P2): this write lands AFTER the transaction
+      // above already committed (and after the awaited adapter/roster lookups just above),
+      // so `encounterRow.updatedAt` captured at the top of this method is stale — the
+      // transaction's own write already advanced it via `nextUpdatedAt`, which can land
+      // STRICTLY AHEAD of wall-clock `now` on a same-millisecond collision (see
+      // `nextUpdatedAt`'s own doc comment). A bare `nowIso()` here would not just fail to
+      // advance the token — it can tie or roll it BACKWARD relative to that already-committed
+      // value. That regression is exactly the defect `CharactersService.update()` fixed for
+      // the `characters.updatedAt` CAS token (issue #1902 rework, round 12/15: re-read the
+      // row fresh and derive the next token from THAT, never from the wall clock alone) —
+      // applied here to the identical `encounters.updatedAt` token so the two mirror the same
+      // rule. Without this, a client holding an older `expectedUpdatedAt` (from before the
+      // transaction's own change) could pass `assertNotStale` against this rolled-back value
+      // and silently overwrite that change with a stale whole-statblock PATCH.
+      const [freshEncounterRow] = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).limit(1);
       await this.db
         .update(encounters)
-        .set({ turnIndex, updatedAt: nowIso() })
+        .set({ turnIndex, updatedAt: nextUpdatedAt(freshEncounterRow?.updatedAt ?? encounterRow.updatedAt) })
         .where(eq(encounters.id, encounterId));
     }
 

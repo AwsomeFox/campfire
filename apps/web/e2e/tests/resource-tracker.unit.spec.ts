@@ -378,7 +378,11 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel keeps a control pending through a fresh read after an ambiguous (not a definite) mutation failure', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ .*isAmbiguousMutation.* \} from '\.\.\/\.\.\/lib\/api'/);
-    expect(src).toMatch(/const endPendingAfterReconciling = async \(key: string, error: unknown, forceReconcile = false\) => \{/);
+    // Round 23: a 4th param, `needsCharacters = true`, so a target that doesn't depend on
+    // campaignCharacters (a monster statblock) isn't gated on it.
+    expect(src).toMatch(
+      /const endPendingAfterReconciling = async \(key: string, error: unknown, forceReconcile = false, needsCharacters = true\) => \{/,
+    );
     expect(src).toMatch(/if \(forceReconcile \|\| \(error && \(isAmbiguousMutation\(error\) \|\| isStaleWrite\(error\)\)\)\)/);
     // All four mutations route their onSettled through the reconciling variant, not the
     // bare endPending (which would release the control before confirming true state).
@@ -396,9 +400,15 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel does not release a pending control if reconciliation itself could not confirm fresh state', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
-    expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
-    // Round 22: the stuck-set now stores whether the outcome was ambiguous, not just the key.
-    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) \{\s*\n\s*stuckKeysRef\.current\.set\(key, wasAmbiguous\);\s*\n\s*return;\s*\n\s*\}/);
+    // Round 23: charactersOk is only demanded when this target actually needs it.
+    expect(src).toMatch(
+      /const charactersOk = !needsCharacters \|\| campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/,
+    );
+    // Round 22: the stuck-set stores whether the outcome was ambiguous; round 23 adds
+    // whether this target needed campaignCharacters at all.
+    expect(src).toMatch(
+      /if \(!encounterOk \|\| !charactersOk\) \{\s*\n\s*stuckKeysRef\.current\.set\(key, \{ wasAmbiguous, needsCharacters \}\);\s*\n\s*return;\s*\n\s*\}/,
+    );
   });
 
   // Sixteenth-round finding (codex P2 + devin, same root cause): staying pending on a failed
@@ -411,9 +421,12 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel automatically releases a stuck-pending control once the relevant queries actually recover', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ useEffect, useRef, useState \} from 'react';/);
-    // Round 22: a Map (key -> wasAmbiguous), not a bare Set, so the release below can also
-    // decide whether to reclassify that key's failure banner.
-    expect(src).toMatch(/const stuckKeysRef = useRef<Map<string, boolean>>\(new Map\(\)\);/);
+    // Round 22/23: a Map keyed on wasAmbiguous + needsCharacters, not a bare Set, so the
+    // release below can decide both whether to reclassify a failure banner AND whether this
+    // key's release requires campaignCharacters to be healthy too.
+    expect(src).toMatch(
+      /const stuckKeysRef = useRef<Map<string, \{ wasAmbiguous: boolean; needsCharacters: boolean \}>>\(new Map\(\)\);/,
+    );
     // Eighteenth-round finding (codex P2): a PASSIVE query-cache subscription (round 16)
     // is unsound — an UNRELATED character's mutation calling `setQueryData` on the SAME
     // `campaignCharacters` key flips its overall status to 'success' too, even though the
@@ -427,7 +440,11 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/campaignId != null \? queryClient\.refetchQueries\(\{ queryKey: queryKeys\.campaignCharacters\(campaignId\) \}\)/);
     expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
     expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
-    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) return;/);
+    // Round 23: release is decided PER KEY, not all-or-nothing — a stuck key whose own
+    // `needsCharacters` is false only needs `encounterOk` to be released.
+    expect(src).toMatch(
+      /if \(encounterOk && \(!entry\.needsCharacters \|\| charactersOk\)\) releasing\.set\(key, entry\.wasAmbiguous\);\s*\n\s*else stillStuck\.set\(key, entry\);/,
+    );
     // The interval actually releases the stuck keys from pendingKeys, not just clears its
     // own bookkeeping.
     expect(src).toMatch(/for \(const key of releasing\.keys\(\)\) next = removePendingKey\(next, key\);/);
@@ -473,7 +490,35 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   // errors.
   test('ResourceTrackerPanel forces statblockMutation to reconcile before releasing even on success, since its CAS token is not in its own response', () => {
     const src = readFileSync(PANEL, 'utf8');
-    expect(src).toMatch(/endPendingAfterReconciling\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\), error, true\)/);
+    // Round 23: a 4th arg (`false`) now says this target doesn't need campaignCharacters.
+    expect(src).toMatch(/endPendingAfterReconciling\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\), error, true, false\)/);
+  });
+
+  /**
+   * Issue #1902 rework (round 23, codex P2, reviewer-caught) — `endPendingAfterReconciling`
+   * demanded `charactersOk` unconditionally, but a monster/NPC statblock combatant's own CAS
+   * token and rendered state depend ONLY on the `encounter` query — `campaignCharacters` is
+   * irrelevant to it. A DM's successful monster pip could therefore get stuck in
+   * `stuckKeysRef` (and keep retrying every 5s) purely because an unrelated character-list
+   * fetch was failing, locking up controls that never depended on that query.
+   */
+  test('ResourceTrackerPanel does not gate a target that does not need campaignCharacters on that query being healthy', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    // needsCharacters defaults to true (the three character-scoped mutations keep the old
+    // behavior unchanged), and narrows both the invalidation and the release check.
+    expect(src).toMatch(
+      /const endPendingAfterReconciling = async \(key: string, error: unknown, forceReconcile = false, needsCharacters = true\) => \{/,
+    );
+    expect(src).toMatch(
+      /const charactersOk = !needsCharacters \|\| campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/,
+    );
+    // The stuck-key map now stores needsCharacters alongside wasAmbiguous, keyed per target.
+    expect(src).toMatch(/stuckKeysRef\.current\.set\(key, \{ wasAmbiguous, needsCharacters \}\);/);
+    // The auto-release interval evaluates release eligibility PER KEY (not all-or-nothing),
+    // so a stuck monster key only needs encounterOk, never charactersOk.
+    expect(src).toMatch(
+      /if \(encounterOk && \(!entry\.needsCharacters \|\| charactersOk\)\) releasing\.set\(key, entry\.wasAmbiguous\);/,
+    );
   });
 
   // Twelfth-round finding (codex P2): a definite 409 STALE_WRITE is not ambiguous (the write
