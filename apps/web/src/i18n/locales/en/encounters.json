@@ -113,8 +113,6 @@
       "features": "Features",
       "spellSlots": "Spell Slots",
       "level": "Level {{level}}",
-      "shortRest": "Short Rest",
-      "longRest": "Long Rest",
       "partyRest": "Party Rest",
       "confirmRest": "{{kind}} for {{name}}?",
       "restError": "Couldn't complete the rest.",

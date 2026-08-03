@@ -51,19 +51,40 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const ownedCharacterIds = new Set([42]);
 
     // DM can edit any character, owned or not.
-    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: 42, ownedCharacterIds })).toBe(true);
-    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: 99, ownedCharacterIds })).toBe(true);
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: 42, ownedCharacterIds, encounterWritable: true })).toBe(true);
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: 99, ownedCharacterIds, encounterWritable: true })).toBe(true);
 
     // A player with write access can only edit their own character's combatant.
-    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: 42, ownedCharacterIds })).toBe(true);
-    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: 99, ownedCharacterIds })).toBe(false);
+    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: 42, ownedCharacterIds, encounterWritable: true })).toBe(true);
+    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: 99, ownedCharacterIds, encounterWritable: true })).toBe(false);
 
     // A viewer (no player write) never edits, even their "own" character id.
-    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: false, characterId: 42, ownedCharacterIds })).toBe(false);
+    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: false, characterId: 42, ownedCharacterIds, encounterWritable: true })).toBe(false);
 
-    // A statblock-only combatant has no owner (characterId null) — only the DM may edit it.
-    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: null, ownedCharacterIds })).toBe(false);
-    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: null, ownedCharacterIds })).toBe(true);
+    // A statblock-only combatant has no owner (characterId null) — only the DM may edit it,
+    // and only while the encounter is still writable.
+    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: null, ownedCharacterIds, encounterWritable: true })).toBe(false);
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: null, ownedCharacterIds, encounterWritable: true })).toBe(true);
+  });
+
+  // Second-round finding (devin, re-review): a statblock (monster) combatant's pips write
+  // through the encounter's combatant PATCH, which the server rejects once the encounter
+  // has ended — that must disable the control, even for the DM. A character-linked
+  // combatant's pips write straight to the character SHEET instead, so an ended encounter
+  // must NOT disable those (resting/spending a resource on your own sheet after the fight
+  // is still meaningful).
+  test('canEditCharacterResource disables a statblock combatant once the encounter has ended, but never a character-linked one', () => {
+    const ownedCharacterIds = new Set([42]);
+
+    // Statblock (characterId null): DM loses write once the encounter has ended.
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: null, ownedCharacterIds, encounterWritable: false })).toBe(false);
+    // ...but keeps it while the encounter is still running/preparing.
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: null, ownedCharacterIds, encounterWritable: true })).toBe(true);
+
+    // Character-linked (characterId set): the ended-encounter gate does not apply — the
+    // DM and the owning player both keep write access to the SHEET regardless.
+    expect(canEditCharacterResource({ canDmWrite: true, canPlayerWrite: false, characterId: 42, ownedCharacterIds, encounterWritable: false })).toBe(true);
+    expect(canEditCharacterResource({ canDmWrite: false, canPlayerWrite: true, characterId: 42, ownedCharacterIds, encounterWritable: false })).toBe(true);
   });
 
   test('hasTrackedResources: renders nothing for a combatant with no resources and no spell slots', () => {
@@ -160,5 +181,44 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel disables Stamina Rest when the character has no Resolve Points', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/opt\.type === 'stamina' && rpCurrent != null && rpCurrent < 1/);
+  });
+
+  // Third-round finding (codex P2, re-review of the round-2 push): restMutation must
+  // reconcile the rest endpoint's response the same way slotMutation already does, or a
+  // Stamina Rest / Night's Rest button can render enabled/disabled against the pre-rest
+  // rpCurrent for the brief window between mutation settle and invalidate()'s refetch.
+  test('ResourceTrackerPanel reconciles the rest response into the campaign-character cache before invalidating', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/api\.post<Character>\(`\$\{API\}\/characters\/\$\{characterId\}\/rest`/);
+    // Both restMutation and slotMutation now reconcile from their response — two call sites.
+    const setQueryDataCalls = src.match(/queryClient\.setQueryData<Character\[\]>\(queryKeys\.campaignCharacters/g) ?? [];
+    expect(setQueryDataCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // Third-round finding (devin, re-review): a monster/statblock combatant's pips must be
+  // disabled once the encounter has ended, or every click 409s with a visible error. The
+  // panel threads an `encounterWritable` prop (encounter.status !== 'ended' at the call
+  // site) into canEditCharacterResource — see the gating-matrix test above for the pure
+  // logic, and the RunSessionPage call site for where it's derived.
+  test('ResourceTrackerPanel accepts and threads an encounterWritable prop into canEditCharacterResource', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/encounterWritable: boolean/);
+    expect(src).toMatch(/encounterWritable,\s*\n\s*\}\);/);
+
+    const runSessionSrc = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(runSessionSrc).toMatch(/<ResourceTrackerPanel[^>]*encounterWritable=\{encounter\.status !== 'ended'\}/);
+  });
+
+  // Third-round finding (devin, re-review): `shortRest`/`longRest` i18n keys were dead —
+  // rest button wording comes from the rule-system adapter's RestOptionDef (`opt.label`),
+  // never from these keys. Removed from both en and ar catalogues.
+  test('the dead shortRest/longRest i18n keys are gone from the resourceTracker namespace', () => {
+    const en = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/en/encounters.json'), 'utf8'));
+    expect(en.encounters.resourceTracker.shortRest).toBeUndefined();
+    expect(en.encounters.resourceTracker.longRest).toBeUndefined();
+    // partyRest/confirmRest ARE still used (the Party Rest link, and the rest confirm
+    // dialog wraps opt.label) — only the dead pair should be gone.
+    expect(en.encounters.resourceTracker.partyRest).toBeDefined();
+    expect(en.encounters.resourceTracker.confirmRest).toBeDefined();
   });
 });

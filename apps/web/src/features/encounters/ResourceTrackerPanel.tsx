@@ -57,6 +57,7 @@ export function ResourceTrackerPanel({
   canDmWrite,
   canPlayerWrite,
   ownedCharacterIds,
+  encounterWritable,
 }: {
   campaignId?: number;
   encounterId: number;
@@ -65,6 +66,9 @@ export function ResourceTrackerPanel({
   canDmWrite: boolean;
   canPlayerWrite: boolean;
   ownedCharacterIds: ReadonlySet<number>;
+  /** `encounter.status !== 'ended'` (issue #1902 rework, round 2) — see the doc comment on
+   *  {@link canEditCharacterResource} for why this only affects statblock-only combatants. */
+  encounterWritable: boolean;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -93,9 +97,22 @@ export function ResourceTrackerPanel({
 
   const restMutation = useMutation({
     mutationFn: async ({ characterId, kind }: { characterId: number; kind: RestOptionDef['type'] }) =>
-      api.post(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
-    onSuccess: () => {
+      api.post<Character>(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
+    // Issue #1902 rework (round 2): same reconciliation-before-invalidate fix as
+    // slotMutation below. `POST .../rest` returns the fully-rested character (fresh
+    // rpCurrent/spCurrent/hpCurrent/…) — without caching it here, `isPending` flips back
+    // to false (re-enabling the buttons) before invalidate()'s background refetch lands,
+    // so a Starfinder character who just spent their only RP on a Stamina Rest briefly
+    // shows an enabled Stamina Rest button the server is guaranteed to reject next click
+    // (and, in the other direction, a Night's Rest that restored RP can render the button
+    // still disabled).
+    onSuccess: (updated) => {
       setError(null);
+      if (campaignId != null) {
+        queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
+          old?.map((c) => (c.id === updated.id ? updated : c)),
+        );
+      }
       invalidate();
     },
     onError: (err) => {
@@ -212,6 +229,7 @@ export function ResourceTrackerPanel({
         canPlayerWrite,
         characterId: c.kind === 'character' ? (c.characterId ?? null) : null,
         ownedCharacterIds,
+        encounterWritable,
       });
 
       return { combatant: c, name, resources, spellSlots, canEdit, rpCurrent };

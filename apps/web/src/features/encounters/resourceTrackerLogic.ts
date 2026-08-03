@@ -43,17 +43,28 @@ export function spellSlotPatchBody(level: number, currentUsed: number, nextUsed:
 }
 
 /**
- * Whether the current viewer may interact with a character-linked combatant's pips/rest
- * controls (issue #1902 acceptance criterion 3). Mirrors the server's dm-or-owner rule
+ * Whether the current viewer may interact with a combatant's pips/rest controls (issue
+ * #1902 acceptance criterion 3). Mirrors the server's dm-or-owner rule
  * (`CharactersService.assertCanWrite`) for UX only — the server remains authoritative.
  * A statblock-only combatant (no `characterId`) has no "owner", so only the DM can edit it.
+ *
+ * `encounterWritable` (issue #1902 rework, round 2) gates ONLY the statblock branch
+ * (`characterId == null`): a statblock combatant's pips write through
+ * `PATCH /encounters/:id/combatants/:id`, which `EncountersService.assertMutable` rejects
+ * with 409 once the encounter has ended. A character-linked combatant's pips write to the
+ * CHARACTER SHEET (`POST /characters/:id/resources` / `.../spell-slots` / `.../rest`),
+ * which has no encounter-status dependency at all — resting or spending a resource on your
+ * own sheet is still meaningful after the fight is over — so `encounterWritable` must NOT
+ * disable those.
  */
 export function canEditCharacterResource(opts: {
   canDmWrite: boolean;
   canPlayerWrite: boolean;
   characterId: number | null | undefined;
   ownedCharacterIds: ReadonlySet<number>;
+  encounterWritable: boolean;
 }): boolean {
+  if (opts.characterId == null && !opts.encounterWritable) return false;
   if (opts.canDmWrite) return true;
   if (!opts.canPlayerWrite) return false;
   return opts.characterId != null && opts.ownedCharacterIds.has(opts.characterId);

@@ -113,8 +113,6 @@
       "features": "القدرات",
       "spellSlots": "خانات التعاويذ",
       "level": "المستوى {{level}}",
-      "shortRest": "راحة قصيرة",
-      "longRest": "راحة طويلة",
       "partyRest": "راحة الفريق",
       "confirmRest": "{{kind}} لـ {{name}}؟",
       "restError": "تعذر إكمال الراحة.",
