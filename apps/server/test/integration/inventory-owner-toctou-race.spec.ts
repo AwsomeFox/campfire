@@ -28,6 +28,13 @@ import { makeTempDataDir } from './fixtures';
  * first read `update()` performs) and, as a side effect of THAT call, running the "concurrent"
  * move directly against the database before returning — exactly the window the review
  * describes, with no reliance on real thread/process timing.
+ *
+ * Round 2 (same review thread): re-checking the ITEM's owner alone isn't sufficient — a
+ * non-DM caller's authorization also depends on the CHARACTER's `ownerUserId` matching them,
+ * for both the character the item currently lives on and, on a move, the destination
+ * character. If the DM reassigns that SAME character's owner in the same window, the item's
+ * own ownerType/characterId never change, so the item-owner check alone would pass while the
+ * authorization it stood on no longer holds. The tests below cover that second dimension too.
  */
 describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-codex-connector P1)', () => {
   let dataDir: string;
@@ -144,5 +151,82 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
     spy.mockRestore();
     const [itemAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, item.id)).all();
     expect(itemAfter.equipped).toBe(false);
+  });
+
+  /** Reassigns `characterId`'s owner directly — the DM transferring a character mid-request. */
+  function raceReassignCharacterOwner(orm: ReturnType<typeof build>['orm'], characterId: number, ownerUserId: string) {
+    orm.update(characters).set({ ownerUserId, updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+  }
+
+  it('rejects a displacing equip when the SOURCE character is reassigned to a different owner mid-request (item itself never moves)', async () => {
+    const { orm, service } = build();
+    const { characterA, item, bobIncumbent } = seed(orm);
+    // The incumbent this time lives on Alice's OWN character A, in the slot Alice is
+    // equipping into — the item never changes owner, only character A's owner does.
+    orm.update(inventoryItems).set({ characterId: characterA.id }).where(eq(inventoryItems.id, bobIncumbent.id)).run();
+
+    const original = service.getRowOrThrow.bind(service);
+    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
+      const row = await original(id, opts);
+      if (id === item.id) {
+        // The window: the DM transfers character A itself to a different player right
+        // after Alice's assertCanWriteOwner authorized her against it.
+        raceReassignCharacterOwner(orm, characterA.id, 'user-someone-else');
+      }
+      return row;
+    });
+
+    await expect(
+      service.update(
+        item.id,
+        { equipped: true, equipSlot: 'main-hand', displaceEquipped: true, expectedConflictingItemId: bobIncumbent.id },
+        alice,
+        'player',
+      ),
+    ).rejects.toThrow(ConflictException);
+
+    spy.mockRestore();
+
+    // The incumbent on (now-reassigned) character A is untouched.
+    const [incumbentAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, bobIncumbent.id)).all();
+    expect(incumbentAfter.equipped).toBe(true);
+    expect(incumbentAfter.equipSlot).toBe('main-hand');
+    const [itemAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, item.id)).all();
+    expect(itemAfter.equipped).toBe(false);
+  });
+
+  it('rejects a MOVE + equip when the DESTINATION character is reassigned to a different owner mid-request', async () => {
+    const { orm, service } = build();
+    const ts = nowIso();
+    const { campaign, characterA, item } = seed(orm);
+    // Character C — also owned by Alice right now, so her destination authorization
+    // (assertCanWriteOwner for the move) legitimately passes at request time.
+    const [characterC] = orm
+      .insert(characters)
+      .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Alice PC 2', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+
+    const original = service.getRowOrThrow.bind(service);
+    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
+      const row = await original(id, opts);
+      if (id === item.id) {
+        // The window: the DM transfers the DESTINATION character to a different player
+        // right after Alice's destination authorization check passed against her own C.
+        raceReassignCharacterOwner(orm, characterC.id, 'user-someone-else');
+      }
+      return row;
+    });
+
+    await expect(
+      service.update(item.id, { characterId: characterC.id, equipped: true, equipSlot: 'main-hand' }, alice, 'player'),
+    ).rejects.toThrow(ConflictException);
+
+    spy.mockRestore();
+
+    // The item never actually landed equipped on the now-reassigned character C.
+    const [itemAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, item.id)).all();
+    expect(itemAfter.equipped).toBe(false);
+    expect(itemAfter.characterId).toBe(characterA.id);
   });
 });

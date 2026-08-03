@@ -48,6 +48,28 @@ test.describe('equipped-item actions in the encounter card (#1901)', () => {
     expect(characterStatCard).toContain('{a.source}');
   });
 
+  // Rework (review: devin-ai-integration, PR #1951): fetchedActions is `undefined` both while
+  // loading AND on a failed fetch, so displayActions' fallback to the raw character.actions
+  // list used to be indistinguishable from a genuine failure — an equipped weapon's attack
+  // could silently vanish with no indication anything went wrong. `isError` must be read from
+  // the query and surfaced, not just `data`.
+  test('reads isError from the actions query so a failed fetch is distinguishable from loading', () => {
+    expect(characterStatCard).toMatch(/const\s*\{\s*data:\s*fetchedActions,\s*isError:\s*actionsFetchFailed\s*\}\s*=\s*useQuery\(/);
+  });
+
+  test('a failed actions fetch renders a visible error, independent of whether the sheet fallback is empty', () => {
+    expect(characterStatCard).toContain('data-testid="character-stat-actions-error"');
+    const errorBlockStart = characterStatCard.indexOf('data-testid="character-stat-actions-error"');
+    expect(errorBlockStart).toBeGreaterThan(-1);
+    // Gated on actionsFetchEnabled && actionsFetchFailed, NOT on displayActions.length — the
+    // section must render even when the sheet has nothing to fall back to.
+    const guardStart = characterStatCard.lastIndexOf('{actionsFetchEnabled && actionsFetchFailed && (', errorBlockStart);
+    expect(guardStart).toBeGreaterThan(-1);
+    // This error block appears BEFORE the `displayActions.length > 0` gate, not inside it.
+    const actionsSectionGate = characterStatCard.indexOf('{displayActions.length > 0 && (');
+    expect(actionsSectionGate).toBeGreaterThan(errorBlockStart);
+  });
+
   test('RunSessionPage wires encounterId/combatantId into the card and no longer re-derives the action from ch.actions[actionIndex]', () => {
     expect(runSessionPage).toContain('encounterId={encounterId}');
     expect(runSessionPage).toContain('combatantId={combatant.id}');

@@ -678,6 +678,46 @@ export class InventoryService {
             message: `Item ${id}'s owner changed after this request was authorized — refetch and retry.`,
           });
         }
+        // Issue #1901 review (chatgpt-codex-connector P1, round 2): the check above
+        // re-validates the ITEM's owner — but `assertCanWriteOwner` for a non-DM caller
+        // also depended on the CHARACTER's `ownerUserId` matching `user.id`, both for the
+        // character the item currently lives on (existing.characterId) and, on a move, for
+        // the destination character (finalCharacterId). Neither of those is touched by the
+        // check above: if the DM reassigns the SAME character to a different player between
+        // `assertCanWriteOwner` and this transaction, the item's own ownerType/characterId
+        // are unchanged, so that check alone would pass while the authorization it stood on
+        // no longer holds. Re-read both characters' `ownerUserId` fresh, inside this same
+        // transaction, and fail closed on any mismatch — this is every identity a non-DM
+        // caller's authorization depended on, re-validated together, not just the item's.
+        // DM callers are exempt: `assertCanWriteOwner` never checked ownerUserId for them.
+        if (role !== 'dm') {
+          if (existing.ownerType === 'character' && existing.characterId != null) {
+            const currentCharacterOwner = tx
+              .select({ ownerUserId: characters.ownerUserId })
+              .from(characters)
+              .where(eq(characters.id, existing.characterId))
+              .get();
+            if (!currentCharacterOwner || currentCharacterOwner.ownerUserId !== user.id) {
+              throw new ConflictException({
+                code: 'INVENTORY_OWNER_CHANGED',
+                message: `The character owning item ${id} changed hands after this request was authorized — refetch and retry.`,
+              });
+            }
+          }
+          if (moved && finalOwnerType === 'character' && finalCharacterId != null) {
+            const destinationCharacterOwner = tx
+              .select({ ownerUserId: characters.ownerUserId })
+              .from(characters)
+              .where(eq(characters.id, finalCharacterId))
+              .get();
+            if (!destinationCharacterOwner || destinationCharacterOwner.ownerUserId !== user.id) {
+              throw new ConflictException({
+                code: 'INVENTORY_OWNER_CHANGED',
+                message: `Destination character ${finalCharacterId} changed hands after this request was authorized — refetch and retry.`,
+              });
+            }
+          }
+        }
 
         const ts = nowIso();
         const update: Record<string, unknown> = { updatedAt: ts };

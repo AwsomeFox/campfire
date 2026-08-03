@@ -167,7 +167,13 @@ export function CharacterStatCard({
   // dozen of these cards mounted at once). `staleTime` still lets a quick collapse/expand
   // reuse a still-fresh cached response instead of re-fetching.
   const actionsFetchEnabled = encounterId != null && combatantId != null && open;
-  const { data: fetchedActions } = useQuery({
+  // Issue #1901 review (devin-ai-integration): `isError` is read below specifically so a
+  // FAILED fetch is distinguishable from an in-flight one — both leave `fetchedActions`
+  // `undefined`, and `displayActions` falls back to the raw sheet list in either case (the
+  // best available data), but only a genuine failure should tell the reader that fallback
+  // might be missing an equipped weapon's attack. Silently blending the two together is
+  // exactly the "equipped action just vanishes, with no message" bug this closes.
+  const { data: fetchedActions, isError: actionsFetchFailed } = useQuery({
     queryKey: actionsFetchEnabled ? [...queryKeys.encounter(encounterId!), 'actions', combatantId!] : ['character-stat-card-actions-disabled'],
     queryFn: () => api.get<UsableAction[]>(`${API}/encounters/${encounterId}/combatants/${combatantId}/actions`),
     enabled: actionsFetchEnabled,
@@ -369,6 +375,16 @@ export function CharacterStatCard({
                 )}
               </div>
             </Section>
+          )}
+
+          {/* Issue #1901 review (devin-ai-integration): a failed merged-actions fetch used to
+              fall back to the raw sheet list with no indication anything went wrong — an
+              equipped weapon's attack just silently disappeared. Rendered independently of
+              `displayActions.length` so it still shows even when the sheet fallback is empty. */}
+          {actionsFetchEnabled && actionsFetchFailed && (
+            <p className="text-rose-400" style={{ fontSize: 11.5 }} data-testid="character-stat-actions-error">
+              Couldn't load this character's full action list — equipped-gear actions may be missing below.
+            </p>
           )}
 
           {/* Actions / attacks — primary combat rolls use 44×44 hit areas (issue #428).
