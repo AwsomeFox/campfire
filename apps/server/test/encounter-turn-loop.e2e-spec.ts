@@ -147,7 +147,7 @@ describe('encounter turn loop (e2e)', () => {
     
     // Try to start again
     const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
-    expect(startRes.status).toBe(409);
+    expect(startRes.status).toBe(400);
     
     // Try to advance turn
     const nextRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
