@@ -5084,6 +5084,78 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(rolls.some((r) => r.label === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
     expect(rolls.some((r) => (r.label ?? '').includes('Nightveil'))).toBe(false);
   });
+
+  // Issue #1904 review finding (chatgpt-codex-connector): a DM's PATCH to initMod after
+  // creation touches only that column — the stored initiativeBreakdown.terms from creation
+  // are left stale. Rolling afterward must rebuild the terms against the CURRENT modifier,
+  // not reuse the stale ones, or the displayed formula visibly contradicts its own total.
+  it('an initMod edit before rolling produces a formula/terms that actually match the new modifier and total (per-combatant roll)', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Drift Test Monster', hpMax: 10, initMod: 2 });
+    expect(created.status).toBe(201);
+    const combatantId = created.body.id as number;
+
+    // Edit the modifier AFTER creation — only initMod changes; the breakdown seeded at
+    // creation time (terms summing to the OLD modifier, 2) is left untouched by this PATCH.
+    const edit = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ initMod: 5 });
+    expect(edit.status).toBe(200);
+    expect(edit.body.initMod).toBe(5);
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'drift-test-monster-roll' });
+    expect(res.status).toBe(201);
+    const breakdown = res.body.combatant.initiativeBreakdown as {
+      modifier: number;
+      roll: number;
+      total: number;
+      terms: Array<{ label: string; value: number }>;
+      formula: string;
+    };
+    expect(breakdown.modifier).toBe(5);
+    expect(breakdown.total).toBe(breakdown.roll + breakdown.modifier);
+    // The core regression: terms must sum to the CURRENT modifier, never the stale one.
+    expect(breakdown.terms.reduce((sum, t) => sum + t.value, 0)).toBe(5);
+    expect(breakdown.formula).not.toContain('initiative +2');
+  });
+
+  it('an initMod edit before rolling also produces matching terms via the DM bulk roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll Drift Test', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const created = await request(server)
+      .post(`/api/v1/encounters/${bulkEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Bulk Drift Monster', hpMax: 10, initMod: 1 });
+    expect(created.status).toBe(201);
+    const combatantId = created.body.id as number;
+
+    const edit = await request(server)
+      .patch(`/api/v1/encounters/${bulkEncounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ initMod: 4 });
+    expect(edit.status).toBe(200);
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    const combatant = (res.body.combatants as Array<{ id: number; initiative: number; initiativeBreakdown: { modifier: number; roll: number; total: number; terms: Array<{ label: string; value: number }>; formula: string } }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(combatant.initiativeBreakdown.modifier).toBe(4);
+    expect(combatant.initiativeBreakdown.total).toBe(combatant.initiativeBreakdown.roll + combatant.initiativeBreakdown.modifier);
+    expect(combatant.initiativeBreakdown.terms.reduce((sum, t) => sum + t.value, 0)).toBe(4);
+    expect(combatant.initiativeBreakdown.formula).not.toContain('initiative +1');
+  });
 });
 
 describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE under group initiative', () => {

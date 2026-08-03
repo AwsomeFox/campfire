@@ -156,6 +156,14 @@ export const DRIVER_COLLABORATIVE_DEFER_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   // Unlike ordinary dice tools, this roll commits its result to the death-save state.
   'roll_death_save',
+  // Issue #1904 review finding: same reasoning as roll_death_save above, not the "a roll is
+  // just a number" carve-out the bulk roll_initiative/ordinary dice tools get. This ONE-
+  // combatant roll immediately writes the combatant's initiative, an encounter event, AND a
+  // shared dice-log row in a single transaction — nothing downstream "applies" it the way a
+  // damage roll waits for apply_action. Deferring (not forbidding, unlike #1951's
+  // displaceEquipped) keeps the capability: rolling a combatant's own initiative is a
+  // legitimate thing to hand to a collaborative co-DM, as long as the human sees it first.
+  'roll_combatant_initiative',
   // Who is on the board, and whose turn it is.
   'next_turn',
   'end_turn',

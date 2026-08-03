@@ -54,6 +54,11 @@ describe('collaborative handoff tool policy (#1051)', () => {
       expect(resolveDriverToolPolicy({ ...livePlay(name), collaborative: true }).policy).toBe('auto');
     }
     expect(resolveDriverToolPolicy({ ...livePlay('roll_death_save'), collaborative: true }).policy).toBe('confirm');
+    // Issue #1904: unlike the bulk roll_initiative above (which produces numbers nothing has
+    // applied yet), rolling ONE combatant's initiative immediately writes the combatant row,
+    // an encounter event, and a shared dice-log entry — classified with roll_death_save, not
+    // with the ordinary dice rolls.
+    expect(resolveDriverToolPolicy({ ...livePlay('roll_combatant_initiative'), collaborative: true }).policy).toBe('confirm');
     // Undo exists to reverse a mistake. A confirmation in front of the undo button leaves a
     // wrong outcome on the board until someone approves removing it.
     expect(resolveDriverToolPolicy({ ...livePlay('undo_action'), collaborative: true }).policy).toBe('auto');

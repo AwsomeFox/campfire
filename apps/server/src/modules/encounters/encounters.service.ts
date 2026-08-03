@@ -349,6 +349,24 @@ function manualInitiativeBreakdown(adapter: RuleSystemAdapter, modifier: number)
   });
 }
 
+/**
+ * Terms to display for a roll against the CURRENT modifier (issue #1904 review finding).
+ * A DM's PATCH to `initMod` (creation-time fix, or a mid-campaign stat change) updates only the
+ * `initMod` column — the previously-stored `initiativeBreakdown.terms` (e.g. "DEX +2") is left
+ * untouched. Rolling afterward while reusing those stale terms verbatim produces a formula that
+ * visibly contradicts its own total (terms sum to the OLD modifier; `total` is computed from the
+ * NEW one). If the stored terms still sum to the current modifier, nothing drifted — keep them,
+ * since they may carry a richer label than a flat number. If they don't, collapse to one flat
+ * term so the displayed formula can never disagree with the total beside it.
+ */
+function initiativeTermsForModifier(
+  existing: CombatantInitiativeBreakdown,
+  modifier: number,
+): Array<{ label: string; value: number }> {
+  const staleSum = existing.terms.reduce((sum, t) => sum + t.value, 0);
+  return staleSum === modifier ? existing.terms : [{ label: 'initiative', value: modifier }];
+}
+
 /** Bare dice expression for a shared dice-log row (issue #1904) — e.g. "1d20+3", "1d20-1", "1d20". */
 function initiativeRollExpr(die: number, modifier: number): string {
   if (modifier === 0) return `1d${die}`;
@@ -5570,13 +5588,19 @@ export class EncountersService {
           const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
           const natural = initiative - row.initMod;
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
+          // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever
+          // the stored breakdown's terms summed to when it was last written — a DM's PATCH
+          // to initMod after creation touches only that column, so stale terms here would
+          // format a formula that visibly contradicts the total/modifier computed below.
+          const terms = initiativeTermsForModifier(existing, row.initMod);
           const breakdown = CombatantInitiativeBreakdown.parse({
             ...existing,
             die: adapter.initiativeDie,
             roll: natural,
             modifier: row.initMod,
             total: initiative,
-            formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+            terms,
+            formula: initiativeFormula(adapter.initiativeDie, terms, natural, initiative),
           });
           diceLogEntries.push({
             label: `${diceLogName(row)} · Initiative`,
@@ -5798,13 +5822,20 @@ export class EncountersService {
         const initiative = rollInitiative(rollModifier, adapter.initiativeDie);
         const natural = initiative - rollModifier;
         const existing = parseInitiativeBreakdown(freshCombatant.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, rollModifier);
+        // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever the
+        // stored breakdown's terms summed to when it was last written. A DM's PATCH to
+        // initMod (creation-time fix, or a mid-campaign stat change) touches only that
+        // column, so reusing stale terms here would format a formula (e.g. "+2") beside a
+        // total/modifier that were actually computed from a different value (e.g. "+5").
+        const terms = initiativeTermsForModifier(existing, rollModifier);
         const breakdown = CombatantInitiativeBreakdown.parse({
           ...existing,
           die: adapter.initiativeDie,
           roll: natural,
           modifier: rollModifier,
           total: initiative,
-          formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+          terms,
+          formula: initiativeFormula(adapter.initiativeDie, terms, natural, initiative),
         });
 
         tx.update(combatants)
