@@ -55,6 +55,31 @@
  * structurally impossible rather than merely checked-for — there is no
  * `generation` field left to get the comparison wrong on.
  *
+ * Two more findings landed on THAT redesign itself:
+ *
+ * 11a. Single-writer closes cross-request ordering, but a single SLOW
+ *      request is still a problem: it can observe `active: false` moments
+ *      before a hold is raised, yet take close to the full hygiene timeout
+ *      to return — and because single-writer means the next request can't
+ *      even START until this one concludes, a second unlucky slow response
+ *      compounds the delay, well past 15s, with neither one ever hitting
+ *      the hygiene abort. Fix: stamp each request with when it was issued;
+ *      on conclusion, `active: true` still always applies, but a confirmed
+ *      `active: false` (or a failure/timeout) is only trusted if it
+ *      concluded within `CAST_SAFETY_OBSERVATION_FRESHNESS_MS` of being
+ *      issued — otherwise it resolves `{ kind: 'unknown' }`, and the
+ *      caller reverts to the curtain instead of silently keeping stale
+ *      state. This bounds worst-case exposure to ONE timeout, not two.
+ * 11b. `invalidate()` aborting the controller isn't enough by itself: the
+ *      single-writer's own `busy` bookkeeping wasn't freed until the
+ *      aborted call's `finally` ran — a microtask later — so a `poll()`
+ *      issued synchronously right after `invalidate()` (exactly what the
+ *      next React effect body does on an identity change) saw the poller
+ *      still "busy" and was skipped, silently delaying the new identity's
+ *      first check by up to one poll interval. Fix: `invalidate()` frees
+ *      the bookkeeping itself, synchronously; the abandoned call's own
+ *      cleanup checks it is still the current owner before touching it.
+ *
  * Consequently, several of the ORIGINAL rounds' specific scenarios (6, 7, 8,
  * 9 — all about comparing generation numbers against each other) are not
  * merely re-tested here, they are RETIRED: the objects those tests
@@ -72,9 +97,10 @@
  *    which rounds 1-9 spent their effort trying to avoid entirely. This is
  *    an intentional, reviewed trade-off (see `playerDisplayLoad.ts`), not a
  *    regression, and is tested below as the new model's documented behavior;
- *  - the deadline value (4): re-derived against the single-writer model's
- *    actual constraint (`timeoutMs + one poll interval <= 15s`), not
- *    against "comfortably under the interval" — tested as its own guard;
+ *  - the deadline value (4): re-derived against round 11a's actual
+ *    constraint (`CAST_SAFETY_POLL_TIMEOUT_MS <= 15s` on its own, since a
+ *    stale conclusion now reverts to `unknown` immediately rather than
+ *    waiting on a subsequent poll) — tested as its own guard;
  *  - a slow-but-healthy response still landing: unaffected, still tested;
  *  - the identity-boundary guard (`shouldApplyCastSafetyResult`): unrelated
  *    to any of this and entirely unchanged — see its own describe block.
@@ -82,10 +108,12 @@
 import { expect, test } from '@playwright/test';
 import type { CastSafetyState } from '@campfire/schema';
 import {
+  CAST_SAFETY_OBSERVATION_FRESHNESS_MS,
   CAST_SAFETY_POLL_TIMEOUT_MS,
   CastSafetyPoller,
   runCastSafetyPoll,
   shouldApplyCastSafetyResult,
+  shouldMarkCastSafetyUnknown,
   type CastSafetyFetcher,
 } from '../../src/features/screen/playerDisplayLoad';
 
@@ -197,20 +225,25 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     expect(nextTick).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('the hygiene timeout is now load-bearing for correctness, and is sized to stay inside the 15s acceptance bound', () => {
+  test('the hygiene timeout is load-bearing for correctness, and alone stays inside the 15s acceptance bound', () => {
     // Unlike the retired generation scheme (where nothing depended on this
     // value for correctness — it was pure resource hygiene), the
     // single-writer model's worst-case observation delay for a freshly
-    // raised hold is `timeoutMs` (waiting out a hang) plus up to one more
-    // poll interval (5s) for the next tick to fire. That sum must not
-    // exceed the feature's 15s acceptance bound (issue #1908).
+    // raised hold is bounded by `CAST_SAFETY_POLL_TIMEOUT_MS` ALONE (issue
+    // #1908's 15s bound): round 11a's freshness check means a stale
+    // conclusion reverts to `unknown` (curtain shown) immediately, rather
+    // than the exposure compounding across a second poll to confirm it.
     const POLL_INTERVAL_MS = 5_000;
     const ACCEPTANCE_BOUND_MS = 15_000;
-    expect(CAST_SAFETY_POLL_TIMEOUT_MS + POLL_INTERVAL_MS).toBeLessThanOrEqual(ACCEPTANCE_BOUND_MS);
+    expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeLessThanOrEqual(ACCEPTANCE_BOUND_MS);
     // And still comfortably larger than the interval itself — round 4's
     // mistake was a deadline so tight it aborted ordinary, healthy-but-not-
     // instant responses.
     expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeGreaterThan(POLL_INTERVAL_MS);
+    // The freshness window must itself stay below the hygiene timeout, or
+    // nothing could ever be "too old" before the hygiene abort forces a
+    // conclusion anyway, and round 11a's check would never fire.
+    expect(CAST_SAFETY_OBSERVATION_FRESHNESS_MS).toBeLessThan(CAST_SAFETY_POLL_TIMEOUT_MS);
   });
 
   test('a slow-but-healthy response still lands: no deadline is tight enough to reject it', async () => {
@@ -226,13 +259,19 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     expect(result).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('the hygiene timeout still eventually aborts a truly hung request (resource cleanup)', async () => {
+  test('the hygiene timeout still eventually aborts a truly hung request, and reverts to unknown (round 11a)', async () => {
+    // Previously this resolved 'ignored' (a no-op, leaving whatever state
+    // was last believed untouched). Since a hygiene-timeout abort by
+    // construction took the full `timeoutMs` — well past the freshness
+    // window — round 11a requires this to revert confidence instead:
+    // 'unknown', not a silent no-op, so the caller shows the curtain rather
+    // than trusting a belief this stale.
     const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, hung.promise);
 
-    const result = await runCastSafetyPoll(poller, fetchSafety, { timeoutMs: 20 });
-    expect(result.kind).toBe('ignored');
+    const result = await runCastSafetyPoll(poller, fetchSafety, { timeoutMs: 20, freshnessMs: 5 });
+    expect(result).toEqual({ kind: 'unknown' });
     expect(poller.isBusy).toBe(false); // the poller frees up, ready for the next tick
   });
 
@@ -302,6 +341,141 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     const released = await runCastSafetyPoll(poller, fetchSafety);
     expect(released).toMatchObject({ kind: 'ok', active: false });
   });
+
+  test('regression (round 11a): a false response concluding WITHIN the freshness window still applies confidently', async () => {
+    const poller = new CastSafetyPoller();
+    const fastFalse = deferred<CastSafetyState>();
+    const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, fastFalse.promise);
+
+    const pending = runCastSafetyPoll(poller, fetchSafety, { freshnessMs: 200 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fastFalse.resolve({ active: false });
+
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'ok', active: false });
+  });
+
+  test('regression (round 11a): a false response concluding AFTER the freshness window reverts to unknown, not applied', async () => {
+    // The core of the P1 finding: a `false` observed just before a hold is
+    // raised, but too slow to report back, must not be trusted as still
+    // describing the current state.
+    const poller = new CastSafetyPoller();
+    const slowFalse = deferred<CastSafetyState>();
+    const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowFalse.promise);
+
+    const pending = runCastSafetyPoll(poller, fetchSafety, { freshnessMs: 20, timeoutMs: 10_000 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    slowFalse.resolve({ active: false });
+
+    const result = await pending;
+    expect(result).toEqual({ kind: 'unknown' });
+  });
+
+  test('regression (round 11a): a true response ALWAYS applies immediately, regardless of its own age', async () => {
+    // Never hide a real hold: staleness only ever downgrades a `false`
+    // (or a failure/timeout) to `unknown` — a confirmed `true` is exempt,
+    // exactly like every earlier round's true/false asymmetry.
+    const poller = new CastSafetyPoller();
+    const slowTrue = deferred<CastSafetyState>();
+    const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowTrue.promise);
+
+    const pending = runCastSafetyPoll(poller, fetchSafety, { freshnessMs: 20, timeoutMs: 10_000 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    slowTrue.resolve({ active: true });
+
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('regression (round 11a): a genuine failure concluding within the freshness window stays a fail-safe no-op', async () => {
+    const poller = new CastSafetyPoller();
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('network down');
+    };
+
+    const result = await runCastSafetyPoll(poller, failing, { freshnessMs: 5_000 });
+    expect(result.kind).toBe('failed');
+  });
+
+  test('regression (round 11a): a genuine failure that takes too long to conclude also reverts to unknown', async () => {
+    const poller = new CastSafetyPoller();
+    const slowFailure = deferred<CastSafetyState>();
+    const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowFailure.promise);
+
+    const pending = runCastSafetyPoll(poller, fetchSafety, { freshnessMs: 20, timeoutMs: 10_000 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    slowFailure.reject(new TypeError('network down'));
+
+    const result = await pending;
+    expect(result).toEqual({ kind: 'unknown' });
+  });
+
+  test('regression (P1, the reviewer-supplied scenario): two consecutive slow responses do not compound exposure past one timeout', async () => {
+    // The exact scenario from the review finding: a request observes
+    // `active: false` just before a hold is raised but takes nearly the
+    // full timeout to return, and a SECOND request is then needed to
+    // observe `true` — without round 11a, the fight would stay visible for
+    // roughly TWO timeouts. With it, the first slow response reverts to
+    // `unknown` (curtain shown) on ITS OWN conclusion, so the second
+    // request confirming `true` is a bonus, not a requirement for safety.
+    const poller = new CastSafetyPoller();
+    const freshnessMs = 30;
+    const timeoutMs = 100;
+
+    const firstSlowFalse = deferred<CastSafetyState>();
+    const first = runCastSafetyPoll(poller, (signal) => trackAbort(signal, firstSlowFalse.promise), {
+      freshnessMs,
+      timeoutMs,
+    });
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs - 10));
+    firstSlowFalse.resolve({ active: false }); // stale: the hold was raised while this was in flight
+    const firstResult = await first;
+    expect(firstResult).toEqual({ kind: 'unknown' }); // curtain shows HERE — not after a second request
+
+    const secondSlowTrue = deferred<CastSafetyState>();
+    const second = runCastSafetyPoll(poller, (signal) => trackAbort(signal, secondSlowTrue.promise), {
+      freshnessMs,
+      timeoutMs,
+    });
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs - 10));
+    secondSlowTrue.resolve({ active: true });
+    const secondResult = await second;
+    expect(secondResult).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('regression (round 11b): invalidate() frees the poller synchronously, so an immediate next poll is NOT skipped', async () => {
+    // Devin's finding: without this, a `poll()` call made synchronously
+    // right after `invalidate()` (exactly what the next React effect body
+    // does on a cast-identity change) would see the poller still marked
+    // busy — because the abandoned call's own cleanup only runs a
+    // microtask later — and be skipped, silently delaying the NEW
+    // identity's first check by up to one poll interval for no reason.
+    const poller = new CastSafetyPoller();
+    const hungForOldIdentity = deferred<CastSafetyState>();
+    const oldIdentityFetch: CastSafetyFetcher = (signal) => trackAbort(signal, hungForOldIdentity.promise);
+
+    const abandoned = runCastSafetyPoll(poller, oldIdentityFetch);
+    expect(poller.isBusy).toBe(true);
+
+    poller.invalidate(); // e.g. cast-token change to a new campaign
+    expect(poller.isBusy).toBe(false); // freed SYNCHRONOUSLY, not after a microtask
+
+    // The new identity's mount-time poll, issued right after invalidate()
+    // in the same synchronous flow — must actually run, not be skipped.
+    let newIdentityFetchCalled = false;
+    const newIdentityResult = await runCastSafetyPoll(poller, async () => {
+      newIdentityFetchCalled = true;
+      return { active: true };
+    });
+    expect(newIdentityFetchCalled).toBe(true);
+    expect(newIdentityResult).toMatchObject({ kind: 'ok', active: true });
+
+    // The abandoned old-identity request settling later must not clobber
+    // the new one's bookkeeping.
+    hungForOldIdentity.reject(new DOMException('Aborted', 'AbortError'));
+    await abandoned.catch(() => undefined);
+    expect(poller.isBusy).toBe(false);
+  });
 });
 
 test.describe('shouldApplyCastSafetyResult (#1908 rework — the identity-boundary P1 finding)', () => {
@@ -333,8 +507,32 @@ test.describe('shouldApplyCastSafetyResult (#1908 rework — the identity-bounda
     expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', null)).toBe(false);
   });
 
-  test('non-ok results (ignored/failed) are never applied, identity aside', () => {
+  test('non-ok results (ignored/failed/unknown) are never applied via shouldApplyCastSafetyResult, identity aside', () => {
     expect(shouldApplyCastSafetyResult({ kind: 'ignored' }, 'token-a', 'token-a')).toBe(false);
     expect(shouldApplyCastSafetyResult({ kind: 'failed' }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldApplyCastSafetyResult({ kind: 'unknown' }, 'token-a', 'token-a')).toBe(false);
+  });
+});
+
+test.describe('shouldMarkCastSafetyUnknown (#1908 rework, round 11a)', () => {
+  // Same identity-boundary shape as shouldApplyCastSafetyResult, for the
+  // 'unknown' outcome: a too-old observation for an identity the page has
+  // already moved on from must not touch the CURRENT identity's state
+  // either — even though the render-time reset already put that identity
+  // into "unknown" on its own, making this a no-op in practice.
+  test('marks unknown when the captured identity still matches the current one', () => {
+    expect(shouldMarkCastSafetyUnknown({ kind: 'unknown' }, 'token-a', 'token-a')).toBe(true);
+  });
+
+  test('does not mark unknown when the identity no longer matches', () => {
+    expect(shouldMarkCastSafetyUnknown({ kind: 'unknown' }, 'token-a', 'token-b')).toBe(false);
+    expect(shouldMarkCastSafetyUnknown({ kind: 'unknown' }, 'token-a', null)).toBe(false);
+  });
+
+  test('other kinds are never treated as unknown, identity aside', () => {
+    expect(shouldMarkCastSafetyUnknown({ kind: 'ok', active: false }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldMarkCastSafetyUnknown({ kind: 'ok', active: true }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldMarkCastSafetyUnknown({ kind: 'ignored' }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldMarkCastSafetyUnknown({ kind: 'failed' }, 'token-a', 'token-a')).toBe(false);
   });
 });

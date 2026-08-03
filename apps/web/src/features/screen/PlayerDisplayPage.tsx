@@ -72,6 +72,7 @@ import {
   runCastSafetyPoll,
   runPlayerDisplayLoad,
   shouldApplyCastSafetyResult,
+  shouldMarkCastSafetyUnknown,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
 } from './playerDisplayLoad';
@@ -371,12 +372,18 @@ export default function PlayerDisplayPage() {
    * checked-for: whichever response arrives IS the most recent observation,
    * unconditionally. The trade this accepts is explicit and bounded: a hung
    * request now delays the NEXT observation, up to
-   * `CAST_SAFETY_POLL_TIMEOUT_MS`, which is sized (with the poll interval)
-   * to stay inside the 15s bound even in that worst case — see that
-   * constant's doc. Fail safe throughout: an ignored tick and a genuine
-   * failure on the current request all leave the last-known hold state
-   * alone rather than guessing a new value — it can never clear an active
-   * curtain. The regular projection poll already surfaces a hard failure
+   * `CAST_SAFETY_POLL_TIMEOUT_MS` — see that constant's doc for why the
+   * bound holds. A single slow-but-not-timed-out request is ALSO bounded:
+   * a `false` (or a failure) that concludes too long after being issued
+   * (`CAST_SAFETY_OBSERVATION_FRESHNESS_MS`) resolves `{ kind: 'unknown' }`
+   * rather than `ok`, and `shouldMarkCastSafetyUnknown` reverts
+   * `castSafetyKnown` to false on that outcome — reverting to the curtain
+   * rather than trusting a stale "safe" verdict, so worst-case exposure
+   * never compounds across two slow requests in a row. Fail safe
+   * throughout: an ignored tick and a genuine, promptly-concluded failure
+   * on the current request leave the last-known hold state alone rather
+   * than guessing a new value — neither can ever clear an active curtain.
+   * The regular projection poll already surfaces a hard failure
    * (expired/revoked token) for the page as a whole.
    *
    * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
@@ -447,12 +454,20 @@ export default function PlayerDisplayPage() {
     if (shouldApplyCastSafetyResult(result, requestIdentity, castSafetyIdentityRef.current)) {
       setCastSafetyActive(result.active);
       setCastSafetyKnown(true);
+    } else if (shouldMarkCastSafetyUnknown(result, requestIdentity, castSafetyIdentityRef.current)) {
+      // A confirmed `false` (or a failure/hygiene-timeout) arrived too long
+      // after being issued to trust as still describing the CURRENT state
+      // — revert to "not yet confirmed" (curtain shown) rather than
+      // silently keep whatever was last believed. See the module doc's
+      // round 11a for why this bounds worst-case exposure to a single
+      // poll timeout instead of two.
+      setCastSafetyKnown(false);
     }
-    // 'ignored' (skipped while busy, aborted, or unmount/identity-change) and
-    // a 'failed' (transient) result, or an 'ok' result whose captured
-    // identity no longer matches the live one (superseded by a later
-    // identity change), all leave castSafetyActive/castSafetyKnown untouched
-    // — see fail-safe note above.
+    // 'ignored' (skipped while busy, aborted, or unmount/identity-change), a
+    // 'failed' result that concluded within the freshness window, or either
+    // outcome above whose captured identity no longer matches the live one
+    // (superseded by a later identity change) all leave
+    // castSafetyActive/castSafetyKnown untouched — see fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
