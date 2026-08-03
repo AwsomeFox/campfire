@@ -2846,7 +2846,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       arguments: { campaignId: ddbCampaignId, ddbId: String(PUBLIC_DDB_CHARACTER_ID) },
     });
     expect(res.isError).toBeFalsy();
-    expect((parseResult(res) as { ddbId: string }).ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+    // Issue #1903: result is { character, summary } — REST/MCP parity.
+    const parsed = parseResult(res) as { character: { ddbId: string }; summary: { actionsImported: number } };
+    expect(parsed.character.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+    expect(parsed.summary.actionsImported).toBeGreaterThanOrEqual(0);
   });
 
   it('uninstall_rule_pack blocks an in-use pack even for an adminEnabled token; a plain dm PAT is denied (issue #76)', async () => {

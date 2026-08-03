@@ -3,7 +3,8 @@
  * and plain-language breakdowns. Extracted from PartyPage for readability.
  */
 import { useMemo, useState, type FormEvent } from 'react';
-import type { RuleSystemAdapter } from '@campfire/schema';
+import { useTranslation } from 'react-i18next';
+import type { RuleSystemAdapter, DdbImportResult } from '@campfire/schema';
 import {
   blankCharacterCreate,
   characterCreateFromTemplate,
@@ -36,8 +37,13 @@ export function NewCharacterForm({
   const [level, setLevel] = useState('1');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useTranslation();
   const [ddbRef, setDdbRef] = useState('');
   const [importing, setImporting] = useState(false);
+  // Issue #1903: the import summary (attacks/spells/slots counts + any text-only entries)
+  // is shown before the form closes, so a DM/player sees what needs a manual touch-up
+  // instead of discovering it only inside the sheet.
+  const [importSummary, setImportSummary] = useState<DdbImportResult['summary'] | null>(null);
 
   const levelCap = adapter.maxLevel === Infinity ? 99 : adapter.maxLevel;
   const levelNum = Math.max(1, Math.min(levelCap, Number(level) || 1));
@@ -52,15 +58,22 @@ export function NewCharacterForm({
     setError(null);
     try {
       const body = /^\d+$/.test(ref) ? { ddbId: ref } : { url: ref };
-      await api.post(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
+      const res = await api.post<DdbImportResult>(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
       setDdbRef('');
-      onCancel?.();
       onCreated();
+      // Hold the form open one more beat to show what imported (issue #1903) — closes on
+      // "Done" rather than immediately, so the summary isn't shown-then-instantly-hidden.
+      setImportSummary(res.summary);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");
     } finally {
       setImporting(false);
     }
+  }
+
+  function finishDdbImport() {
+    setImportSummary(null);
+    onCancel?.();
   }
 
   async function submit(e: FormEvent) {
@@ -112,7 +125,33 @@ export function NewCharacterForm({
       </div>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
-      {ddbAllowed && (
+      {ddbAllowed && importSummary && (
+        <div className="space-y-2 rounded-md border border-emerald-700/60 bg-emerald-950/20 p-3" role="status">
+          <span className="text-xs font-bold text-emerald-300 uppercase tracking-wide">{t('characters.ddbImport.summaryTitle')}</span>
+          <ul className="space-y-1 text-xs text-slate-300">
+            <li>{t('characters.ddbImport.actionsCount', { count: importSummary.actionsImported })}</li>
+            <li>{t('characters.ddbImport.spellsCount', { count: importSummary.spellsImported })}</li>
+            {importSummary.spellSlotsImported && <li>{t('characters.ddbImport.spellSlotsSet')}</li>}
+          </ul>
+          {importSummary.textOnly.length > 0 && (
+            <div className="text-xs text-amber-300">
+              <p>{t('characters.ddbImport.textOnlyIntro')}</p>
+              <ul className="list-disc space-y-0.5 pl-4">
+                {importSummary.textOnly.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Btn type="button" onClick={finishDdbImport}>
+              {t('characters.ddbImport.done')}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {ddbAllowed && !importSummary && (
         <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
           <span className="text-xs font-bold text-secondary uppercase tracking-wide">Import from D&amp;D Beyond</span>
           <div className="flex gap-2">
@@ -131,7 +170,7 @@ export function NewCharacterForm({
         </div>
       )}
 
-      {ddbAllowed && (
+      {ddbAllowed && !importSummary && (
         <div className="flex items-center gap-2 text-xs text-secondary">
           <span className="h-px flex-1 bg-slate-700/60" />
           or create in Campfire
@@ -139,6 +178,8 @@ export function NewCharacterForm({
         </div>
       )}
 
+      {!importSummary && (
+      <>
       <fieldset className="space-y-2">
         <legend className="text-xs font-bold text-secondary uppercase tracking-wide">How do you want to start?</legend>
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -260,6 +301,8 @@ export function NewCharacterForm({
           </Btn>
         </div>
       </form>
+      </>
+      )}
     </Card>
   );
 }

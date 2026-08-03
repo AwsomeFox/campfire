@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
-import { startFakeDdb, PUBLIC_DDB_CHARACTER, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
-import { mapDdbCharacter, parseDdbId } from '../src/modules/characters/ddb-importer';
+import { startFakeDdb, PUBLIC_DDB_CHARACTER, PUBLIC_DDB_CHARACTER_ID, CASTER_DDB_CHARACTER, CASTER_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
+import { mapDdbCharacter, summarizeDdbImport, computeSpellSlots, parseDdbId } from '../src/modules/characters/ddb-importer';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { rulePacks } from '../src/db/schema';
 
@@ -48,6 +48,90 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(c.skills).toEqual({ Perception: 'proficient', Stealth: 'expertise' });
     expect(c.portraitUrl).toBe('https://www.dndbeyond.com/avatars/thornbeard.png');
     expect(c.notes).toContain('left the mountain halls');
+  });
+
+  // Issue #1903 — attacks/actions.
+  it('maps the equipped weapon into a resolvable attack action (fighter fixture)', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    const longsword = c.actions?.find((a) => a.name === 'Longsword');
+    expect(longsword).toBeDefined();
+    // STR 16 (mod +3) + proficiency bonus at level 5 (+3) = +6; 1d8+3 slashing.
+    expect(longsword?.toHit).toBe('+6');
+    expect(longsword?.damage).toBe('1d8+3 slashing');
+    expect(longsword?.spec?.mode).toBe('attack');
+    expect(longsword?.spec?.attack.bonus).toBe('+6');
+    expect(longsword?.spec?.outcomes.hit?.damage).toEqual([{ formula: '1d8', flat: 3, type: 'slashing' }]);
+  });
+
+  it('does not import an unequipped weapon as an attack', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    expect(c.actions?.some((a) => a.name === 'Dagger')).toBe(false);
+  });
+
+  it('maps an attack-less class feature as a text-only action, never dropped', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    const secondWind = c.actions?.find((a) => a.name === 'Second Wind');
+    expect(secondWind).toBeDefined();
+    expect(secondWind?.spec).toBeUndefined();
+    expect(secondWind?.notes).toContain('Regain 1d10+5');
+  });
+
+  it('non-caster fighter gets empty spellSlots', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    expect(c.spellSlots).toEqual({});
+  });
+
+  it('summarizeDdbImport reports the text-only feature and the resolvable weapon attack', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    const summary = summarizeDdbImport(c);
+    expect(summary.spellSlotsImported).toBe(false);
+    expect(summary.spellsImported).toBe(0);
+    expect(summary.actionsImported).toBeGreaterThanOrEqual(2); // Longsword + Second Wind
+    expect(summary.textOnly).toContain('Second Wind');
+    expect(summary.textOnly).not.toContain('Longsword');
+  });
+
+  // Issue #1903 — spells / spell slots.
+  it('maps class + feat-granted spells into kind:"spell" actions with spec.uses.spellLevel set', () => {
+    const c = mapDdbCharacter(CASTER_DDB_CHARACTER);
+    const spells = c.actions?.filter((a) => a.kind === 'spell') ?? [];
+    const names = spells.map((s) => s.name).sort();
+    // Mage Armor is prepared:false -> excluded.
+    expect(names).toEqual(['Find Familiar', 'Fire Bolt', 'Magic Missile']);
+    const fireBolt = spells.find((s) => s.name === 'Fire Bolt');
+    expect(fireBolt?.spec?.uses.spellLevel).toBe(0); // cantrip
+    const magicMissile = spells.find((s) => s.name === 'Magic Missile');
+    expect(magicMissile?.spec?.uses.spellLevel).toBe(1);
+    const findFamiliar = spells.find((s) => s.name === 'Find Familiar');
+    expect(findFamiliar?.spec?.uses.spellLevel).toBe(1);
+    expect(findFamiliar?.notes).toContain('Ritual.');
+  });
+
+  it('computes wizard spell slots from the full-caster table by level (fallback table, issue #1903)', () => {
+    const c = mapDdbCharacter(CASTER_DDB_CHARACTER);
+    // Level 5 Wizard (full caster): PHB slots 4/3/2 at levels 1/2/3.
+    expect(c.spellSlots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 3, used: 0 },
+      '3': { max: 2, used: 0 },
+    });
+  });
+
+  it('computeSpellSlots merges half-caster and pact-magic multiclass progressions', () => {
+    // Level 6 Paladin (half caster -> effective 3) + level 3 Warlock (pact, own table).
+    const slots = computeSpellSlots([
+      { level: 6, definition: { name: 'Paladin' } },
+      { level: 3, definition: { name: 'Warlock' } },
+    ]);
+    // Effective full-caster level 3 -> 4 level-1 / 2 level-2 slots (PHB multiclass table),
+    // plus Warlock level 3 pact magic -> 2 level-2 slots, merged into the same level-2 pool.
+    expect(slots?.['1']).toEqual({ max: 4, used: 0 });
+    expect(slots?.['2']).toEqual({ max: 4, used: 0 });
+  });
+
+  it('computeSpellSlots returns {} for a non-caster class', () => {
+    expect(computeSpellSlots([{ level: 5, definition: { name: 'Fighter' } }])).toEqual({});
+    expect(computeSpellSlots(null)).toEqual({});
   });
 
   it('tolerates a sparse sheet without throwing', () => {
@@ -127,17 +211,24 @@ describe('D&D Beyond character import — endpoint (e2e)', () => {
       .set(player)
       .send({ ddbId: String(PUBLIC_DDB_CHARACTER_ID) });
     expect(res.status).toBe(201);
-    expect(res.body.name).toBe('Thornbeard Ironfist');
-    expect(res.body.species).toBe('Hill Dwarf');
-    expect(res.body.className).toBe('Fighter 3 / Rogue 2');
-    expect(res.body.level).toBe(5);
-    expect(res.body.stats).toEqual({ STR: 16, DEX: 12, CON: 16, INT: 10, WIS: 13, CHA: 8 });
-    expect(res.body.ac).toBe(18);
-    expect(res.body.hpMax).toBe(54);
-    expect(res.body.hpCurrent).toBe(47);
-    expect(res.body.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+    // Issue #1903: response is { character, summary }.
+    const { character, summary } = res.body;
+    expect(character.name).toBe('Thornbeard Ironfist');
+    expect(character.species).toBe('Hill Dwarf');
+    expect(character.className).toBe('Fighter 3 / Rogue 2');
+    expect(character.level).toBe(5);
+    expect(character.stats).toEqual({ STR: 16, DEX: 12, CON: 16, INT: 10, WIS: 13, CHA: 8 });
+    expect(character.ac).toBe(18);
+    expect(character.hpMax).toBe(54);
+    expect(character.hpCurrent).toBe(47);
+    expect(character.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
     // Owner is the importing player (normal create ownership rules).
-    expect(res.body.ownerUserId).toBe('dev:ddb-owner');
+    expect(character.ownerUserId).toBe('dev:ddb-owner');
+    // Attacks/actions landed on the created character (issue #1903).
+    expect(character.actions.some((a: { name: string; spec?: unknown }) => a.name === 'Longsword' && a.spec)).toBe(true);
+    expect(character.spellSlots).toEqual({});
+    expect(summary.actionsImported).toBeGreaterThanOrEqual(2);
+    expect(summary.textOnly).toContain('Second Wind');
 
     // It's a real persisted character.
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(player);
@@ -151,7 +242,23 @@ describe('D&D Beyond character import — endpoint (e2e)', () => {
       .set(player)
       .send({ url: `https://www.dndbeyond.com/characters/${PUBLIC_DDB_CHARACTER_ID}` });
     expect(res.status).toBe(201);
-    expect(res.body.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+    expect(res.body.character.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+  });
+
+  it('imports a caster sheet with spells and spell slots (issue #1903)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters/import-ddb`)
+      .set(player)
+      .send({ ddbId: String(CASTER_DDB_CHARACTER_ID) });
+    expect(res.status).toBe(201);
+    const { character, summary } = res.body;
+    expect(character.ddbId).toBe(String(CASTER_DDB_CHARACTER_ID));
+    expect(character.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 3, used: 0 }, '3': { max: 2, used: 0 } });
+    const spellNames = character.actions.filter((a: { kind: string }) => a.kind === 'spell').map((a: { name: string }) => a.name).sort();
+    expect(spellNames).toEqual(['Find Familiar', 'Fire Bolt', 'Magic Missile']);
+    expect(summary.spellsImported).toBe(3);
+    expect(summary.spellSlotsImported).toBe(true);
   });
 
   it('private sheet (403) -> clean 400 with a make-it-public hint', async () => {
@@ -332,7 +439,7 @@ describe('D&D Beyond import — system gate (issue #714)', () => {
       .send({ ddbId: String(PUBLIC_DDB_CHARACTER_ID) });
 
     expect(res.status).toBe(201);
-    expect(res.body.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+    expect(res.body.character.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
     // And in this case the fake WAS contacted — proves the counter is wired correctly and
     // the 0-assertions above aren't passing because the counter is broken.
     expect(fake.hitCount).toBe(1);

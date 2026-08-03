@@ -13,6 +13,16 @@
       "available": "{{available}} of {{max}} — {{name}} available",
       "count": "{{available}}/{{max}}",
       "updateError": "Couldn't update {{name}}."
+    },
+    "ddbImport": {
+      "summaryTitle": "Imported from D&D Beyond",
+      "actionsCount_one": "{{count}} attack/action imported",
+      "actionsCount_other": "{{count}} attacks/actions imported",
+      "spellsCount_one": "{{count}} spell imported",
+      "spellsCount_other": "{{count}} spells imported",
+      "spellSlotsSet": "Spell slots set from class and level.",
+      "textOnlyIntro": "These came in as text-only — check them on the sheet:",
+      "done": "Done"
     }
   }
 }

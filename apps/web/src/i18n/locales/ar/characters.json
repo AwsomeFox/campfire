@@ -13,6 +13,16 @@
       "available": "{{available}} من {{max}} — {{name}} متاح",
       "count": "{{available}}/{{max}}",
       "updateError": "تعذّر تحديث {{name}}."
+    },
+    "ddbImport": {
+      "summaryTitle": "تم الاستيراد من D&D Beyond",
+      "actionsCount_one": "تم استيراد هجوم/إجراء واحد",
+      "actionsCount_other": "تم استيراد {{count}} من الهجمات/الإجراءات",
+      "spellsCount_one": "تم استيراد تعويذة واحدة",
+      "spellsCount_other": "تم استيراد {{count}} من التعويذات",
+      "spellSlotsSet": "تم تعيين خانات التعويذات حسب الفئة والمستوى.",
+      "textOnlyIntro": "وردت هذه العناصر كنص فقط — راجعها في ورقة الشخصية:",
+      "done": "تم"
     }
   }
 }
