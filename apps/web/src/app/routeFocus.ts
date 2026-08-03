@@ -193,13 +193,29 @@ export type FocusMainOptions = {
  *
  * A window this long is only safe because of the user-takeover tracking below: the
  * observer never moves focus once the user has interacted (a focus change, a click,
- * or a non-focus-moving key), so an extended window only ever acts on a page the user
- * has genuinely not touched yet — which is exactly when moving focus to the heading is
- * correct. The hard teardown at the end of the window is unconditional either way, so
- * a route that never renders an h1 still stops observing once the window closes
- * (review findings: Devin, Copilot on routeFocus.ts).
+ * a scroll, or a non-focus-moving key), so an extended window only ever acts on a page
+ * the user has genuinely not touched yet — which is exactly when moving focus to the
+ * heading is correct. The hard teardown at the end of the window is unconditional
+ * either way, so a route that never renders an h1 still stops observing once the
+ * window closes (review findings: Devin, Copilot on routeFocus.ts).
  */
 export const FALLBACK_UPGRADE_GRACE_MS = API_READ_BUDGET.overallMs;
+
+/**
+ * Absolute ceiling on the recovery window, measured from the moment the fallback first
+ * settles. `FALLBACK_UPGRADE_GRACE_MS` alone assumes the read starts at roughly the same
+ * moment the fallback settles, but a route's component can itself be code-split
+ * (`lazyPage` in router.tsx): on a cold navigation the chunk download has to finish before
+ * the component mounts and issues its request at all, so a successful read can legitimately
+ * finish *after* one read-budget's worth of wall-clock time has passed since navigation
+ * (review finding: P2 codex — chunk load + read can compound past the base window). Each
+ * still-headless mutation nudges the deadline forward by another `FALLBACK_UPGRADE_GRACE_MS`
+ * (see `armFallbackGraceTimer`), which absorbs that pre-request delay without inventing a
+ * separate, ungrounded "chunk load budget" constant — but that nudging is itself capped here
+ * at twice the base budget, so a route with unrelated recurring DOM churn still cannot keep
+ * the observer alive indefinitely; it is bounded, just by a longer, still-derived bound.
+ */
+export const FALLBACK_UPGRADE_MAX_MS = FALLBACK_UPGRADE_GRACE_MS * 2;
 
 /**
  * Focus the main destination (h1 or main) without scrolling the viewport.
@@ -224,6 +240,9 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   // while the fallback focus has not itself been overtaken by the user.
   let settledOnMainFallback = false;
   let fallbackGraceTimeout = 0;
+  // Absolute deadline (Date.now()-based) beyond which the recovery window never extends,
+  // regardless of continued mutation activity — see `FALLBACK_UPGRADE_MAX_MS`.
+  let fallbackWatchDeadlineAt = 0;
   // Guards the fallback-recovery `focusin` listener against the focus calls this closure
   // makes on its own behalf, so only genuine user-driven focus changes are treated as
   // "the user took over" (review finding: P2 codex on routeFocus.ts — a skip-link
@@ -283,6 +302,11 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     document.addEventListener('focusin', handleUserTookOver, true);
     document.addEventListener('pointerdown', handleUserTookOver, true);
     document.addEventListener('keydown', handleUserKeydown, true);
+    // Mouse-wheel/trackpad scrolling moves neither DOM focus nor the pointer down, and
+    // fires no listed key — but it is just as much the user interacting with the page as a
+    // click or an arrow key (review finding: P2 codex). `passive: true` since this listener
+    // never calls preventDefault and must not block the scroll it is observing.
+    document.addEventListener('wheel', handleUserTookOver, { capture: true, passive: true });
   };
 
   const removeFallbackWatchListeners = () => {
@@ -291,6 +315,16 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     document.removeEventListener('focusin', handleUserTookOver, true);
     document.removeEventListener('pointerdown', handleUserTookOver, true);
     document.removeEventListener('keydown', handleUserKeydown, true);
+    document.removeEventListener('wheel', handleUserTookOver, true);
+  };
+
+  // (Re)arms the grace timer for `FALLBACK_UPGRADE_GRACE_MS` from now, never past the
+  // absolute `fallbackWatchDeadlineAt` ceiling.
+  const armFallbackGraceTimer = () => {
+    if (fallbackGraceTimeout) window.clearTimeout(fallbackGraceTimeout);
+    const remaining = Math.max(0, fallbackWatchDeadlineAt - Date.now());
+    const wait = Math.min(FALLBACK_UPGRADE_GRACE_MS, remaining);
+    fallbackGraceTimeout = window.setTimeout(teardownFallbackWatch, wait);
   };
 
   // Ends the late-h1 recovery window: stops watching for a heading, and stops listening for
@@ -344,10 +378,11 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     }
     // A fallback settle keeps the observer alive so a real h1 that arrives shortly afterward
     // can still take over focus — but only for a bounded grace window (see
-    // `FALLBACK_UPGRADE_GRACE_MS`), and only until the user acts on the page themselves (see
-    // `handleUserTookOver`). Either one ends the recovery window early.
+    // `FALLBACK_UPGRADE_GRACE_MS`/`FALLBACK_UPGRADE_MAX_MS`), and only until the user acts on
+    // the page themselves (see `handleUserTookOver`). Either one ends the recovery window early.
     installFallbackWatchListeners();
-    fallbackGraceTimeout = window.setTimeout(teardownFallbackWatch, FALLBACK_UPGRADE_GRACE_MS);
+    fallbackWatchDeadlineAt = Date.now() + FALLBACK_UPGRADE_MAX_MS;
+    armFallbackGraceTimer();
   };
 
   const tryFocusHeading = (): boolean => {
@@ -376,7 +411,18 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
       return true;
     }
     const h1 = main.querySelector('h1');
-    if (!(h1 instanceof HTMLElement)) return false;
+    if (!(h1 instanceof HTMLElement)) {
+      // Still headless, but something inside `<main>` just changed — e.g. a code-split
+      // route's chunk finally arriving and swapping the Suspense skeleton for its own
+      // (still loading) content. That is a sign of continued, legitimate loading activity
+      // rather than of the page having gone quiet, so push the deadline out another grace
+      // window, up to the absolute `fallbackWatchDeadlineAt` ceiling (review finding: P2
+      // codex — a slow chunk load ahead of the read can otherwise outlast a flat, one-shot
+      // window). A route with unrelated recurring churn and no h1 is still bounded by that
+      // same ceiling, just not by the base window alone.
+      armFallbackGraceTimer();
+      return false;
+    }
     if (!moveFocus) {
       teardownFallbackWatch();
       return true;
