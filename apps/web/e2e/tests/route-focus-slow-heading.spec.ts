@@ -21,9 +21,10 @@ import { FALLBACK_UPGRADE_GRACE_MS, MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../
  *
  * A permanently-live recovery window has its own problems (see PR #1957 review), so
  * `focusMainDestination` bounds it to `FALLBACK_UPGRADE_GRACE_MS` and cancels it the moment
- * the user acts (a skip-link activation, a click, or a tab) rather than leaving focus
- * perpetually up for grabs. The two tests below cover those two edges: a late heading must
- * never claw focus back from a user who already moved on, and a heading arriving after the
+ * the user acts (a skip-link activation, a click, a tab, or a non-focus-moving key like an
+ * arrow or PageDown) rather than leaving focus perpetually up for grabs. The tests below
+ * cover those edges: a late heading must never claw focus back from a user who already moved
+ * on — whether or not that action itself moved DOM focus — and a heading arriving after the
  * grace window must not claw focus away either (bounding the watcher's lifetime the same way
  * a route that never renders an h1 at all would).
  */
@@ -103,6 +104,50 @@ test('a late heading does not claw focus back from a user who already activated 
   // Give the (buggy, pre-fix) late-upgrade path the two animation frames it schedules itself
   // on — mirroring `focusMainDestination`'s own `scheduleFrame` — rather than an arbitrary
   // sleep, then confirm focus is still exactly where the user put it.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(main).toBeFocused();
+});
+
+test('a late heading does not claw focus away after a non-focus-moving key press (#591)', async ({ page }) => {
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  // The fallback settles on <main> first, same as the tests above.
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Arrow keys typically just scroll the page — DOM focus never moves off <main> — which is
+  // exactly the gap a focus-change-only listener cannot see (PR #1957 review, P2 codex
+  // finding): `document.activeElement` still reads as `main`, so a plain equality check would
+  // let the late h1 steal focus even though the user has clearly moved on.
+  await expect(main).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(main).toBeFocused();
+
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
   await page.evaluate(
     () =>
       new Promise<void>((resolve) => {

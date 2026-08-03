@@ -237,11 +237,36 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     teardownFallbackWatch();
   };
 
+  // Keys that a keyboard user presses to interact with the current landmark without ever
+  // moving DOM focus off it (scrolling, paging, activating a non-link control) — none of
+  // these reach `handleUserTookOver` via `focusin`, so `document.activeElement` would still
+  // read as `main` when the late h1 arrives (review finding: P2 codex). `Tab`/`Shift+Tab`
+  // are deliberately excluded: they DO move focus and are already covered by the `focusin`
+  // listener above, so treating them here too would be redundant, not incorrect.
+  const FALLBACK_TAKEOVER_KEYS = new Set([
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'PageUp',
+    'PageDown',
+    'Home',
+    'End',
+    ' ',
+    'Spacebar',
+  ]);
+
+  const handleUserKeydown = (event: KeyboardEvent) => {
+    if (!FALLBACK_TAKEOVER_KEYS.has(event.key)) return;
+    teardownFallbackWatch();
+  };
+
   const installFallbackWatchListeners = () => {
     if (fallbackListenersInstalled) return;
     fallbackListenersInstalled = true;
     document.addEventListener('focusin', handleUserTookOver, true);
     document.addEventListener('pointerdown', handleUserTookOver, true);
+    document.addEventListener('keydown', handleUserKeydown, true);
   };
 
   const removeFallbackWatchListeners = () => {
@@ -249,6 +274,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     fallbackListenersInstalled = false;
     document.removeEventListener('focusin', handleUserTookOver, true);
     document.removeEventListener('pointerdown', handleUserTookOver, true);
+    document.removeEventListener('keydown', handleUserKeydown, true);
   };
 
   // Ends the late-h1 recovery window: stops watching for a heading, and stops listening for
