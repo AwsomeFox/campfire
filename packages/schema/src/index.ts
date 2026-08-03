@@ -745,6 +745,7 @@ export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
 });
+export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
 /**
  * Spend, restore, or configure one bounded character resource (issue #422/#1578) —
  * `hitDice`/`rage`/`kiPoints` under 5e, `focusPoints` under PF2e, or a custom pool the

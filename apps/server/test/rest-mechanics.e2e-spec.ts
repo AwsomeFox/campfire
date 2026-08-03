@@ -113,6 +113,43 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(combatant.hpCurrent).toBe(40);
   });
 
+  it('#1902: POST /characters/:id/rest mirrors the restored HP into a running combatant immediately — no acknowledgement step, no stale write-back on End', async () => {
+    // This is the direct single-character rest endpoint the in-encounter
+    // ResourceTrackerPanel calls (issue #1902), as opposed to the DM's bulk
+    // preview/apply party-recovery flow exercised by the test above. A PR review
+    // (devin-ai-integration) flagged that resting mid-combat "is applied only to the
+    // character sheet" and gets silently overwritten when the encounter later ends.
+    // That is not what the code does: `CharactersService.rest()` delegates short/long
+    // rests to `restParty()`, which calls `syncActiveCombatants()` for every character
+    // in the plan straight after the sheet write commits — unconditionally, with no
+    // acknowledgement gate (that gate is specific to the bulk party-recovery preview/
+    // apply flow above). This test pins that behaviour for the single-character path so
+    // a future change cannot silently reintroduce the stale-HP defect the review
+    // described.
+    const id = await batteredCharacter('Solo combat rest', { hpCurrent: 5, hpMax: 40 });
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Solo running rest', status: 'running', createdAt: now, updatedAt: now }).returning();
+    const [combatant] = await db
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Solo combat rest', hpCurrent: 5, hpMax: 40 })
+      .returning();
+
+    const res = await request(server).post(`/api/v1/characters/${id}/rest`).set(dm).send({ type: 'long' });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(40);
+
+    const [mirrored] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(mirrored.hpCurrent).toBe(40);
+
+    // Ending the encounter writes the combatant's HP back to the sheet — with the
+    // combatant already carrying the rested value, that write-back is a no-op for HP,
+    // not a silent revert of the healing the rest just applied.
+    const endRes = await request(server).post(`/api/v1/encounters/${encounter.id}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+    const [afterEnd] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    expect(afterEnd.hpCurrent).toBe(40);
+  });
+
   it('replays an undo key and refuses a different key or later sheet edit', async () => {
     const id = await batteredCharacter('Undo replay');
     const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');

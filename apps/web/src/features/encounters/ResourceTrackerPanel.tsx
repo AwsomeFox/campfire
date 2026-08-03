@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { Character, Combatant, CharacterResource, SpellSlotLevel } from '@campfire/schema';
+import { ruleSystemAdapter, restOptionsForAdapter } from '@campfire/schema';
+import type { Character, Combatant, CharacterResource, RestOptionDef, SpellSlotLevel } from '@campfire/schema';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 import { api, API, translateApiError } from '../../lib/api';
-import { invalidateEncounter, invalidateCampaignCharacters } from '../../lib/query';
+import { invalidateEncounter, invalidateCampaignCharacters, queryKeys } from '../../lib/query';
+import { useCampaign } from '../../app/CampaignContext';
 import {
   restRequestBody,
   resourcePatchBody,
@@ -67,13 +70,21 @@ export function ResourceTrackerPanel({
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
+  // Issue #1902 rework: the campaign's rule-system adapter drives which rests are on
+  // offer, exactly like CharacterPage's RestControls — a Starfinder table gets its
+  // stamina/night cadence instead of a generic short/long rest that restores no SP and
+  // spends no RP.
+  const campaign = useCampaign(campaignId);
+  const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+  const restOptions = restOptionsForAdapter(adapter);
+
   const invalidate = () => {
     invalidateEncounter(queryClient, encounterId);
     if (campaignId != null) invalidateCampaignCharacters(queryClient, campaignId);
   };
 
   const restMutation = useMutation({
-    mutationFn: async ({ characterId, kind }: { characterId: number; kind: 'short' | 'long' }) =>
+    mutationFn: async ({ characterId, kind }: { characterId: number; kind: RestOptionDef['type'] }) =>
       api.post(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
     onSuccess: () => {
       setError(null);
@@ -109,9 +120,22 @@ export function ResourceTrackerPanel({
       level: number;
       currentUsed: number;
       used: number;
-    }) => api.post(`${API}/characters/${characterId}/spell-slots`, spellSlotPatchBody(level, currentUsed, used)),
-    onSuccess: () => {
+    }) =>
+      api.post<Character>(`${API}/characters/${characterId}/spell-slots`, spellSlotPatchBody(level, currentUsed, used)),
+    // Issue #1902 rework: `spellSlotPatchBody` sends a DELTA relative to the `used` value
+    // rendered on screen. If we waited for `invalidate()`'s background refetch to land
+    // before trusting `slot.used` again, a second click in that window would compute its
+    // delta against the stale pre-write value and over/under-shoot the server's true
+    // count. The POST response IS the fresh character (server-authoritative `spellSlots`),
+    // so write it into the cache synchronously, before the query has any chance to be read
+    // again — this closes the race without a debounce or a second round-trip.
+    onSuccess: (updated) => {
       setError(null);
+      if (campaignId != null) {
+        queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
+          old?.map((c) => (c.id === updated.id ? updated : c)),
+        );
+      }
       invalidate();
     },
     onError: (err) => {
@@ -121,14 +145,25 @@ export function ResourceTrackerPanel({
   });
 
   const statblockMutation = useMutation({
-    mutationFn: async ({ combatantId, statblock }: { combatantId: number; statblock: Record<string, unknown> }) =>
-      api.patch(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
+    mutationFn: async ({
+      combatantId,
+      statblock,
+    }: {
+      combatantId: number;
+      statblock: Record<string, unknown>;
+      // Issue #1902 rework: this one mutation backs both statblock resource pips and
+      // statblock spell-slot pips. `kind` lets `onError` pick the fallback message that
+      // matches which control actually failed, instead of always reporting "resource".
+      kind: 'resource' | 'slot';
+    }) => api.patch(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
     onSuccess: () => {
       setError(null);
       invalidate();
     },
-    onError: (err) => {
-      setError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
+    onError: (err, variables) => {
+      const fallbackKey =
+        variables.kind === 'slot' ? 'encounters.resourceTracker.updateSlotError' : 'encounters.resourceTracker.updateResourceError';
+      setError(translateApiError(err, t, { fallbackKey }));
       invalidate();
     },
   });
@@ -173,9 +208,9 @@ export function ResourceTrackerPanel({
       <div className="flex items-center justify-between">
         <h3 className="font-semibold text-lg">{t('encounters.resourceTracker.title', { defaultValue: 'Resource Tracker' })}</h3>
         {canDmWrite && campaignId != null && (
-          <a href={`/c/${campaignId}/party`} className="text-xs font-medium underline opacity-80 hover:opacity-100" data-testid="resource-tracker-party-rest-link">
+          <Link to={`/c/${campaignId}/party`} className="text-xs font-medium underline opacity-80 hover:opacity-100" data-testid="resource-tracker-party-rest-link">
             {t('encounters.resourceTracker.partyRest', { defaultValue: 'Party Rest' })} →
-          </a>
+          </Link>
         )}
       </div>
 
@@ -188,30 +223,22 @@ export function ResourceTrackerPanel({
           <div key={c.id} className="border-t pt-2 mt-2 first:mt-0 first:border-0 first:pt-0">
             <div className="flex items-center justify-between mb-2 gap-2">
               <div className="font-medium">{name}</div>
-              {canEdit && c.kind === 'character' && c.characterId != null && (
+              {canEdit && c.kind === 'character' && c.characterId != null && restOptions.length > 0 && (
                 <div className="flex gap-2">
-                  <Btn
-                    density="compact"
-                    disabled={isPending}
-                    onClick={() => {
-                      const kindLabel = t('encounters.resourceTracker.shortRest', { defaultValue: 'Short Rest' });
-                      if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: kindLabel, defaultValue: `${kindLabel} for ${name}?` }))) return;
-                      restMutation.mutate({ characterId: c.characterId as number, kind: 'short' });
-                    }}
-                  >
-                    {t('encounters.resourceTracker.shortRest', { defaultValue: 'Short Rest' })}
-                  </Btn>
-                  <Btn
-                    density="compact"
-                    disabled={isPending}
-                    onClick={() => {
-                      const kindLabel = t('encounters.resourceTracker.longRest', { defaultValue: 'Long Rest' });
-                      if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: kindLabel, defaultValue: `${kindLabel} for ${name}?` }))) return;
-                      restMutation.mutate({ characterId: c.characterId as number, kind: 'long' });
-                    }}
-                  >
-                    {t('encounters.resourceTracker.longRest', { defaultValue: 'Long Rest' })}
-                  </Btn>
+                  {restOptions.map((opt) => (
+                    <Btn
+                      key={opt.type}
+                      density="compact"
+                      disabled={isPending}
+                      title={opt.description}
+                      onClick={() => {
+                        if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: opt.label, defaultValue: `${opt.label} for ${name}?` }))) return;
+                        restMutation.mutate({ characterId: c.characterId as number, kind: opt.type });
+                      }}
+                    >
+                      {opt.label}
+                    </Btn>
+                  ))}
                 </div>
               )}
             </div>
@@ -242,6 +269,7 @@ export function ResourceTrackerPanel({
                             statblockMutation.mutate({
                               combatantId: c.id,
                               statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } },
+                              kind: 'resource',
                             });
                           }
                         }}
@@ -271,6 +299,7 @@ export function ResourceTrackerPanel({
                           statblockMutation.mutate({
                             combatantId: c.id,
                             statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } },
+                            kind: 'slot',
                           });
                         }
                       }}

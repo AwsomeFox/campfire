@@ -2,32 +2,44 @@
  * Pure helpers for {@link ResourceTrackerPanel} (issue #1902), split out so the request
  * bodies and the gating matrix can be unit-tested without rendering the component.
  */
+import type { ResourcePatch, RestOptionDef, SpellSlotPatch } from '@campfire/schema';
 
-/** Body for `POST /characters/:id/rest` — mirrors `RestPatch` in characters.dto.ts. */
-export function restRequestBody(kind: 'short' | 'long'): { type: 'short' | 'long' } {
+/**
+ * Body for `POST /characters/:id/rest`. `kind` is `RestOptionDef['type']` — the same
+ * `'short' | 'long' | 'stamina' | 'night'` union the server's `RestPatch` DTO accepts —
+ * rather than a locally-invented `'short' | 'long'` literal, so a caller driven by
+ * `restOptionsForAdapter` (Starfinder's `stamina`/`night` cadence included) type-checks
+ * without a cast. `RestPatch` itself is server-only (not re-exported from
+ * `@campfire/schema`, unlike `ResourcePatch`/`SpellSlotPatch`), so `RestOptionDef['type']`
+ * is the closest shared source of truth for this shape.
+ */
+export function restRequestBody(kind: RestOptionDef['type']): { type: RestOptionDef['type'] } {
   return { type: kind };
 }
 
 /**
  * Body for `POST /characters/:id/resources` — `ResourcePatch.strict()` is flat
  * (`{ key, used?, ... }`), NOT `{ [key]: { used, max } }`. Sending the nested shape is a
- * guaranteed 400 (issue #1902's root defect).
+ * guaranteed 400 (issue #1902's root defect). Typed against the shared `ResourcePatch`
+ * contract (rather than a locally re-declared `{ key, used }` shape) so a future change to
+ * that contract's field names surfaces here as a type error instead of a silent 400 at
+ * runtime — the schema-source-of-truth rule AGENTS.md documents.
  */
-export function resourcePatchBody(key: string, nextUsed: number): { key: string; used: number } {
-  return { key, used: nextUsed };
+export function resourcePatchBody(key: string, nextUsed: number): Pick<ResourcePatch, 'key' | 'used'> {
+  const body: Pick<ResourcePatch, 'key' | 'used'> = { key, used: nextUsed };
+  return body;
 }
 
 /**
  * Body for `POST /characters/:id/spell-slots` — `SpellSlotPatch.strict()` is
  * `{ level, delta }`, not `{ [level]: { used, max } }`. `delta` is relative to the
  * slot's current `used`, so the panel (which only knows the target `used`) must convert.
+ * Typed against the shared `SpellSlotPatch` contract for the same reason as
+ * {@link resourcePatchBody}.
  */
-export function spellSlotPatchBody(
-  level: number,
-  currentUsed: number,
-  nextUsed: number,
-): { level: number; delta: number } {
-  return { level, delta: nextUsed - currentUsed };
+export function spellSlotPatchBody(level: number, currentUsed: number, nextUsed: number): SpellSlotPatch {
+  const body: SpellSlotPatch = { level, delta: nextUsed - currentUsed };
+  return body;
 }
 
 /**

@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
+import { ruleSystemAdapter, restOptionsForAdapter } from '@campfire/schema';
 import {
   canEditCharacterResource,
   hasTrackedResources,
@@ -20,6 +21,19 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('restRequestBody posts { type } for short and long rest — the real RestPatch shape', () => {
     expect(restRequestBody('short')).toEqual({ type: 'short' });
     expect(restRequestBody('long')).toEqual({ type: 'long' });
+  });
+
+  // Rework finding B (codex P1): a Starfinder campaign's adapter declares stamina/night
+  // rests, not short/long — restRequestBody must accept whatever restOptionsForAdapter
+  // hands it, not just the generic 5e-shaped pair.
+  test('restRequestBody accepts every type restOptionsForAdapter can hand it, generic and Starfinder alike', () => {
+    const generic = restOptionsForAdapter(ruleSystemAdapter('dnd5e'));
+    expect(generic.map((o) => o.type)).toEqual(['short', 'long']);
+    for (const opt of generic) expect(restRequestBody(opt.type)).toEqual({ type: opt.type });
+
+    const starfinder = restOptionsForAdapter(ruleSystemAdapter('starfinder-1e'));
+    expect(starfinder.map((o) => o.type)).toEqual(['stamina', 'night']);
+    for (const opt of starfinder) expect(restRequestBody(opt.type)).toEqual({ type: opt.type });
   });
 
   test('resourcePatchBody sends the flat ResourcePatch shape, not { [key]: {...} }', () => {
@@ -78,5 +92,46 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel gates rest/pip controls on canEditCharacterResource, not canDmWrite alone', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/canEditCharacterResource/);
+  });
+
+  // Rework finding B (codex P1): rest buttons must be driven by the campaign's adapter,
+  // not a hardcoded short/long pair — mirrors CharacterPage's RestControls pattern.
+  test('ResourceTrackerPanel resolves the campaign adapter and renders restOptionsForAdapter, not a hardcoded short/long pair', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/ruleSystemAdapter/);
+    expect(src).toMatch(/restOptionsForAdapter/);
+    expect(src).toMatch(/useCampaign/);
+    // No more hardcoded `kind: 'short'` / `kind: 'long'` mutate() call sites.
+    expect(src).not.toMatch(/kind: 'short'/);
+    expect(src).not.toMatch(/kind: 'long'/);
+  });
+
+  // Rework finding C (codex P1 + devin, independently): a spell-slot pip sends a DELTA
+  // relative to the rendered `used`. The fix reconciles the query cache from the
+  // mutation's response instead of waiting on the fire-and-forget invalidate() refetch,
+  // so a click right after settle computes its delta against server-fresh state.
+  test('ResourceTrackerPanel reconciles spell-slot cache from the mutation response before invalidating', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/api\.post<Character>\(`\$\{API\}\/characters\/\$\{characterId\}\/spell-slots`/);
+    expect(src).toMatch(/queryClient\.setQueryData<Character\[\]>\(queryKeys\.campaignCharacters/);
+  });
+
+  // Rework finding E (copilot): statblockMutation backs both resource and spell-slot
+  // writes for statblock-only combatants; onError must not always blame "resource".
+  test('ResourceTrackerPanel picks the slot vs resource error key by mutation kind, not a single hardcoded fallback', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/variables\.kind === 'slot'/);
+    expect(src).toMatch(/kind: 'resource'/);
+    expect(src).toMatch(/kind: 'slot'/);
+  });
+
+  // Rework finding F (copilot + devin, independently): the Party Rest shortcut must be an
+  // in-app React Router navigation, not a raw anchor that full-reloads and drops live
+  // encounter/SSE state (and breaks under a router basename).
+  test('ResourceTrackerPanel\'s Party Rest control is a React Router Link, not a raw anchor', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/import \{ Link \} from 'react-router-dom'/);
+    expect(src).toMatch(/<Link to=\{`\/c\/\$\{campaignId\}\/party`\}/);
+    expect(src).not.toMatch(/<a href=\{`\/c\/\$\{campaignId\}\/party`\}/);
   });
 });
