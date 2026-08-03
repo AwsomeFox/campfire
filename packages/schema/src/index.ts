@@ -749,6 +749,10 @@ export function isKnownCondition(vocab: readonly string[], name: string): boolea
  * 409 instead of a silently-misapplied delta if another client changed the sheet (this
  * slot or otherwise) in between. Omitted => unconditional write, matching every other
  * caller of this contract (AI DM/MCP tools included) exactly as before.
+ *
+ * {@link ResourcePatch} carries the identical guard for the sibling resource contract
+ * (issue #1902 rework, round 24) — the two are separate hand-written shapes, not one
+ * merged type, but the same rule.
  */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -768,6 +772,13 @@ export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
  * resource's current `used`, `used` sets it absolutely; the service applies `used` first
  * when both are sent, then `delta`. Spending past 0 or restoring past `max` is a 400, not
  * a clamp (see `CharactersService.adjustResource`'s own doc comment for why).
+ *
+ * `expectedUpdatedAt` is the same optimistic-concurrency guard as {@link SpellSlotPatch}'s
+ * own field (issue #1902 rework, round 24): an absolute `used` is a full overwrite, not a
+ * delta, so a caller that read `used` from a stale render and echoes back the character's
+ * `updatedAt` at that moment gets a 409 instead of silently undoing a concurrent spend/rest
+ * from another tab, a REST client, or an MCP caller. Omitted => unconditional write,
+ * matching every other caller of this contract exactly as before.
  */
 export const ResourcePatch = z.object({
   key: z.string().min(1).max(80),
@@ -777,6 +788,7 @@ export const ResourcePatch = z.object({
   name: z.string().min(1).max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
   source: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([

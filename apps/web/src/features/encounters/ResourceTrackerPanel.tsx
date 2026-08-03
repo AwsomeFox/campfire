@@ -309,8 +309,19 @@ export function ResourceTrackerPanel({
   });
 
   const resourceMutation = useMutation({
-    mutationFn: async ({ characterId, key, used }: { characterId: number; key: string; used: number }) =>
-      api.post<Character>(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used)),
+    mutationFn: async ({
+      characterId,
+      key,
+      used,
+      expectedUpdatedAt,
+    }: {
+      characterId: number;
+      key: string;
+      used: number;
+      // `string | undefined` (issue #1902 rework, round 24), matching `slotMutation`'s own
+      // `expectedUpdatedAt` parameter and `resourcePatchBody`'s doc comment.
+      expectedUpdatedAt: string | undefined;
+    }) => api.post<Character>(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used, expectedUpdatedAt)),
     onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
     onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ characterId: vars.characterId }), error),
     onSuccess: (updated, vars) => {
@@ -539,7 +550,11 @@ export function ResourceTrackerPanel({
                         onChange={(val) => {
                           if (!canEdit) return;
                           if (c.kind === 'character' && c.characterId) {
-                            resourceMutation.mutate({ characterId: c.characterId, key, used: val });
+                            // Issue #1902 rework (round 24, codex P1): forward the sheet's
+                            // last-read `updatedAt`, exactly like the spell-slot pip below —
+                            // see `resourcePatchBody`'s doc comment for why an absolute
+                            // `used` needs this guard even more than a relative delta does.
+                            resourceMutation.mutate({ characterId: c.characterId, key, used: val, expectedUpdatedAt: updatedAt });
                           } else if (c.statblock) {
                             const sb = c.statblock as unknown as Record<string, unknown>;
                             statblockMutation.mutate({

@@ -200,6 +200,83 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
   });
 
   /**
+   * Issue #1902 rework, round 24 (codex P1) — `adjustResource`'s `ResourcePatch` had NO
+   * `expectedUpdatedAt` at all, unlike its sibling `patchSpellSlots` above. This is worse
+   * than a plain missing-guard gap: `used` is an ABSOLUTE overwrite (not a delta), and
+   * `adjustResource` builds its next `resources` object by spreading `current` (read fresh
+   * INSIDE its own transaction) and then setting `used` to whatever the caller sent. A
+   * caller that rendered `used: 0` and asks for `used: 1` (its own "spend one") silently
+   * REPLACES a concurrent writer's `used: 1` (their own spend) with `1` again — the
+   * concurrent writer's change is not merely raced against, it disappears without a trace,
+   * because both callers happen to compute the identical target value from their own
+   * stale view. `expectedUpdatedAt` closes this exactly like `patchSpellSlots`'s own guard:
+   * a caller holding a stale token gets 409 STALE_WRITE instead of a silent overwrite.
+   */
+  function seedResource(orm: ReturnType<typeof build>['orm'], max: number): number {
+    const ts = '2026-07-27T00:00:00.000Z';
+    orm.insert(campaigns).values({ name: 'Resources', createdAt: ts, updatedAt: ts }).run();
+    const [row] = orm
+      .insert(characters)
+      .values({
+        campaignId: 1,
+        name: 'Barbarian',
+        resources: JSON.stringify({ rage: { max, used: 0, name: 'Rage', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    return row.id;
+  }
+
+  function usedResource(orm: ReturnType<typeof build>['orm'], id: number): number {
+    const [row] = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+    return fromJsonText<Record<string, { max: number; used: number }>>(row.resources, {})['rage']?.used ?? 0;
+  }
+
+  it('#1902 rework (round 24): expectedUpdatedAt rejects a resource write whose token is stale, instead of silently undoing a concurrent spend', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seedResource(orm, 3);
+    const staleToken = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0].updatedAt;
+
+    // A concurrent actor spends a rage charge — used: 0 -> 1 — and the character row's
+    // `updatedAt` moves. `staleToken` above is now stale.
+    await service.adjustResource(id, { key: 'rage', used: 1 }, dmUser, 'dm');
+    expect(usedResource(orm, id)).toBe(1);
+
+    // A caller who rendered BEFORE that write (and so still believes `used` is 0) tries to
+    // set it to what it believes is the first spend: `used: 1`. Without the CAS check this
+    // absolute overwrite would land on the fresh row and LOOK like a no-op (both compute
+    // `used: 1`) while actually discarding the other writer's spend — the same charge would
+    // be usable again even though two people believe they each spent one.
+    let caught: { status?: number; response?: { code?: string } } | undefined;
+    try {
+      await service.adjustResource(id, { key: 'rage', used: 1, expectedUpdatedAt: staleToken }, dmUser, 'dm');
+    } catch (err) {
+      caught = err as typeof caught;
+    }
+    expect(caught?.status).toBe(409);
+    expect(caught?.response?.code).toBe('STALE_WRITE');
+    expect(usedResource(orm, id)).toBe(1);
+  });
+
+  it('#1902 rework (round 24): a resource write with a fresh expectedUpdatedAt succeeds, and omitting it stays unconditional', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seedResource(orm, 3);
+    const freshToken = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0].updatedAt;
+
+    await service.adjustResource(id, { key: 'rage', used: 1, expectedUpdatedAt: freshToken }, dmUser, 'dm');
+    expect(usedResource(orm, id)).toBe(1);
+
+    // Omitted => unconditional write, exactly like every other existing caller of this
+    // contract (AI DM/MCP tools included) that never opts into the CAS token.
+    await service.adjustResource(id, { key: 'rage', used: 2 }, dmUser, 'dm');
+    expect(usedResource(orm, id)).toBe(2);
+  });
+
+  /**
    * Issue #1902 rework, round 6 — the LOAD-BEARING fix this round, and per its own
    * review comment "invisible in normal use and will regress silently" if left
    * uncovered. `patchSpellSlots` used to stamp its write with `nowIso()`

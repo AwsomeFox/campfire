@@ -1936,6 +1936,13 @@ export class CharactersService {
    *
    * A SQL-side `json_set` delta was the alternative. It was rejected because it cannot express
    * "fail when insufficient" in one statement — it would have to clamp, which is the bug.
+   *
+   * `expectedUpdatedAt` below is the SAME optimistic-concurrency guard {@link adjustResource}
+   * carries for its `used` field (issue #1902 rework, round 24) — the two methods are
+   * separate, hand-written implementations (different columns, different decision logic:
+   * a per-level slot budget here vs. a keyed max/used/name/recharge/source map there), not
+   * one shared guarded path, but they follow the identical CAS pattern: re-read fresh inside
+   * the transaction, `assertNotStale` against THAT read, then `nextUpdatedAt` the write.
    */
   async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
@@ -2047,6 +2054,16 @@ export class CharactersService {
     const row = this.db.transaction((tx) => {
       const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
       if (!fresh) throw new NotFoundException(`Character ${id} not found`);
+      // Issue #1902 rework (round 24, codex P1): the SAME guard `patchSpellSlots` has always
+      // had — see its own doc comment just above. An absolute `used` here is a full
+      // OVERWRITE, not a relative delta; without this, a concurrent spend or rest from
+      // another tab, a REST client, or an MCP caller between this caller's read and this
+      // write is silently undone the instant this write lands, because the resource object
+      // this method builds below is derived from `fresh` and then unconditionally replaces
+      // whatever is on the row — checked against the tx-scoped re-read (`fresh`), not the
+      // pre-transaction `existing`, for the identical reason `patchSpellSlots` validates
+      // against its own tx-scoped `fresh`.
+      this.revisions.assertNotStale(fresh, patch.expectedUpdatedAt);
 
       // Issue #1902 rework: typed against the shared `CharacterResource` contract (which
       // also carries `source`), not a narrower server-local record missing it — the

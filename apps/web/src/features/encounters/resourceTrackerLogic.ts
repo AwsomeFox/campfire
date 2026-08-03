@@ -24,9 +24,22 @@ export function restRequestBody(kind: RestOptionDef['type']): { type: RestOption
  * contract (rather than a locally re-declared `{ key, used }` shape) so a future change to
  * that contract's field names surfaces here as a type error instead of a silent 400 at
  * runtime — the schema-source-of-truth rule AGENTS.md documents.
+ *
+ * `expectedUpdatedAt` (issue #1902 rework, round 24, codex P1) protects this write for the
+ * SAME reason {@link spellSlotPatchBody} carries it, more acutely: `used` here is an
+ * ABSOLUTE overwrite, not a delta, so without a revision guard a concurrent spend/rest from
+ * another tab, a REST client, or an MCP caller between this client's read and this request
+ * is silently undone the instant this write lands — not merely mis-applied on top of stale
+ * data, but a full round trip THROUGH `adjustResource`'s own read-modify-write that discards
+ * the other writer's change entirely. See that function's doc comment for the full
+ * compare-and-set rationale; this is the identical guard, applied to the sibling contract.
  */
-export function resourcePatchBody(key: string, nextUsed: number): Pick<ResourcePatch, 'key' | 'used'> {
-  const body: Pick<ResourcePatch, 'key' | 'used'> = { key, used: nextUsed };
+export function resourcePatchBody(
+  key: string,
+  nextUsed: number,
+  expectedUpdatedAt: string | undefined,
+): Pick<ResourcePatch, 'key' | 'used' | 'expectedUpdatedAt'> {
+  const body: Pick<ResourcePatch, 'key' | 'used' | 'expectedUpdatedAt'> = { key, used: nextUsed, expectedUpdatedAt };
   return body;
 }
 

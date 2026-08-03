@@ -40,7 +40,19 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   });
 
   test('resourcePatchBody sends the flat ResourcePatch shape, not { [key]: {...} }', () => {
-    expect(resourcePatchBody('kiPoints', 3)).toEqual({ key: 'kiPoints', used: 3 });
+    expect(resourcePatchBody('kiPoints', 3, '2026-01-01T00:00:00.000Z')).toEqual({
+      key: 'kiPoints',
+      used: 3,
+      expectedUpdatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  // Issue #1902 rework (round 24, codex P1): `expectedUpdatedAt` is honestly `string |
+  // undefined`, matching `spellSlotPatchBody`'s own optionality and the schema's
+  // `ExpectedUpdatedAt` — omitted reaches the server as an unconditional write, the
+  // documented fallback every other caller of this contract already gets.
+  test('resourcePatchBody accepts undefined expectedUpdatedAt honestly, without a caller-side cast', () => {
+    expect(resourcePatchBody('kiPoints', 3, undefined)).toEqual({ key: 'kiPoints', used: 3, expectedUpdatedAt: undefined });
   });
 
   test('spellSlotPatchBody sends { level, delta, expectedUpdatedAt } relative to current used, not { [level]: {...} }', () => {

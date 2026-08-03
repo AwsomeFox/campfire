@@ -3161,7 +3161,10 @@ export class McpToolsService {
         'never a silent clamp — so it is safe to treat success as "the resource was actually spent/restored"; do not ' +
         'narrate a Second Wind or a Ki technique the call errored on. `key` is not restricted to ' +
         'list_character_resources\' vocabulary: an unrecognised key creates a custom resource from `max`/`name`/' +
-        '`recharge` (or their defaults) the first time it is touched.',
+        '`recharge` (or their defaults) the first time it is touched. Optional `expectedUpdatedAt` (the character\'s ' +
+        '`updatedAt` you last read) rejects the write with 409 if the sheet changed since — this matters especially ' +
+        'here because `used` is an ABSOLUTE overwrite: without it, a concurrent spend or rest from another caller ' +
+        'between your read and this write is silently undone. Omit for an unconditional write.',
       { characterId: Id.describe('Character id'), ...ResourcePatch.shape },
       async ({ characterId, ...patch }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
