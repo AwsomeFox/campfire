@@ -183,4 +183,86 @@ describe('RulesService unit coverage tests', () => {
     expect(searchResult.items.length).toBeGreaterThanOrEqual(1);
     expect(searchResult.items[0].name).toBe('Fireball Spell');
   });
+
+  it('handles campaign-scoped getEntryOrThrow and search including homebrew and archived exclusion', async () => {
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'open5e-srd',
+        name: 'Open5e SRD',
+        version: '1.0.0',
+        license: 'OGL',
+        sourceUrl: 'https://example.com',
+        installedAt: nowIso(),
+        entryCount: 1,
+      })
+      .returning();
+
+    const [globalEntry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'goblin',
+        name: 'Goblin',
+        type: 'monster',
+        summary: 'Small humanoid monster.',
+        body: 'Nimble escape.',
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      })
+      .returning();
+
+    const homebrewEntry = await rulesService.createCampaignHomebrew(
+      campaignId,
+      {
+        slug: 'shadow-goblin',
+        name: 'Shadow Goblin',
+        type: 'monster',
+        summary: 'Homebrew shadow monster.',
+        body: 'Shadow step.',
+      },
+      adminActor,
+    );
+
+    // 1. Member can get global entry with campaignId
+    const resolvedGlobal = await rulesService.getEntryOrThrow(globalEntry.id, campaignId, adminActor);
+    expect(resolvedGlobal.id).toBe(globalEntry.id);
+
+    // 2. Member can get homebrew entry with campaignId
+    const resolvedHomebrew = await rulesService.getEntryOrThrow(homebrewEntry.id, campaignId, adminActor);
+    expect(resolvedHomebrew.id).toBe(homebrewEntry.id);
+
+    // 3. Getting homebrew without campaignId throws 404
+    await expect(rulesService.getEntryOrThrow(homebrewEntry.id)).rejects.toThrow('not found');
+
+    // 4. Getting homebrew from another campaign with campaignId=999 throws 404
+    await expect(rulesService.getEntryOrThrow(homebrewEntry.id, 999, adminActor)).rejects.toThrow();
+
+    // 5. Member search with campaignId returns both global and homebrew
+    const scopedSearch = await rulesService.search(
+      { q: 'Goblin', campaignId },
+      10,
+      adminActor,
+    );
+    const names = scopedSearch.items.map((i) => i.name);
+    expect(names).toContain('Goblin');
+    expect(names).toContain('Shadow Goblin');
+
+    // 6. Search without campaignId returns only global
+    const globalSearch = await rulesService.search({ q: 'Goblin' });
+    const globalNames = globalSearch.items.map((i) => i.name);
+    expect(globalNames).toContain('Goblin');
+    expect(globalNames).not.toContain('Shadow Goblin');
+
+    // 7. Archived homebrew is excluded from scoped search
+    await rulesService.archiveCampaignHomebrew(campaignId, homebrewEntry.id, adminActor);
+    const postArchiveSearch = await rulesService.search(
+      { q: 'Goblin', campaignId },
+      10,
+      adminActor,
+    );
+    const postArchiveNames = postArchiveSearch.items.map((i) => i.name);
+    expect(postArchiveNames).toContain('Goblin');
+    expect(postArchiveNames).not.toContain('Shadow Goblin');
+  });
 });

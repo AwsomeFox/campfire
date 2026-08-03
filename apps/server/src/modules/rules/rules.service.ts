@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -1267,8 +1267,15 @@ export class RulesService implements OnModuleInit {
     return row;
   }
 
-  async getEntryOrThrow(id: number): Promise<RuleEntry> {
-    const [row] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), isNull(ruleEntries.campaignId))).limit(1);
+  async getEntryOrThrow(id: number, campaignId?: number, user?: RequestUser): Promise<RuleEntry> {
+    if (campaignId !== undefined) {
+      if (!user) throw new ForbiddenException('Campaign access requires user context');
+      await this.homebrewRole(campaignId, user);
+    }
+    const scope = campaignId !== undefined
+      ? and(eq(ruleEntries.id, id), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId)))
+      : and(eq(ruleEntries.id, id), isNull(ruleEntries.campaignId));
+    const [row] = await this.db.select().from(ruleEntries).where(scope).limit(1);
     if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
     return entryToDomain(row);
   }
@@ -2543,12 +2550,24 @@ export class RulesService implements OnModuleInit {
    * from a previous `nextCursor` to continue. The optional second `limit` arg
    * is kept for MCP / AI-driver callers that want a smaller top-N page.
    */
+  private ruleScopeCondition(campaignId?: number) {
+    return campaignId !== undefined
+      ? or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt)))
+      : isNull(ruleEntries.campaignId);
+  }
+
   async search(
-    params: { q: string; type?: RuleEntryType; pack?: string; cursor?: string; limit?: number },
+    params: { q: string; type?: RuleEntryType; pack?: string; cursor?: string; limit?: number; campaignId?: number },
     limitArg?: number,
+    user?: RequestUser,
   ): Promise<RuleSearchPage> {
     const limit = clampRuleSearchLimit(params.limit ?? limitArg);
     const empty = (total = 0): RuleSearchPage => ({ items: [], total, hasMore: false, limit, facets: [] });
+
+    if (params.campaignId !== undefined) {
+      if (!user) throw new ForbiddenException('Campaign access requires user context');
+      await this.homebrewRole(params.campaignId, user);
+    }
 
     const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
     if (params.pack && (!packFilter || packFilter.length === 0)) return empty();
@@ -2556,16 +2575,16 @@ export class RulesService implements OnModuleInit {
     const packSlug = packFilter?.[0]?.slug;
 
     if (!params.q.trim()) {
-      return this.searchBrowse({ type: params.type, packId, packSlug, cursor: params.cursor, limit });
+      return this.searchBrowse({ type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
     }
 
     if (this.ftsAvailable) {
       const ftsQuery = toFtsQuery(params.q);
       if (!ftsQuery) return empty();
-      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packId, packSlug, cursor: params.cursor, limit });
+      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
     }
 
-    return this.searchLike({ q: params.q, type: params.type, packId, packSlug, cursor: params.cursor, limit });
+    return this.searchLike({ q: params.q, type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
   }
 
   /** Empty-query browse: deterministic lower(name), id order with keyset cursor. */
@@ -2575,10 +2594,11 @@ export class RulesService implements OnModuleInit {
     packSlug?: string;
     cursor?: string;
     limit: number;
+    campaignId?: number;
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
     const baseConditions = [
-      isNull(ruleEntries.campaignId),
+      this.ruleScopeCondition(opts.campaignId),
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2592,7 +2612,7 @@ export class RulesService implements OnModuleInit {
     // serves both "which categories exist in this pack" and "how many match".
     const [total, packTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
     ]);
     const facets = buildRuleFacets(packTypeCounts, packTypeCounts, opts.packSlug);
     const rows = await this.db
@@ -2629,11 +2649,12 @@ export class RulesService implements OnModuleInit {
     packSlug?: string;
     cursor?: string;
     limit: number;
+    campaignId?: number;
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
     const baseConditions = [
-      isNull(ruleEntries.campaignId),
+      this.ruleScopeCondition(opts.campaignId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
@@ -2649,13 +2670,13 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      isNull(ruleEntries.campaignId),
+      this.ruleScopeCondition(opts.campaignId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countFts(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
       this.groupFtsCounts(matchConditions),
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
@@ -2695,6 +2716,7 @@ export class RulesService implements OnModuleInit {
     packSlug?: string;
     cursor?: string;
     limit: number;
+    campaignId?: number;
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'like') as LikeCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
@@ -2708,7 +2730,7 @@ export class RulesService implements OnModuleInit {
       ? sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`
       : sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${rawLike})`;
     const baseConditions = [
-      isNull(ruleEntries.campaignId),
+      this.ruleScopeCondition(opts.campaignId),
       likeClause,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
@@ -2724,13 +2746,13 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      isNull(ruleEntries.campaignId),
+      this.ruleScopeCondition(opts.campaignId),
       likeClause,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
       this.groupEntryCounts(matchConditions),
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
@@ -2761,7 +2783,7 @@ export class RulesService implements OnModuleInit {
     return { items, total, hasMore, nextCursor, limit: opts.limit, facets };
   }
 
-  private async countEntries(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
+  private async countEntries(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or>>): Promise<number> {
     const [row] = await this.db
       .select({ n: sql<number>`count(*)` })
       .from(ruleEntries)
@@ -2770,12 +2792,13 @@ export class RulesService implements OnModuleInit {
   }
 
   /** Conditions that scope a query to the active pack only (no query/type filter). */
-  private packScopeConditions(packId?: number): Array<ReturnType<typeof eq>> {
-    return (packId === undefined ? [isNull(ruleEntries.campaignId)] : [isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)]) as Array<ReturnType<typeof eq>>;
+  private packScopeConditions(packId?: number, campaignId?: number): Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or>> {
+    const scope = this.ruleScopeCondition(campaignId);
+    return packId === undefined ? [scope] : [scope, eq(ruleEntries.packId, packId)];
   }
 
   private async groupEntryCounts(
-    conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>,
+    conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or>>,
   ): Promise<Map<string, number>> {
     const rows = await this.db
       .select({ type: ruleEntries.type, count: sql<number>`count(*)` })

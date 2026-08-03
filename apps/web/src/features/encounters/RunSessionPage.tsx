@@ -7958,7 +7958,7 @@ function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {canViewStatblock && combatant.ruleEntryId != null && (
-          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
+          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} campaignId={campaignId} />
         )}
         {onUseMonsterAction && (
           <CombatantActionsList
@@ -8205,7 +8205,7 @@ function CombatantRow({
  * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
  * default so the initiative row stays scannable mid-fight.
  */
-function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; ruleSystem: string | null }) {
+function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: { ruleEntryId: number; ruleSystem: string | null; campaignId?: number }) {
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     // No regionLabel: StatBlock inside already exposes a labelled "Creature
@@ -8223,7 +8223,8 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
       setLoading(true);
       setFailed(false);
       try {
-        const e = await api.get<RuleEntry>(`${API}/rules/entries/${ruleEntryId}`);
+        const url = `${API}/rules/entries/${ruleEntryId}${campaignId ? `?campaignId=${campaignId}` : ''}`;
+        const e = await api.get<RuleEntry>(url);
         setEntry(e);
       } catch {
         setFailed(true);
@@ -8438,6 +8439,7 @@ function AddCombatantPanel({
       try {
         const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
         if (rulePack) baseParams.set('pack', rulePack);
+        if (cid) baseParams.set('campaignId', String(cid));
         // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
         // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
         const types = tab === 'compendium' ? (['monster', 'hazard'] as const) : (['monster'] as const);
@@ -8587,7 +8589,8 @@ function AddCombatantPanel({
       // Resolve the FULL entry from the rules read path (the drag payload only carries
       // id/name/type, but RuleEntry requires many more fields — trusting a cast would
       // mask bugs). Confirm the resolved type still matches what was dragged before adding.
-      const entry = await api.get<RuleEntry>(`${API}/rules/entries/${droppedId}`);
+      const url = `${API}/rules/entries/${droppedId}${cid ? `?campaignId=${cid}` : ''}`;
+      const entry = await api.get<RuleEntry>(url);
       if (entry.type !== droppedType) {
         setError("That compendium entry doesn't match the dragged monster/hazard anymore.");
         return;
@@ -8855,6 +8858,11 @@ function AddCombatantPanel({
                   onClick={() => addFromCompendium(entry)}
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                  {entry.campaignId != null && (
+                    <span className="tag tag-amber" data-testid="homebrew-badge">
+                      {t('compendium.homebrew', 'Homebrew')}
+                    </span>
+                  )}
                   <span className="tag tag-neutral">
                     {entry.type}
                   </span>
@@ -9012,6 +9020,11 @@ function AddCombatantPanel({
                       onClick={() => void addFromNpc(entry)}
                     >
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                      {entry.campaignId != null && (
+                        <span className="tag tag-amber" data-testid="homebrew-badge">
+                          {t('compendium.homebrew', 'Homebrew')}
+                        </span>
+                      )}
                       <span className="tag tag-neutral">
                         statblock
                       </span>
