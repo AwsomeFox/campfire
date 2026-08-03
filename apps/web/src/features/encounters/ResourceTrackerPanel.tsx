@@ -287,10 +287,10 @@ export function ResourceTrackerPanel({
 
   return (
     <Card className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-lg">{t('encounters.resourceTracker.title', { defaultValue: 'Resource Tracker' })}</h3>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="font-semibold text-lg min-w-0 break-words">{t('encounters.resourceTracker.title', { defaultValue: 'Resource Tracker' })}</h3>
         {canDmWrite && campaignId != null && (
-          <Link to={`/c/${campaignId}/party`} className="text-xs font-medium underline opacity-80 hover:opacity-100" data-testid="resource-tracker-party-rest-link">
+          <Link to={`/c/${campaignId}/party`} className="text-xs font-medium underline opacity-80 hover:opacity-100 shrink-0" data-testid="resource-tracker-party-rest-link">
             {t('encounters.resourceTracker.partyRest', { defaultValue: 'Party Rest' })} →
           </Link>
         )}
@@ -303,10 +303,18 @@ export function ResourceTrackerPanel({
       <div className="space-y-4 max-h-96 overflow-y-auto">
         {rows.map(({ combatant: c, name, resources, spellSlots, canEdit, rpCurrent, updatedAt, scope }) => (
           <div key={c.id} className="border-t pt-2 mt-2 first:mt-0 first:border-0 first:pt-0">
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <div className="font-medium">{name}</div>
+            <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+              <div className="font-medium min-w-0 break-words">{name}</div>
               {canEdit && c.kind === 'character' && c.characterId != null && campaignResolved && restOptions.length > 0 && (
-                <div className="flex gap-2">
+                // Issue #762 rework: `flex-wrap` — a Starfinder character's rest labels
+                // ("⚡ Stamina Rest (1 RP)", "🌙 Night's Rest") are noticeably longer than
+                // 5e's "Short Rest"/"Long Rest", and this row had no wrap fallback. At the
+                // tablet-width DM cockpit (which already has no spare width, #1455/#1510),
+                // an unwrapped long name + two long rest buttons could force this row (and
+                // anything relying on its parent's min-content width) wider than the
+                // viewport. Wrapping here keeps the row's own width bounded instead of
+                // pushing unrelated page chrome off-screen.
+                <div className="flex gap-2 flex-wrap">
                   {restOptions.map((opt) => (
                     <Btn
                       key={opt.type}
@@ -332,8 +340,8 @@ export function ResourceTrackerPanel({
                   const sourceVal = (res as Record<string, unknown>).source;
                   const sourceText = typeof sourceVal === 'string' || typeof sourceVal === 'number' ? String(sourceVal) : null;
                   return (
-                    <div key={key} className="flex items-center justify-between gap-4">
-                      <div className="text-sm">
+                    <div key={key} className="flex items-center justify-between gap-4 flex-wrap">
+                      <div className="text-sm min-w-0 break-words">
                         {res.name || key}
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
                         {sourceText && <span className="ml-2 text-xs opacity-70">[{sourceText}]</span>}
@@ -366,8 +374,8 @@ export function ResourceTrackerPanel({
               <div className="space-y-2 mt-3">
                 <div className="text-xs font-semibold uppercase text-muted">{t('encounters.resourceTracker.spellSlots', { defaultValue: 'Spell Slots' })}</div>
                 {Object.entries(spellSlots).map(([level, slot]) => (
-                  <div key={level} className="flex items-center justify-between gap-4">
-                    <div className="text-sm">{t('encounters.resourceTracker.level', { level, defaultValue: `Level ${level}` })}</div>
+                  <div key={level} className="flex items-center justify-between gap-4 flex-wrap">
+                    <div className="text-sm min-w-0 break-words">{t('encounters.resourceTracker.level', { level, defaultValue: `Level ${level}` })}</div>
                     <Pips
                       max={slot.max}
                       used={slot.used}
