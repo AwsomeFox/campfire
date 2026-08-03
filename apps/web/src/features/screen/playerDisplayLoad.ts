@@ -231,18 +231,35 @@ export class PlayerDisplayLoadSequencer {
  * response ever arrives) would leave `inFlight` true forever, silently
  * disabling every later tick — the exact failure this feature exists to
  * prevent, since the display would never learn a hold went active. So every
- * poll carries a deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, comfortably under
- * the 5s poll interval): a stalled request is aborted on its own timer, and
- * the flight flag is always released in a `finally` — on success, on a real
- * failure, or on the timeout's own abort — so a hang can delay observing a
- * hold for at most one deadline, never indefinitely. A timeout is classified
- * `ignored`, the same as any other abort: it must never be read as "no hold".
+ * poll carries a deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`): a request that
+ * never settles on its own is aborted on its own timer, and the flight flag
+ * is always released in a `finally` — on success, on a real failure, or on
+ * the timeout's own abort — so a hang can delay observing a hold for at most
+ * one deadline, never indefinitely. A timeout is classified `ignored`, the
+ * same as any other abort: it must never be read as "no hold".
+ *
+ * That deadline must be GENEROUS relative to normal latency, not tight
+ * against the poll interval — an earlier version set it to 4s (just under
+ * the 5s interval) on the reasoning that it only needed to be "comfortably
+ * under" the next tick. That reasoning was wrong: an endpoint that healthily
+ * but consistently responds in, say, 4–5s lives entirely inside that
+ * shorter deadline, so every single request would be aborted before it could
+ * complete — `runCastSafetyPoll` would never resolve `ok`, and a display that
+ * has never seen a successful poll would sit at its initial state
+ * indefinitely, which is worse than the stall this deadline exists to guard
+ * against. The two goals — "a hung request must not block forever" and "a
+ * slow-but-completing request must still be allowed to finish" — are not in
+ * tension; the deadline just needs to sit well above realistic response
+ * times (several poll intervals), not below the next tick.
  */
 export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
 
-/** Deadline for a single safety poll request, comfortably under the 5s poll
- * interval so a stalled request cannot latch `inFlight` past the next tick. */
-export const CAST_SAFETY_POLL_TIMEOUT_MS = 4_000;
+/** Deadline for a single safety poll request. Generous relative to normal
+ * latency (several 5s poll intervals) so only a genuinely hung connection is
+ * ever aborted — a slow-but-completing response must always be allowed to
+ * resolve normally. See the module doc above for why a tighter, sub-interval
+ * deadline is the wrong shape here. */
+export const CAST_SAFETY_POLL_TIMEOUT_MS = 30_000;
 
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }

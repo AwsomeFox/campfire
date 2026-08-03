@@ -368,10 +368,11 @@ export default function PlayerDisplayPage() {
    * `CastSafetyPollSequencer`/`runCastSafetyPoll`: a tick that finds a poll
    * already in flight is skipped outright rather than aborting it — cancelling
    * a slow request just to restart an equally slow one would starve the
-   * display at its initial `false` forever under sustained latency, which is
+   * display at its initial state forever under sustained latency, which is
    * worse than the race it would "fix". With at most one request ever in
    * flight, out-of-order application is impossible by construction. A per-poll
-   * deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, under the 5s interval) then
+   * deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, generous relative to normal
+   * latency — see that constant's doc for why a tighter one is wrong) then
    * guards the narrower failure mode that skip-not-abort would otherwise
    * reopen — a single stalled request latching the in-flight gate forever —
    * by aborting a request that never settles and always releasing the gate in
@@ -381,17 +382,29 @@ export default function PlayerDisplayPage() {
    * active curtain, and a timeout is never read as "no hold". The regular
    * projection poll already surfaces a hard failure (expired/revoked token)
    * for the page as a whole.
+   *
+   * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
+   * separately from the last-known `active` value: "no hold" and "never
+   * successfully checked" are different states, and only the former may
+   * render as an open display. Until the first `ok`, the overlay renders as
+   * if a hold were active — the same fail-safe bias as everywhere else in
+   * this poll, applied to its own unconfirmed starting state.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
+  const [castSafetyKnown, setCastSafetyKnown] = useState(false);
   const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());
   const loadCastSafety = useCallback(async () => {
     if (!isCastMode || !castToken) return;
     const result = await runCastSafetyPoll(castSafetySequencerRef.current, (signal) =>
       castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
     );
-    if (result.kind === 'ok') setCastSafetyActive(result.active);
+    if (result.kind === 'ok') {
+      setCastSafetyActive(result.active);
+      setCastSafetyKnown(true);
+    }
     // 'skipped' (already in flight), 'ignored' (aborted), and 'failed'
-    // (transient) all leave castSafetyActive untouched — see fail-safe note above.
+    // (transient) all leave castSafetyActive/castSafetyKnown untouched — see
+    // fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
@@ -1244,9 +1257,11 @@ export default function PlayerDisplayPage() {
             for this feature to fail. The cast-token client cannot read the member-scoped safety
             endpoint, so it polls the anonymous `/cast/:token/safety` capability instead
             (`loadCastSafety` above) and renders the same overlay markup via
-            `SafetyHoldOverlayView`. */}
+            `SafetyHoldOverlayView`. Renders active until the first poll actually succeeds
+            (`!castSafetyKnown`) — "no hold" and "never successfully checked" must not look
+            the same as an open display. */}
         {isCastMode ? (
-          <SafetyHoldOverlayView active={castSafetyActive} />
+          <SafetyHoldOverlayView active={castSafetyActive || !castSafetyKnown} />
         ) : (
           <SafetyHoldDisplayOverlay campaignId={cid} />
         )}

@@ -1,7 +1,7 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Three review
+ * `GET /cast/:token/safety` is polled on a fixed interval. Four review
  * findings on the same code, addressed here together:
  *
  *  1. (P1) Overlapping polls can complete out of order — a slow pre-hold
@@ -17,18 +17,26 @@
  *     starvation mode: with no deadline, a single request that stalls (the
  *     connection hangs, no response ever arrives) leaves the flight flag
  *     latched forever, silently disabling every later tick.
+ *  4. (P1, found on the third fix's own diff) The 4s deadline that fixed (3)
+ *     was itself too tight — under the 5s poll interval sounds safe, but an
+ *     endpoint that healthily and consistently responds in the 4–5s band
+ *     would have every single request aborted before completion, so the
+ *     poll could never resolve `ok` at all. The deadline must be generous
+ *     relative to normal latency (several poll intervals), not merely
+ *     shorter than one tick.
  *
  * The shipped design never overlaps requests (closing 1 and 2 — nothing to be
  * superseded by, and a slow-but-completing request is left alone to finish),
- * and every request carries a deadline that aborts it and releases the flight
- * flag in a `finally` if it never settles on its own (closing 3). These specs
- * pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free) against all
- * three, mirroring `player-display-load.unit.spec.ts`'s deferred-promise
- * technique.
+ * and every request carries a generous deadline that aborts it and releases
+ * the flight flag in a `finally` only if it never settles on its own (closing
+ * 3 without reopening 4). These specs pin `CastSafetyPollSequencer` +
+ * `runCastSafetyPoll` (DOM-free) against all four, mirroring
+ * `player-display-load.unit.spec.ts`'s deferred-promise technique.
  */
 import { expect, test } from '@playwright/test';
 import type { CastSafetyState } from '@campfire/schema';
 import {
+  CAST_SAFETY_POLL_TIMEOUT_MS,
   CastSafetyPollSequencer,
   runCastSafetyPoll,
   type CastSafetyFetcher,
@@ -132,7 +140,7 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     // settles on its own would leave `inFlight` true forever, silently
     // disabling every later tick — the display would never learn a hold went
     // active. A short `timeoutMs` here stands in for the production
-    // 4s-under-5s deadline so the test doesn't need to wait for it.
+    // (generous, 30s) deadline so the test doesn't need to wait for it.
     const sequencer = new CastSafetyPollSequencer();
     const neverSettles: CastSafetyFetcher = (signal) =>
       trackAbort(signal, new Promise<CastSafetyState>(() => {})); // no resolve/reject — only the deadline ends this
@@ -174,6 +182,36 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     // Not stuck behind a leaked timer either — an immediate next poll runs.
     const next = await runCastSafetyPoll(sequencer, async () => ({ active: true }), { timeoutMs: 20 });
     expect(next).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('regression: a slow-but-completing response must not be aborted by too tight a deadline', async () => {
+    // This pins the P1 in the deadline itself: the first version set it to 4s
+    // "under the 5s interval", which means an endpoint that healthily and
+    // consistently responds in the 4-5s band would have EVERY request
+    // aborted before it could complete — runCastSafetyPoll would never
+    // resolve `ok`. The deadline here is deliberately generous relative to
+    // the response time (10x), matching production's several-poll-intervals
+    // margin, so a response that is merely slow — not stalled — must land.
+    const sequencer = new CastSafetyPollSequencer();
+    const slowButHealthy = deferred<CastSafetyState>();
+    const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowButHealthy.promise);
+
+    const pending = runCastSafetyPoll(sequencer, fetchSafety, { timeoutMs: 200 });
+    await new Promise((resolve) => setTimeout(resolve, 40)); // "slow" relative to one tick...
+    expect(sequencer.isInFlight).toBe(true); // ...but must not have been aborted yet.
+    slowButHealthy.resolve({ active: true });
+
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('the production deadline is generous relative to normal latency, not merely under one poll interval', () => {
+    // A regression guard on the constant itself, not just behavior: the
+    // wrong-shaped 4s value would also pass a "resolves before the deadline"
+    // behavioral test if that test's own timing were too generous. Pin that
+    // the shipped deadline is comfortably multiple poll intervals (5s each),
+    // not a fraction of one.
+    expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeGreaterThanOrEqual(20_000);
   });
 
   test('a genuine failure on the in-flight request fails safe (does not clear the curtain)', async () => {

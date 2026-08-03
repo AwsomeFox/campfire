@@ -64,6 +64,13 @@ test.describe('Player Display cast sessions', () => {
       expectCastFetchWithoutCookies(route.request());
       return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
+    // Issue #1908: the display fails safe (renders the curtain) until the first
+    // safety poll actually succeeds, so this route must resolve for any test that
+    // interacts with the page underneath it.
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) => {
+      castCalls.push(route.request().url());
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) });
+    });
     await page.route(`**/api/v1/cast/${TOKEN}/exit`, (route) => {
       castCalls.push(route.request().url());
       expectCastFetchWithoutCookies(route.request());
@@ -155,6 +162,9 @@ test.describe('Player Display cast sessions', () => {
     await page.route(`**/api/v1/cast/${TOKEN}/encounters/${encounterId}`, (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(encounter) }),
     );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) }),
+    );
 
     await page.addInitScript(() => {
       window.localStorage.setItem('cf.screen.scene.7', 'map');
@@ -229,6 +239,50 @@ test.describe('Player Display cast sessions', () => {
     // Releasing restores the scene.
     holdActive = false;
     await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
+  });
+
+  /**
+   * Issue #1908 rework, round 4 — "no hold" and "never successfully checked"
+   * are different states, and only the confirmed former may render as an open
+   * display. Before the first `/safety` poll actually resolves, the page
+   * cannot yet distinguish "no hold" from "don't know" — it must fail safe
+   * and render as if a hold were active, not default to the open scene.
+   */
+  test('cast display shows the curtain until the first safety poll succeeds, even when no hold is active', async ({ page }) => {
+    let releaseSafety!: () => void;
+    const safetyGate = new Promise<void>((resolve) => {
+      releaseSafety = resolve;
+    });
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, async (route) => {
+      await safetyGate; // hold the response open until the test explicitly releases it
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ active: false }),
+      });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+
+    // The first /safety poll is still in flight — no hold is actually active,
+    // but that isn't known yet. The display must fail safe rather than
+    // assume the open scene.
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // Once the poll actually succeeds and confirms no hold, the curtain lifts.
+    releaseSafety();
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
     await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
   });
 });
