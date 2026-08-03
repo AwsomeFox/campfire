@@ -134,7 +134,7 @@ describe('encounter turn loop (e2e)', () => {
     // The escalation die starts at 0, and increments by 1 each round (up to 6) in 13th age
     // We can also POST to /escalation to override it
     
-    const escRes = await request(server).post(`/api/v1/encounters/${encounterId}/escalation`).set(dm).send({ escalationDie: 3 });
+    const escRes = await request(server).post(`/api/v1/encounters/${encounterId}/escalation`).set(dm).send({ override: 3 });
     expect(escRes.status).toBe(201);
     expect(escRes.body.escalationDie).toBe(3);
   });
