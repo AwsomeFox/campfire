@@ -1,4 +1,5 @@
-import fs from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, characters } from '../../src/db/schema';
@@ -348,6 +349,39 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
     } finally {
       jest.useRealTimers();
       spy.mockRestore();
+    }
+  });
+
+  /**
+   * Issue #1902 rework, round 13 (codex P2) — both `breakConcentration` mirrors (one in
+   * `action-resolver.service.ts`, one in `encounters.service.ts`; they cascade a broken
+   * concentrator's dependent conditions onto every affected combatant, mirroring the
+   * linked sheet for each) stamped the sheet write with ONE SHARED `now = nowIso()` for
+   * every affected character — the same class of bug fixed for `restParty`/
+   * `applyPartyRecovery`/`awardXp`: a shared, non-monotonic timestamp for a multi-row
+   * write can coincide with (or roll BACKWARD relative to) a concurrent CAS-protected
+   * writer's own token. Fixed by reading each character's OWN current `updatedAt` inside
+   * the same transaction and keying `nextUpdatedAt` off that, per character, matching
+   * every other multi-row `characters` writer in this rework.
+   *
+   * This is a source-shape check, not a full behavioral harness — driving
+   * `cascadeConcentrationLoss` end-to-end needs a running encounter with a concentrating
+   * caster and a dependent condition on another combatant, which is already covered
+   * functionally by `test/integration/action-resolver.spec.ts` and
+   * `test/integration/encounter-condition-concurrency.spec.ts` (both pass unchanged: the
+   * fix only changes the TOKEN value written, never any other field). This test pins the
+   * specific defect class those functional tests cannot see — a same-millisecond
+   * collision — the same way `condition-columns-single-writer.spec.ts` mechanically
+   * enforces its own invariant rather than relying on incidental behavioral coverage.
+   */
+  it('#1902 rework (round 13): both breakConcentration sheet mirrors advance the CAS token per-character, not from one shared stamp', () => {
+    const actionResolverSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/action-resolver.service.ts'), 'utf8');
+    const encountersSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/encounters.service.ts'), 'utf8');
+    for (const src of [actionResolverSrc, encountersSrc]) {
+      // Reads the row fresh, inside the same transaction, right before using it —
+      // not a pre-loop snapshot shared across every affected character.
+      expect(src).toMatch(/const currentChar = tx\.select\(\{ updatedAt: characters\.updatedAt \}\)\.from\(characters\)\.where\(eq\(characters\.id, row\.characterId\)\)\.get\(\);/);
+      expect(src).toMatch(/updatedAt: nextUpdatedAt\(currentChar\?\.updatedAt \?\? now\)/);
     }
   });
 });

@@ -2389,8 +2389,16 @@ export class ActionResolverService {
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
+        // Issue #1902 rework (round 13, codex P2): `nextUpdatedAt`, keyed off THIS
+        // character's own current row — not the shared `now` above (a `sheetSyncedUpdatedAt`
+        // stamp on the combatant, fine to share) — for the same reason every other
+        // `characters` table writer in this rework was: `updatedAt` is the CAS token
+        // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every
+        // write, and a shared/`nowIso()` stamp here could roll it BACKWARD relative to a
+        // concurrent spell-slot spend already applied to this same character.
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: nextUpdatedAt(currentChar?.updatedAt ?? now) })
           .where(eq(characters.id, row.characterId))
           .run();
       }

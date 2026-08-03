@@ -2537,8 +2537,14 @@ export class EncountersService {
       } else {
         this.db.transaction((tx) => {
           for (const charId of recipientIds) {
+            // Issue #1902 rework (round 13, codex P2 sweep): PER CHARACTER, not the shared
+            // `ts` above — same class of bug as `restParty`/`awardXp`'s own per-character
+            // fix. This fallback path only runs when `charactersService` isn't injected
+            // (the preferred branch above already calls the fixed `awardXp`), but it writes
+            // the same CAS-guarded `updatedAt` column, so it needs the same guarantee.
+            const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, charId)).get();
             tx.update(characters)
-              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: ts })
+              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: nextUpdatedAt(current?.updatedAt ?? ts) })
               .where(eq(characters.id, charId))
               .run();
           }
@@ -4686,7 +4692,14 @@ export class EncountersService {
           afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
         }
         if (mirrorSheet) {
-          const mirroredAt = nowIso();
+          // Issue #1902 rework (round 13, codex P2 sweep): read the character's CURRENT
+          // `updatedAt` here, inside the transaction, rather than reusing `character` (read
+          // pre-transaction, via an earlier `await` — the same stale-snapshot gap fixed
+          // elsewhere in this rework). `nextUpdatedAt`, not `nowIso()`, for the same reason
+          // every other `characters` table writer in this rework needs it: this column is
+          // the CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on.
+          const priorCharUpdatedAt = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, existing.characterId!)).get()?.updatedAt;
+          const mirroredAt = nextUpdatedAt(priorCharUpdatedAt ?? nowIso());
           const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
           if (recomputeHp || spFieldsTouched || deathStateTouched) {
             sheetSet.hpCurrent = updated.hpCurrent;
@@ -7243,7 +7256,15 @@ export class EncountersService {
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
           conditionInstances: w.conditionInstances,
-          updatedAt: ts,
+          // Issue #1902 rework (round 13, codex P2 sweep): PER CHARACTER, from `prior`
+          // (already read fresh, inside this transaction, a few lines above) — not the
+          // shared `ts` this whole encounter-end call uses for OTHER purposes (endedAt,
+          // the encounter's own updatedAt, sheetSyncedUpdatedAt). This column is the CAS
+          // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+          // every writer, the same reason every other multi-character write in this
+          // rework (restParty, applyPartyRecovery, awardXp) keys off each row's own prior
+          // value rather than one shared stamp.
+          updatedAt: nextUpdatedAt(prior?.updatedAt ?? ts),
         };
         if (prior !== undefined && prior.status !== w.status) {
           set.status = w.status;
@@ -7279,9 +7300,11 @@ export class EncountersService {
             });
           }
           // Slices already match (e.g. name-only sheet edit) — bump updatedAt + token.
+          // `nextUpdatedAt(fresh.updatedAt)` (issue #1902 rework, round 13), not the
+          // shared `ts` — `fresh` was just read above, inside this same transaction.
           if (fresh) {
             tx.update(characters)
-              .set({ updatedAt: ts })
+              .set({ updatedAt: nextUpdatedAt(fresh.updatedAt) })
               .where(eq(characters.id, w.characterId))
               .run();
           }
@@ -8197,8 +8220,12 @@ export class EncountersService {
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
+        // Issue #1902 rework (round 13, codex P2): `nextUpdatedAt`, keyed off THIS
+        // character's own current row — see the matching fix (and its fuller doc comment)
+        // in `action-resolver.service.ts`'s `breakConcentration`.
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: nextUpdatedAt(currentChar?.updatedAt ?? now) })
           .where(eq(characters.id, row.characterId))
           .run();
       }

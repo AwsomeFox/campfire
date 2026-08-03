@@ -431,7 +431,6 @@ describe('rest mechanics (#1041, e2e)', () => {
     // and the index's re-export getter reads through to this same module object
     // dynamically at call time, so a mutation here is visible to
     // `characters.service.ts`'s `import { planPartyRest } from '@campfire/schema'` too.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const restModule = require('../../../packages/schema/src/rest') as { planPartyRest: (...args: unknown[]) => unknown };
     const originalPlanPartyRest = restModule.planPartyRest;
     const spy = jest
