@@ -252,4 +252,42 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
       jest.useRealTimers();
     }
   });
+
+  /**
+   * Issue #1902 rework, round 9 (Devin) — `updatedAt` is a ROW-LEVEL compare-and-set
+   * token: `patchSpellSlots`'s `expectedUpdatedAt` guard is only as sound as every OTHER
+   * writer of that same row keeping the SAME monotonic-advancement promise. This test
+   * exercises two representative non-spell-slot writers — the general PATCH (`update`)
+   * and `patchHp` — under a frozen clock, proving the round-9 sweep (every `characters`
+   * row writer now uses `nextUpdatedAt`, not `nowIso()`) actually closed the gap network-
+   * wide rather than just for spell slots.
+   */
+  it('#1902 rework: non-spell-slot writers (update, patchHp) also advance the CAS token under a frozen clock', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      orm.update(characters).set({ updatedAt: frozen.toISOString() }).where(eq(characters.id, id)).run();
+      const beforeUpdate = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      expect(beforeUpdate.updatedAt).toBe(frozen.toISOString());
+
+      // The general PATCH (`update`) — still frozen at the exact same instant.
+      await service.update(id, { name: 'Renamed mid-freeze' }, dmUser, 'dm');
+      const afterUpdate = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      expect(afterUpdate.updatedAt).not.toBe(beforeUpdate.updatedAt);
+
+      // patchHp, immediately after, still inside the same frozen millisecond — its own
+      // write must advance AGAIN relative to what `update` just produced.
+      await service.patchHp(id, { set: 3 }, dmUser, 'dm');
+      const afterHp = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      expect(afterHp.updatedAt).not.toBe(afterUpdate.updatedAt);
+      expect(afterHp.hpCurrent).toBe(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

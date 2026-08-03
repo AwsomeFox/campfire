@@ -1112,7 +1112,11 @@ export class CharactersService {
       CharactersService.assertLevelWithinCap(input.level, (await this.adapterForCampaign(existing.campaignId)).maxLevel);
     }
 
-    const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
+    // Issue #1902 rework (round 9): `nextUpdatedAt`, not `nowIso()` — `updatedAt` is a
+    // row-level CAS token now (patchSpellSlots' `expectedUpdatedAt` guard depends on it
+    // advancing on EVERY write to this row, not just spell-slot writes), so every writer
+    // of this table must guarantee monotonic advancement the same way.
+    const update: Partial<typeof characters.$inferInsert> = { updatedAt: nextUpdatedAt(existing.updatedAt) };
     if (input.name !== undefined) update.name = input.name;
     if (input.species !== undefined) update.species = input.species;
     if (input.className !== undefined) update.className = input.className;
@@ -1337,7 +1341,8 @@ export class CharactersService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
-    await this.db.update(characters).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(characters.id, id));
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
+    await this.db.update(characters).set({ deletedAt: nowIso(), updatedAt: nextUpdatedAt(existing.updatedAt) }).where(eq(characters.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -1355,9 +1360,10 @@ export class CharactersService {
     const existing = await this.getRowOrThrow(id, true);
     if (existing.deletedAt == null) throw new NotFoundException(`Character ${id} is not in the trash`);
     this.assertCanWrite(existing, user, role);
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
     const [row] = await this.db
       .update(characters)
-      .set({ deletedAt: null, updatedAt: nowIso() })
+      .set({ deletedAt: null, updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
     await this.audit.log({
@@ -1406,7 +1412,8 @@ export class CharactersService {
       // persistent death-state echo self-consistent when a DM/player adjusts HP
       // outside an encounter instead of leaving a stale 'dead' flag on a healed
       // character or a stale 'none' on a freshly-dropped one.
-      const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nowIso() };
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
+      const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nextUpdatedAt(fresh.updatedAt) };
       if (hpCurrent > 0 && fresh.deathState !== 'none') {
         hpSet.deathState = 'none';
         hpSet.deathSaveSuccesses = 0;
@@ -1507,7 +1514,8 @@ export class CharactersService {
           .set({
             rpCurrent: Math.max(0, fresh.rpCurrent - 1),
             spCurrent: fresh.spMax,
-            updatedAt: nowIso(),
+            // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
+            updatedAt: nextUpdatedAt(fresh.updatedAt),
           })
           .where(eq(characters.id, id))
           .returning()
@@ -1522,7 +1530,7 @@ export class CharactersService {
             rpCurrent: fresh.rpMax,
             hpCurrent: Math.min(fresh.hpMax, fresh.hpCurrent + hpHealed),
             deathState: fresh.hpCurrent + hpHealed > 0 ? 'none' : fresh.deathState,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(fresh.updatedAt),
           })
           .where(eq(characters.id, id))
           .returning()
@@ -1575,9 +1583,10 @@ export class CharactersService {
 
       // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
       const requested = 'delta' in patch ? fresh.xp + patch.delta : patch.set;
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [updated] = tx
         .update(characters)
-        .set({ xp: Math.max(0, requested), updatedAt: nowIso() })
+        .set({ xp: Math.max(0, requested), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -1644,10 +1653,12 @@ export class CharactersService {
         );
       }
 
+      // Issue #1902 rework (round 9): PER CHARACTER, not the one shared `ts` for the whole
+      // award — same fix, same reason, as `restParty`'s per-character `nextUpdatedAt` above.
       const changed = targets.map((target) => {
         const [row] = tx
           .update(characters)
-          .set({ xp: target.xp + award.amount, updatedAt: ts })
+          .set({ xp: target.xp + award.amount, updatedAt: nextUpdatedAt(target.updatedAt) })
           .where(eq(characters.id, target.id))
           .returning()
           .all();
@@ -1711,7 +1722,8 @@ export class CharactersService {
       throw new BadRequestException(`Already at level ${maxLevel} — there is no level ${maxLevel + 1}`);
     }
 
-    const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
+    const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nextUpdatedAt(existing.updatedAt) };
     if (input.hpMax !== undefined) {
       const gained = input.hpMax - existing.hpMax;
       update.hpMax = input.hpMax;
@@ -1746,9 +1758,10 @@ export class CharactersService {
     for (const c of patch.remove ?? []) current.delete(c);
     for (const c of patch.add ?? []) current.add(c);
 
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
     const [row] = await this.db
       .update(characters)
-      .set({ ...sheetConditionWriteSetFromNames([...current], existing.conditionInstances), updatedAt: nowIso() })
+      .set({ ...sheetConditionWriteSetFromNames([...current], existing.conditionInstances), updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
 
@@ -1843,9 +1856,10 @@ export class CharactersService {
             : // `legacyConditionInstance` only returns null for an empty name; `track.name`
               // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
               [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [written] = tx
         .update(characters)
-        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
+        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -2045,9 +2059,10 @@ export class CharactersService {
         ...(patch.source !== undefined ? { source: patch.source } : {}),
       };
 
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [written] = tx
         .update(characters)
-        .set({ resources: toJsonText(resources), updatedAt: nowIso() })
+        .set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -2446,9 +2461,10 @@ export class CharactersService {
       }
     }
 
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
     const [row] = await this.db
       .update(characters)
-      .set({ spellSlots: toJsonText(slots), resources: toJsonText(resources), updatedAt: nowIso() })
+      .set({ spellSlots: toJsonText(slots), resources: toJsonText(resources), updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
 

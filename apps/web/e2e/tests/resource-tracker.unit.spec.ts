@@ -357,7 +357,7 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/useState<ReadonlySet<string>>\(new Set\(\)\)/);
     expect(src).toMatch(/onMutate: \(vars\) => beginPending\(pendingTargetKey\(/);
-    expect(src).toMatch(/onSettled: \(_data, _error, vars\) => endPending\(pendingTargetKey\(/);
+    expect(src).toMatch(/onSettled: \(_data, error, vars\) => endPendingAfterReconciling\(pendingTargetKey\(/);
     expect(src).toMatch(/pendingKeys\.has\(pendingTargetKey\(scope\)\)/);
     // The blanket boolean, the round-4 hook-snapshot derivation, AND the round-4/5
     // per-resource/per-slot key builders are all gone.
@@ -366,6 +366,24 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).not.toMatch(/restPendingKey\(/);
     expect(src).not.toMatch(/resourcePendingKey\(/);
     expect(src).not.toMatch(/slotPendingKey\(/);
+  });
+
+  // Ninth-round finding (codex P2): an AMBIGUOUS mutation outcome (response lost to a
+  // timeout/network drop) must not release the control the instant the promise settles —
+  // for an irreplaceable resource (a Stamina Rest's RP, a spell slot, a hit die), a
+  // "harmless" retry after a lost response can silently spend it twice. RunSessionPage's
+  // own `isAmbiguousOutcome` reconciliation guard exists for exactly this failure class;
+  // this panel now applies the same principle via its own pending-key mechanism instead
+  // of releasing on every settle unconditionally.
+  test('ResourceTrackerPanel keeps a control pending through a fresh read after an ambiguous (not a definite) mutation failure', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/import \{ .*isAmbiguousMutation.* \} from '\.\.\/\.\.\/lib\/api'/);
+    expect(src).toMatch(/const endPendingAfterReconciling = async \(key: string, error: unknown\) => \{/);
+    expect(src).toMatch(/if \(error && isAmbiguousMutation\(error\)\)/);
+    // All four mutations route their onSettled through the reconciling variant, not the
+    // bare endPending (which would release the control before confirming true state).
+    const endPendingAfterReconcilingCalls = src.match(/endPendingAfterReconciling\(pendingTargetKey/g) ?? [];
+    expect(endPendingAfterReconcilingCalls.length).toBe(4);
   });
 
   // Fourth-round finding (codex P1, THIRD review pass on this exact defect): a
