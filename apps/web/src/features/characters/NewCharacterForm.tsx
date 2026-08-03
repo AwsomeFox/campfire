@@ -60,9 +60,12 @@ export function NewCharacterForm({
       const body = /^\d+$/.test(ref) ? { ddbId: ref } : { url: ref };
       const res = await api.post<DdbImportResult>(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
       setDdbRef('');
-      onCreated();
-      // Hold the form open one more beat to show what imported (issue #1903) — closes on
-      // "Done" rather than immediately, so the summary isn't shown-then-instantly-hidden.
+      // Hold the form open to show what imported (issue #1903) — defer onCreated()/onCancel()
+      // to finishDdbImport() (the "Done" button) rather than calling them here. PartyPage wires
+      // onCreated to close the create panel and reload the roster; calling it immediately would
+      // unmount this form (the render guard is `creating || party.length === 0`, and both
+      // closeCreating() and the reload's `loading=true` flip that guard false) before the
+      // summary set on the next line ever gets a render — the panel would never be visible.
       setImportSummary(res.summary);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");
@@ -74,6 +77,7 @@ export function NewCharacterForm({
   function finishDdbImport() {
     setImportSummary(null);
     onCancel?.();
+    onCreated();
   }
 
   async function submit(e: FormEvent) {

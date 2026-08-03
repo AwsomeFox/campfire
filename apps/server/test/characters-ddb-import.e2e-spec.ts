@@ -118,7 +118,8 @@ describe('D&D Beyond character import — mapper (unit)', () => {
   });
 
   it('computeSpellSlots merges half-caster and pact-magic multiclass progressions', () => {
-    // Level 6 Paladin (half caster -> effective 3) + level 3 Warlock (pact, own table).
+    // Level 6 Paladin (half caster, solo alongside a Warlock -> Pact Magic is excluded from
+    // this combination per PHB p.165, so Paladin uses its own table: ceil(6/2) = 3).
     const slots = computeSpellSlots([
       { level: 6, definition: { name: 'Paladin' } },
       { level: 3, definition: { name: 'Warlock' } },
@@ -132,6 +133,75 @@ describe('D&D Beyond character import — mapper (unit)', () => {
   it('computeSpellSlots returns {} for a non-caster class', () => {
     expect(computeSpellSlots([{ level: 5, definition: { name: 'Fighter' } }])).toEqual({});
     expect(computeSpellSlots(null)).toEqual({});
+  });
+
+  // Regression for a PR #1950 review finding: a solo half-caster used the multiclass
+  // floor(level/2) formula, undercounting slots at every odd level.
+  it('a solo level-5 Paladin gets its own class table (ceil), not the multiclass floor', () => {
+    const slots = computeSpellSlots([{ level: 5, definition: { name: 'Paladin' } }]);
+    // PHB Paladin table at level 5: 4 first-level, 2 second-level. floor(5/2)=2 would have
+    // given only 3 first-level and nothing else.
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
+  it('a solo level-5 Ranger gets the same single-class table as a solo Paladin', () => {
+    const slots = computeSpellSlots([{ level: 5, definition: { name: 'Ranger' } }]);
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
+  it('a genuine multiclass (Paladin 3 / Wizard 2) still uses the combining floor(level/2)', () => {
+    const slots = computeSpellSlots([
+      { level: 3, definition: { name: 'Paladin' } },
+      { level: 2, definition: { name: 'Wizard' } },
+    ]);
+    // floor(3/2)=1 (Paladin) + 2 (Wizard) = effective level 3 -> row3 = 4 first, 2 second.
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
+  it('Artificer uses the same solo half-caster curve as Paladin/Ranger', () => {
+    const slots = computeSpellSlots([{ level: 5, definition: { name: 'Artificer' } }]);
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
+  it('recognizes Eldritch Knight and Arcane Trickster as 1/3 casters by subclass', () => {
+    // A level-7 solo Eldritch Knight: PHB Fighter spellcasting table row for level 7 is
+    // 4 first-level, 2 second-level (ceil(7/3) = 3 -> full-caster row 3).
+    const ek = computeSpellSlots([{ level: 7, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Eldritch Knight' } }]);
+    expect(ek).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+    const at = computeSpellSlots([{ level: 7, definition: { name: 'Rogue' }, subclassDefinition: { name: 'Arcane Trickster' } }]);
+    expect(at).toEqual(ek);
+    // A plain Fighter with no matching subclass is still a non-caster.
+    expect(computeSpellSlots([{ level: 7, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Champion' } }])).toEqual({});
+  });
+
+  // Regression for a PR #1950 review finding: an overlong spell name must never abort the
+  // whole import — CharacterAction.name is capped at 120 chars (mirrors
+  // expandRawStatblockAction's identical clamp for weapon/feature actions).
+  it('clamps an overlong spell name to 120 chars instead of throwing', () => {
+    const longName = 'A'.repeat(150);
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Wizard' } }],
+      classSpells: [{ spells: [{ definition: { name: longName, level: 0 }, prepared: true }] }],
+    });
+    const spell = c.actions?.find((a) => a.kind === 'spell');
+    expect(spell).toBeDefined();
+    expect(spell?.name).toBe('A'.repeat(120));
+    expect(spell?.name.length).toBe(120);
   });
 
   it('tolerates a sparse sheet without throwing', () => {

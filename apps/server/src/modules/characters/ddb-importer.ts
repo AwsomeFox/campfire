@@ -507,7 +507,9 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
     if (!entry || out.length >= 60) return;
     if (!isKnownOrPrepared(entry)) return;
     const def = entry.definition;
-    const name = typeof def?.name === 'string' ? def.name.trim() : '';
+    // Clamp to CharacterAction's 120-char name cap (mirrors expandRawStatblockAction) so an
+    // unusually long DDB spell name can never abort the whole import with a Zod throw.
+    const name = typeof def?.name === 'string' ? def.name.trim().slice(0, 120) : '';
     if (!name) return;
     const key = name.toLowerCase();
     if (seen.has(key)) return;
@@ -538,23 +540,41 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
   return out;
 }
 
-type CasterProgression = 'full' | 'half' | 'pact';
+type CasterProgression = 'full' | 'half' | 'pact' | 'third';
 const FULL_CASTER_CLASSES = new Set(['bard', 'cleric', 'druid', 'sorcerer', 'wizard']);
-const HALF_CASTER_CLASSES = new Set(['paladin', 'ranger']);
+// Artificer's official slot table (Tasha's) tracks the same ceil(level/2) curve as a
+// solo Paladin/Ranger — see computeSpellSlots below — so it belongs in the same bucket.
+const HALF_CASTER_CLASSES = new Set(['paladin', 'ranger', 'artificer']);
 const PACT_CASTER_CLASSES = new Set(['warlock']);
+// The only two core-rules 1/3-caster archetypes; identified by subclass, not base class,
+// since Fighter/Rogue themselves are non-casters.
+const THIRD_CASTER_SUBCLASSES = new Set(['eldritch knight', 'arcane trickster']);
 
-function casterProgressionForClass(name: string): CasterProgression | null {
+function casterProgressionForClass(name: string, subclassName?: string | null): CasterProgression | null {
   const key = name.trim().toLowerCase();
   if (FULL_CASTER_CLASSES.has(key)) return 'full';
   if (HALF_CASTER_CLASSES.has(key)) return 'half';
   if (PACT_CASTER_CLASSES.has(key)) return 'pact';
+  const sub = subclassName?.trim().toLowerCase();
+  if (sub && THIRD_CASTER_SUBCLASSES.has(sub)) return 'third';
   return null;
 }
 
 /**
  * PHB multiclass spellcaster slot table (index = combined effective caster level 0-20,
- * columns = spell levels 1-9). Full casters contribute their whole level, half casters
- * (Paladin/Ranger) floor(level/2) — standard 5e multiclassing math (PHB p.165).
+ * columns = spell levels 1-9). When COMBINING two or more caster classes, full casters
+ * contribute their whole level, half casters (Paladin/Ranger/Artificer) floor(level/2),
+ * and third casters (Eldritch Knight/Arcane Trickster) floor(level/3) — standard 5e
+ * multiclassing math (PHB p.165).
+ *
+ * A character with exactly ONE caster class (Warlock's separate Pact Magic aside — see
+ * {@link PACT_SLOT_TABLE}) does not use that combining formula: their own class table
+ * applies, which for a half caster is equivalent to this full-caster table read at
+ * ceil(level/2), and for a third caster at ceil(level/3) (verified against the PHB
+ * Paladin/Ranger tables and the Eldritch Knight/Arcane Trickster tables respectively —
+ * e.g. a level-5 solo Paladin gets 4 first + 2 second, not the multiclass floor(5/2)=2
+ * row's 3 first only). {@link computeSpellSlots} picks floor vs. ceil based on whether
+ * more than one non-Warlock caster class is present.
  */
 const FULL_CASTER_SLOT_TABLE: readonly (readonly number[])[] = [
   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -615,26 +635,38 @@ const PACT_SLOT_TABLE: readonly { level: number; count: number }[] = [
  */
 export function computeSpellSlots(classes: DdbClass[] | null | undefined): CharacterCreateInput['spellSlots'] {
   if (!Array.isArray(classes) || classes.length === 0) return {};
-  let fullEquivalentLevel = 0;
+  // Pact Magic is a fully separate resource from the regular spell-slot table and its levels
+  // never count toward the multiclass "combined caster level" below (PHB p.165 sidebar), so
+  // Warlock is tracked independently and excluded from the full/half/third combination.
+  const casterEntries: { progression: 'full' | 'half' | 'third'; level: number }[] = [];
   let pactLevel = 0;
-  let anyCaster = false;
   for (const cls of classes) {
     const name = cls.definition?.name ?? '';
     const level = typeof cls.level === 'number' && cls.level > 0 ? cls.level : 0;
     if (!name || level <= 0) continue;
-    const progression = casterProgressionForClass(name);
-    if (progression === 'full') {
-      fullEquivalentLevel += level;
-      anyCaster = true;
-    } else if (progression === 'half') {
-      fullEquivalentLevel += Math.floor(level / 2);
-      anyCaster = true;
-    } else if (progression === 'pact') {
+    const progression = casterProgressionForClass(name, cls.subclassDefinition?.name);
+    if (progression === 'pact') {
       pactLevel += level;
-      anyCaster = true;
+    } else if (progression) {
+      casterEntries.push({ progression, level });
     }
   }
-  if (!anyCaster) return {};
+  if (casterEntries.length === 0 && pactLevel === 0) return {};
+
+  // Exactly one non-Warlock caster class -> use that class's own table (ceil), not the
+  // multiclass combining formula (floor), which only applies when genuinely combining two
+  // or more spellcasting progressions. See the comment on FULL_CASTER_SLOT_TABLE.
+  const solo = casterEntries.length === 1 ? casterEntries[0] : null;
+  let fullEquivalentLevel = 0;
+  for (const entry of casterEntries) {
+    if (entry.progression === 'full') {
+      fullEquivalentLevel += entry.level;
+    } else if (entry.progression === 'half') {
+      fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 2) : Math.floor(entry.level / 2);
+    } else {
+      fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 3) : Math.floor(entry.level / 3);
+    }
+  }
 
   const slots: Record<string, { max: number; used: number }> = {};
   const addSlots = (level: number, count: number) => {
