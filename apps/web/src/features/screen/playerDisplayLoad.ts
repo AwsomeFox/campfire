@@ -225,8 +225,24 @@ export class PlayerDisplayLoadSequencer {
  * by construction — there is nothing to be superseded by. The only abort is
  * `invalidate()` on unmount / cast identity (token) change, so a request
  * still running past that point cannot call back into stale-scope state.
+ *
+ * Skip-instead-of-abort trades the original starvation mode for a narrower
+ * one: with no deadline, a single request that stalls (connection hangs, no
+ * response ever arrives) would leave `inFlight` true forever, silently
+ * disabling every later tick — the exact failure this feature exists to
+ * prevent, since the display would never learn a hold went active. So every
+ * poll carries a deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, comfortably under
+ * the 5s poll interval): a stalled request is aborted on its own timer, and
+ * the flight flag is always released in a `finally` — on success, on a real
+ * failure, or on the timeout's own abort — so a hang can delay observing a
+ * hold for at most one deadline, never indefinitely. A timeout is classified
+ * `ignored`, the same as any other abort: it must never be read as "no hold".
  */
 export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
+
+/** Deadline for a single safety poll request, comfortably under the 5s poll
+ * interval so a stalled request cannot latch `inFlight` past the next tick. */
+export const CAST_SAFETY_POLL_TIMEOUT_MS = 4_000;
 
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }
@@ -288,27 +304,34 @@ export class CastSafetyPollSequencer {
  * Run one cast-safety poll tick. A tick that finds a poll already in flight
  * is skipped (never overlapped, never aborts the in-flight request); only a
  * poll that actually ran can resolve `ok`, and only when it was not aborted
- * mid-flight by `invalidate()`. A genuine failure resolves `failed` so the
- * caller can fail safe (keep last-known state) instead of guessing a value.
+ * mid-flight (by `invalidate()` or by its own deadline). A genuine failure
+ * resolves `failed` so the caller can fail safe (keep last-known state)
+ * instead of guessing a value. The flight flag is always released in a
+ * `finally` — success, failure, or timeout-triggered abort all clear it, so a
+ * stalled request can never latch it past this one poll.
  */
 export async function runCastSafetyPoll(
   sequencer: CastSafetyPollSequencer,
   fetchSafety: CastSafetyFetcher,
+  options: { timeoutMs?: number } = {},
 ): Promise<CastSafetyPollResult> {
   const begun = sequencer.begin();
   if (!begun) return { kind: 'skipped' };
   const { signal, token } = begun;
+  const timeoutMs = options.timeoutMs ?? CAST_SAFETY_POLL_TIMEOUT_MS;
+  const deadline = setTimeout(() => token.abort(), timeoutMs);
   try {
     const state = await fetchSafety(signal);
-    sequencer.end(token);
     if (signal.aborted) return { kind: 'ignored' };
     return { kind: 'ok', active: state.active };
   } catch (error) {
-    sequencer.end(token);
     if (isAbortError(error) || signal.aborted) {
       return { kind: 'ignored' };
     }
     return { kind: 'failed' };
+  } finally {
+    clearTimeout(deadline);
+    sequencer.end(token);
   }
 }
 

@@ -370,12 +370,17 @@ export default function PlayerDisplayPage() {
    * a slow request just to restart an equally slow one would starve the
    * display at its initial `false` forever under sustained latency, which is
    * worse than the race it would "fix". With at most one request ever in
-   * flight, out-of-order application is impossible by construction. Fail safe
-   * throughout: a skipped/aborted tick and a genuine failure on the current
-   * request all leave the last-known hold state alone rather than guessing a
-   * new value — it can never clear an active curtain. The regular projection
-   * poll already surfaces a hard failure (expired/revoked token) for the page
-   * as a whole.
+   * flight, out-of-order application is impossible by construction. A per-poll
+   * deadline (`CAST_SAFETY_POLL_TIMEOUT_MS`, under the 5s interval) then
+   * guards the narrower failure mode that skip-not-abort would otherwise
+   * reopen — a single stalled request latching the in-flight gate forever —
+   * by aborting a request that never settles and always releasing the gate in
+   * a `finally`. Fail safe throughout: a skipped/aborted/timed-out tick and a
+   * genuine failure on the current request all leave the last-known hold
+   * state alone rather than guessing a new value — it can never clear an
+   * active curtain, and a timeout is never read as "no hold". The regular
+   * projection poll already surfaces a hard failure (expired/revoked token)
+   * for the page as a whole.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());

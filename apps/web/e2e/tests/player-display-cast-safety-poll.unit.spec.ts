@@ -1,8 +1,8 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Two review findings
- * on the same code, addressed here together:
+ * `GET /cast/:token/safety` is polled on a fixed interval. Three review
+ * findings on the same code, addressed here together:
  *
  *  1. (P1) Overlapping polls can complete out of order — a slow pre-hold
  *     `false` resolving after a fresh post-hold `true` must not clear the
@@ -12,13 +12,19 @@
  *     starvation: if every response takes longer than the interval, each new
  *     tick cancels the last before it can ever complete, and the display can
  *     sit at its initial `false` forever even while a hold is active.
+ *  3. (P1, found on the second fix's own diff) Skipping a tick while one is
+ *     in flight — instead of aborting — closes (2) but reopens a narrower
+ *     starvation mode: with no deadline, a single request that stalls (the
+ *     connection hangs, no response ever arrives) leaves the flight flag
+ *     latched forever, silently disabling every later tick.
  *
- * The shipped design never overlaps requests at all — a tick that finds one
- * already in flight is skipped, not aborted — so (1) cannot happen (nothing
- * to be superseded by) and (2) cannot happen (a slow request is left alone to
- * finish). These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll`
- * (DOM-free) against both, mirroring `player-display-load.unit.spec.ts`'s
- * deferred-promise technique.
+ * The shipped design never overlaps requests (closing 1 and 2 — nothing to be
+ * superseded by, and a slow-but-completing request is left alone to finish),
+ * and every request carries a deadline that aborts it and releases the flight
+ * flag in a `finally` if it never settles on its own (closing 3). These specs
+ * pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free) against all
+ * three, mirroring `player-display-load.unit.spec.ts`'s deferred-promise
+ * technique.
  */
 import { expect, test } from '@playwright/test';
 import type { CastSafetyState } from '@campfire/schema';
@@ -118,6 +124,56 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     slowPoll.resolve({ active: true });
     const firstResult = await first;
     expect(firstResult).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('deadline regression: a stalled (never-resolving) request cannot latch the poll forever', async () => {
+    // Skip-not-abort (the starvation fix above) reopens a narrower starvation
+    // mode with no deadline: a request whose connection hangs and never
+    // settles on its own would leave `inFlight` true forever, silently
+    // disabling every later tick — the display would never learn a hold went
+    // active. A short `timeoutMs` here stands in for the production
+    // 4s-under-5s deadline so the test doesn't need to wait for it.
+    const sequencer = new CastSafetyPollSequencer();
+    const neverSettles: CastSafetyFetcher = (signal) =>
+      trackAbort(signal, new Promise<CastSafetyState>(() => {})); // no resolve/reject — only the deadline ends this
+
+    const stalled = runCastSafetyPoll(sequencer, neverSettles, { timeoutMs: 20 });
+
+    // Before the deadline fires, a tick is correctly skipped — still the
+    // only-one-request-in-flight invariant from the starvation fix.
+    const midflightTick = await runCastSafetyPoll(sequencer, async () => ({ active: true }), {
+      timeoutMs: 20,
+    });
+    expect(midflightTick).toEqual({ kind: 'skipped' });
+
+    // The deadline aborts the stalled request; it must never be read as "no
+    // hold" — it resolves `ignored`, not `ok`.
+    const stalledResult = await stalled;
+    expect(stalledResult.kind).toBe('ignored');
+    expect(sequencer.isInFlight).toBe(false);
+
+    // With the gate released, the next tick actually runs and can observe an
+    // active hold — the stall delayed this by at most one deadline, not
+    // forever.
+    const recovered = await runCastSafetyPoll(sequencer, async () => ({ active: true }), {
+      timeoutMs: 20,
+    });
+    expect(recovered).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('deadline releases the flight flag on a genuine (non-timeout) failure too — finally, not just the try path', async () => {
+    const sequencer = new CastSafetyPollSequencer();
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('network down');
+    };
+
+    const result = await runCastSafetyPoll(sequencer, failing, { timeoutMs: 20 });
+    expect(result.kind).toBe('failed');
+    expect(sequencer.isInFlight).toBe(false);
+
+    // Not stuck behind a leaked timer either — an immediate next poll runs.
+    const next = await runCastSafetyPoll(sequencer, async () => ({ active: true }), { timeoutMs: 20 });
+    expect(next).toMatchObject({ kind: 'ok', active: true });
   });
 
   test('a genuine failure on the in-flight request fails safe (does not clear the curtain)', async () => {
