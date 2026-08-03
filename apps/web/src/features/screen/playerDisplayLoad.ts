@@ -253,6 +253,15 @@ export class PlayerDisplayLoadSequencer {
  *     "stale" — even though it is the only response that ever actually
  *     confirmed the hold. If failures keep winning that race, the curtain
  *     can stay down indefinitely despite a real, repeatedly-confirmed hold.
+ *  7. Fix (6) by exempting `active: true` from the freshest-settled gate
+ *     entirely: closes (6), but the exemption was unconditional. If
+ *     `invalidate()` (unmount / cast-token change) explicitly abandoned a
+ *     request and the fetcher ignores its abort signal and resolves anyway,
+ *     that `active: true` belongs to an identity this sequencer has already
+ *     moved on from — applying it raises the WRONG campaign's curtain, and
+ *     unlike ordinary staleness it is not guaranteed to self-correct (the
+ *     new identity's own polls could keep succeeding with `false` and never
+ *     revisit it).
  *
  * The fix is to stop coupling ticking to completion, advance the ordering
  * watermark on every conclusion (not only successful ones), AND stop gating
@@ -264,20 +273,24 @@ export class PlayerDisplayLoadSequencer {
  * records that a generation has concluded — with ANY outcome, success,
  * failure, or abort — returning whether that generation is still the
  * freshest to have concluded. A confirmed `active: true` always applies,
- * regardless of that freshness check: raising the curtain late is never the
- * dangerous mistake (worst case it stays up one poll longer than strictly
- * needed, self-correcting on the next tick), so nothing should ever be
- * allowed to suppress a genuine hold observation. Only `active: false` is
- * gated on being the freshest-settled generation, since clearing the curtain
- * out of order is the direction that actually matters to block. This keeps
- * the out-of-order guarantee from (1)/(2) for the case that needs it — a
- * late, low-numbered `false` can never overwrite a `true` a higher-numbered
- * one already applied — closes (5) by no longer letting a response's own
- * success be the only thing that can supersede it, closes (6) by never
- * letting an inconclusive newer attempt suppress an older but genuine `true`,
- * and keeps (2)'s and (3)'s starvation modes structurally impossible: no
- * tick is ever skipped, and no in-flight request is ever aborted by a newer
- * tick starting.
+ * regardless of that freshness check UNLESS its own signal was explicitly
+ * aborted (invalidate() — unmount / identity change), in which case it is
+ * `ignored` regardless of value: raising the curtain late from an ordinary
+ * overlapping poll is never the dangerous mistake (worst case it stays up
+ * one poll longer than strictly needed, self-correcting on the next tick),
+ * but a response whose OWN identity has already been abandoned is a
+ * different kind of stale that would not self-correct. Only `active: false`
+ * from a still-current identity is gated on being the freshest-settled
+ * generation, since clearing the curtain out of order is the direction that
+ * actually matters to block there. This keeps the out-of-order guarantee
+ * from (1)/(2) for the case that needs it — a late, low-numbered `false` can
+ * never overwrite a `true` a higher-numbered one already applied — closes
+ * (5) by no longer letting a response's own success be the only thing that
+ * can supersede it, closes (6) by never letting an inconclusive newer
+ * attempt suppress an older but genuine `true`, closes (7) by never letting
+ * an abandoned identity's buffered `true` raise the wrong curtain, and keeps
+ * (2)'s and (3)'s starvation modes structurally impossible: no tick is ever
+ * skipped, and no in-flight request is ever aborted by a newer tick starting.
  *
  * `CAST_SAFETY_POLL_TIMEOUT_MS` still exists, but its job changed: it is no
  * longer a correctness deadline (nothing depends on it to keep polling
@@ -373,15 +386,20 @@ export class CastSafetyPollSequencer {
  * Run one cast-safety poll tick. Always starts a fresh request — never
  * skipped, never aborts a still-running earlier poll — so an outstanding
  * request can never block this or any later tick. A confirmed `active: true`
- * always resolves `{ kind: 'ok', active: true }`, regardless of generation
- * ordering — raising the curtain late is never the mistake that matters to
- * prevent. A confirmed `active: false` only resolves `ok` when its
- * generation is still the freshest SETTLED one; an out-of-order `false`
- * (including one superseded by a newer poll that itself failed or aborted)
- * resolves `stale` instead. Aborted work resolves `ignored`, and a genuine
- * failure resolves `failed`, so the caller can fail safe (keep last-known
- * state) instead of guessing a value. `timeoutMs` bounds this one request's
- * own lifetime purely for resource hygiene — see
+ * resolves `{ kind: 'ok', active: true }` regardless of generation ordering
+ * — raising the curtain late is never the mistake that matters to prevent —
+ * UNLESS this specific request's own signal was explicitly aborted
+ * (`invalidate()`: unmount / cast-token change), in which case even a
+ * buffered `true` that ignored the abort resolves `ignored`: it belongs to
+ * an identity this sequencer has already moved on from, and applying it
+ * would raise the WRONG campaign's curtain with no guarantee of self-
+ * correction. A confirmed `active: false` from a still-current identity only
+ * resolves `ok` when its generation is still the freshest SETTLED one; an
+ * out-of-order `false` (including one superseded by a newer poll that
+ * itself failed or aborted) resolves `stale` instead. A genuine failure
+ * resolves `failed`, so the caller can fail safe (keep last-known state)
+ * instead of guessing a value. `timeoutMs` bounds this one request's own
+ * lifetime purely for resource hygiene — see
  * `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no correctness
  * weight here.
  */
@@ -409,6 +427,18 @@ export async function runCastSafetyPoll(
     // because a LATER-started poll happened to fail FASTER — fresh evidence
     // that gating success on `settle()`'s freshest check applied uniformly
     // to both values was itself too strict.
+    //
+    // That leniency is itself scoped to ordinary staleness, not identity: if
+    // `invalidate()` explicitly aborted THIS request (unmount / cast-token
+    // change) and the fetcher ignored the signal and resolved anyway, its
+    // `active: true` belongs to a campaign this sequencer has already moved
+    // on from — applying it would raise the WRONG campaign's curtain, and
+    // unlike ordinary staleness that isn't guaranteed to self-correct on the
+    // next tick (the new identity's own polls could keep succeeding with
+    // `false` and never revisit it). `signal.aborted` at this point can only
+    // mean an explicit abort (invalidate() or the hygiene timeout) — the
+    // fetch already resolved, so ordinary out-of-order arrival never sets it.
+    if (signal.aborted) return { kind: 'ignored' };
     if (state.active) return { kind: 'ok', active: true };
     if (!isFreshest) return { kind: 'stale' };
     return { kind: 'ok', active: false };

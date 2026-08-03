@@ -1,11 +1,13 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Seven review
+ * `GET /cast/:token/safety` is polled on a fixed interval. Eight review
  * findings on the same code, each closing one failure mode and (because
  * earlier shapes coupled "when the next tick may run" to "when this one
- * finishes", or coupled ordering to success alone, or applied that ordering
- * gate uniformly regardless of which way it was protecting) opening another:
+ * finishes", coupled ordering to success alone, applied that ordering gate
+ * uniformly regardless of which way it was protecting, or exempted a value
+ * from that gate unconditionally rather than only for ordinary staleness)
+ * opening another:
  *
  *  1. Overlapping polls can complete out of order — a slow pre-hold `false`
  *     resolving after a fresh post-hold `true` must not clear the curtain.
@@ -42,9 +44,18 @@
  *     poll happened to fail faster. Fix: only `active: false` is gated on
  *     being the freshest-settled generation; `active: true` always applies —
  *     raising the curtain late is never the mistake that matters to prevent.
+ *  8. Exempting `active: true` UNCONDITIONALLY reopens a narrower problem:
+ *     if `invalidate()` (a cast-identity change) explicitly abandoned a
+ *     request and its fetcher ignores the abort and resolves anyway, that
+ *     `true` belongs to a campaign this sequencer has already moved on
+ *     from — applying it raises the WRONG campaign's curtain, with no
+ *     guarantee the new identity's own polls will ever revisit it (unlike
+ *     ordinary staleness, which self-corrects on the next tick). Fix: check
+ *     `signal.aborted` before either value branch, so an explicitly
+ *     invalidated request is `ignored` regardless of what it resolves with.
  *
  * These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free)
- * against all seven, mirroring `player-display-load.unit.spec.ts`'s
+ * against all eight, mirroring `player-display-load.unit.spec.ts`'s
  * deferred-promise technique.
  */
 import { expect, test } from '@playwright/test';
@@ -255,17 +266,11 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
   });
 
   test("invalidate() aborts outstanding polls, and even a late 'completion' that ignores the abort cannot clear the curtain", async () => {
-    // Uses `active: false` deliberately — per round 7, `active: true` always
-    // applies regardless of staleness (that's the point of the asymmetric
-    // fix, covered separately above), so the case that actually needs the
-    // watermark backstop here is the dangerous direction: a stale `false`
-    // must still be blocked after invalidate(), even from a fetch that
-    // ignores its own abort signal and resolves anyway.
     const sequencer = new CastSafetyPollSequencer();
     const hung = deferred<CastSafetyState>();
     // Deliberately ignores `signal` — some transports/mocks resolve a
-    // buffered response regardless of abort — so this proves the watermark,
-    // not just cancellation, is the backstop.
+    // buffered response regardless of abort — so this proves an explicit
+    // abort, not just cancellation, is the backstop.
     const ignoresAbort: CastSafetyFetcher = async () => hung.promise;
 
     const inFlight = runCastSafetyPoll(sequencer, ignoresAbort);
@@ -273,7 +278,33 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
 
     hung.resolve({ active: false });
     const result = await inFlight;
-    expect(result.kind).toBe('stale');
+    // 'ignored', not 'stale': `signal.aborted` is checked before the
+    // freshness gate, so an explicitly-invalidated request's late value is
+    // rejected outright regardless of which value it carries — see the
+    // round-8 regression below for why `active: true` needs this too, not
+    // just `false`.
+    expect(result.kind).toBe('ignored');
+  });
+
+  test('regression (round 8): invalidate() must reject a buffered active:true too, not only false', async () => {
+    // Round 7 exempted `active: true` from the staleness gate for the
+    // ORDINARY overlapping-poll case (a slow poll superseded by a faster
+    // newer one), where the worst case is a harmless, self-correcting extra
+    // frame of curtain. But a request explicitly abandoned by invalidate()
+    // (a cast-identity change) is a different kind of stale: its `true`
+    // belongs to a campaign this sequencer has already moved on from, and
+    // applying it would raise the WRONG campaign's curtain with no
+    // guarantee the new identity's own polls will ever revisit it.
+    const sequencer = new CastSafetyPollSequencer();
+    const hung = deferred<CastSafetyState>();
+    const ignoresAbort: CastSafetyFetcher = async () => hung.promise;
+
+    const inFlight = runCastSafetyPoll(sequencer, ignoresAbort);
+    sequencer.invalidate(); // cast-token change to a new campaign
+
+    hung.resolve({ active: true }); // campaign A's stale hold, arriving after B has taken over
+    const result = await inFlight;
+    expect(result.kind).toBe('ignored');
   });
 
   test('invalidate() does not block future polls — cast mode re-entered works normally', async () => {
