@@ -21,7 +21,7 @@ export function NewCharacterForm({
   ddbAllowed,
   onCancel,
   onCreated,
-  onImportSucceeded,
+  onImportStarted,
 }: {
   campaignId: number;
   adapter: RuleSystemAdapter;
@@ -29,16 +29,23 @@ export function NewCharacterForm({
   onCancel?: () => void;
   onCreated: () => void;
   /**
-   * Fired the instant a DDB import succeeds, before the summary is shown (issue #1903
-   * review). PartyPage's render guard for this form is `creating || party.length === 0` —
-   * when the form is open only because the party was empty (`creating` false), the reload
-   * this import triggers makes `party.length` become 1, flipping that guard false and
-   * unmounting the form (discarding the just-set summary) before the user can read it. The
-   * parent should treat this as "keep me open" independent of the party size (e.g. flip its
-   * own `creating` flag true) so the summary survives until `onCreated`/`onCancel` fire from
-   * the "Done" button.
+   * Fired the instant a DDB import STARTS, before the request is even sent (issue #1903
+   * review, round 11 — renamed from `onImportSucceeded` and moved earlier). PartyPage's
+   * render guard for this form is `creating || party.length === 0` — when the form is open
+   * only because the party was empty (`creating` false), the character-creation side effect
+   * this import triggers can flip `party.length` to 1 via a live campaign-event reload
+   * (`character.updated`, see PartyPage's `useCampaignEvents`) BEFORE this component's own
+   * `await api.post(...)` for the import even resolves — the server can broadcast that event
+   * as soon as the character row is created, independent of when the HTTP response body
+   * finishes arriving at this client. Firing this callback only after the import "succeeded"
+   * (the previous behavior) left exactly that window open: `creating` was still false when
+   * the reload's `party.length` bump raced ahead of it, unmounting the form and discarding
+   * the summary before it could ever be set. Firing it before the request starts closes the
+   * window entirely — the parent should treat this as "keep me open" independent of party
+   * size (e.g. flip its own `creating` flag true) for the whole lifetime of the import, until
+   * `onCreated`/`onCancel` fire from the "Done" button.
    */
-  onImportSucceeded?: () => void;
+  onImportStarted?: () => void;
 }) {
   const templates = useMemo(() => starterTemplatesForAdapter(adapter, 1), [adapter]);
   const [path, setPath] = useState<CharacterCreationPath>('template');
@@ -66,6 +73,11 @@ export function NewCharacterForm({
   async function importFromDdb() {
     const ref = ddbRef.trim();
     if (!ref) return;
+    // Pin the parent open BEFORE the request is even sent (issue #1903 review, round 11) —
+    // see onImportStarted's own doc comment for why firing this after the request resolves
+    // (the previous behavior) left a race window open where a live campaign-event reload
+    // could unmount this form before the summary was ever set.
+    onImportStarted?.();
     setImporting(true);
     setError(null);
     try {
@@ -78,10 +90,6 @@ export function NewCharacterForm({
       // unmount this form (the render guard is `creating || party.length === 0`, and both
       // closeCreating() and the reload's `loading=true` flip that guard false) before the
       // summary set on the next line ever gets a render — the panel would never be visible.
-      // onImportSucceeded fires first so the parent can pin itself open BEFORE that reload
-      // lands — needed for the party-was-empty case, where `creating` was never true to
-      // begin with (see the prop's own doc comment).
-      onImportSucceeded?.();
       setImportSummary(res.summary);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");

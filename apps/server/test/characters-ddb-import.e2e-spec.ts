@@ -675,6 +675,49 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(plain.actions?.find((a) => a.name === 'Longsword')?.spec).toBeDefined();
   });
 
+  // Regression for a PR #1950 review finding: a weapon with no damage dice at all (most
+  // notably the net, or any weapon whose sheet omits `definition.damage`) used to still get
+  // a resolvable attack spec with empty `outcomes` — rolling it hits but applies no damage,
+  // silently losing the weapon's real (non-damage) effect. It must land text-only instead.
+  it('a weapon with no damage dice (e.g. a net) lands text-only instead of a to-hit-only spec', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [
+        { id: 1, value: 16 },
+        { id: 2, value: 14 },
+      ],
+      inventory: [{ equipped: true, definition: { name: 'Net', filterType: 'Weapon', attackType: 2 } }],
+    });
+    const net = c.actions?.find((a) => a.name === 'Net');
+    expect(net).toBeDefined();
+    expect(net?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Net');
+  });
+
+  // Regression for a PR #1950 review finding: `ActionSpec`'s fixed-DC schema is
+  // `z.number().int().min(1).max(60)`. A malformed `fixedSaveDc` of 0, 61, or a non-integer
+  // used to reach `ActionSpec.parse` unvalidated and throw an uncaught ZodError, aborting the
+  // ENTIRE import over one bad feature instead of degrading just that feature to text-only.
+  it('an out-of-range or non-integer fixedSaveDc lands text-only instead of crashing the import', () => {
+    for (const badDc of [0, 61, 12.5, -5]) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        actions: { class: [{ name: 'Bad DC Breath', fixedSaveDc: badDc, saveStatId: 2, activation: { activationType: 1 } }] },
+      });
+      const feature = c.actions?.find((a) => a.name === 'Bad DC Breath');
+      expect(feature).toBeDefined();
+      expect(feature?.spec).toBeUndefined();
+      expect(summarizeDdbImport(c).textOnly).toContain('Bad DC Breath');
+    }
+    // A confirmed, in-range integer DC is unaffected (activationType:1 so the entry also
+    // clears the round-8 activation-economy gate and actually resolves).
+    const fine = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Fine DC Breath', fixedSaveDc: 15, saveStatId: 2, activation: { activationType: 1 } }] },
+    });
+    expect(fine.actions?.find((a) => a.name === 'Fine DC Breath')?.spec).toBeDefined();
+  });
+
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not
   // plain text, and the character sheet renders notes as plain text — so literal tags were
   // showing up on imported characters' sheets.

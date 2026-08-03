@@ -676,9 +676,25 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
       );
       continue;
     }
+    if (!diceString) {
+      // A weapon with no damage dice at all (issue #1903 review, round 11) — most notably the
+      // net, or any weapon whose sheet omits `definition.damage` — would otherwise still get a
+      // resolvable attack spec with an empty `outcomes` object: rolling it hits but applies no
+      // damage, silently losing whatever non-damage effect the real weapon has (the net
+      // restrains on a hit). Leave it text-only instead of presenting a to-hit-only action as
+      // a confident, complete resolution of the weapon's real effect.
+      out.push(
+        expandRawStatblockAction(
+          { name, desc: 'This weapon has no damage dice on the sheet — check its real effect (e.g. a net) and resolve manually.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
     const abilityModifier = abilityMod(abilityScore);
     const attackBonus = abilityModifier + proficiencyBonus;
-    const damage = diceString ? [{ expression: `${diceString}${flatSuffix(abilityModifier)}`, type: damageType }] : undefined;
+    const damage = [{ expression: `${diceString}${flatSuffix(abilityModifier)}`, type: damageType }];
     out.push(expandRawStatblockAction({ name, desc: '', attackBonus, damage }, 'attack', 'dnd5e'));
   }
   return out;
@@ -762,8 +778,19 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // costed) save spec for an entry this importer has deliberately decided is unresolvable.
       // `savingThrowFrom` treats explicit `null` as "do not infer at all."
       const saveAbilityKey = item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined;
+      // `ActionSpec`'s fixed-DC schema (packages/schema/src/action-resolver.ts) is
+      // `z.number().int().min(1).max(60)` — a sparse/malformed sheet's `fixedSaveDc` of `0`,
+      // `61`, or a non-integer like `12.5` would otherwise reach `ActionSpec.parse` inside
+      // `expandRawStatblockAction` and throw an uncaught ZodError, aborting the ENTIRE import
+      // over one bad feature (review finding on PR #1950 round 11) — the same class of crash
+      // fixed for out-of-range HTML entities in round 4. Validate the range here too, before
+      // treating the DC as confidently resolved.
+      const validFixedSaveDc =
+        typeof item.fixedSaveDc === 'number' && Number.isInteger(item.fixedSaveDc) && item.fixedSaveDc >= 1 && item.fixedSaveDc <= 60
+          ? item.fixedSaveDc
+          : null;
       let savingThrow: { dc: number; ability: string } | null =
-        typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : null;
+        validFixedSaveDc !== null && saveAbilityKey ? { dc: validFixedSaveDc, ability: saveAbilityKey } : null;
       // Same principle a third time for action economy (review finding on PR #1950 round 8):
       // an activation type this importer can't map to a real action-economy slot (see
       // featureActionSource) must not silently spend the actor's ordinary action either —
