@@ -31,6 +31,13 @@ import { FALLBACK_UPGRADE_GRACE_MS, MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../
 test.use({ storageState: stateFor('dm') });
 
 test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#591)', async ({ page }) => {
+  // The grace window is now derived from API_READ_BUDGET.overallMs (30s) rather than an
+  // arbitrary constant (review finding: P2 codex — a supported-but-slow read must still be
+  // caught), and this test deliberately exercises a delay past the *previous* 5s bound to
+  // prove the extended window is what makes that possible, so it needs more than the default
+  // 30s Playwright test timeout.
+  test.setTimeout(45_000);
+
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
   await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
@@ -56,6 +63,12 @@ test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#5
   // sleep (issue #1954's anti-pattern): this both avoids flaking on slow runners and confirms
   // the gated summary really is racing the fallback rather than beating it.
   await expect(page.locator(`#${MAIN_CONTENT_ID}`)).toBeFocused();
+
+  // Hold the response well past the OLD 5s grace window — this is the exact regression the
+  // P2 codex finding identified: a supported (not failing) slow read that outlasts a too-short
+  // window would previously have left focus stranded on <main> forever. A real wall-clock wait
+  // is unavoidable here since the thing under test is itself wall-clock-bounded.
+  await page.waitForTimeout(6_000);
   releaseSummary();
 
   await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused({ timeout: 5_000 });
@@ -158,6 +171,10 @@ test('a late heading does not claw focus away after a non-focus-moving key press
 });
 
 test('a heading arriving after the recovery grace window does not claw focus away (#591)', async ({ page }) => {
+  // FALLBACK_UPGRADE_GRACE_MS is now API_READ_BUDGET.overallMs (30s), so waiting it out plus
+  // margin needs more than the default 30s Playwright test timeout.
+  test.setTimeout(60_000);
+
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
   await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();

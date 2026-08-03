@@ -5,6 +5,8 @@
  * imperative helpers after navigation.
  */
 
+import { API_READ_BUDGET } from '../lib/apiTimeouts';
+
 export const MAIN_CONTENT_ID = 'main-content';
 export const SKIP_TO_MAIN_ID = 'skip-to-main';
 
@@ -178,14 +180,26 @@ export type FocusMainOptions = {
 
 /**
  * How long a late h1 may still claim focus after the fallback settles on `<main>`.
- * Long enough to cover a realistically slow async fetch-then-render (the reproduction
- * for issue #591 gated the Dashboard's summary fetch well past the initial ~2-frame
- * window and the heading still arrived comfortably inside this margin); short enough
- * that a route which never renders an h1 stops paying for the MutationObserver and
- * loses recovery eligibility within a few seconds of navigating, not for the entire
- * time the user stays on the page (review findings: Devin, Copilot on routeFocus.ts).
+ *
+ * This is not an arbitrary guess: it is `API_READ_BUDGET.overallMs` (apiTimeouts.ts),
+ * the app's own cap on how long a *successful* GET is allowed to take end-to-end. A
+ * route's heading depends on a read (e.g. the Dashboard's `/campaigns/:id/summary`)
+ * that starts at roughly the same moment the fallback settles, so any read that is
+ * going to succeed at all must resolve within this same budget — a heading arriving
+ * at 25s on a slow-but-supported connection is exactly the case this fix exists for,
+ * not an edge case to exclude (review finding: P2 codex on routeFocus.ts). Deriving
+ * from the read budget instead of a separate constant also means the two cannot drift
+ * apart if the app's read timeouts ever change.
+ *
+ * A window this long is only safe because of the user-takeover tracking below: the
+ * observer never moves focus once the user has interacted (a focus change, a click,
+ * or a non-focus-moving key), so an extended window only ever acts on a page the user
+ * has genuinely not touched yet — which is exactly when moving focus to the heading is
+ * correct. The hard teardown at the end of the window is unconditional either way, so
+ * a route that never renders an h1 still stops observing once the window closes
+ * (review findings: Devin, Copilot on routeFocus.ts).
  */
-export const FALLBACK_UPGRADE_GRACE_MS = 5_000;
+export const FALLBACK_UPGRADE_GRACE_MS = API_READ_BUDGET.overallMs;
 
 /**
  * Focus the main destination (h1 or main) without scrolling the viewport.
