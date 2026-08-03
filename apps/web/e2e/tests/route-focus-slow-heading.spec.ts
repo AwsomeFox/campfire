@@ -1,6 +1,32 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
-import { FALLBACK_UPGRADE_GRACE_MS, MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../../src/app/routeFocus';
+import { MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../../src/app/routeFocus';
+
+/**
+ * Milliseconds used to override the production recovery window for these specs (see
+ * `routeFocus.ts`'s `graceMs` option and `RouteChangeFocus.tsx`'s e2e bridge). The real
+ * window is `API_READ_BUDGET.overallMs` (tens of seconds) — a flat multi-second constant
+ * that can only be exercised by actually waiting it out is effectively untested in CI,
+ * which is how the boundary would silently rot later (review finding: coordinator). A
+ * small injected value lets both sides of the boundary — inside the window, and after it
+ * — run in well under a second instead.
+ */
+const TEST_GRACE_MS = 300;
+
+/**
+ * Seeds `window.__CAMPFIRE_E2E__.routeFocusGraceMs` before the app loads, gated the same
+ * way as the Announcer e2e bridge (issue #434): read only under `navigator.webdriver`,
+ * never in normal production browsing.
+ */
+async function installGraceMsOverride(page: Page, graceMs: number) {
+  await page.addInitScript((ms) => {
+    const w = window as Window & { __CAMPFIRE_E2E__?: { routeFocusGraceMs?: number } };
+    if (typeof w.__CAMPFIRE_E2E__ !== 'object' || w.__CAMPFIRE_E2E__ == null) {
+      w.__CAMPFIRE_E2E__ = {};
+    }
+    w.__CAMPFIRE_E2E__.routeFocusGraceMs = ms;
+  }, graceMs);
+}
 
 /**
  * Issue #591 regression (found via PR #1950's CI on `layout-skip-nav-a11y.spec.ts:75`,
@@ -31,12 +57,7 @@ import { FALLBACK_UPGRADE_GRACE_MS, MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../
 test.use({ storageState: stateFor('dm') });
 
 test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#591)', async ({ page }) => {
-  // The grace window is now derived from API_READ_BUDGET.overallMs (30s) rather than an
-  // arbitrary constant (review finding: P2 codex — a supported-but-slow read must still be
-  // caught), and this test deliberately exercises a delay past the *previous* 5s bound to
-  // prove the extended window is what makes that possible, so it needs more than the default
-  // 30s Playwright test timeout.
-  test.setTimeout(45_000);
+  await installGraceMsOverride(page, TEST_GRACE_MS);
 
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
@@ -64,14 +85,13 @@ test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#5
   // the gated summary really is racing the fallback rather than beating it.
   await expect(page.locator(`#${MAIN_CONTENT_ID}`)).toBeFocused();
 
-  // Hold the response well past the OLD 5s grace window — this is the exact regression the
-  // P2 codex finding identified: a supported (not failing) slow read that outlasts a too-short
-  // window would previously have left focus stranded on <main> forever. A real wall-clock wait
-  // is unavoidable here since the thing under test is itself wall-clock-bounded.
-  await page.waitForTimeout(6_000);
+  // Release comfortably inside the injected recovery window — this is the case the fix
+  // exists for: a supported (not failing) slow read whose heading arrives after the fallback
+  // has already settled must still claim focus.
+  await page.waitForTimeout(TEST_GRACE_MS / 3);
   releaseSummary();
 
-  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused();
 });
 
 test('a late heading does not claw focus back from a user who already activated the skip link (#591)', async ({
@@ -221,9 +241,7 @@ test('a late heading does not steal focus from an open dialog (#591)', async ({ 
 });
 
 test('a heading arriving after the recovery grace window does not claw focus away (#591)', async ({ page }) => {
-  // FALLBACK_UPGRADE_GRACE_MS is now API_READ_BUDGET.overallMs (30s), so waiting it out plus
-  // margin needs more than the default 30s Playwright test timeout.
-  test.setTimeout(60_000);
+  await installGraceMsOverride(page, TEST_GRACE_MS);
 
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
@@ -247,14 +265,17 @@ test('a heading arriving after the recovery grace window does not claw focus awa
   const main = page.locator(`#${MAIN_CONTENT_ID}`);
   await expect(main).toBeFocused();
 
-  // Let the bounded recovery window fully elapse without ever releasing the summary — this is
-  // the same watcher lifetime a route that never renders an h1 at all relies on to stop
-  // re-running `publishTitle()` and watching for a heading forever (PR #1957 review, Devin and
-  // Copilot findings). A real wall-clock wait is unavoidable here: the behavior under test is
-  // itself wall-clock-bounded, so there is no faster observable event to wait on instead.
-  await page.waitForTimeout(FALLBACK_UPGRADE_GRACE_MS + 500);
+  // Let the injected focus-recovery window (armed for double the override — see
+  // `settleOnTarget`'s arm site) fully elapse without ever releasing the summary — the same
+  // watcher lifetime a route that never renders an h1 at all relies on to stop moving focus
+  // forever (PR #1957 review, Devin and Copilot findings). A real wall-clock wait is
+  // unavoidable here: the behavior under test is itself wall-clock-bounded, so there is no
+  // faster observable event to wait on instead — but overriding the window down to
+  // `TEST_GRACE_MS` keeps that wait well under a second instead of needing the real
+  // multi-second production budget.
+  await page.waitForTimeout(TEST_GRACE_MS * 2 + 200);
 
-  // Only now does the real heading show up — after the recovery window already closed.
+  // Only now does the real heading show up — after the focus-recovery window already closed.
   releaseSummary();
   await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
 
@@ -264,5 +285,8 @@ test('a heading arriving after the recovery grace window does not claw focus awa
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       }),
   );
+  // Focus stays put — but title-sync is a separate, longer-lived concern (see
+  // `teardownFallbackWatch`'s doc comment) and must still have updated to the real heading.
   await expect(main).toBeFocused();
+  await expect(page).toHaveTitle(/E2E — Cinderhaven/);
 });
