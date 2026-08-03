@@ -920,8 +920,11 @@ describe('D&D Beyond character import — mapper (unit)', () => {
   // Regression for a PR #1950 review finding (Devin): `DamagePart.type` is `z.string().max(24)`.
   // DDB's `damageType` is normally a short display string ("Slashing"), but an implausibly
   // long value reaching `CharacterAction.parse` unguarded would throw a ZodError and abort
-  // the whole import rather than degrading just that weapon.
-  it('an implausibly long damage type does not crash the import', () => {
+  // the whole import rather than degrading just that weapon. Round 16 sharpened this further:
+  // an over-long (or missing) damage type now lands text-only rather than resolving with an
+  // empty `type` — see the round 16 damage-type test below for why an empty type is also
+  // unsafe to resolve (it silently skips resistance/immunity).
+  it('an implausibly long damage type lands text-only instead of crashing the import', () => {
     const c = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats: [{ id: 1, value: 16 }],
@@ -940,8 +943,83 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
     const weapon = c.actions?.find((a) => a.name === 'Verbose Sword');
     expect(weapon).toBeDefined();
-    expect(weapon?.spec).toBeDefined();
-    expect(weapon?.spec?.outcomes?.hit?.damage?.[0]?.type).toBe('');
+    expect(weapon?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Verbose Sword');
+  });
+
+  // Regression for a PR #1950 review finding (Codex, round 16): a MISSING damage type used to
+  // fall back to `''` and still resolve. The resolver treats an empty `DamagePart.type` as
+  // untyped and never applies target resistance/immunity, so a sword imported with incomplete
+  // metadata could silently bypass slashing (etc.) defenses while `summary.textOnly` never
+  // flagged it as needing a touch-up.
+  it('a weapon with no damage type lands text-only instead of resolving untyped', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      inventory: [
+        { equipped: true, definition: { name: 'Untyped Sword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' } } },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Untyped Sword');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Untyped Sword');
+  });
+
+  // Regression for a PR #1950 review finding (Codex, round 16): a weapon whose `attackType` is
+  // missing or an unrecognized value (not 1 or 2) used to be treated as melee by both
+  // `weaponAbilityKey` and the Fighting-Style bonus-flag check, so e.g. a bow with a sparse
+  // sheet could import as a resolvable STR attack while silently dropping a ranged bonus.
+  it('a weapon with no recognized attack type lands text-only instead of defaulting to melee', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }, { id: 2, value: 18 }],
+      inventory: [
+        { equipped: true, definition: { name: 'Mystery Bow', filterType: 'Weapon', damage: { diceString: '1d8' }, damageType: 'Piercing' } },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Mystery Bow');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Mystery Bow');
+
+    // A confirmed, recognized attack type (ranged) is unaffected.
+    const fine = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }, { id: 2, value: 18 }],
+      inventory: [
+        { equipped: true, definition: { name: 'Fine Bow', filterType: 'Weapon', attackType: 2, damage: { diceString: '1d8' }, damageType: 'Piercing' } },
+      ],
+    });
+    expect(fine.actions?.find((a) => a.name === 'Fine Bow')?.spec).toBeDefined();
+  });
+
+  // Regression for a PR #1950 review finding (Devin, round 16): `invalidFlat` only bounded the
+  // RAW `item.value` against DamagePart.flat's ±999 range, but the COMBINED flat (raw value +
+  // ability modifier, folded in for attack-shaped features since round 14) is what actually
+  // reaches `ActionSpec.parse`. An in-range raw value that overflows once the ability modifier
+  // is added would throw an uncaught ZodError and abort the whole import.
+  it('a feature bonus damage value that overflows once combined with the ability modifier lands text-only instead of crashing the import', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 20 }],
+      actions: {
+        class: [
+          {
+            name: 'Overloaded Strike',
+            value: 998,
+            dice: { diceString: '1d6' },
+            abilityModifierStatId: 1,
+            activation: { activationType: 1 },
+            attackTypeRange: 1,
+          },
+        ],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Overloaded Strike');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Overloaded Strike');
   });
 
   // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.
