@@ -5156,6 +5156,47 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(combatant.initiativeBreakdown.terms.reduce((sum, t) => sum + t.value, 0)).toBe(4);
     expect(combatant.initiativeBreakdown.formula).not.toContain('initiative +1');
   });
+
+  // Issue #1904 review finding (devin-ai-integration): the idempotent replay stored the
+  // full response body under the key and replayed it verbatim, without checking whether the
+  // CALLER's role still matches the role it was rendered for. Dev-auth's role header IS the
+  // effective role per request (no DB membership row backs it — same #1636 precedent used
+  // elsewhere in this file), so sending the SAME dev-user with a different `x-dev-role` on a
+  // later request faithfully simulates "demoted mid-session, same identity" without needing
+  // a real membership change.
+  it("a demoted replay of a DM-issued roll key receives the DEMOTED role's redacted projection, not the DM's raw one", async () => {
+    const server = ctx.app.getHttpServer();
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Replay Secrecy Monster', hpMax: 40 });
+    expect(monster.status).toBe(201);
+    const monsterCombatantId2 = monster.body.id as number;
+    const idempotencyKey = 'replay-secrecy-dm-roll';
+
+    // DM rolls (a player could never roll this monster fresh — no linked character).
+    const dmRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId2}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(dmRoll.status).toBe(201);
+    expect(dmRoll.body.combatant.hpCurrent).toBe(40); // DM sees the exact number
+    expect(dmRoll.body.combatant.hpBand).toBeNull();
+
+    // Same identity (dm-1), demoted to player on this later request.
+    const demotedDm = { 'x-dev-role': 'player', 'x-dev-user': 'dm-1' };
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId2}/roll-initiative`)
+      .set(demotedDm)
+      .send({ idempotencyKey });
+    expect(replay.status).toBe(201);
+    // The core regression: the demoted replay must NOT carry the DM's raw HP through.
+    expect(replay.body.combatant.hpCurrent).toBeNull();
+    expect(replay.body.combatant.hpBand).toBe('healthy');
+    // Same roll outcome either way (the roll already committed) — only the projection differs.
+    expect(replay.body.combatant.initiative).toBe(dmRoll.body.combatant.initiative);
+    expect(replay.body.roll).toEqual(dmRoll.body.roll);
+  });
 });
 
 describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE under group initiative', () => {

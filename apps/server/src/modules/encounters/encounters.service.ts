@@ -77,6 +77,7 @@ import {
   readEncounterOpAfterRace,
   recordEncounterOp,
   type EncounterOpClaim,
+  type EncounterOpPrior,
 } from './encounter-idempotency';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
@@ -5739,16 +5740,36 @@ export class EncountersService {
       const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }>;
       return candidate.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
     };
-    const replayCommitted = (): { combatant: Combatant; roll: DiceRoll | null } | null => {
-      let replay: { combatant: Combatant; roll: DiceRoll | null } | null = null;
-      this.db.transaction((tx) => {
-        const prior = findPriorEncounterOp(tx, opClaim, Date.now());
-        replay = prior ? replayResponse(prior.response) : null;
-      });
-      return replay;
+    // Issue #1904 review finding: the stored response's `combatant` half was rendered for
+    // the ROLE that committed it. If the caller's role has since changed within the replay
+    // window (e.g. a DM demoted to player/viewer), replaying that stored projection verbatim
+    // would leak whatever the DM saw — exact monster HP, an unmasked hidden-NPC name — to a
+    // lower-privileged caller. The `roll` half carries no such sensitivity: it is masked at
+    // WRITE time (see the hidden-NPC label fix above) and every campaign member already reads
+    // the identical shared dice log via GET /campaigns/:id/rolls, so only `combatant` needs
+    // re-deriving. The roll already committed either way — this re-renders CURRENT state for
+    // the caller's role rather than re-running the effect, mirroring the turn-advance
+    // precedent (issue #580) of falling through to fresh server truth on a role mismatch.
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
+      const parsed = replayResponse(prior.response);
+      if (!parsed) return null;
+      if (prior.responseRole === role) return parsed;
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      return found ? { combatant: found, roll: parsed.roll } : null;
     };
-    const earlyReplay = replayCommitted();
-    if (earlyReplay) return earlyReplay;
+    const findPrior = (): EncounterOpPrior | null => {
+      let prior: EncounterOpPrior | null = null;
+      this.db.transaction((tx) => {
+        prior = findPriorEncounterOp(tx, opClaim, Date.now());
+      });
+      return prior;
+    };
+    const earlyPrior = findPrior();
+    if (earlyPrior) {
+      const earlyReplay = await resolveReplay(earlyPrior);
+      if (earlyReplay) return earlyReplay;
+    }
 
     try {
       const adapter = await this.adapterForCampaign(encounter.campaignId);
@@ -5779,12 +5800,16 @@ export class EncountersService {
       let roll: DiceRoll | null = null;
       let committed!: Combatant;
       let freshEncounterRow!: typeof encounters.$inferSelect;
-      let replayed: { combatant: Combatant; roll: DiceRoll | null } | null = null;
+      // Holds the raw prior (not yet role-resolved) when this transaction lands on a race —
+      // the same key committed between the early check above and this transaction starting.
+      // Resolved via resolveReplay AFTER the transaction, since that may need an async
+      // role-filtered re-read and this callback is a synchronous better-sqlite3 transaction.
+      let priorFromRace: EncounterOpPrior | null = null;
 
       this.db.transaction((tx) => {
         const prior = findPriorEncounterOp(tx, opClaim, Date.now());
         if (prior) {
-          replayed = replayResponse(prior.response);
+          priorFromRace = prior;
           return;
         }
         const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
@@ -5905,7 +5930,10 @@ export class EncountersService {
         recordEncounterOp(tx, opClaim, nowIso(), { body: { combatant: committed, roll }, role });
       });
 
-      if (replayed) return replayed;
+      if (priorFromRace) {
+        const raceReplay = await resolveReplay(priorFromRace);
+        if (raceReplay) return raceReplay;
+      }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
       return { combatant: committed, roll };
     } catch (err) {
@@ -5913,8 +5941,11 @@ export class EncountersService {
       // a mutable-row preflight (for example, before another DM ends the encounter).
       // Recheck the stored outcome before surfacing that later 404/409/403 so an ambiguous
       // retry still recovers the committed authoritative result.
-      const lateReplay = replayCommitted();
-      if (lateReplay) return lateReplay;
+      const latePrior = findPrior();
+      if (latePrior) {
+        const lateReplay = await resolveReplay(latePrior);
+        if (lateReplay) return lateReplay;
+      }
       throw err;
     }
   }
