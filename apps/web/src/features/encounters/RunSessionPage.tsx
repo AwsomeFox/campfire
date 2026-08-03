@@ -2210,7 +2210,13 @@ export default function RunSessionPage() {
       beginRollAnimation(`1d${activeAdapter.initiativeDie}`);
     },
     onSuccess: (data) => {
-      if (data.roll) showRoll(data.roll);
+      // Issue #1904 review finding: applyDisabled, not a label heuristic — an initiative
+      // roll under a non-d20 ruleset (e.g. Starforged's 1d6) otherwise passes
+      // looksLikeDamageRoll's "positive, non-d20, not heal/cure-labeled" test and would
+      // offer to apply the initiative value as HP damage while the apply-damage bridge is
+      // active (any running encounter). This is never damage, structurally, regardless of
+      // die size or label wording.
+      if (data.roll) showRoll(data.roll, { applyDisabled: true });
       else cancelRollAnimation();
     },
     onError: (err) => {

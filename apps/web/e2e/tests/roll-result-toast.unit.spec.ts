@@ -37,6 +37,17 @@ test.describe('looksLikeDamageRoll (issue #1315)', () => {
   test('flat modifier-only expressions are not damage-suitable', () => {
     expect(looksLikeDamageRoll(roll({ expr: '+3', total: 3 }))).toBe(false);
   });
+
+  // Issue #1904 review finding (codex): a non-5e ruleset's individual initiative die (e.g.
+  // Starforged's 1d6) is a positive, non-d20, non-"heal"/"cure"-labeled expression — exactly
+  // what this heuristic treats as damage-suitable. This is NOT a bug in the heuristic to
+  // patch with an "initiative" label check (that only moves the same guess one word along
+  // for the next non-d20 roll kind); it is the reason ShowRollOptions.applyDisabled exists to
+  // bypass this heuristic structurally at the call site instead. This test documents the gap
+  // the structural fix protects against, not a desired outcome to "fix" here.
+  test('a non-d20 initiative roll is misread as damage-suitable by the heuristic alone — this is exactly why callers that know better must bypass it via applyDisabled, not a smarter label match', () => {
+    expect(looksLikeDamageRoll(roll({ expr: '1d6', total: 4, label: 'Zephyr · Initiative' }))).toBe(true);
+  });
 });
 
 test.describe('RollResultToast component contract (issue #1315)', () => {
@@ -76,5 +87,19 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
     expect(logSource).toMatch(/showRoll\(result\)/);
     expect(logSource).toMatch(/beginRollAnimation\(cleaned\)/);
     expect(cardSource).toMatch(/onApply: onApplyDamage/);
+  });
+
+  // Issue #1904 review finding: the per-combatant initiative roll must structurally opt out
+  // of the apply-damage bridge — not rely on looksLikeDamageRoll ever concluding "not damage"
+  // for a non-d20 initiative die under some ruleset.
+  test('applyDisabled bypasses the damage heuristic unconditionally, and the combatant-initiative roll call site sets it', () => {
+    expect(contextSource).toMatch(/applyDisabled/);
+    // canApply must gate on !rollApplyDisabled BEFORE consulting looksLikeDamageRoll/handler
+    // presence — a structural veto, not one more heuristic input among several.
+    expect(contextSource).toMatch(/!rollApplyDisabled\s*&&/);
+    expect(contextSource).toMatch(/if \(rollApplyDisabled\) return;/);
+
+    const runSessionSource = readFileSync(resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(runSessionSource).toMatch(/showRoll\(data\.roll, \{ applyDisabled: true \}\)/);
   });
 });

@@ -14,12 +14,14 @@ import {
   encounterEvents as encounterEventsTable,
   diceRolls,
   combatantRemovalUndos,
+  encounterOpIdempotency,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AuditService } from '../src/modules/audit/audit.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
 import { RollsService } from '../src/modules/rolls/rolls.service';
 import { UNKNOWN_COMBATANT_LABEL } from '../src/modules/encounters/encounters.logic';
+import { encounterOpFingerprint } from '../src/modules/encounters/encounter-idempotency';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const otherDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-2' };
@@ -5196,6 +5198,54 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     // Same roll outcome either way (the roll already committed) — only the projection differs.
     expect(replay.body.combatant.initiative).toBe(dmRoll.body.combatant.initiative);
     expect(replay.body.roll).toEqual(dmRoll.body.roll);
+  });
+
+  // Issue #1904 review finding (devin-ai-integration): the role-aware replay above can find a
+  // recorded op whose stored response cannot be re-shown to ANY caller (e.g. a claim recorded
+  // before its body was backfilled — same "crash in the moment between commit and backfill"
+  // class the turn-advance idempotency helper already documents). Before this fix, falling
+  // through past that unresolvable replay dereferenced `freshEncounterRow` — never assigned on
+  // this branch, since the write path that assigns it is exactly what a replay skips — and
+  // 500'd instead of failing cleanly. This is the branch nobody exercises by hand: it requires
+  // an already-recorded claim reached from INSIDE the write transaction's own dedup check,
+  // which normally only happens on a genuine concurrent race. A directly-seeded incomplete
+  // claim row reproduces the same "recorded but unrenderable" condition deterministically.
+  it('a recorded roll claim that cannot be re-rendered for the caller 404s cleanly instead of 500ing', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Unrenderable Replay Monster', hpMax: 12 });
+    expect(monster.status).toBe(201);
+    const combatantId = monster.body.id as number;
+    const idempotencyKey = 'unrenderable-replay-claim';
+
+    // Seed an already-committed-looking claim whose response was never backfilled (responseJson
+    // null) — the same "claim committed, body missing" state the turn-advance path's own
+    // comments anticipate, reachable in practice via the in-transaction race branch this fix
+    // guards.
+    await db.insert(encounterOpIdempotency).values({
+      actorId: 'dev:dm-1',
+      operation: 'combatant.roll_initiative',
+      key: idempotencyKey,
+      encounterId,
+      campaignId,
+      fingerprint: encounterOpFingerprint({ combatantId, overwrite: false }),
+      responseJson: null,
+      responseRole: null,
+      createdAt: new Date().toISOString(),
+    });
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(res.status).toBe(404); // not 500
+    // Not re-rolled either — the pre-existing (if incomplete) claim is honored, not overwritten.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatant = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === combatantId);
+    expect(combatant?.initiative).toBeNull();
   });
 });
 

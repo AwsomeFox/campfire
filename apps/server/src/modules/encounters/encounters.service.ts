@@ -5737,8 +5737,12 @@ export class EncountersService {
       fingerprint: encounterOpFingerprint({ combatantId, overwrite: overwrite === true }),
     };
     const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll | null } | null => {
-      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }>;
-      return candidate.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
+      // `response` is `null` outright when the claim committed but its body was never
+      // backfilled (see the analogous turn-advance comment on this exact window) — optional
+      // chaining here, not a bare property access, so that state resolves to "cannot replay"
+      // rather than throwing before resolveReplay ever gets to decide what to do about it.
+      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }> | null | undefined;
+      return candidate?.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
     };
     // Issue #1904 review finding: the stored response's `combatant` half was rendered for
     // the ROLE that committed it. If the caller's role has since changed within the replay
@@ -5931,8 +5935,18 @@ export class EncountersService {
       });
 
       if (priorFromRace) {
+        // The write branch above never ran (it returned early the moment it found this
+        // race), so `committed`/`freshEncounterRow` were never assigned — falling through
+        // to the fresh-write emit/return below would dereference undefined and 500 instead
+        // of replaying. Resolve the race's outcome for THIS caller's role, or, on the rare
+        // case that fails (role mismatch AND the combatant is no longer visible to it —
+        // e.g. removed since), surface a 404 rather than crash. Either way, a race replay
+        // must return here: the op already committed under the concurrent request, which
+        // owns the ONE audit entry + SSE signal for it (same reasoning as the analogous
+        // bulk-roll/turn-advance "an idempotent replay stops here" comments elsewhere).
         const raceReplay = await resolveReplay(priorFromRace);
         if (raceReplay) return raceReplay;
+        throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
       return { combatant: committed, roll };
