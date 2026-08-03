@@ -60,7 +60,8 @@
       "resolveAction": "Couldn't resolve that action.",
       "applyAction": "Couldn't apply that action.",
       "loadAftermath": "Couldn't load the aftermath workflow.",
-      "dismissAftermath": "Couldn't defer the aftermath panel."
+      "dismissAftermath": "Couldn't defer the aftermath panel.",
+      "spellSlot": "Couldn't update the spell slot."
     },
     "aftermath": {
       "title": "Aftermath",

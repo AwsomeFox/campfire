@@ -10503,6 +10503,57 @@ export const TurnSuggestedAction = z.object({
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
 
+/**
+ * A castable spell surfaced in the current-turn workspace (issue #1900) — the in-combat
+ * Spellbook's data source. Derived server-side from the SAME action rows as
+ * {@link TurnSuggestedAction} (see {@link deriveTurnSpells}), never fabricated: fields with no
+ * data model (school, range, casting time) simply do not exist here. `level`/`castingSlot`/
+ * `concentration` come straight off the row's `spec.uses`/`spec.cost` — there is no separate
+ * spell data model.
+ */
+export const TurnSpellEntry = z.object({
+  name: z.string().min(1).max(160),
+  // 0 = cantrip / at-will; 1-9 = the slot level the row's structured spec declares.
+  level: z.number().int().min(0).max(9),
+  // Adapter action-economy slot this spell's cast consumes ('action', 'bonus', …); '' = unset.
+  castingSlot: z.string().max(40).default(''),
+  concentration: z.boolean().default(false),
+  // Same index space as TurnSuggestedAction.actionIndex — feeds the resolve/apply Use flow.
+  actionIndex: z.number().int().min(0).optional(),
+  resolvable: z.boolean().default(false),
+  spec: ActionSpec.nullable().optional(),
+});
+export type TurnSpellEntry = z.infer<typeof TurnSpellEntry>;
+
+/**
+ * Pure derivation (issue #1900): pick the spell-qualifying rows out of the same
+ * `TurnSuggestedAction[]` the workspace already built for `suggestedActions`, and reshape them
+ * into {@link TurnSpellEntry}. A row qualifies when its structured spec spends a spell slot
+ * (`spec.uses.spellLevel >= 1`), or its source/kind reads as a spell or cantrip at level 0 (a
+ * cantrip has no slot to spend, so `spellLevel` alone can't distinguish it from a non-spell
+ * action). No school/range/casting-time invention — those fields have no data model and are
+ * simply absent from the result, unlike the deleted client-side fallback this replaces.
+ */
+export function deriveTurnSpells(actions: readonly TurnSuggestedAction[]): TurnSpellEntry[] {
+  const out: TurnSpellEntry[] = [];
+  for (const a of actions) {
+    const level = a.spec?.uses?.spellLevel ?? 0;
+    const kind = a.source.trim().toLowerCase();
+    const isSpellKind = kind === 'spell' || kind === 'cantrip';
+    if (level < 1 && !isSpellKind) continue;
+    out.push({
+      name: a.name,
+      level,
+      castingSlot: a.spec?.cost?.slot ?? '',
+      concentration: a.spec?.uses?.concentration ?? false,
+      actionIndex: a.actionIndex,
+      resolvable: a.resolvable,
+      spec: a.spec ?? null,
+    });
+  }
+  return out;
+}
+
 /** Quick-roll request body for one-tap attack or damage roll in an encounter (issue #1850). */
 export const QuickRollRequest = z.object({
   combatantId: Id.optional(),
@@ -10585,6 +10636,12 @@ export const TurnWorkspace = z.object({
   suggestedActions: z.array(TurnSuggestedAction),
   startPrompts: z.array(TurnPrompt),
   endPrompts: z.array(TurnPrompt),
+  // Issue #1900: the current combatant's persisted spell slots (character actors only) —
+  // null for a monster/NPC actor, or when the viewer doesn't pass the detail gate above.
+  spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).nullable(),
+  // Issue #1900: castable spells derived from the same rows as `suggestedActions` (see
+  // {@link deriveTurnSpells}) — empty when the actor is not a character or has none.
+  spells: z.array(TurnSpellEntry),
 });
 export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
 

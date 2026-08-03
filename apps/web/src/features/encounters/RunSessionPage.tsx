@@ -98,6 +98,7 @@ import {
 import { isDown, endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import {
   canStabilizeCombatant,
   hasRestoredTrashedEncounter,
@@ -1885,6 +1886,36 @@ export default function RunSessionPage() {
     },
   });
 
+  // Issue #1900: the in-combat Spellbook's slot spend/restore. Optimistically flips the
+  // affected pip in the SHARED /turn cache entry (the same `queryKeys.encounterTurn(eid)`
+  // TurnWorkspace itself now reads, since the duplicate child query was removed) so a click
+  // feels instant; a 4xx/5xx rolls the cache back to its pre-click snapshot and surfaces a
+  // toast, rather than leaving a pip showing a spend that never happened server-side.
+  const updateSpellSlot = useMutation({
+    mutationFn: ({ characterId, level, delta }: { characterId: number; level: number; delta: number }) =>
+      api.post<Character>(`${API}/characters/${characterId}/spell-slots`, { level, delta }),
+    onMutate: async ({ level, delta }) => {
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      const previous = queryClient.getQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid));
+      if (previous) {
+        queryClient.setQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid), {
+          ...previous,
+          spellSlots: applyOptimisticSpellSlotDelta(previous.spellSlots, level, delta),
+        });
+      }
+      return { previous };
+    },
+    onError: (err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKeys.encounterTurn(eid), context.previous);
+      setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.spellSlot' })));
+    },
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
+    },
+  });
+
   // Turn advancement (issue #580). Both directions of protection travel together: the
   // operation id makes a RETRY replay, and expectedCurrentCombatantId makes a RACE with
   // another device a 409 rather than a second advance.
@@ -3452,8 +3483,7 @@ export default function RunSessionPage() {
       {encounter.status === 'running' && (
         <TurnWorkspace
           encounterId={eid}
-          round={encounter.round}
-          currentCombatantId={currentCombatantId ?? null}
+          turn={turnWorkspace}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
@@ -3463,6 +3493,11 @@ export default function RunSessionPage() {
           gridUnit={encounter.gridUnit}
           gridScale={encounter.gridScale}
           onRollDeathSave={rollDeathSave}
+          onUpdateSpellSlot={
+            currentCombatant?.characterId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+              ? (level, delta) => updateSpellSlot.mutate({ characterId: currentCombatant.characterId!, level, delta })
+              : undefined
+          }
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {

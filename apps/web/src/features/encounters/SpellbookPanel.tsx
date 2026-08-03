@@ -3,13 +3,21 @@ import { useTranslation } from 'react-i18next';
 import type { ActionSpec } from '@campfire/schema';
 import { Card } from '../../components/ui';
 
+/**
+ * A castable spell as rendered by the panel (issue #1900). Sourced from the server's
+ * `TurnWorkspace.spells` (derived from the character's real actions — see
+ * `deriveTurnSpells` in `@campfire/schema`), never invented client-side. `castingTime` /
+ * `range` / `toHit` / `saveDc` / `damage` / `school` have no data model on a spell action —
+ * they stay optional and simply go unrendered when absent rather than being fabricated
+ * (the deleted `effectiveSpells` fallback used to hardcode all of these).
+ */
 export interface SpellItem {
   id: string;
   name: string;
   level: number; // 0 for Cantrip, 1..9 for leveled spells
   school?: string;
-  castingTime: string; // e.g. "1 Action", "1 Bonus Action", "1 Reaction", "1A", "1BA", "1R"
-  range: string; // e.g. "60 ft", "Touch", "Self"
+  castingTime?: string; // e.g. "1A", "1BA", "1R" — display-only, derived from the action's cost slot
+  range?: string; // e.g. "60 ft", "Touch", "Self"
   toHit?: string | null; // e.g. "+7"
   saveDc?: string | null; // e.g. "DC 15 Dex"
   damage?: string | null; // e.g. "8d6 fire"
@@ -20,32 +28,16 @@ export interface SpellItem {
   actionIndex?: number;
 }
 
-export interface SpellcastingStats {
-  attribute: string; // e.g. "INT" | "WIS" | "CHA"
-  attackMod: string | number; // e.g. "+7" or 7
-  saveDc: number; // e.g. 15
-}
-
-export interface PactSlotPool {
-  level: number; // e.g. 3
-  max: number;
-  used: number;
-}
-
 export interface SpellSlotMap {
   [level: string]: { max: number; used: number };
 }
 
 export interface SpellbookPanelProps {
   combatantName?: string;
-  stats?: SpellcastingStats;
   spells: SpellItem[];
   spellSlots?: SpellSlotMap;
-  pactSlots?: PactSlotPool | null;
   activeConcentration?: string | null;
-  onUpdateSlot?: (level: number | 'pact', delta: number) => void;
-  onToggleSlotPip?: (level: number | 'pact', pipIndex: number) => void;
-  onCastSpell?: (spell: SpellItem, castLevel?: number | 'pact') => void;
+  onUpdateSlot?: (level: number, delta: number) => void;
   onUseActionRequested?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   disabled?: boolean;
 }
@@ -76,8 +68,8 @@ export function filterSpells(spells: SpellItem[], query: string): SpellItem[] {
   return spells.filter((s) => {
     const nameMatch = s.name.toLowerCase().includes(q);
     const schoolMatch = s.school ? s.school.toLowerCase().includes(q) : false;
-    const cTimeRawMatch = s.castingTime.toLowerCase().includes(q);
-    const cTimeFmtMatch = formatCastingTime(s.castingTime).toLowerCase().includes(q);
+    const cTimeRawMatch = s.castingTime ? s.castingTime.toLowerCase().includes(q) : false;
+    const cTimeFmtMatch = s.castingTime ? formatCastingTime(s.castingTime).toLowerCase().includes(q) : false;
     return nameMatch || schoolMatch || cTimeRawMatch || cTimeFmtMatch;
   });
 }
@@ -96,14 +88,10 @@ export function groupSpellsByLevel(spells: SpellItem[]): Map<number, SpellItem[]
 
 export function SpellbookPanel({
   combatantName,
-  stats,
   spells,
   spellSlots = {},
-  pactSlots,
   activeConcentration,
   onUpdateSlot,
-  onToggleSlotPip,
-  onCastSpell,
   onUseActionRequested,
   disabled = false,
 }: SpellbookPanelProps) {
@@ -113,7 +101,7 @@ export function SpellbookPanel({
   const [upcastMenuOpenFor, setUpcastMenuOpenFor] = useState<string | null>(null);
   const [concentrationWarningSpell, setConcentrationWarningSpell] = useState<{
     spell: SpellItem;
-    castLevel?: number | 'pact';
+    castLevel?: number;
   } | null>(null);
 
   const filteredSpells = useMemo(() => filterSpells(spells, filterQuery), [spells, filterQuery]);
@@ -136,32 +124,33 @@ export function SpellbookPanel({
     setCollapsedLevels((prev) => ({ ...prev, [lvl]: !prev[lvl] }));
   };
 
-  const handlePipClick = (level: number | 'pact', pipIndex: number, isUsed: boolean) => {
-    if (disabled) return;
-    if (onToggleSlotPip) {
-      onToggleSlotPip(level, pipIndex);
-    } else if (onUpdateSlot) {
-      // If clicking an available slot pip (not used), spend 1 (+1 delta).
-      // If clicking a used slot pip, restore 1 (-1 delta).
-      onUpdateSlot(level, isUsed ? -1 : 1);
-    }
+  const handlePipClick = (level: number, pipIndex: number, isUsed: boolean) => {
+    if (disabled || !onUpdateSlot) return;
+    // Clicking an available slot pip (not used) spends 1 (+1 delta); clicking a used pip
+    // restores 1 (-1 delta). The parent's mutation is the only writer of `used` — this
+    // component never tracks its own copy, so a failed request simply leaves the pips
+    // showing whatever the server last confirmed (issue #1900).
+    onUpdateSlot(level, isUsed ? -1 : 1);
   };
 
-  const executeCast = (spell: SpellItem, castLevel?: number | 'pact') => {
-    // Auto-decrement slot count for leveled spells or upcasting
-    const levelToSpend = castLevel ?? (spell.level > 0 ? spell.level : undefined);
-    if (levelToSpend !== undefined && levelToSpend !== 0 && onUpdateSlot) {
-      onUpdateSlot(levelToSpend, 1);
-    }
-
+  // Issue #1900: no client-side slot decrement here anymore — that used to fire ALONGSIDE
+  // the resolver's own server-side spend for a spec-bearing spell, double-spending the same
+  // cast. A resolvable spell now routes through the resolve/apply flow exclusively, which
+  // spends the spec's own declared slot level transactionally (undo-refundable). A
+  // spec-less leveled spell has no resolver path at all, so its ONLY spend event is the
+  // direct slot patch below — still exactly once.
+  const executeCast = (spell: SpellItem, castLevel?: number) => {
     if (spell.spec && onUseActionRequested && spell.actionIndex != null) {
       onUseActionRequested(spell.actionIndex, spell.name, spell.spec);
-    } else if (onCastSpell) {
-      onCastSpell(spell, castLevel);
+      return;
+    }
+    const levelToSpend = castLevel ?? (spell.level > 0 ? spell.level : undefined);
+    if (levelToSpend && onUpdateSlot) {
+      onUpdateSlot(levelToSpend, 1);
     }
   };
 
-  const initiateCast = (spell: SpellItem, castLevel?: number | 'pact') => {
+  const initiateCast = (spell: SpellItem, castLevel?: number) => {
     if (disabled) return;
     setUpcastMenuOpenFor(null);
 
@@ -176,70 +165,13 @@ export function SpellbookPanel({
 
   return (
     <Card className="space-y-4" data-testid="spellbook-panel">
-      {/* Header section with combatant title & header stats */}
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-800 pb-3">
-        <div>
-          <h3 className="text-base font-bold text-white m-0 flex items-center gap-2">
-            <span>🔮 In-Combat Spellbook</span>
-            {combatantName && <span className="text-xs font-normal text-muted">— {combatantName}</span>}
-          </h3>
-        </div>
-
-        {/* Stats header: Spell attack mod, save DC, spellcasting attribute */}
-        {stats && (
-          <div className="flex items-center gap-3 text-xs bg-neutral-950/60 px-3 py-1.5 rounded-md border border-neutral-800" data-testid="spellbook-stats-header">
-            <div>
-              <span className="text-muted uppercase text-[10px] block">Attribute</span>
-              <span className="font-bold text-white" data-testid="spell-stat-attribute">{stats.attribute}</span>
-            </div>
-            <div className="border-r border-neutral-800 h-5" />
-            <div>
-              <span className="text-muted uppercase text-[10px] block">Attack Mod</span>
-              <span className="font-bold text-white" data-testid="spell-stat-attack">{typeof stats.attackMod === 'number' && stats.attackMod >= 0 ? `+${stats.attackMod}` : stats.attackMod}</span>
-            </div>
-            <div className="border-r border-neutral-800 h-5" />
-            <div>
-              <span className="text-muted uppercase text-[10px] block">Save DC</span>
-              <span className="font-bold text-white" data-testid="spell-stat-dc">DC {stats.saveDc}</span>
-            </div>
-          </div>
-        )}
+        <h3 className="text-base font-bold text-white m-0 flex items-center gap-2">
+          <span>🔮 In-Combat Spellbook</span>
+          {combatantName && <span className="text-xs font-normal text-muted">— {combatantName}</span>}
+        </h3>
       </div>
-
-      {/* Warlock Pact Magic slots row */}
-      {pactSlots && pactSlots.max > 0 && (
-        <div className="rounded-md border border-purple-500/30 bg-purple-950/20 px-3 py-2 flex items-center justify-between flex-wrap gap-2" data-testid="pact-magic-slots-row">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-purple-300 uppercase tracking-wide">Pact Magic (Level {pactSlots.level})</span>
-            <span className="text-xs text-muted">
-              {Math.max(0, pactSlots.max - pactSlots.used)}/{pactSlots.max} remaining
-            </span>
-          </div>
-
-          {/* Pact slot pips */}
-          <div className="flex items-center gap-1.5" data-testid="pact-slot-pips">
-            {Array.from({ length: pactSlots.max }).map((_, idx) => {
-              const isUsed = idx >= (pactSlots.max - pactSlots.used);
-              return (
-                <button
-                  key={`pact-pip-${idx}`}
-                  type="button"
-                  className={`w-7 h-7 rounded flex items-center justify-center text-sm font-bold transition-colors cf-target-44 ${
-                    isUsed
-                      ? 'border border-neutral-700 text-neutral-600 bg-neutral-900'
-                      : 'border border-purple-400 text-purple-300 bg-purple-950/50 hover:bg-purple-900/50'
-                  }`}
-                  aria-label={`Pact slot ${idx + 1} ${isUsed ? 'used' : 'available'}`}
-                  disabled={disabled}
-                  onClick={() => handlePipClick('pact', idx, isUsed)}
-                >
-                  {isUsed ? '○' : '●'}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Search / filter input */}
       <div>
@@ -287,7 +219,8 @@ export function SpellbookPanel({
                   <span className="text-xs text-muted">({levelSpells.length})</span>
                 </div>
 
-                {/* Slot pips for leveled slots */}
+                {/* Slot pips for leveled slots — the ONLY source of truth is spellSlots
+                    (the server's persisted {max, used}); there is nothing else to render. */}
                 {lvl >= 1 && slotPool.max > 0 && (
                   <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <span className="text-xs text-muted">
@@ -325,12 +258,17 @@ export function SpellbookPanel({
                     <p className="text-xs text-muted italic m-0 p-2">No {formatLevelName(lvl).toLowerCase()} prepared.</p>
                   ) : (
                     levelSpells.map((spell) => {
-                      const isUpcastable = spell.isUpcastable ?? (lvl >= 1 && lvl < 9);
-                      const hasSlotRemaining = lvl === 0 || remainingSlots > 0 || (pactSlots && pactSlots.max - pactSlots.used > 0);
+                      // Upcasting a resolvable spell isn't offered: the resolve/apply flow
+                      // spends the spec's OWN declared slot level, so a chosen upcast level
+                      // would silently not be honored server-side. Only a spec-less leveled
+                      // spell (no resolver path) gets the upcast picker, which spends the
+                      // chosen level directly and exclusively (issue #1900).
+                      const isUpcastable = !spell.spec && (spell.isUpcastable ?? (lvl >= 1 && lvl < 9));
+                      const hasSlotRemaining = lvl === 0 || remainingSlots > 0;
                       const canCastBase = hasSlotRemaining && !disabled;
 
                       // Higher slot options for upcasting popover
-                      const upcastLevels: Array<{ level: number | 'pact'; label: string; remaining: number }> = [];
+                      const upcastLevels: Array<{ level: number; label: string; remaining: number }> = [];
                       if (isUpcastable) {
                         for (let uLvl = lvl + 1; uLvl <= 9; uLvl++) {
                           const pool = spellSlots[String(uLvl)];
@@ -345,17 +283,9 @@ export function SpellbookPanel({
                             }
                           }
                         }
-                        if (pactSlots && pactSlots.level > lvl) {
-                          const pactRem = Math.max(0, pactSlots.max - pactSlots.used);
-                          if (pactRem > 0) {
-                            upcastLevels.push({
-                              level: 'pact',
-                              label: `Pact Magic (Lvl ${pactSlots.level}) (${pactRem}/${pactSlots.max})`,
-                              remaining: pactRem,
-                            });
-                          }
-                        }
                       }
+
+                      const hasDisplayDetails = Boolean(spell.castingTime || spell.range || spell.toHit || spell.saveDc || spell.damage);
 
                       return (
                         <div
@@ -376,13 +306,15 @@ export function SpellbookPanel({
                                   </span>
                                 )}
                               </div>
-                              <div className="flex items-center gap-3 text-xs text-muted mt-1 flex-wrap">
-                                <span>Time: <strong className="text-neutral-300">{formatCastingTime(spell.castingTime)}</strong></span>
-                                <span>Range: <strong className="text-neutral-300">{spell.range}</strong></span>
-                                {spell.toHit && <span>To Hit: <strong className="text-neutral-300">{spell.toHit}</strong></span>}
-                                {spell.saveDc && <span>Save: <strong className="text-neutral-300">{spell.saveDc}</strong></span>}
-                                {spell.damage && <span>Effect: <strong className="text-neutral-300">{spell.damage}</strong></span>}
-                              </div>
+                              {hasDisplayDetails && (
+                                <div className="flex items-center gap-3 text-xs text-muted mt-1 flex-wrap">
+                                  {spell.castingTime && <span>Time: <strong className="text-neutral-300">{formatCastingTime(spell.castingTime)}</strong></span>}
+                                  {spell.range && <span>Range: <strong className="text-neutral-300">{spell.range}</strong></span>}
+                                  {spell.toHit && <span>To Hit: <strong className="text-neutral-300">{spell.toHit}</strong></span>}
+                                  {spell.saveDc && <span>Save: <strong className="text-neutral-300">{spell.saveDc}</strong></span>}
+                                  {spell.damage && <span>Effect: <strong className="text-neutral-300">{spell.damage}</strong></span>}
+                                </div>
+                              )}
                               {spell.notes && <p className="text-xs text-muted m-0 mt-1">{spell.notes}</p>}
                             </div>
 

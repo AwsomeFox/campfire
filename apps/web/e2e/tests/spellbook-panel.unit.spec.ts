@@ -8,31 +8,81 @@ import {
   groupSpellsByLevel,
   type SpellItem,
 } from '../../src/features/encounters/SpellbookPanel';
+import { deriveTurnSpells, TurnWorkspace as TurnWorkspaceSchema, type TurnSuggestedAction, type ActionSpec } from '@campfire/schema';
+import { applyOptimisticSpellSlotDelta } from '../../src/features/encounters/optimisticSpellSlots';
 
 const SPELLBOOK_PANEL_PATH = resolve(__dirname, '../../src/features/encounters/SpellbookPanel.tsx');
 const TURN_WORKSPACE_PATH = resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx');
+const RUN_SESSION_PAGE_PATH = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 
-test.describe('In-combat Spellbook panel (issue #1851)', () => {
-  test('SpellbookPanel.tsx contains all required UI affordances and contracts', () => {
+/** Minimal-but-valid ActionSpec builder for spell-derivation fixtures. */
+function spec(overrides: { spellLevel?: number; concentration?: boolean; slot?: string } = {}): ActionSpec {
+  return {
+    mode: 'none',
+    attack: { bonus: '', ability: '', proficient: true, vs: 'ac' },
+    save: { ability: '', dc: { kind: 'none', dc: 10, ability: '', proficient: true, bonus: 0, base: 8 } },
+    cost: { slot: overrides.slot ?? 'action', count: 1 },
+    uses: {
+      max: 0,
+      recharge: '',
+      concentration: overrides.concentration ?? false,
+      repeatSave: false,
+      spellLevel: overrides.spellLevel ?? 0,
+      resourceKey: '',
+      resourceCost: 0,
+    },
+    range: { range: '', shape: '', size: '' },
+    targets: { count: 1, allow: 'any' },
+    outcomes: {},
+    provenance: { ruleSystem: '', source: '', ref: '' },
+  } as unknown as ActionSpec;
+}
+
+function suggestedAction(overrides: Partial<TurnSuggestedAction>): TurnSuggestedAction {
+  return {
+    name: 'Action',
+    source: 'action',
+    summary: '',
+    toHit: '',
+    damage: '',
+    resolvable: false,
+    spec: null,
+    ...overrides,
+  } as TurnSuggestedAction;
+}
+
+test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)', () => {
+  test('the fabricated fallback is gone: no invented spell facts anywhere in apps/web/src', () => {
+    // Direct regression guard for the issue's own acceptance criterion.
+    const turnWorkspaceSrc = readFileSync(TURN_WORKSPACE_PATH, 'utf8');
+    expect(turnWorkspaceSrc).not.toContain('Evocation');
+    expect(turnWorkspaceSrc).not.toContain('effectiveSpells');
+    expect(turnWorkspaceSrc).not.toContain("'60 ft'");
+    expect(turnWorkspaceSrc).not.toContain("range: '60 ft'");
+
+    const spellbookSrc = readFileSync(SPELLBOOK_PANEL_PATH, 'utf8');
+    expect(spellbookSrc).not.toContain('Evocation');
+  });
+
+  test('SpellbookPanel.tsx keeps its real-data affordances and drops the dead pact/stats surface', () => {
     const src = readFileSync(SPELLBOOK_PANEL_PATH, 'utf8');
 
-    // i18n check requirement
     expect(src).toContain('useTranslation');
 
-    // Header stats: spellcasting attribute, attack mod, save DC
-    expect(src).toContain('spellbook-stats-header');
-    expect(src).toContain('spell-stat-attribute');
-    expect(src).toContain('spell-stat-attack');
-    expect(src).toContain('spell-stat-dc');
-
-    // Pact magic slots row and pips
-    expect(src).toContain('pact-magic-slots-row');
-    expect(src).toContain('pact-slot-pips');
+    // Issue #1900: PactSlotPool UI and the spellcasting-stats header were removed —
+    // no data model backs either (out of scope; #1513 owns any new sheet fields).
+    expect(src).not.toContain('pact-magic-slots-row');
+    expect(src).not.toContain('pact-slot-pips');
+    expect(src).not.toContain('spellbook-stats-header');
+    expect(src).not.toContain('PactSlotPool');
+    expect(src).not.toContain('SpellcastingStats');
+    expect(src).not.toContain('onToggleSlotPip');
+    expect(src).not.toContain('onCastSpell');
 
     // Search and filter input
     expect(src).toContain('spellbook-search-input');
 
-    // Collapsible level sections and slot pips
+    // Collapsible level sections and slot pips — driven ONLY by the real spellSlots prop.
     expect(src).toContain('spell-level-section-');
     expect(src).toContain('aria-expanded');
     expect(src).toContain('slot-pips-level-');
@@ -50,13 +100,32 @@ test.describe('In-combat Spellbook panel (issue #1851)', () => {
     expect(src).toContain('cancel-concentration-replace');
   });
 
-  test('TurnWorkspace.tsx integrates SpellbookPanel and exposes toggle button', () => {
+  test('TurnWorkspace.tsx integrates SpellbookPanel, hides the toggle with no data, and fetches /turn exactly once', () => {
     const src = readFileSync(TURN_WORKSPACE_PATH, 'utf8');
 
     expect(src).toContain('SpellbookPanel');
     expect(src).toContain('toggle-spellbook-btn');
     expect(src).toContain('🔮 Spellbook');
     expect(src).toContain('showSpellbook');
+
+    // Issue #1900: the toggle is gated on real data, not always rendered.
+    expect(src).toContain('hasSpellbookData &&');
+
+    // Issue #1900: the duplicate child /turn query is gone — TurnWorkspace now takes the
+    // already-fetched workspace as a `turn` prop from the parent's single query instead of
+    // running its own `useQuery` against the same endpoint.
+    expect(src).not.toContain('useQuery(');
+    expect(src).not.toContain('api.get<TurnWorkspaceData>');
+  });
+
+  test('RunSessionPage.tsx owns the single /turn query and passes it straight to TurnWorkspace', () => {
+    const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    expect(src).toContain('turn={turnWorkspace}');
+    expect(src).toContain('onUpdateSpellSlot');
+    // The mutation reverts its optimistic cache write on error (acceptance criterion:
+    // a forced 4xx/5xx shows a toast and the pip state reverts).
+    expect(src).toContain('context?.previous');
+    expect(src).toContain("fallbackKey: 'encounters.errors.spellSlot'");
   });
 
   test('formatCastingTime converts verbose strings to standard abbreviations', () => {
@@ -67,6 +136,8 @@ test.describe('In-combat Spellbook panel (issue #1851)', () => {
     expect(formatCastingTime('1 Reaction')).toBe('1R');
     expect(formatCastingTime('reaction')).toBe('1R');
     expect(formatCastingTime('10 Minutes')).toBe('10 Minutes');
+    // The real derivation feeds the raw adapter slot key straight in — must format cleanly.
+    expect(formatCastingTime('bonus')).toBe('1BA');
   });
 
   test('formatLevelName formats levels accurately', () => {
@@ -96,6 +167,16 @@ test.describe('In-combat Spellbook panel (issue #1851)', () => {
     expect(filterSpells(sampleSpells, '')).toHaveLength(3);
   });
 
+  test('filterSpells tolerates spells with no castingTime/range data (no fabrication to fall back on)', () => {
+    const sampleSpells: SpellItem[] = [
+      { id: '1', name: 'Guidance', level: 0 },
+      { id: '2', name: 'Fireball', level: 3, castingTime: 'bonus' },
+    ];
+    expect(filterSpells(sampleSpells, 'guidance')).toHaveLength(1);
+    expect(filterSpells(sampleSpells, '1ba')).toHaveLength(1);
+    expect(filterSpells(sampleSpells, '')).toHaveLength(2);
+  });
+
   test('groupSpellsByLevel groups spells by level accurately', () => {
     const sampleSpells: SpellItem[] = [
       { id: '1', name: 'Fire Bolt', level: 0, castingTime: '1A', range: '120 ft' },
@@ -109,5 +190,81 @@ test.describe('In-combat Spellbook panel (issue #1851)', () => {
     expect(grouped.get(1)).toHaveLength(2);
     expect(grouped.get(2)).toHaveLength(1);
     expect(grouped.get(3)).toBeUndefined();
+  });
+
+  test('deriveTurnSpells picks a leveled spell (spec.uses.spellLevel >= 1) off the same rows as suggestedActions', () => {
+    const actions: TurnSuggestedAction[] = [
+      suggestedAction({ name: 'Fireball', source: 'spell', actionIndex: 0, resolvable: true, spec: spec({ spellLevel: 3, slot: 'action' }) }),
+      suggestedAction({ name: 'Attack', source: 'action', actionIndex: 1, resolvable: true, spec: spec({ spellLevel: 0 }) }),
+    ];
+    const spells = deriveTurnSpells(actions);
+    expect(spells).toHaveLength(1);
+    expect(spells[0]).toMatchObject({ name: 'Fireball', level: 3, castingSlot: 'action', actionIndex: 0 });
+  });
+
+  test('deriveTurnSpells picks a level-0 row only when its source/kind reads as spell or cantrip', () => {
+    const actions: TurnSuggestedAction[] = [
+      suggestedAction({ name: 'Fire Bolt', source: 'cantrip', actionIndex: 0, spec: spec({ spellLevel: 0 }) }),
+      suggestedAction({ name: 'Guidance', source: 'Spell', actionIndex: 1, spec: spec({ spellLevel: 0 }) }),
+      suggestedAction({ name: 'Unarmed Strike', source: 'action', actionIndex: 2, spec: spec({ spellLevel: 0 }) }),
+    ];
+    const spells = deriveTurnSpells(actions);
+    expect(spells.map((s) => s.name)).toEqual(['Fire Bolt', 'Guidance']);
+  });
+
+  test('deriveTurnSpells never invents school/range/casting-time — only real spec-derived fields', () => {
+    const actions: TurnSuggestedAction[] = [
+      suggestedAction({ name: 'Bless', source: 'spell', actionIndex: 0, spec: spec({ spellLevel: 1, concentration: true, slot: 'bonus' }) }),
+    ];
+    const [entry] = deriveTurnSpells(actions);
+    expect(entry).toMatchObject({ name: 'Bless', level: 1, castingSlot: 'bonus', concentration: true, actionIndex: 0 });
+    expect(entry).not.toHaveProperty('school');
+    expect(entry).not.toHaveProperty('range');
+  });
+
+  test('TurnWorkspace schema parses real spellSlots + derived spells, and null/empty for a non-character actor', () => {
+    const base = {
+      encounterId: 1,
+      status: 'running' as const,
+      round: 1,
+      current: null,
+      next: null,
+      isYourTurn: false,
+      canEndTurn: false,
+      dmControlsTurns: false,
+      requireDmTurnConfirmation: false,
+      actionEconomy: [],
+      movement: null,
+      reactionAvailable: false,
+      concentration: null,
+      activeEffects: [],
+      suggestedActions: [],
+      startPrompts: [],
+      endPrompts: [],
+    };
+
+    const withSpells = TurnWorkspaceSchema.parse({
+      ...base,
+      spellSlots: { '1': { max: 2, used: 1 } },
+      spells: [{ name: 'Bless', level: 1, castingSlot: 'bonus', concentration: true, actionIndex: 0, resolvable: true, spec: null }],
+    });
+    expect(withSpells.spellSlots).toEqual({ '1': { max: 2, used: 1 } });
+    expect(withSpells.spells).toHaveLength(1);
+
+    const nonCharacter = TurnWorkspaceSchema.parse({ ...base, spellSlots: null, spells: [] });
+    expect(nonCharacter.spellSlots).toBeNull();
+    expect(nonCharacter.spells).toEqual([]);
+  });
+
+  test('applyOptimisticSpellSlotDelta clamps used to [0, max], matching the server clamp', () => {
+    const slots = { '1': { max: 2, used: 1 } };
+    expect(applyOptimisticSpellSlotDelta(slots, 1, 1)).toEqual({ '1': { max: 2, used: 2 } });
+    // Spending past max clamps rather than overshoots.
+    expect(applyOptimisticSpellSlotDelta({ '1': { max: 2, used: 2 } }, 1, 1)).toEqual({ '1': { max: 2, used: 2 } });
+    // Restoring below 0 clamps rather than undershoots.
+    expect(applyOptimisticSpellSlotDelta({ '1': { max: 2, used: 0 } }, 1, -1)).toEqual({ '1': { max: 2, used: 0 } });
+    // A level with no configured pool is left alone (nothing to estimate).
+    expect(applyOptimisticSpellSlotDelta(slots, 9, 1)).toBe(slots);
+    expect(applyOptimisticSpellSlotDelta(null, 1, 1)).toBeNull();
   });
 });

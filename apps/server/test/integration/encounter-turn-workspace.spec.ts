@@ -1008,6 +1008,100 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(other.actionEconomy).toHaveLength(0);
   });
 
+  describe('spellbook data — spells/spellSlots on the turn workspace (issue #1900)', () => {
+    /** Gives c1's linked character a cantrip, a leveled spell, a non-spell action, and slots. */
+    function seedSpellbookCharacter(orm: ReturnType<typeof build>['orm'], c1: number): void {
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      const characterId = c1row.characterId!;
+      const actions = [
+        {
+          name: 'Fire Bolt',
+          kind: 'cantrip',
+          notes: '',
+          spec: { uses: { spellLevel: 0, concentration: false }, cost: { slot: 'action' } },
+        },
+        {
+          name: 'Fireball',
+          kind: 'spell',
+          notes: '',
+          spec: { uses: { spellLevel: 3, concentration: false }, cost: { slot: 'action' } },
+        },
+        {
+          name: 'Shortsword Slash',
+          kind: 'action',
+          notes: '',
+          spec: { uses: { spellLevel: 0, concentration: false }, cost: { slot: 'action' } },
+        },
+      ];
+      orm
+        .update(characters)
+        .set({
+          actions: JSON.stringify(actions),
+          spellSlots: JSON.stringify({ '3': { max: 2, used: 1 } }),
+        })
+        .where(eq(characters.id, characterId))
+        .run();
+    }
+
+    it('the owner sees real spellSlots + derived spells (cantrip and leveled, not the plain action)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      seedSpellbookCharacter(orm, c1);
+
+      const owner = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(owner.spellSlots).toEqual({ '3': { max: 2, used: 1 } });
+      expect(owner.spells.map((s) => s.name).sort()).toEqual(['Fire Bolt', 'Fireball']);
+      const fireball = owner.spells.find((s) => s.name === 'Fireball')!;
+      expect(fireball).toMatchObject({ level: 3, castingSlot: 'action', concentration: false });
+      const fireBolt = owner.spells.find((s) => s.name === 'Fire Bolt')!;
+      expect(fireBolt.level).toBe(0);
+      // The plain (non-spell) action never appears in `spells` — no invented spell data.
+      expect(owner.spells.some((s) => s.name === 'Shortsword Slash')).toBe(false);
+    });
+
+    it('a non-owner player receives neither spells nor spellSlots for another PC (secrecy)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      seedSpellbookCharacter(orm, c1);
+
+      const other = await service.getTurnWorkspace(encounterId, player2, 'player');
+      expect(other.spellSlots).toBeNull();
+      expect(other.spells).toEqual([]);
+    });
+
+    it('the DM sees the current character actor\'s spells/spellSlots same as the owner', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      seedSpellbookCharacter(orm, c1);
+
+      const dm = await service.getTurnWorkspace(encounterId, dmUser, 'dm');
+      expect(dm.spellSlots).toEqual({ '3': { max: 2, used: 1 } });
+      expect(dm.spells.map((s) => s.name).sort()).toEqual(['Fire Bolt', 'Fireball']);
+    });
+
+    it('a monster/NPC actor never carries spellSlots or spells (character-only feature)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const [monster] = orm
+        .insert(combatants)
+        .values({ encounterId, kind: 'monster', name: 'Wolf', initiative: 15, hpCurrent: 11, hpMax: 11, sortOrder: 2 })
+        .returning()
+        .all();
+      // initiative 15 sits between c1 (20) and c2 (10) — one advance from c1 makes it current.
+      const advanced = await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
+      expect(advanced.currentCombatantId).toBe(monster.id);
+
+      const dm = await service.getTurnWorkspace(encounterId, dmUser, 'dm');
+      expect(dm.current?.combatantId).toBe(monster.id);
+      expect(dm.spellSlots).toBeNull();
+      expect(dm.spells).toEqual([]);
+    });
+  });
+
   it('13th Age auto-added PCs get DEX + level initiative breakdowns', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();
