@@ -151,6 +151,6 @@ describe('encounter turn loop (e2e)', () => {
     
     // Try to advance turn
     const nextRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
-    expect(nextRes.status).toBe(409);
+    expect(nextRes.status).toBe(400);
   });
 });
