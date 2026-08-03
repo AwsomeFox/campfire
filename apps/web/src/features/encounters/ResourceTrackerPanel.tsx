@@ -145,13 +145,32 @@ export function ResourceTrackerPanel({
   // the identical way. Both cases therefore wait for a fresh read of BOTH caches this panel
   // renders from before releasing the pending key, so the control's next render reflects
   // server-truth rather than the pre-request snapshot.
-  const endPendingAfterReconciling = async (key: string, error: unknown) => {
-    if (error && (isAmbiguousMutation(error) || isStaleWrite(error))) {
+  // `forceReconcile` (issue #1902 rework, round 14, codex P2): `statblockMutation`'s CAS
+  // token is the ENCOUNTER's `updatedAt`, not something its own `Combatant` response can
+  // refresh (see the `encounterUpdatedAt` prop's doc comment) — so unlike the other three
+  // mutations (whose token IS in their own response, synchronously reconciled by
+  // `reconcileCharacter`), a statblock write must wait for the encounter to actually
+  // refetch on SUCCESS too, not only on an ambiguous/stale-write error, or an immediate
+  // second click resends the now-provably-stale encounter revision and 409s against its
+  // own prior write.
+  const endPendingAfterReconciling = async (key: string, error: unknown, forceReconcile = false) => {
+    if (forceReconcile || (error && (isAmbiguousMutation(error) || isStaleWrite(error)))) {
       await Promise.allSettled([
         queryClient.invalidateQueries({ queryKey: queryKeys.encounter(encounterId) }),
         campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }) : Promise.resolve(),
         campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) }) : Promise.resolve(),
       ]);
+      // Issue #1902 rework (round 14, codex P2): `invalidateQueries()`'s own promise
+      // settles once a refetch ATTEMPT completes, successful or not — awaiting it alone
+      // does not prove the cache is actually fresh. If the same outage that made a
+      // mutation's outcome ambiguous also breaks this refetch, releasing anyway would let
+      // a retry proceed against the identical stale snapshot the wait exists to rule out.
+      // Only release once the queries this panel's CAS tokens and rendered values depend
+      // on are confirmed NOT in an error state; otherwise stay pending rather than guess —
+      // the control staying disabled is the safe failure mode, not a silent double-spend.
+      const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
+      const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
+      if (!encounterOk || !charactersOk) return;
     }
     endPending(key);
   };
@@ -270,7 +289,7 @@ export function ResourceTrackerPanel({
       expectedUpdatedAt: string | undefined;
     }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock, expectedUpdatedAt }),
     onMutate: (vars) => beginPending(pendingTargetKey({ combatantId: vars.combatantId })),
-    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error),
+    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error, true),
     onSuccess: (updated, vars) => {
       clearErrorFor(pendingTargetKey({ combatantId: vars.combatantId }));
       reconcileCombatant(updated);

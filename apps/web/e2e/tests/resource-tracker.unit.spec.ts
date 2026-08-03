@@ -378,12 +378,40 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel keeps a control pending through a fresh read after an ambiguous (not a definite) mutation failure', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ .*isAmbiguousMutation.* \} from '\.\.\/\.\.\/lib\/api'/);
-    expect(src).toMatch(/const endPendingAfterReconciling = async \(key: string, error: unknown\) => \{/);
-    expect(src).toMatch(/if \(error && \(isAmbiguousMutation\(error\) \|\| isStaleWrite\(error\)\)\)/);
+    expect(src).toMatch(/const endPendingAfterReconciling = async \(key: string, error: unknown, forceReconcile = false\) => \{/);
+    expect(src).toMatch(/if \(forceReconcile \|\| \(error && \(isAmbiguousMutation\(error\) \|\| isStaleWrite\(error\)\)\)\)/);
     // All four mutations route their onSettled through the reconciling variant, not the
     // bare endPending (which would release the control before confirming true state).
     const endPendingAfterReconcilingCalls = src.match(/endPendingAfterReconciling\(pendingTargetKey/g) ?? [];
     expect(endPendingAfterReconcilingCalls.length).toBe(4);
+  });
+
+  // Fourteenth-round finding (codex P3, hardening the ambiguous/stale-write path): awaiting
+  // `Promise.allSettled` around `invalidateQueries()` only proves a refetch was ATTEMPTED —
+  // `invalidateQueries()`'s own promise settles regardless of whether the underlying refetch
+  // succeeded or failed. If the same outage that made a mutation ambiguous also breaks the
+  // refetch, releasing anyway lets a retry proceed against the identical stale snapshot the
+  // wait exists to rule out. The control must stay pending (never release) unless the
+  // relevant queries are confirmed NOT in an error state.
+  test('ResourceTrackerPanel does not release a pending control if reconciliation itself could not confirm fresh state', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
+    expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
+    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) return;/);
+  });
+
+  // Fourteenth-round finding (codex P1 + devin, same root cause): `statblockMutation`'s CAS
+  // token is the ENCOUNTER's `updatedAt`, which its own `Combatant` response cannot refresh
+  // (`reconcileCombatant` only writes the combatant into the encounter cache, not the
+  // encounter's own `updatedAt`). Releasing the control immediately on SUCCESS (the same as
+  // every other mutation) meant a second click before the async `invalidate()` refetch landed
+  // resent the now-stale encounter revision and got a self-inflicted 409 — reproducible by
+  // just clicking a monster's pip twice in a row. `statblockMutation` must force the same
+  // reconcile-before-release path the other three mutations only take on ambiguous/stale
+  // errors.
+  test('ResourceTrackerPanel forces statblockMutation to reconcile before releasing even on success, since its CAS token is not in its own response', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/endPendingAfterReconciling\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\), error, true\)/);
   });
 
   // Twelfth-round finding (codex P2): a definite 409 STALE_WRITE is not ambiguous (the write

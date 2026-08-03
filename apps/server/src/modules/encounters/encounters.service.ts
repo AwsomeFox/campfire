@@ -4414,6 +4414,13 @@ export class EncountersService {
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
         this.assertMutable(freshEncounter);
+        // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
+        // THIS transaction-local row, not just the pre-transaction `encounterRow` checked
+        // above — the same reason `freshEncounter` itself is re-read here rather than reused
+        // (a caller between the outer check and this transaction, e.g. an unrelated combatant
+        // PATCH, can advance the encounter's `updatedAt`; the outer check already passed
+        // against the now-stale value, so without this the write proceeds anyway).
+        if (patch.expectedUpdatedAt) this.revisions.assertNotStale(freshEncounter, patch.expectedUpdatedAt);
         // The sheet mirror has the same lifecycle boundary: derive it from the
         // transaction-local encounter row, never the stale preflight snapshot.
         const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
