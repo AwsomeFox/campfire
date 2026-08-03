@@ -10320,11 +10320,12 @@ export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**
  * Body for the server-authoritative per-combatant initiative roll (issue #1904). The
- * caller supplies no die result — the server rolls `adapter.initiativeDie + initMod`
- * (or one shared d-die for the combatant's side under group initiative), writes the
- * roll + its breakdown, and records one matching campaign-shared dice-log entry (skipped
- * only for a hidden encounter, since the dice log is campaign-wide). A combatant that
- * already has initiative set 409s unless `overwrite` is sent by the DM.
+ * caller supplies no die result — the server rolls `adapter.initiativeDie + initMod`,
+ * writes the roll + its breakdown, and records one matching campaign-shared dice-log
+ * entry (skipped only for a hidden encounter, since the dice log is campaign-wide). A
+ * combatant that already has initiative set 409s unless `overwrite` is sent by the DM.
+ * 400s for a group-initiative rule system — a side shares one roll, which stays
+ * exclusively the DM's bulk `POST /encounters/:id/roll-initiative`.
  */
 export const CombatantRollInitiativeRequest = z.object({
   // Same replay contract as DeathSaveRollRequest: a lost-response retry replays the
