@@ -1,11 +1,12 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, lte } from 'drizzle-orm';
-import type { DiceRoll, RollResult, RollResultTerm } from '@campfire/schema';
+import { and, desc, eq, inArray, lte } from 'drizzle-orm';
+import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { diceRolls } from '../../db/schema';
+import { diceRolls, encounters, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import type { RequestUser } from '../../common/user.types';
+import { UNKNOWN_COMBATANT_LABEL } from '../encounters/encounters.logic';
 
 /**
  * #614: how many dice rolls each campaign keeps before the oldest are pruned.
@@ -84,6 +85,8 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     source,
     ...(row.actor ? { actor: row.actor } : {}),
     ...(row.natural20 != null ? { natural20: row.natural20 } : {}),
+    ...(row.encounterId != null ? { encounterId: row.encounterId } : {}),
+    ...(row.npcId != null ? { npcId: row.npcId } : {}),
     createdAt: row.createdAt,
   };
 }
@@ -150,6 +153,8 @@ export class RollsService implements OnApplicationBootstrap {
         source: result.source ?? 'rolled',
         actor: result.actor ?? null,
         natural20: result.natural20 ?? null,
+        encounterId: result.encounterId ?? null,
+        npcId: result.npcId ?? null,
         createdAt: nowIso(),
       })
       .returning()
@@ -161,15 +166,63 @@ export class RollsService implements OnApplicationBootstrap {
    * Most-recent-first roll feed for a campaign. The `limit` caps what a single
    * request returns (the live feed window); it is independent of the durable
    * retention ceiling, which governs how many rows *exist* at all.
+   *
+   * `role` drives issue #1904 read-time redaction: omit it (or pass `dm`) only for
+   * DM-facing returns (export, scribe recaps, the DM's own feed) — mirrors the
+   * `viewerRole` convention on `EncountersService.getWithCombatantsOrThrow`. A write-time
+   * check alone cannot catch an encounter/NPC that becomes hidden AFTER a roll naming it
+   * was already persisted, so a non-DM role re-checks CURRENT visibility on every read.
    */
-  async listForCampaign(campaignId: number, limit = DEFAULT_ROLL_LIST_LIMIT): Promise<DiceRoll[]> {
+  async listForCampaign(campaignId: number, limit = DEFAULT_ROLL_LIST_LIMIT, role?: Role): Promise<DiceRoll[]> {
     const rows = await this.db
       .select()
       .from(diceRolls)
       .where(eq(diceRolls.campaignId, campaignId))
       .orderBy(desc(diceRolls.id))
       .limit(limit);
-    return rows.map(toDomain);
+    const rolls = rows.map(toDomain);
+    if (role === undefined || role === 'dm') return rolls;
+    return this.redactForRole(rolls);
+  }
+
+  /**
+   * Issue #1904: re-checks CURRENT visibility for every roll tied to an encounter/NPC and
+   * redacts what a non-DM may no longer see, regardless of what was safe to persist at
+   * WRITE time. A roll naming a now-hidden ENCOUNTER is dropped wholesale (mirrors that
+   * hidden encounters are indistinguishable from nonexistent for a non-DM elsewhere in this
+   * codebase); a roll naming a combatant linked to a now-hidden NPC keeps its row (the dice
+   * log entry itself is not secret — only the label's naming — mirroring how a hidden-NPC
+   * combatant token still shows in initiative order without exposing who it is) but has its
+   * label replaced.
+   */
+  // The reconstructed label assumes the exact "<name> · Initiative" suffix every current
+  // npcId-tagged producer writes (encounters.service.ts's bulk and per-combatant initiative
+  // rolls — the only callers that set npcId today), and matches the SAME string those write
+  // paths already use for an NPC hidden AT roll time, so a masked entry looks identical
+  // regardless of when the hide happened. Revisit this if a future roll type starts tagging
+  // npcId for a different action label.
+  private async redactForRole(rolls: DiceRoll[]): Promise<DiceRoll[]> {
+    const encounterIds = [...new Set(rolls.map((r) => r.encounterId).filter((id): id is number => id !== undefined))];
+    const npcIds = [...new Set(rolls.map((r) => r.npcId).filter((id): id is number => id !== undefined))];
+    if (encounterIds.length === 0 && npcIds.length === 0) return rolls;
+
+    const hiddenEncounterIds = encounterIds.length
+      ? new Set(
+          (await this.db.select({ id: encounters.id }).from(encounters).where(and(inArray(encounters.id, encounterIds), eq(encounters.hidden, true)))).map(
+            (r) => r.id,
+          ),
+        )
+      : new Set<number>();
+    const hiddenNpcIds = npcIds.length
+      ? new Set(
+          (await this.db.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIds), eq(npcs.hidden, true)))).map((r) => r.id),
+        )
+      : new Set<number>();
+    if (hiddenEncounterIds.size === 0 && hiddenNpcIds.size === 0) return rolls;
+
+    return rolls
+      .filter((r) => r.encounterId === undefined || !hiddenEncounterIds.has(r.encounterId))
+      .map((r) => (r.npcId !== undefined && hiddenNpcIds.has(r.npcId) ? { ...r, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` } : r));
   }
 
   /**

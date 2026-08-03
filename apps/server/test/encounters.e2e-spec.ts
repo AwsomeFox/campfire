@@ -5247,6 +5247,81 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     const combatant = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === combatantId);
     expect(combatant?.initiative).toBeNull();
   });
+
+  // Issue #1904 review finding (codex, P1): a write-time-only secrecy check cannot react to
+  // an encounter or NPC becoming hidden AFTER a roll naming it was already persisted. The
+  // shared campaign-wide dice log must be redacted at READ time against CURRENT visibility.
+  it('rolling in a visible encounter, then hiding the ENCOUNTER, immediately removes the roll from a non-DM read (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Later-Hidden Encounter', hidden: false });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Later-Hidden Monster', hpMax: 8 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    // Roll while visible — the raw name is safe to persist right now.
+    const roll = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'later-hidden-encounter-roll' });
+    expect(roll.status).toBe(201);
+
+    const beforeHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(beforeHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(true);
+
+    // Hide the encounter — nothing about the ALREADY-WRITTEN roll changes on disk.
+    const hide = await request(server).patch(`/api/v1/encounters/${freshEncounterId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    // The core regression: a player's very next read no longer contains it.
+    const afterHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(false);
+
+    // The DM still sees it — this is a non-DM read redaction, not data loss.
+    const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(true);
+  });
+
+  it('rolling for a visible NPC, then hiding the NPC, masks the roll label on a non-DM read but keeps the row (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Later-Hidden NPC', hidden: false })
+    ).body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Later-Hidden NPC', hpMax: 20 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    const roll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'later-hidden-npc-roll' });
+    expect(roll.status).toBe(201);
+
+    const beforeHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(beforeHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
+
+    const hide = await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    const afterHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    // The name is gone...
+    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(false);
+    // ...but the row itself is not (the encounter is still visible — only the NPC's identity
+    // is secret, same as the roster/combat-log masking rule this mirrors).
+    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+
+    const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
+  });
 });
 
 describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE under group initiative', () => {

@@ -5554,7 +5554,15 @@ export class EncountersService {
       // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
       // it leave the same campaign-wide trail a manual roll would. Built alongside `rolled`
       // so a fully-rolled roster (rolled.length === 0 below) still inserts nothing.
-      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number }> = [];
+      //
+      // `npcId` (individual mode only — a group-mode label names a SIDE, never an
+      // individual) lets RollsService.listForCampaign redact the label at READ time if the
+      // linked NPC becomes hidden AFTER this roll was written (review finding on #1904): a
+      // write-time-only check cannot react to a later hide. `encounterId` on every entry
+      // (both modes) lets the same read path drop the whole row if the ENCOUNTER itself is
+      // later hidden — mirroring the write-time rule right below that a hidden encounter's
+      // roll must never reach the campaign-wide log in the first place.
+      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number; npcId?: number }> = [];
 
       if (initModel.mode === 'group') {
         // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
@@ -5608,6 +5616,7 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
+            ...(row.kind === 'npc' && row.npcId !== null ? { npcId: row.npcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
@@ -5622,7 +5631,15 @@ export class EncountersService {
           this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
-            { expr: entry.expr, rolls: entry.rolls, total: entry.total, label: entry.label, source: 'rolled' },
+            {
+              expr: entry.expr,
+              rolls: entry.rolls,
+              total: entry.total,
+              label: entry.label,
+              source: 'rolled',
+              encounterId,
+              ...(entry.npcId !== undefined ? { npcId: entry.npcId } : {}),
+            },
             user,
           );
         }
@@ -5898,9 +5915,11 @@ export class EncountersService {
         // hidden encounter this far (non-DM callers already 404 above), and a hidden
         // encounter's roll must never leak into the shared log. Same rule for a
         // combatant borrowing a hidden NPC's identity (review finding, same masking
-        // the quick-roll dice log already applies for issue #1850): the roster/combat-log
-        // reads mask that name at read time, but the dice log has no read-time
-        // redaction, so it must be masked here before the write.
+        // the quick-roll dice log already applies for issue #1850): mask here at write
+        // time for the state at THIS moment, AND persist encounterId/npcId so
+        // RollsService.listForCampaign can redact this row again at READ time if the
+        // encounter or NPC becomes hidden LATER — a write-time check alone cannot react
+        // to a hide that happens after the roll was already recorded.
         if (!fresh.hidden) {
           let hiddenNpcName = false;
           if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
@@ -5912,7 +5931,15 @@ export class EncountersService {
           roll = this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
-            { expr, rolls: [natural], total: initiative, label, source: 'rolled' },
+            {
+              expr,
+              rolls: [natural],
+              total: initiative,
+              label,
+              source: 'rolled',
+              encounterId,
+              ...(freshCombatant.kind === 'npc' && freshCombatant.npcId !== null ? { npcId: freshCombatant.npcId } : {}),
+            },
             user,
           );
         }

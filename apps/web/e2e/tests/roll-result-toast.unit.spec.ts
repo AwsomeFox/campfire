@@ -102,4 +102,19 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
     const runSessionSource = readFileSync(resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(runSessionSource).toMatch(/showRoll\(data\.roll, \{ applyDisabled: true \}\)/);
   });
+
+  // Issue #1904 review finding (devin): `roll` is null specifically for a HIDDEN encounter
+  // (the shared dice log deliberately gets no row for it) — the roll still happened, so
+  // cancelling the animation into nothing left the DM (the only one who can reach it) with
+  // no result at all. A local, never-persisted DiceRoll synthesized from the committed
+  // breakdown must still reach showRoll instead.
+  test('a hidden-encounter roll (null shared roll) still shows a result via a synthesized local DiceRoll, not cancelRollAnimation', () => {
+    const runSessionSource = readFileSync(resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    // The onSuccess handler must branch on data.roll and, in the null case, build a local
+    // DiceRoll from data.combatant.initiativeBreakdown and route it through showRoll — a bare
+    // cancelRollAnimation() with no substitute toast is exactly the bug this guards against.
+    expect(runSessionSource).toMatch(/const breakdown = data\.combatant\.initiativeBreakdown;/);
+    expect(runSessionSource).toMatch(/const localRoll: DiceRoll = \{/);
+    expect(runSessionSource).toMatch(/showRoll\(localRoll, \{ applyDisabled: true \}\)/);
+  });
 });

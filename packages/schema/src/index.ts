@@ -10921,6 +10921,18 @@ export const RollResult = z.object({
   actor: z.string().max(120).optional(),
   /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
   natural20: z.number().int().min(1).max(20).optional(),
+  /**
+   * Issue #1904 review finding: the encounter/NPC this roll's identity is tied to, when
+   * applicable (currently: per-combatant and bulk initiative rolls). A write-time-only
+   * secrecy check cannot react to the encounter or NPC becoming hidden LATER — the label was
+   * safe to persist when written but the entity it names may not stay visible. Carrying these
+   * ids lets the read path (`RollsService.listForCampaign`) re-check CURRENT visibility and
+   * redact accordingly, instead of baking a permanent, unredactable name into the shared log.
+   * Absent for the vast majority of rolls (checks, quick-rolls, saves, …), which have no such
+   * identity tie and are unaffected.
+   */
+  encounterId: z.number().int().positive().optional(),
+  npcId: z.number().int().positive().optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 

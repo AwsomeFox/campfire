@@ -46,7 +46,7 @@ export class CampaignRollsController {
     @CurrentUser() user: RequestUser,
     @Res({ passthrough: true }) res: Response,
   ) {
-    await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId);
     // Lenient limit parsing (clamped, NaN -> default) mirrors the audit list's
     // fixed-cap philosophy — a bad limit is a harmless request, not a 400. The
     // clamp is on the *page* size, not the durable retention: a caller can
@@ -64,6 +64,8 @@ export class CampaignRollsController {
       res.setHeader('X-Dice-Rolls-Retention', String(resolveDiceRollsRetention()));
     }
 
-    return this.rolls.listForCampaign(campaignId, limit);
+    // Issue #1904: role drives read-time redaction of a roll whose encounter/NPC became
+    // hidden AFTER it was recorded — see RollsService.listForCampaign.
+    return this.rolls.listForCampaign(campaignId, limit, role);
   }
 }

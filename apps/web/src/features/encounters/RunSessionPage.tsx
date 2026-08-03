@@ -2216,8 +2216,37 @@ export default function RunSessionPage() {
       // offer to apply the initiative value as HP damage while the apply-damage bridge is
       // active (any running encounter). This is never damage, structurally, regardless of
       // die size or label wording.
-      if (data.roll) showRoll(data.roll, { applyDisabled: true });
-      else cancelRollAnimation();
+      if (data.roll) {
+        showRoll(data.roll, { applyDisabled: true });
+        return;
+      }
+      // Issue #1904 review finding: `roll` is null specifically because THIS encounter is
+      // hidden (DM prep) — only the DM can even reach a hidden encounter's roll-initiative
+      // action, and the shared campaign-wide dice log deliberately gets no row for it. The
+      // roll still happened (data.combatant.initiative/initiativeBreakdown are committed);
+      // cancelling the animation into nothing left the roller watching dice tumble and then
+      // vanish with no result. Synthesize a LOCAL, never-persisted DiceRoll from the
+      // committed breakdown so the one person entitled to see it still gets the same toast
+      // every other roll shows, rather than silence.
+      const breakdown = data.combatant.initiativeBreakdown;
+      if (breakdown == null || breakdown.roll == null || breakdown.total == null) {
+        cancelRollAnimation();
+        return;
+      }
+      const expr = breakdown.modifier === 0 ? `1d${breakdown.die}` : `1d${breakdown.die}${breakdown.modifier > 0 ? '+' : ''}${breakdown.modifier}`;
+      const localRoll: DiceRoll = {
+        id: -data.combatant.id, // synthetic, negative so it can never collide with a real row id
+        campaignId: cid,
+        rollerUserId: me?.user.id !== undefined ? String(me.user.id) : '',
+        rollerName: me?.user.displayName || me?.user.username || '',
+        expr,
+        rolls: [breakdown.roll],
+        total: breakdown.total,
+        label: `${data.combatant.name} · Initiative`,
+        source: 'rolled',
+        createdAt: new Date().toISOString(),
+      };
+      showRoll(localRoll, { applyDisabled: true });
     },
     onError: (err) => {
       cancelRollAnimation();
