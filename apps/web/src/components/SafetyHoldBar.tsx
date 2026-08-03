@@ -216,19 +216,16 @@ function SafetyReleaseDialog({ campaignId, onClose }: { campaignId: number; onCl
 }
 
 /**
- * Read-only "the table is paused" overlay for the shared display (issue #599).
- *
- * The cast screen is a television in the corner of a room. It has no keyboard, and on the
- * `/cast/:id/:token` route no member identity either, so it CANNOT raise a hold. What it must
- * do is stop showing the fiction: a monitor still cheerfully rendering the initiative order of
- * the fight everyone just stopped is the single most visible way this feature could fail. It
- * therefore carries the acknowledgment and nothing else — no actor, no reason, and no control.
+ * Presentational "the table is paused" overlay markup, shared by the authed and cast-token
+ * Player Display (issue #1908). Split out so both routes render the identical DOM/strings —
+ * the only difference is where `active` comes from: a member-scoped `useTableSafety` query
+ * for the authed route, or a poll against the anonymous `/cast/:token/safety` capability for
+ * a cast client, which has no member identity and cannot call the member endpoint at all.
  */
-export function SafetyHoldDisplayOverlay({ campaignId }: { campaignId: number }) {
+export function SafetyHoldOverlayView({ active }: { active: boolean }) {
   const { t } = useTranslation();
-  const { data: hold } = useTableSafety(campaignId);
   const [visible, setVisible] = useState(false);
-  useEffect(() => { setVisible(hold?.active === true); }, [hold?.active]);
+  useEffect(() => { setVisible(active); }, [active]);
   if (!visible) return null;
   return (
     <div className="cf-safety-display" role="status" data-testid="safety-display-overlay">
@@ -238,4 +235,22 @@ export function SafetyHoldDisplayOverlay({ campaignId }: { campaignId: number })
       </div>
     </div>
   );
+}
+
+/**
+ * Read-only "the table is paused" overlay for the AUTHED shared display (issue #599).
+ *
+ * The cast screen is a television in the corner of a room. It has no keyboard, and on the
+ * `/cast/:id/:token` route no member identity either, so it CANNOT raise a hold. What it must
+ * do is stop showing the fiction: a monitor still cheerfully rendering the initiative order of
+ * the fight everyone just stopped is the single most visible way this feature could fail. It
+ * therefore carries the acknowledgment and nothing else — no actor, no reason, and no control.
+ *
+ * Cast-token clients cannot use this component (no membership to back `useTableSafety`'s
+ * `GET /campaigns/:id/safety`); `PlayerDisplayPage` renders `SafetyHoldOverlayView` directly
+ * for that route, fed from a poll against the anonymous `/cast/:token/safety` capability.
+ */
+export function SafetyHoldDisplayOverlay({ campaignId }: { campaignId: number }) {
+  const { data: hold } = useTableSafety(campaignId);
+  return <SafetyHoldOverlayView active={hold?.active === true} />;
 }

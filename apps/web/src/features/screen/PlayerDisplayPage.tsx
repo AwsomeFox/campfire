@@ -26,6 +26,7 @@ import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
   CampaignSummary,
+  CastSafetyState,
   Encounter,
   EncounterWithCombatants,
   HpBand,
@@ -43,7 +44,7 @@ import {
 import { GameIcon } from '../../components/GameIcon';
 import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
-import { SafetyHoldDisplayOverlay } from '../../components/SafetyHoldBar';
+import { SafetyHoldDisplayOverlay, SafetyHoldOverlayView } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
 import { useAuth } from '../../app/auth';
@@ -348,6 +349,34 @@ export default function PlayerDisplayPage() {
   // Pauses while the cast tab is hidden; refetches immediately on becoming visible
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
+
+  /**
+   * X-Card state for the cast-token route (issue #1908).
+   *
+   * A cast client has no member identity and cannot call the member-scoped
+   * `GET /campaigns/:id/safety` that backs the authed overlay, so it polls the
+   * anonymous `/cast/:token/safety` capability on the same visible-tab cadence as
+   * the rest of this page — comfortably inside the 15s bound raising a hold must
+   * blank the display within. A transient poll failure leaves the last-known state
+   * rather than clearing it: the regular projection poll already surfaces a hard
+   * failure (expired/revoked token) for the page as a whole.
+   */
+  const [castSafetyActive, setCastSafetyActive] = useState(false);
+  const loadCastSafety = useCallback(async () => {
+    if (!isCastMode || !castToken) return;
+    try {
+      const state = await castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`);
+      setCastSafetyActive(state.active);
+    } catch {
+      /* transient/blip — keep the last-known hold state */
+    }
+  }, [castToken, isCastMode]);
+
+  useEffect(() => {
+    if (isCastMode) void loadCastSafety();
+  }, [isCastMode, loadCastSafety]);
+
+  usePollWhileVisible(() => void loadCastSafety(), POLL_MS, isCastMode);
 
   const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++mapPingSeq.current;
@@ -1180,13 +1209,19 @@ export default function PlayerDisplayPage() {
         <div className="cf-scene-body" data-testid={`cf-scene-${scene}`} data-scene={scene}>
           {sceneContent}
         </div>
-        {/* #599 — the shared display's half of the safety hold. A TV in the corner of the room
-            cannot raise a hold (on the /cast token route it has no member identity at all), but
-            it absolutely must stop showing the fight when one is raised: a monitor still
-            rendering initiative order through a safety stop is the loudest possible way for
-            this feature to fail. Authed route only — the cast-token client cannot read the
-            member-scoped safety endpoint, and is documented as an uncovered surface. */}
-        {!isCastMode && <SafetyHoldDisplayOverlay campaignId={cid} />}
+        {/* #599 / #1908 — the shared display's half of the safety hold. A TV in the corner of
+            the room cannot raise a hold (on the /cast token route it has no member identity at
+            all), but it absolutely must stop showing the fight when one is raised: a monitor
+            still rendering initiative order through a safety stop is the loudest possible way
+            for this feature to fail. The cast-token client cannot read the member-scoped safety
+            endpoint, so it polls the anonymous `/cast/:token/safety` capability instead
+            (`loadCastSafety` above) and renders the same overlay markup via
+            `SafetyHoldOverlayView`. */}
+        {isCastMode ? (
+          <SafetyHoldOverlayView active={castSafetyActive} />
+        ) : (
+          <SafetyHoldDisplayOverlay campaignId={cid} />
+        )}
       </div>
     </div>,
   );

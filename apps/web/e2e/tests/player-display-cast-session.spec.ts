@@ -180,6 +180,57 @@ test.describe('Player Display cast sessions', () => {
     expect(encounterMapCalls).toEqual([]);
     expect(await page.getByRole('img', { name: 'Battle map' }).getAttribute('srcset')).toBeNull();
   });
+
+  /**
+   * Issue #1908 — a cast client has no member identity, so it cannot read the
+   * member-scoped `GET /campaigns/:id/safety` behind `useTableSafety`. It must still
+   * blank the fight when the table raises an X-Card: this proves the anonymous
+   * `/cast/:token/safety` poll drives the same overlay the authed route uses.
+   */
+  test('cast display blanks on an X-Card safety hold and restores on release', async ({ page }) => {
+    let holdActive = false;
+    const safetyCalls: Request[] = [];
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) => {
+      safetyCalls.push(route.request());
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ active: holdActive }),
+      });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+
+    // Fetched on mount, before the first poll tick — proves the safety projection
+    // itself carries no more than `{ active }` over the wire (no cookies either,
+    // same anonymity contract as every other cast route).
+    await expect.poll(() => safetyCalls.length).toBeGreaterThan(0);
+    expectCastFetchWithoutCookies(safetyCalls[0]);
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
+
+    // Raising the hold must blank the display within the acceptance criteria's 15s
+    // bound; the page polls every 5s, comfortably inside it. The overlay is a
+    // `position: fixed` full-viewport scrim (same markup the authed route renders),
+    // so it visually covers the scene beneath it without unmounting it.
+    holdActive = true;
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('safety-display-overlay')).toContainText('The table is paused.');
+
+    // Releasing restores the scene.
+    holdActive = false;
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
+  });
 });
 
 /** 1x1 transparent PNG — the map bytes' contents are irrelevant, only their source is. */
