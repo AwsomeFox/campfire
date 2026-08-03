@@ -210,83 +210,105 @@ export class PlayerDisplayLoadSequencer {
  * Cast-token X-Card safety poll sequencing (issue #1908 rework).
  *
  * The safety poll is a single anonymous `GET /cast/:token/safety` on the same
- * visible-tab cadence as the rest of this page. A poll that takes longer than
- * the interval can overlap the next one, and an unconditional "apply whatever
- * comes back" update lets a slow pre-hold `false` land AFTER a fresh post-hold
- * `true` already resolved — removing the safety curtain while the X-Card is
- * still raised. This mirrors `PlayerDisplayLoadSequencer`'s generation +
- * AbortController gate (scoped down to one fetch, no campaign identity) so
- * only the latest in-flight request may ever commit, and a superseded or
- * aborted response is always ignored rather than applied.
+ * visible-tab cadence as the rest of this page. An earlier version of this
+ * gate aborted whichever poll was in flight every time a new tick fired —
+ * closing the out-of-order race (a slow pre-hold `false` landing after a
+ * fresh post-hold `true`) but opening a starvation one: if every response
+ * takes longer than the interval, each new tick keeps cancelling the last
+ * before it can ever complete, and the display can sit at its initial
+ * `false` forever even while a hold is active.
+ *
+ * Polls are therefore never overlapped at all: a tick that fires while a
+ * poll is already in flight is skipped outright (`begin()` returns `null`),
+ * letting the in-flight request run to completion rather than restarting it.
+ * With at most one request in flight, out-of-order application is impossible
+ * by construction — there is nothing to be superseded by. The only abort is
+ * `invalidate()` on unmount / cast identity (token) change, so a request
+ * still running past that point cannot call back into stale-scope state.
  */
 export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
 
 export type CastSafetyPollResult =
-  | { kind: 'ok'; generation: number; active: boolean }
-  | { kind: 'ignored'; generation: number; reason: 'aborted' | 'superseded' }
-  /** Real (non-abort) failure on the request that is still current. Callers
-   * must fail safe: leave the last-known hold state untouched rather than
-   * clearing an active curtain or guessing a new value. */
-  | { kind: 'failed'; generation: number };
+  | { kind: 'ok'; active: boolean }
+  /** A poll was already in flight — this tick did not fetch at all. */
+  | { kind: 'skipped' }
+  /** The in-flight request was aborted (unmount / identity change). */
+  | { kind: 'ignored' }
+  /** Real (non-abort) failure. Callers must fail safe: leave the last-known
+   * hold state untouched rather than clearing an active curtain or guessing
+   * a new value. */
+  | { kind: 'failed' };
 
 export class CastSafetyPollSequencer {
-  private generation = 0;
   private controller: AbortController | null = null;
+  private inFlight = false;
 
-  /** Start a new poll. Aborts any prior in-flight poll so a late response from
-   * an older tick cannot resolve after (and overwrite) a newer one. */
-  begin(): { generation: number; signal: AbortSignal } {
-    this.controller?.abort();
+  /** True while a poll is in flight — callers use this to skip a tick rather
+   * than overlap or restart it. */
+  get isInFlight(): boolean {
+    return this.inFlight;
+  }
+
+  /**
+   * Start a new poll, or `null` if one is already in flight — the caller must
+   * skip this tick (never overlap/abort a slow request just to start a fresh
+   * one, or a persistently slow endpoint would never get to resolve).
+   */
+  begin(): { signal: AbortSignal; token: AbortController } | null {
+    if (this.inFlight) return null;
     const controller = new AbortController();
     this.controller = controller;
-    this.generation += 1;
-    return { generation: this.generation, signal: controller.signal };
+    this.inFlight = true;
+    return { signal: controller.signal, token: controller };
   }
 
-  /** True when this generation is still the active, non-aborted poll. */
-  isCurrent(generation: number): boolean {
-    return (
-      generation === this.generation
-      && this.controller != null
-      && !this.controller.signal.aborted
-    );
+  /**
+   * Mark a poll settled (success or failure) so the next tick may start a new
+   * one. Takes the `token` `begin()` returned so a stale settle — a request
+   * that was already aborted by `invalidate()`, and possibly superseded by a
+   * fresh `begin()` since — cannot clear the flight flag out from under the
+   * poll that is actually current.
+   */
+  end(token: AbortController): void {
+    if (this.controller !== token) return;
+    this.controller = null;
+    this.inFlight = false;
   }
 
-  /** Abort in-flight work and bump the generation so a late response cannot
-   * commit. Call on unmount / cast identity (token) change. */
+  /** Abort in-flight work. Call on unmount / cast identity (token) change so
+   * a response arriving after that point cannot commit. */
   invalidate(): void {
     this.controller?.abort();
     this.controller = null;
-    this.generation += 1;
+    this.inFlight = false;
   }
 }
 
 /**
- * Run one sequenced cast-safety poll. Only the latest generation's response
- * may ever be applied — a superseded or aborted request resolves `ignored`,
- * and a genuine failure on the still-current request resolves `failed` so the
- * caller can fail safe (keep last-known state) rather than strand the display
- * in whatever value a prior out-of-order response happened to set.
+ * Run one cast-safety poll tick. A tick that finds a poll already in flight
+ * is skipped (never overlapped, never aborts the in-flight request); only a
+ * poll that actually ran can resolve `ok`, and only when it was not aborted
+ * mid-flight by `invalidate()`. A genuine failure resolves `failed` so the
+ * caller can fail safe (keep last-known state) instead of guessing a value.
  */
 export async function runCastSafetyPoll(
   sequencer: CastSafetyPollSequencer,
   fetchSafety: CastSafetyFetcher,
 ): Promise<CastSafetyPollResult> {
-  const { generation, signal } = sequencer.begin();
+  const begun = sequencer.begin();
+  if (!begun) return { kind: 'skipped' };
+  const { signal, token } = begun;
   try {
     const state = await fetchSafety(signal);
-    if (!sequencer.isCurrent(generation)) {
-      return { kind: 'ignored', generation, reason: 'superseded' };
-    }
-    return { kind: 'ok', generation, active: state.active };
+    sequencer.end(token);
+    if (signal.aborted) return { kind: 'ignored' };
+    return { kind: 'ok', active: state.active };
   } catch (error) {
+    sequencer.end(token);
     if (isAbortError(error) || signal.aborted) {
-      return { kind: 'ignored', generation, reason: 'aborted' };
+      return { kind: 'ignored' };
     }
-    if (!sequencer.isCurrent(generation)) {
-      return { kind: 'ignored', generation, reason: 'superseded' };
-    }
-    return { kind: 'failed', generation };
+    return { kind: 'failed' };
   }
 }
 

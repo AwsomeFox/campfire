@@ -361,15 +361,21 @@ export default function PlayerDisplayPage() {
    * the rest of this page — comfortably inside the 15s bound raising a hold must
    * blank the display within.
    *
-   * A `/safety` request that outruns the poll interval can overlap the next one,
-   * so this goes through `CastSafetyPollSequencer` (same generation + abort gate
-   * as the main projection load, scoped to one fetch) — only the latest request
-   * may ever set `castSafetyActive`. Fail safe throughout: a superseded/aborted
-   * response is ignored, and a genuine failure on the still-current request
-   * leaves the last-known hold state alone rather than guessing a new value —
-   * it can never clear an active curtain, nor strand one cleared by a stale
-   * response. The regular projection poll already surfaces a hard failure
-   * (expired/revoked token) for the page as a whole.
+   * A `/safety` request that outruns the poll interval must never overlap the
+   * next one — an unconditional "apply whatever comes back" update let a slow
+   * pre-hold `false` land after a fresh post-hold `true` and clear the curtain
+   * while the X-Card was still raised. So this goes through
+   * `CastSafetyPollSequencer`/`runCastSafetyPoll`: a tick that finds a poll
+   * already in flight is skipped outright rather than aborting it — cancelling
+   * a slow request just to restart an equally slow one would starve the
+   * display at its initial `false` forever under sustained latency, which is
+   * worse than the race it would "fix". With at most one request ever in
+   * flight, out-of-order application is impossible by construction. Fail safe
+   * throughout: a skipped/aborted tick and a genuine failure on the current
+   * request all leave the last-known hold state alone rather than guessing a
+   * new value — it can never clear an active curtain. The regular projection
+   * poll already surfaces a hard failure (expired/revoked token) for the page
+   * as a whole.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());
@@ -379,8 +385,8 @@ export default function PlayerDisplayPage() {
       castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
     );
     if (result.kind === 'ok') setCastSafetyActive(result.active);
-    // 'ignored' (superseded/aborted) and 'failed' (transient, still-current
-    // request) both leave castSafetyActive untouched — see fail-safe note above.
+    // 'skipped' (already in flight), 'ignored' (aborted), and 'failed'
+    // (transient) all leave castSafetyActive untouched — see fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
