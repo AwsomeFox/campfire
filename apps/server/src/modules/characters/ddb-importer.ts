@@ -976,14 +976,17 @@ export function computeSpellSlots(
       fullEquivalentLevel += Math.ceil(entry.level / 2);
     } else {
       // Same level-floor guard as the half-caster case: Eldritch Knight/Arcane Trickster
-      // spellcasting doesn't begin before class level 3. The ceil() read is also clamped to
-      // full-caster level 6 (4/3/3 slots): the real third-caster table stops progressing
-      // there for class levels 16-20, but an unclamped ceil(19/3) or ceil(20/3) reads 7,
-      // which is FULL_CASTER_SLOT_TABLE row 7 (4/3/3/1) — inventing a 4th-level slot a
-      // level-19/20 solo Eldritch Knight or Arcane Trickster never receives (review finding
-      // on PR #1950). The multiclass floor(level/3) branch doesn't have this problem:
-      // floor(19/3) and floor(20/3) are both already 6.
-      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.min(6, Math.ceil(entry.level / 3))) : Math.floor(entry.level / 3);
+      // spellcasting doesn't begin before class level 3.
+      //
+      // CORRECTION (review finding on PR #1950 round 9): an earlier round of this PR added a
+      // `Math.min(6, ...)` clamp here on the strength of two independent-but-both-wrong review
+      // claims that the real third-caster table "stops progressing" at 4/3/3 for class levels
+      // 16-20. It does not — the actual PHB Fighter/Rogue class tables give Eldritch
+      // Knight/Arcane Trickster exactly ONE 4th-level spell slot starting at class level 19
+      // (4/3/3/1), which is precisely what the unclamped `ceil(19/3) = ceil(20/3) = 7` ->
+      // FULL_CASTER_SLOT_TABLE row 7 (`[0,4,3,3,1,...]`) already produced before that clamp was
+      // added. The clamp was silently removing a real, legitimate slot. Reverted.
+      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.ceil(entry.level / 3)) : Math.floor(entry.level / 3);
     }
   }
 

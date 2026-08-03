@@ -157,8 +157,16 @@ export function NewCharacterForm({
             <div className="text-xs text-amber-300">
               <p>{t('characters.ddbImport.textOnlyIntro')}</p>
               <ul className="list-disc space-y-0.5 pl-4">
-                {importSummary.textOnly.map((name) => (
-                  <li key={name}>{name}</li>
+                {importSummary.textOnly.map((name, i) => (
+                  // Keyed by name+index, not name alone (review finding on PR #1950 round 9):
+                  // two equipped weapons (or features) with the same name are legitimately
+                  // separate entries — computeWeaponActions/computeFeatureActions do not
+                  // (and should not) de-duplicate them the way spells are — so a name-only key
+                  // risks React's standard duplicate-key hazards on any future re-render of
+                  // this list (a stale/misapplied component identity across renders), even
+                  // though the single static render this list currently gets does not lose
+                  // either item from the DOM today.
+                  <li key={`${name}-${i}`}>{name}</li>
                 ))}
               </ul>
             </div>

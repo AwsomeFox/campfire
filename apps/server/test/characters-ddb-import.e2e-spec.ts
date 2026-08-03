@@ -273,16 +273,21 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(computeSpellSlots([{ level: 7, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Champion' } }])).toEqual({});
   });
 
-  // Regression for a Devin/Kilo review finding on PR #1950: an unclamped ceil(level/3) for a
-  // SOLO third-caster read row 7 of the full-caster table (4/3/3/1) at class levels 19-20,
-  // inventing a 4th-level slot the real Eldritch Knight/Arcane Trickster table never grants
-  // (it stops progressing at 4/3/3 for levels 16-20 — full-caster row 6).
-  it('a solo Eldritch Knight/Arcane Trickster at level 19-20 does not get an invented 4th-level slot', () => {
+  // Regression for a PR #1950 round-9 review finding, correcting a round-7 mistake: a solo
+  // third-caster's ceil(level/3) DOES correctly read row 7 of the full-caster table
+  // (4/3/3/1) at class levels 19-20 — the real Eldritch Knight/Arcane Trickster PHB tables
+  // give exactly ONE 4th-level spell slot starting at class level 19. An earlier round of
+  // this PR added a `Math.min(6, ...)` clamp here on the strength of an incorrect claim that
+  // the real table "stops progressing" at 4/3/3 for levels 16-20; it does not, and the clamp
+  // was silently removing a real, legitimate slot. This test now asserts the CORRECT
+  // (unclamped) behavior — the opposite of what an earlier version of this same test checked.
+  it('a solo Eldritch Knight/Arcane Trickster at level 19-20 gets the real 4th-level slot at level 19', () => {
     const level19 = computeSpellSlots([{ level: 19, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Eldritch Knight' } }]);
     expect(level19).toEqual({
       '1': { max: 4, used: 0 },
       '2': { max: 3, used: 0 },
       '3': { max: 3, used: 0 },
+      '4': { max: 1, used: 0 },
     });
     const level20 = computeSpellSlots([{ level: 20, definition: { name: 'Rogue' }, subclassDefinition: { name: 'Arcane Trickster' } }]);
     expect(level20).toEqual(level19);

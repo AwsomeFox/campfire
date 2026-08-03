@@ -68,7 +68,11 @@ test.describe('D&D Beyond import summary stays visible until dismissed (issue #1
             actionsImported: 2,
             spellsImported: 3,
             spellSlotsImported: true,
-            textOnly: ['Unparseable Feature'],
+            // Two identically-named entries (issue #1903 review, PR #1950 round 9) — e.g. two
+            // equipped daggers each landing text-only — must both render. The list used to key
+            // each `<li>` by name alone, so a React key collision silently dropped one of the
+            // pair from the DOM.
+            textOnly: ['Unparseable Feature', 'Unparseable Feature'],
           },
         }),
       });
@@ -89,7 +93,8 @@ test.describe('D&D Beyond import summary stays visible until dismissed (issue #1
     await expect(summaryPanel.getByText('2 attacks/actions imported')).toBeVisible();
     await expect(summaryPanel.getByText('3 spells imported')).toBeVisible();
     await expect(summaryPanel.getByText('Spell slots set from class and level.')).toBeVisible();
-    await expect(summaryPanel.getByText('Unparseable Feature')).toBeVisible();
+    // Both identically-named entries render as separate list items, not collapsed into one.
+    await expect(summaryPanel.locator('li', { hasText: 'Unparseable Feature' })).toHaveCount(2);
     const doneBtn = summaryPanel.getByRole('button', { name: 'Done' });
     await expect(doneBtn).toBeVisible();
 
