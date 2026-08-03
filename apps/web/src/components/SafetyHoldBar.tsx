@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useId, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type { SafetyHoldRecovery } from '@campfire/schema';
@@ -224,9 +224,17 @@ function SafetyReleaseDialog({ campaignId, onClose }: { campaignId: number; onCl
  */
 export function SafetyHoldOverlayView({ active }: { active: boolean }) {
   const { t } = useTranslation();
-  const [visible, setVisible] = useState(false);
-  useEffect(() => { setVisible(active); }, [active]);
-  if (!visible) return null;
+  // Render directly from the prop — no local state/effect copy. That
+  // indirection delayed visibility by one render cycle in both directions
+  // (raising the curtain, and lifting it), with no animation depending on the
+  // intermediate state to justify it. On the cast route (issue #1908) it also
+  // undermined the fail-safe "show the curtain until the first poll confirms
+  // no hold" guarantee: `active` can be `true` on this component's very
+  // first render (parent passes `castSafetyActive || !castSafetyKnown`), but
+  // rendering from a `visible` state that only starts reflecting `active`
+  // after a post-mount effect painted the scene underneath for that first
+  // frame regardless.
+  if (!active) return null;
   return (
     <div className="cf-safety-display" role="status" data-testid="safety-display-overlay">
       <div className="cf-safety-display-inner">

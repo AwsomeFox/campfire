@@ -1,7 +1,18 @@
-import { expect, test, type Request } from '@playwright/test';
+import { expect, test, type Page, type Request } from '@playwright/test';
 import { stateFor } from './seed';
 
 const TOKEN = `cf_cast_${'a'.repeat(48)}`;
+
+/** Client-side navigation — pushState + popstate is exactly what a client-side
+ * navigation does to createBrowserRouter, reusing the mounted route element
+ * rather than remounting it the way `page.goto()` would. See
+ * `ai-table-campaign-switch.spec.ts` (#572) for the same technique. */
+async function navigateClientSide(page: Page, to: string): Promise<void> {
+  await page.evaluate((href) => {
+    window.history.pushState({}, '', href);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+  }, to);
+}
 const CAST_PARTY = [{
   id: 1,
   name: 'Ember',
@@ -285,15 +296,85 @@ test.describe('Player Display cast sessions', () => {
     await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
     await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
   });
+
+  /**
+   * Issue #1908 rework, round 6 — `/cast/:campaignId/:token` is a single
+   * unkeyed route element, so a client-side transition between two different
+   * cast identities REUSES the mounted `PlayerDisplayPage`, not remounts it.
+   * The prior campaign's last-known safety state must not survive that
+   * transition: a display that last confirmed "no hold" on campaign A must
+   * fail safe (show the curtain) for campaign B until B's OWN poll succeeds
+   * — even if B's hold is already active and its poll is slow to confirm it.
+   */
+  test('safety knowledge resets to unknown on a client-side cast identity change, even when the new hold is already active', async ({ page }) => {
+    const CAMPAIGN_B = 8;
+    const TOKEN_B = `cf_cast_${'b'.repeat(48)}`;
+    let releaseSafetyB!: () => void;
+    const safetyBGate = new Promise<void>((resolve) => {
+      releaseSafetyB = resolve;
+    });
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+
+    // Campaign A: confirmed no hold.
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) }),
+    );
+
+    // Campaign B: its hold is ALREADY active, but the safety poll is slow to
+    // confirm it — the case that matters is what the display shows in the
+    // gap, not just the eventual correct value.
+    await page.route(`**/api/v1/cast/${TOKEN_B}/summary`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(castSummary(CAMPAIGN_B, 'Second Cast Campaign')),
+      }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN_B}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN_B}/safety`, async (route) => {
+      await safetyBGate;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: true }) });
+    });
+
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cf.screen.scene.7', 'party');
+      window.localStorage.setItem('cf.screen.scene.8', 'party');
+    });
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
+
+    await navigateClientSide(page, `/cast/${CAMPAIGN_B}/${TOKEN_B}`);
+    await expect(page.getByRole('heading', { name: 'Second Cast Campaign' })).toBeVisible();
+
+    // Campaign A's confirmed "no hold" must not carry over: campaign B's own
+    // poll hasn't resolved yet, so the display must fail safe.
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // Confirms this isn't just the fail-safe default settling into the
+    // correct value by coincidence — B's hold really is active.
+    releaseSafetyB();
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+    await expect(page.getByTestId('safety-display-overlay')).toContainText('The table is paused.');
+  });
 });
 
 /** 1x1 transparent PNG — the map bytes' contents are irrelevant, only their source is. */
 const TRANSPARENT_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
-function castSummary() {
+function castSummary(id = 7, name = 'Cast-Safe Campaign') {
   return {
-    campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
+    campaign: { id, name, sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
     currentLocation: null,
     quests: [],
     npcs: [],

@@ -234,17 +234,30 @@ export class PlayerDisplayLoadSequencer {
  *     means a single hang can still delay observing a freshly-raised hold by
  *     up to the deadline — incompatible with the 15s acceptance bound this
  *     feature is built around, however generous the deadline's own value.
+ *  5. Fix (4) by decoupling ticking from completion (every tick starts a
+ *     genuinely new, never-aborted request), gated only by a generation
+ *     watermark that advances on SUCCESS: closes (4), but a poll succeeding
+ *     is not the only way it can conclude. If a newer poll fails or is
+ *     aborted (never calling the success-only watermark update) while an
+ *     OLDER poll is still outstanding, the older one's late — and by then
+ *     possibly stale — success can still land after the newer attempt
+ *     already gave up inconclusively, clearing the curtain with out-of-date
+ *     data even though a fresher check was already attempted.
  *
- * The fix is to stop coupling those two things. Every visible-tab tick
- * starts a genuinely NEW request — never skipped, never aborted just because
- * a new tick fired — so an outstanding request (however slow, however hung)
- * can never block a later one from running. Ordering is handled separately,
- * by a monotonic generation: each poll gets a generation number, and a
- * response may only be applied if its generation is strictly newer than the
- * highest generation already applied (`shouldApply`/`markApplied`). This
- * keeps the out-of-order guarantee from (1)/(2) — a late, low-numbered
- * response can never overwrite a result a higher-numbered one already
- * applied, even if it "completes" without ever being aborted — while making
+ * The fix is to stop coupling ticking to completion, AND to advance the
+ * ordering watermark on every conclusion, not only successful ones. Every
+ * visible-tab tick starts a genuinely NEW request — never skipped, never
+ * aborted just because a new tick fired — so an outstanding request
+ * (however slow, however hung) can never block a later one from running.
+ * Ordering is handled separately, by a monotonic generation: each poll gets
+ * a generation number, and `settle()` records that a generation has
+ * concluded — with ANY outcome, success, failure, or abort — returning
+ * whether that generation is still the freshest to have concluded. Only a
+ * still-freshest generation's success may ever be applied. This keeps the
+ * out-of-order guarantee from (1)/(2) — a late, low-numbered response can
+ * never overwrite a result a higher-numbered one already applied, even if it
+ * "completes" without ever being aborted — closes (5) by no longer letting a
+ * response's own success be the only thing that can supersede it, and keeps
  * (2)'s and (3)'s starvation modes structurally impossible: no tick is ever
  * skipped, and no in-flight request is ever aborted by a newer tick starting.
  *
@@ -280,7 +293,7 @@ export type CastSafetyPollResult =
 
 export class CastSafetyPollSequencer {
   private generation = 0;
-  private appliedGeneration = 0;
+  private settledGeneration = 0;
   private inFlight = new Map<number, AbortController>();
 
   /** Start a new poll. Always succeeds — never blocked or superseded by a
@@ -300,31 +313,41 @@ export class CastSafetyPollSequencer {
     this.inFlight.delete(generation);
   }
 
-  /** True when `generation` is newer than the highest generation already
-   * applied — the only responses allowed to update state. */
-  shouldApply(generation: number): boolean {
-    return generation > this.appliedGeneration;
-  }
-
-  /** Record that `generation`'s result was applied, raising the watermark so
-   * no older generation can ever apply after it, regardless of arrival order. */
-  markApplied(generation: number): void {
-    if (generation > this.appliedGeneration) this.appliedGeneration = generation;
+  /**
+   * Record that `generation` has settled — with ANY outcome: a successful
+   * response, a genuine failure, or an abort. Returns whether `generation`'s
+   * own value (if it succeeded) may still be trusted: true only if no NEWER
+   * generation had already settled by the time this one finished.
+   *
+   * Settling is tracked for every outcome, not just successes: if it only
+   * advanced on success, a newer poll that itself fails, times out, or is
+   * aborted would never raise the watermark, and a slower OLDER poll's late
+   * (and by then possibly stale) success could still land after it —
+   * clearing the curtain with out-of-date data even though a fresher check
+   * was already attempted and came back inconclusive. Once any newer attempt
+   * has concluded, an older one is stale regardless of how it concludes: the
+   * fail-safe stance is to keep the last-known state rather than trust a
+   * result real-world time has already moved past.
+   */
+  settle(generation: number): boolean {
+    const isFreshest = generation > this.settledGeneration;
+    if (isFreshest) this.settledGeneration = generation;
+    return isFreshest;
   }
 
   /**
    * Abort every currently in-flight poll. Call on unmount / cast identity
    * (token) change so a response arriving after that point cannot commit.
-   * Also raises the applied watermark to the current generation, so even a
+   * Also raises the settled watermark to the current generation, so even a
    * request that ignores its abort signal and "completes" later can never
-   * apply — the same backstop-beyond-cancellation property as the generation
-   * guard elsewhere. Future `begin()` calls (e.g. cast mode re-entered) are
+   * apply — the same backstop-beyond-cancellation property `settle()` gives
+   * every other case. Future `begin()` calls (e.g. cast mode re-entered) are
    * unaffected — this is a one-time flush, not a permanent shutdown.
    */
   invalidate(): void {
     for (const controller of this.inFlight.values()) controller.abort();
     this.inFlight.clear();
-    this.appliedGeneration = this.generation;
+    this.settledGeneration = this.generation;
   }
 }
 
@@ -332,13 +355,14 @@ export class CastSafetyPollSequencer {
  * Run one cast-safety poll tick. Always starts a fresh request — never
  * skipped, never aborts a still-running earlier poll — so an outstanding
  * request can never block this or any later tick. Only a response whose
- * generation is still the newest may ever be applied (`kind: 'ok'`); an
- * out-of-order arrival resolves `stale`, aborted work resolves `ignored`, and
- * a genuine failure resolves `failed` so the caller can fail safe (keep
- * last-known state) instead of guessing a value. `timeoutMs` bounds this
- * one request's own lifetime purely for resource hygiene — see
- * `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no correctness
- * weight here.
+ * generation is still the freshest SETTLED one may ever be applied
+ * (`kind: 'ok'`) — an out-of-order arrival (including one superseded by a
+ * newer poll that itself failed or aborted) resolves `stale`, aborted work
+ * resolves `ignored`, and a genuine failure resolves `failed`, so the caller
+ * can fail safe (keep last-known state) instead of guessing a value.
+ * `timeoutMs` bounds this one request's own lifetime purely for resource
+ * hygiene — see `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no
+ * correctness weight here.
  */
 export async function runCastSafetyPoll(
   sequencer: CastSafetyPollSequencer,
@@ -351,10 +375,15 @@ export async function runCastSafetyPoll(
   const deadline = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const state = await fetchSafety(signal);
-    if (!sequencer.shouldApply(generation)) return { kind: 'stale' };
-    sequencer.markApplied(generation);
+    const isFreshest = sequencer.settle(generation);
+    if (!isFreshest) return { kind: 'stale' };
     return { kind: 'ok', active: state.active };
   } catch (error) {
+    // Settle even on failure/abort — a later-arriving OLDER response must
+    // see this generation as having concluded, regardless of how it
+    // concluded. See `settle()`'s doc for why this is the fix, not an
+    // incidental detail.
+    sequencer.settle(generation);
     if (isAbortError(error) || signal.aborted) {
       return { kind: 'ignored' };
     }

@@ -383,7 +383,13 @@ export default function PlayerDisplayPage() {
    * successfully checked" are different states, and only the former may
    * render as an open display. Until the first `ok`, the overlay renders as
    * if a hold were active — the same fail-safe bias as everywhere else in
-   * this poll, applied to its own unconfirmed starting state.
+   * this poll, applied to its own unconfirmed starting state. Both reset to
+   * "unknown" whenever the cast identity (token) changes — a route
+   * transition between two `/cast/:campaignId/:token` URLs reuses this
+   * component, and carrying over the PRIOR campaign's last-known state would
+   * let a display that last confirmed "no hold" there render the NEW
+   * campaign open, even if its hold is already active, until its own poll
+   * happens to succeed.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const [castSafetyKnown, setCastSafetyKnown] = useState(false);
@@ -404,6 +410,8 @@ export default function PlayerDisplayPage() {
 
   useEffect(() => {
     const sequencer = castSafetySequencerRef.current;
+    setCastSafetyActive(false);
+    setCastSafetyKnown(false);
     if (isCastMode) void loadCastSafety();
     // Abort any in-flight poll on unmount or when the cast identity (token)
     // changes, so a late response never calls setState past that point.

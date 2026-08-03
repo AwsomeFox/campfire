@@ -1,10 +1,10 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Five review
+ * `GET /cast/:token/safety` is polled on a fixed interval. Six review
  * findings on the same code, each closing one failure mode and (because
  * earlier shapes coupled "when the next tick may run" to "when this one
- * finishes") opening another:
+ * finishes", or coupled ordering to success alone) opening another:
  *
  *  1. Overlapping polls can complete out of order — a slow pre-hold `false`
  *     resolving after a fresh post-hold `true` must not clear the curtain.
@@ -22,15 +22,22 @@
  *     hang can still delay observing a freshly-raised hold by up to
  *     whatever the deadline is, in tension with the 15s acceptance bound
  *     no matter how the deadline is tuned.
- *  5. The fix: stop coupling ticking to completion. Every tick starts a
+ *  5. Fix: stop coupling ticking to completion. Every tick starts a
  *     genuinely new request — never skipped, never aborted by a later
  *     tick — so an outstanding request (however slow or hung) can never
  *     block a later one. Ordering is handled separately by a monotonic
- *     generation watermark: a response only applies if it is strictly
- *     newer than the highest generation already applied.
+ *     generation watermark that (in this shape) only advances on SUCCESS.
+ *  6. That watermark-on-success-only is itself incomplete: if a NEWER poll
+ *     fails or is aborted (never advancing it) while an OLDER poll is still
+ *     outstanding, the older one's late success can still land after the
+ *     newer attempt already gave up inconclusively — clearing the curtain
+ *     with stale data even though a fresher check was already attempted.
+ *     Fix: advance the watermark on every settled generation, success or
+ *     not (`settle()`), so an older response is stale once ANY newer one has
+ *     concluded, regardless of how.
  *
  * These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free)
- * against all five, mirroring `player-display-load.unit.spec.ts`'s
+ * against all six, mirroring `player-display-load.unit.spec.ts`'s
  * deferred-promise technique.
  */
 import { expect, test } from '@playwright/test';
@@ -143,6 +150,32 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(stuckResult.kind).toBe('stale'); // superseded by the newer applied generations
   });
 
+  test('regression (round 6): a newer poll that fails must still block an older, now-stale success', async () => {
+    // The watermark-on-success-only shape passed every test above but missed
+    // this: tick 1 (pre-hold) hangs; the hold is raised; tick 2 (post-hold)
+    // is attempted but itself fails outright before tick 1 resolves — so
+    // nothing had advanced the watermark yet under that shape. Tick 1's
+    // late, stale success must still be rejected once tick 2 has concluded,
+    // even though tick 2's own conclusion carried no value of its own to
+    // apply (fail safe: keep last-known state, don't adopt known-older data).
+    const sequencer = new CastSafetyPollSequencer();
+    const stalePreHold = deferred<CastSafetyState>();
+
+    const stale = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, stalePreHold.promise));
+
+    const failing = await runCastSafetyPoll(sequencer, async () => {
+      throw new TypeError('network down');
+    });
+    expect(failing.kind).toBe('failed');
+
+    // The older pre-hold request finally resolves successfully — but a
+    // newer attempt already concluded (even though it failed), so this must
+    // not be trusted.
+    stalePreHold.resolve({ active: false });
+    const staleResult = await stale;
+    expect(staleResult.kind).toBe('stale');
+  });
+
   test('a slow-but-healthy response still lands: no deadline is tight enough to reject it', async () => {
     // Round 4's bug in a different shape: the hygiene timeout must never be
     // what determines whether a normal (if slow) response can apply. A
@@ -229,18 +262,17 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(released).toMatchObject({ kind: 'ok', active: false });
   });
 
-  test('begin()/shouldApply()/markApplied(): the generation watermark never regresses', () => {
+  test('begin()/settle(): the generation watermark never regresses, and advances regardless of outcome', () => {
     const sequencer = new CastSafetyPollSequencer();
     const first = sequencer.begin();
     const second = sequencer.begin();
 
-    expect(sequencer.shouldApply(second.generation)).toBe(true);
-    sequencer.markApplied(second.generation);
-    expect(sequencer.shouldApply(second.generation)).toBe(false); // already applied, no double-apply
-    expect(sequencer.shouldApply(first.generation)).toBe(false); // older than the watermark
+    expect(sequencer.settle(second.generation)).toBe(true); // freshest so far — may apply
+    expect(sequencer.settle(second.generation)).toBe(false); // already settled, no double-apply
+    expect(sequencer.settle(first.generation)).toBe(false); // older than the watermark
 
     const third = sequencer.begin();
-    expect(sequencer.shouldApply(third.generation)).toBe(true); // newer than the watermark
+    expect(sequencer.settle(third.generation)).toBe(true); // newer than the watermark
   });
 
   test('begin() never blocks — every call gets its own generation and controller', () => {
