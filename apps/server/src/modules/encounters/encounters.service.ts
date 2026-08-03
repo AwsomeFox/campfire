@@ -4172,7 +4172,6 @@ export class EncountersService {
     const isDm = role === 'dm';
     if (!isDm) {
       // Identity edits and combat-log actor are DM-only.
-      // Players may set initiative on their own combatant (#1457).
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
       // patching their own combatant must not spoof who dealt the damage/heal.
       //
@@ -4193,8 +4192,28 @@ export class EncountersService {
             'Only a DM may set the combat-log actor. Omit actorId — damage is attributed to the current-turn combatant automatically.',
         });
       }
-      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
-        throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
+      // Issue #1904 (review finding): a player could formerly set initiative to ANY
+      // value on their own combatant (#1457) via this manual PATCH, entirely
+      // bypassing the server RNG, idempotency, and dice-log evidence the new
+      // POST .../roll-initiative endpoint provides. That made "server-authoritative
+      // initiative" a UI-only convention — a disabled button, not a server rule — since
+      // any direct request (or an old client) could still choose its own value. A
+      // player rolls their own initiative exclusively through the dedicated endpoint
+      // now; manual initiative PATCHes (set or clear) are DM-only, same as name/hpMax/
+      // initMod/tokenSize. Absolute rule, same reasoning as actorId above: a player
+      // never needs to send this field, so it is rejected outright rather than ignored.
+      if (
+        patch.name !== undefined ||
+        patch.hpMax !== undefined ||
+        patch.initMod !== undefined ||
+        patch.tokenSize !== undefined ||
+        patch.initiative !== undefined
+      ) {
+        throw new ForbiddenException({
+          code: 'COMBATANT_FIELD_DM_ONLY',
+          message:
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+        });
       }
       if (!existing.characterId) {
         throw new ForbiddenException('Only dm may modify this combatant');
@@ -4262,9 +4281,12 @@ export class EncountersService {
     // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    // Initiative: DMs can set on any combatant; players can set on their own (#1457).
-    // The ownership guard above already rejected non-owned combatants for non-DMs.
-    if (patch.initiative !== undefined) staticUpdate.initiative = patch.initiative;
+    // Initiative: DM-only manual set/clear (issue #1904 — see the ForbiddenException
+    // above, which already rejects a non-DM's `initiative` outright). A player rolls
+    // their own initiative exclusively through POST .../roll-initiative now, not this
+    // manual PATCH (formerly allowed for the owning player under #1457). `&& isDm` here
+    // is defense-in-depth matching the sibling identity fields below, not the only gate.
+    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
@@ -5493,6 +5515,22 @@ export class EncountersService {
         .where(and(eq(combatants.encounterId, encounterId), isNull(combatants.initiative)))
         .all();
 
+      // Issue #1904 review finding: the dice log is campaign-wide and performs no
+      // read-time redaction (unlike the roster/combat-log reads, which mask a
+      // hidden-NPC combatant's identity — see getWithCombatantsOrThrow above and
+      // listEncounterEvents' redactEncounterEventsForViewer). Individual-mode labels
+      // below borrow the combatant's raw name, so a hidden NPC's identity must be
+      // masked before it reaches that label — same rule the quick-roll dice log
+      // already applies (issue #1850).
+      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+      const hiddenNpcIds = new Set<number>();
+      if (npcIdsInRoll.length > 0) {
+        const hiddenRows = tx.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIdsInRoll), eq(npcs.hidden, true))).all();
+        for (const r of hiddenRows) hiddenNpcIds.add(r.id);
+      }
+      const diceLogName = (row: { kind: string; npcId: number | null; name: string }): string =>
+        row.kind === 'npc' && row.npcId !== null && hiddenNpcIds.has(row.npcId) ? UNKNOWN_COMBATANT_LABEL : row.name;
+
       // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
       // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
       // it leave the same campaign-wide trail a manual roll would. Built alongside `rolled`
@@ -5541,7 +5579,7 @@ export class EncountersService {
             formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
           });
           diceLogEntries.push({
-            label: `${row.name} · Initiative`,
+            label: `${diceLogName(row)} · Initiative`,
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
@@ -5798,9 +5836,18 @@ export class EncountersService {
 
         // Issue #1904 secrecy: the dice log is campaign-wide. Only the DM can reach a
         // hidden encounter this far (non-DM callers already 404 above), and a hidden
-        // encounter's roll must never leak into the shared log.
+        // encounter's roll must never leak into the shared log. Same rule for a
+        // combatant borrowing a hidden NPC's identity (review finding, same masking
+        // the quick-roll dice log already applies for issue #1850): the roster/combat-log
+        // reads mask that name at read time, but the dice log has no read-time
+        // redaction, so it must be masked here before the write.
         if (!fresh.hidden) {
-          const label = `${freshCombatant.name} · Initiative`;
+          let hiddenNpcName = false;
+          if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
+            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, freshCombatant.npcId)).limit(1).all();
+            hiddenNpcName = npc?.hidden === true;
+          }
+          const label = `${hiddenNpcName ? UNKNOWN_COMBATANT_LABEL : freshCombatant.name} · Initiative`;
           const expr = initiativeRollExpr(adapter.initiativeDie, rollModifier);
           roll = this.rolls.recordInTransaction(
             tx,

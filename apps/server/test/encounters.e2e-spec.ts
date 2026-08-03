@@ -19,6 +19,7 @@ import { CampaignEventsService } from '../src/modules/events/campaign-events.ser
 import { AuditService } from '../src/modules/audit/audit.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
 import { RollsService } from '../src/modules/rolls/rolls.service';
+import { UNKNOWN_COMBATANT_LABEL } from '../src/modules/encounters/encounters.logic';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const otherDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-2' };
@@ -636,18 +637,40 @@ describe('encounters (e2e)', () => {
       expect(res.status).toBe(403);
     });
 
-    it('player can set initiative on their own combatant (#1457)', async () => {
+    // Issue #1904 (review finding): #1457 originally let a player PATCH ANY initiative
+    // value onto their own combatant. Once server-authoritative rolling shipped (POST
+    // .../roll-initiative), that manual path became a bypass of the server RNG,
+    // idempotency, and dice-log evidence — a disabled button in the UI, not a server
+    // rule. A player rolling their own combatant's initiative now must go through the
+    // dedicated roll endpoint; this manual PATCH is DM-only even for the owning player.
+    it('player CANNOT set initiative via manual PATCH on their own combatant — DM-only (issue #1904, was #1457)', async () => {
       const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const ariaBefore = (before.body.combatants as Array<{ id: number; initiative: number | null }>).find(
+        (c) => c.id === ariaCombatantId,
+      );
       const res = await request(server)
         .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
         .set(player)
         .send({ initiative: 5 });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: 'COMBATANT_FIELD_DM_ONLY' });
       const get = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
       const aria = (get.body.combatants as Array<{ id: number; initiative: number | null }>).find(
         (c) => c.id === ariaCombatantId,
       );
-      expect(aria?.initiative).toBe(5);
+      // Confirm it's truly a no-op, not a partial/silent apply.
+      expect(aria?.initiative).toBe(ariaBefore?.initiative ?? null);
+    });
+
+    it('dm can still manually set initiative on any combatant, including a player-owned one', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ initiative: 5 });
+      expect(res.status).toBe(200);
+      expect(res.body.initiative).toBe(5);
     });
 
     it('player cannot modify a monster combatant (not theirs)', async () => {
@@ -5007,6 +5030,59 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(res.status).toBe(201);
     expect(res.body.rolledCount).toBeGreaterThan(0);
     expect(await initiativeRolls()).toHaveLength(beforeRolls.length);
+  });
+
+  // Issue #1904 review finding (devin-ai-integration / chatgpt-codex-connector): the dice
+  // log is campaign-wide with NO read-time redaction (unlike the roster/combat-log reads,
+  // which mask a hidden-NPC combatant's identity). Both new initiative dice-log writes
+  // must apply the same masking the quick-roll dice log already does for issue #1850.
+  it("a hidden-NPC combatant's per-combatant initiative roll masks its identity in the shared dice log", async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Shadowbrand', hidden: true })
+    ).body.id;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Shadowbrand', hpMax: 30 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'shadowbrand-hidden-roll' });
+    expect(res.status).toBe(201);
+    expect(res.body.roll).toMatchObject({ label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` });
+
+    const rolls = await initiativeRolls();
+    expect(rolls.some((r) => r.label === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+    expect(rolls.some((r) => (r.label ?? '').includes('Shadowbrand'))).toBe(false);
+  });
+
+  it("a hidden-NPC combatant's initiative is masked in the shared dice log for a DM bulk roll too", async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Nightveil', hidden: true })
+    ).body.id;
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll With Hidden NPC', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${bulkEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Nightveil', hpMax: 30 });
+    expect(combatant.status).toBe(201);
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBeGreaterThan(0);
+
+    const rolls = await initiativeRolls();
+    expect(rolls.some((r) => r.label === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+    expect(rolls.some((r) => (r.label ?? '').includes('Nightveil'))).toBe(false);
   });
 });
 
