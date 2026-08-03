@@ -3792,7 +3792,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} ownedCharacterIds={ownedCharacterIds} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 

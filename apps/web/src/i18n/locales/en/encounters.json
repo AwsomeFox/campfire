@@ -107,6 +107,23 @@
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
       }
+    },
+    "resourceTracker": {
+      "title": "Resource Tracker",
+      "features": "Features",
+      "spellSlots": "Spell Slots",
+      "level": "Level {{level}}",
+      "shortRest": "Short Rest",
+      "longRest": "Long Rest",
+      "partyRest": "Party Rest",
+      "confirmShortRest": "Short Rest for {{name}}",
+      "confirmLongRest": "Long Rest for {{name}}",
+      "confirmRestBody": "Restoring resources and HP for {{name}} using the server rest engine.",
+      "restSuccess": "{{name}} completed a {{kind}} rest.",
+      "restError": "Couldn't complete rest for {{name}}.",
+      "updateResourceError": "Couldn't update resource.",
+      "updateSlotError": "Couldn't update spell slot.",
+      "setUsedTitle": "Set used to {{val}}"
     }
   }
 }
