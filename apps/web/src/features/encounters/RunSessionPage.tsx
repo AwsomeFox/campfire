@@ -8685,14 +8685,14 @@ function AddCombatantPanel({
       }}
       onDrop={(event: React.DragEvent<HTMLElement>) => void addDroppedRuleEntry(event)}
     >
-      <span className="card-kicker">{t('encounters.addCombatant')}</span>
+      <span className="card-kicker">{t('run.addCombatant')}</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
-        {t('encounters.addCombatantHint')}
+        {t('run.addCombatantHint')}
       </p>
       <div
         className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
-        aria-label={t('encounters.addCombatant')}
+        aria-label={t('run.addCombatant')}
         data-testid="add-combatant-tabs"
       >
         {ADD_TAB_ORDER.map((t) => {
