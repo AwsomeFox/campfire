@@ -456,7 +456,23 @@ function stripDdbHtml(html: string): string {
       const isValidCodePoint = Number.isFinite(code) && code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
       return isValidCodePoint ? String.fromCodePoint(code) : match;
     }
-    return DDB_HTML_ENTITIES[ref] ?? match;
+    // Object.hasOwn (not `DDB_HTML_ENTITIES[ref] ?? match`) because DDB_HTML_ENTITIES is a
+    // plain object literal that inherits Object.prototype, and the regex above accepts any
+    // [a-zA-Z]+ — untrusted sheet text containing "&constructor;", "&toString;",
+    // "&valueOf;", "&hasOwnProperty;", etc. would otherwise resolve to an INHERITED function
+    // (truthy, so `??` never falls back to `match`), which String.prototype.replace then
+    // stringifies into the imported note as garbled text (e.g. "function Object() { [native
+    // code] }") instead of leaving the unrecognized entity as written (review finding on PR
+    // #1950 round 8).
+    // Object.hasOwn (not `DDB_HTML_ENTITIES[ref] ?? match`) because DDB_HTML_ENTITIES is a
+    // plain object literal that inherits Object.prototype, and the regex above accepts any
+    // [a-zA-Z]+ — untrusted sheet text containing "&constructor;", "&toString;",
+    // "&valueOf;", "&hasOwnProperty;", etc. would otherwise resolve to an INHERITED function
+    // (truthy, so `??` never falls back to `match`), which String.prototype.replace then
+    // stringifies into the imported note as garbled text (e.g. "function Object() { [native
+    // code] }") instead of leaving the unrecognized entity as written (review finding on PR
+    // #1950 round 8).
+    return Object.hasOwn(DDB_HTML_ENTITIES, ref) ? DDB_HTML_ENTITIES[ref] : match;
   });
   // Collapse whitespace, then drop a space a closing inline tag leaves immediately before
   // punctuation ("creature</strong>." -> "creature ." -> "creature.") — cosmetic, but this
@@ -506,6 +522,28 @@ function hasAmbiguousMeleeAbilityClass(classes: DdbClass[] | null | undefined): 
 }
 
 /**
+ * Classes with full simple + martial weapon proficiency (issue #1903 review, PR #1950 round
+ * 8 finding) — the only classes for which "the character is proficient with whatever weapon
+ * they equipped" is a safe RAW default. D&D Beyond's item builder does NOT restrict equipping
+ * to weapons the character is proficient with (a Wizard can equip and show a longsword as
+ * equipped), so unconditionally adding the proficiency bonus for every class — this
+ * function's previous behavior — silently over-counted the to-hit for any class without
+ * full martial proficiency. Every other class has partial (simple-weapons-only) or
+ * specific-named-list (Rogue/Bard/Monk's short exception lists) proficiency that this
+ * importer has no confirmed, reliably-shaped sheet field to verify per equipped weapon, so
+ * for those classes a weapon goes text-only instead of guessing proficiency either way. A
+ * multiclassed character keeps every proficiency any of their classes ever granted (5e
+ * multiclassing never removes an earlier class's proficiencies), so this checks ALL of the
+ * character's classes, not just the first/primary one.
+ */
+const FULL_MARTIAL_PROFICIENCY_CLASSES = new Set(['barbarian', 'fighter', 'paladin', 'ranger']);
+
+function hasFullMartialWeaponProficiency(classes: DdbClass[] | null | undefined): boolean {
+  if (!Array.isArray(classes)) return false;
+  return classes.some((c) => FULL_MARTIAL_PROFICIENCY_CLASSES.has((c.definition?.name ?? '').trim().toLowerCase()));
+}
+
+/**
  * DDB `bonus`-type modifier subTypes that add to weapon attack rolls or damage which this
  * importer's ability-mod + proficiency math (below) has no way to read (issue #1903 review,
  * PR #1950 finding) — most commonly a Fighting Style (Archery: +2 to ranged attack rolls;
@@ -531,12 +569,16 @@ function weaponBonusModifierFlags(mods: DdbModifier[]): { melee: boolean; ranged
 }
 
 /**
- * Equipped-weapon attacks (issue #1903). Assumes proficiency with the character's own
- * equipped weapons — true for the overwhelming majority of DDB-built PCs (the DDB
- * character builder only lets you equip what your class/background/feats grant
- * proficiency with); a DM can correct the rare exception on the sheet afterward. Reuses
- * `expandRawStatblockAction` for the attack/damage inference, mirroring how a compendium
- * monster's weapon attacks are expanded.
+ * Equipped-weapon attacks (issue #1903). Reuses `expandRawStatblockAction` for the
+ * attack/damage inference, mirroring how a compendium monster's weapon attacks are
+ * expanded.
+ *
+ * Proficiency is only assumed for a class with full simple + martial proficiency (see
+ * {@link hasFullMartialWeaponProficiency}) — D&D Beyond's item builder lets any class equip
+ * any weapon regardless of proficiency (review finding on PR #1950 round 8, correcting an
+ * earlier, incorrect assumption in this comment that equipping already implied
+ * proficiency), so blanket-including the proficiency bonus for every class would over-count
+ * the to-hit for e.g. a Wizard wielding a martial weapon they aren't trained with.
  *
  * A `magic:true` weapon (a +1/+2/+3 item, or one with a rarer nonstandard bonus) is
  * deliberately excluded from this to-hit/damage math: the simplified item shape read here
@@ -552,6 +594,7 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
   const items = Array.isArray(data.inventory) ? data.inventory : [];
   const ambiguousMeleeAbility = hasAmbiguousMeleeAbilityClass(data.classes);
   const weaponBonusFlags = weaponBonusModifierFlags(allModifiers(data));
+  const fullMartialProficiency = hasFullMartialWeaponProficiency(data.classes);
   const out: CharacterActionType[] = [];
   for (const item of items) {
     if (out.length >= RAW_ENTRY_SAFETY_CAP) break;
@@ -563,6 +606,21 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
       out.push(
         expandRawStatblockAction(
           { name, desc: 'Magic weapon — add its enchantment bonus to attack and damage manually; not inferred from the import.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
+    if (!fullMartialProficiency) {
+      // Weapon proficiency can't be confirmed for this class from the sheet shape this
+      // importer reads (see hasFullMartialWeaponProficiency) — do not assume proficiency
+      // (which would over-count the to-hit for a non-proficient weapon) or assume its
+      // absence (which would under-count for a weapon the character legitimately trained
+      // with). Leave text-only rather than guessing either way.
+      out.push(
+        expandRawStatblockAction(
+          { name, desc: "This class's proficiency with this weapon could not be confirmed — check whether the attack bonus should include proficiency.", attackBonus: null },
           'attack',
           'dnd5e',
         ),
@@ -640,11 +698,18 @@ const ACTION_SECTIONS = ['class', 'race', 'background', 'item', 'feat'] as const
  * 2 no action, 5 minute, 6 hour, 7 special, 8 legendary) or a missing/unrecognized value
  * keeps the previous, correct-for-those-cases 'action' default.
  */
-function featureActionSource(item: DdbActionEntry): 'action' | 'bonus' | 'reaction' {
+function featureActionSource(item: DdbActionEntry): 'action' | 'bonus' | 'reaction' | null {
   const activationType = item.activation?.activationType;
+  if (activationType === 1) return 'action';
   if (activationType === 3) return 'bonus';
   if (activationType === 4) return 'reaction';
-  return 'action';
+  // 2 (no action), 5 (minute), 6 (hour), 7 (special), 8 (legendary), or a missing/unrecognized
+  // value have no action-economy slot this importer can represent correctly (review finding
+  // on PR #1950 round 7's own activation-economy fix) — forcing any of them into the ordinary
+  // 'action' slot would make resolving the feature consume a resource the source feature
+  // doesn't actually cost. Returning null tells the caller to force this entry text-only
+  // instead of guessing a slot.
+  return null;
 }
 
 /**
@@ -688,8 +753,17 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // DEX — that's inventing which ability the target saves with, which resolution would
       // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
       const saveAbilityKey = item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined;
-      const savingThrow = typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : undefined;
-      out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, featureActionSource(item), 'dnd5e'));
+      let savingThrow = typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : undefined;
+      // Same principle a third time for action economy (review finding on PR #1950 round 8):
+      // an activation type this importer can't map to a real action-economy slot (see
+      // featureActionSource) must not silently spend the actor's ordinary action either —
+      // force the whole entry text-only rather than resolve it against the wrong resource.
+      const source = featureActionSource(item);
+      if (source === null) {
+        attackBonus = null;
+        savingThrow = undefined;
+      }
+      out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, source ?? 'action', 'dnd5e'));
     }
   }
   return out;
@@ -723,7 +797,16 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
     if (seen.has(key)) return;
     seen.add(key);
     const rawLevel = def?.level;
-    const level = typeof rawLevel === 'number' && rawLevel >= 0 && rawLevel <= 9 ? rawLevel : 0;
+    // `ActionUses.spellLevel` (packages/schema/src/action-resolver.ts) is a plain
+    // `z.number().int().min(0).max(9).default(0)` — it has no "unknown" representation, and
+    // 0 means a real, specific thing: a free cantrip that never costs a slot. A missing or
+    // out-of-range `definition.level` must NOT silently become 0 — that would misrepresent a
+    // sparse/malformed sheet's leveled spell as a cantrip, which (if the action were ever
+    // given a resolvable mode by hand) could be cast for free (review finding on PR #1950
+    // round 8). When the level can't be confirmed, omit `spec` entirely instead — the spell
+    // still imports (name + notes, always visible in the summary), just without spellLevel
+    // usage tracking, consistent with every other "can't confirm it -> text-only" case here.
+    const level = typeof rawLevel === 'number' && rawLevel >= 0 && rawLevel <= 9 ? rawLevel : null;
     const desc = stripDdbHtml(typeof def?.description === 'string' ? def.description : '');
     const tags = [def?.ritual ? 'Ritual.' : '', def?.concentration ? 'Concentration.' : ''].filter(Boolean);
     const notes = [...tags, desc].join(' ').trim().slice(0, 500);
@@ -732,7 +815,7 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
         name,
         kind: 'spell',
         notes,
-        spec: { uses: { spellLevel: level, concentration: Boolean(def?.concentration) } },
+        ...(level !== null ? { spec: { uses: { spellLevel: level, concentration: Boolean(def?.concentration) } } } : {}),
       }),
     );
   };

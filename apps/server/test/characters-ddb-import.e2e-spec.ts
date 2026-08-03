@@ -303,6 +303,48 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(spell?.name.length).toBe(120);
   });
 
+  // Regression for a PR #1950 review finding: `ActionUses.spellLevel` has no "unknown"
+  // representation (a plain 0-9 int defaulting to 0), and 0 means a real thing — a free
+  // cantrip. A missing/invalid `definition.level` used to silently become 0, misrepresenting
+  // a sparse/malformed sheet's leveled spell as a free cantrip. It must omit `spec` entirely
+  // instead (still imported, still visible in the summary, just without spellLevel tracking).
+  it('a spell with a missing or invalid level omits spec instead of defaulting to a free cantrip', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Wizard' } }],
+      classSpells: [
+        {
+          spells: [
+            { definition: { name: 'Missing Level Spell' }, prepared: true },
+            { definition: { name: 'Bad Level Spell', level: 99 }, prepared: true },
+            { definition: { name: 'Fine Cantrip', level: 0 }, prepared: true },
+          ],
+        },
+      ],
+    });
+    expect(c.actions?.find((a) => a.name === 'Missing Level Spell')?.spec).toBeUndefined();
+    expect(c.actions?.find((a) => a.name === 'Bad Level Spell')?.spec).toBeUndefined();
+    // A genuinely-confirmed level-0 cantrip is unaffected — still gets its spec.
+    expect(c.actions?.find((a) => a.name === 'Fine Cantrip')?.spec?.uses.spellLevel).toBe(0);
+  });
+
+  // Regression for a PR #1950 review finding: `DDB_HTML_ENTITIES` is a plain object literal
+  // and inherits `Object.prototype`; the entity regex accepts any [a-zA-Z]+, so untrusted
+  // sheet text containing "&constructor;"/"&toString;"/"&valueOf;"/"&hasOwnProperty;" used to
+  // resolve to an INHERITED FUNCTION (truthy, so `??` never fell back), which got stringified
+  // into the imported note as garbled text instead of being left as written.
+  it('an HTML entity matching an inherited Object.prototype property is left as written, not stringified', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: {
+        class: [{ name: 'Prototype Pollution Check', description: 'Weird &constructor; and &toString; and &hasOwnProperty; text.' }],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Prototype Pollution Check');
+    expect(feature?.notes).toBe('Weird &constructor; and &toString; and &hasOwnProperty; text.');
+    expect(feature?.notes).not.toContain('function');
+    expect(feature?.notes).not.toContain('[native code]');
+  });
+
   // Regression for a PR #1950 review finding: a magic (+1/+2/+3) weapon was rolled as
   // mundane — the enchantment bonus was never read (the simplified item shape here has no
   // reliable numeric field for it), so the reported attack/damage silently under-counted.
@@ -431,14 +473,29 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     }).actions?.find((a) => a.name === 'Reaction Strike');
     expect(reactionFeature?.spec?.cost.slot).toBe('reaction');
 
-    // No activation info (or an ordinary action activationType of 1) keeps the previous,
-    // correct-for-that-case default.
+    // An explicit ordinary-action activationType (1) is the only other supported case.
     const actionFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1 }] },
+      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 1 } }] },
     }).actions?.find((a) => a.name === 'Plain Strike');
     expect(actionFeature?.spec?.cost.slot).toBe('action');
+
+    // Regression for a follow-up review finding: an activation type this importer can't map
+    // to a real action-economy slot (no action, minute, hour, special, legendary — or a
+    // missing/unrecognized value) must not silently fall back to 'action' either, since that
+    // would still spend a resource the source feature doesn't actually cost. The whole entry
+    // goes text-only instead, even though attackTypeRange/abilityModifierStatId both resolve.
+    for (const activation of [undefined, { activationType: 2 }, { activationType: 5 }, { activationType: 6 }, { activationType: 7 }, { activationType: 8 }, { activationType: 999 }]) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        stats,
+        actions: { class: [{ name: 'Unsupported Activation Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation }] },
+      });
+      const feature = c.actions?.find((a) => a.name === 'Unsupported Activation Strike');
+      expect(feature?.spec).toBeUndefined();
+      expect(summarizeDdbImport(c).textOnly).toContain('Unsupported Activation Strike');
+    }
   });
 
   // Regression for a PR #1950 review finding: same principle as the two feature-action
@@ -497,6 +554,34 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
     const weapon = c.actions?.find((a) => a.name === 'Quarterstaff');
     expect(weapon?.spec).toBeDefined();
+  });
+
+  // Regression for a PR #1950 review finding: D&D Beyond's item builder lets any class
+  // equip any weapon regardless of proficiency, so unconditionally adding the proficiency
+  // bonus (the previous behavior) over-counted the to-hit for a class without full martial
+  // weapon proficiency — e.g. a Wizard equipping and being credited proficiency with a
+  // martial longsword they were never trained with.
+  it('a non-full-martial-proficiency class (Wizard) gets a text-only weapon instead of an assumed proficiency bonus', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Wizard' } }],
+      stats: [{ id: 1, value: 16 }],
+      inventory: [{ equipped: true, definition: { name: 'Longsword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' } }],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Longsword');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Longsword');
+  });
+
+  it('every full-martial-proficiency class (Barbarian, Fighter, Paladin, Ranger) still gets a resolvable weapon attack', () => {
+    for (const className of ['Barbarian', 'Fighter', 'Paladin', 'Ranger']) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 5, definition: { name: className } }],
+        stats: [{ id: 1, value: 16 }],
+        inventory: [{ equipped: true, definition: { name: 'Longsword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' } }],
+      });
+      expect(c.actions?.find((a) => a.name === 'Longsword')?.spec).toBeDefined();
+    }
   });
 
   // Regression for a PR #1950 review finding: a Fighting-Style-shaped bonus modifier (e.g.
