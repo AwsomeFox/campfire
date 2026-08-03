@@ -35,6 +35,7 @@ import type {
   CombatantKind,
   ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
+  DiceRoll,
   DifficultyBand,
   EncounterDifficulty,
   EncounterEvent,
@@ -141,7 +142,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
-import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
+import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
@@ -1049,6 +1050,9 @@ export default function RunSessionPage() {
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  // Issue #1904: the per-combatant "Roll initiative" action animates through the same
+  // shared dice overlay/toast as every other campaign roll.
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
   // #1589 — read from `attemptGridDefaults`, which can run from inside a mutation's
   // `onSettled` callback (see `gridDefaultRetryOnFree`) rather than only from render, so it
   // needs the CURRENT permission rather than whatever was in scope when that callback closure
@@ -2191,6 +2195,35 @@ export default function RunSessionPage() {
     },
   });
 
+  // Issue #1904: server-authoritative "Roll initiative" for one combatant (the DM's own
+  // bulk roll is the `rollInitiative` mutation below). The result animates through the
+  // shared DiceRollOverlay/toast, same as any other campaign roll.
+  const combatantInitiativeRoll = useKeyedMutation({
+    mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
+      api.post<{ combatant: Combatant; roll: DiceRoll | null }>(
+        `${API}/encounters/${eid}/combatants/${combatantId}/roll-initiative`,
+        { idempotencyKey },
+      ),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+      beginRollAnimation(`1d${activeAdapter.initiativeDie}`);
+    },
+    onSuccess: (data) => {
+      if (data.roll) showRoll(data.roll);
+      else cancelRollAnimation();
+    },
+    onError: (err) => {
+      cancelRollAnimation();
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
   const patchCombatantTurnState = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
     [combatantTurnState],
@@ -2200,6 +2233,12 @@ export default function RunSessionPage() {
   const rollDeathSave = useCallback(
     (combatant: Pick<Combatant, 'id'>) => deathSaveRoll.mutate({ combatantId: combatant.id }),
     [deathSaveRoll],
+  );
+
+  /** One server roll drives the combatant's initiative and (unless hidden) its shared dice-log entry. */
+  const rollCombatantInitiative = useCallback(
+    (combatant: Pick<Combatant, 'id'>) => combatantInitiativeRoll.mutate({ combatantId: combatant.id }),
+    [combatantInitiativeRoll],
   );
 
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
@@ -3738,6 +3777,7 @@ export default function RunSessionPage() {
                   onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
                   onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  onRollInitiative={() => rollCombatantInitiative(c)}
                   onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
                   onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
                   onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
@@ -6934,6 +6974,7 @@ function CombatantRow({
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  onRollInitiative,
   onSetInitiative,
   onClearInitiative,
   onAddCondition,
@@ -7007,6 +7048,13 @@ function CombatantRow({
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /**
+   * Roll this combatant's own initiative through the server-authoritative die + shared
+   * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
+   * viewer may edit (their own owned combatant, or the DM); the ownership/already-set
+   * checks are still enforced server-side.
+   */
+  onRollInitiative: () => void;
   onSetInitiative: (value: number) => void;
   /** Clear initiative back to the unrolled state (issue #715) — sends `initiative: null`. */
   onClearInitiative: () => void;
@@ -7227,19 +7275,24 @@ function CombatantRow({
         </div>
       ) : (
         <div className="flex items-center" style={{ gap: 2 }}>
-          {combatant.initiative === null && canEditPermission && onSetInitiative ? (
+          {combatant.initiative === null && canEditPermission && adapter.initiativeModel?.mode !== 'group' ? (
+            // Issue #1904: a server-authoritative roll (crypto RNG, breakdown, combat-log
+            // event, and a labeled shared dice-log row), not a client-computed value pushed
+            // through the manual PATCH — a player's own die roll is now real evidence, not
+            // a trusted client claim. Hidden under group initiative (issue #765): a side
+            // shares one roll, which only the DM's bulk "Roll remaining" can produce.
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-primary cf-target-44"
+              data-testid={`roll-initiative-${combatant.id}`}
+              aria-label={`Roll initiative for ${combatant.name}`}
+              aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
               style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
               disabled={busy || syncBlocked}
-              title={combatant.initiativeBreakdown?.formula || "Roll initiative"}
-              onClick={() => {
-                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initMod ?? 0);
-                onSetInitiative(roll);
-              }}
+              title="Roll initiative"
+              onClick={onRollInitiative}
             >
-              Roll Init
+              Roll initiative
             </button>
           ) : (
             <span

@@ -4579,6 +4579,33 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'roll_combatant_initiative',
+      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Combatant id — from get_encounter'),
+        idempotencyKey: IdempotencyKey.unwrap().describe('Client-minted action intent key; reuse for retries of this roll'),
+        overwrite: z.boolean().optional().describe('DM only: re-roll a combatant that already has initiative set'),
+      },
+      async ({ encounterId, combatantId, idempotencyKey, overwrite }) => {
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+        return this.encounters.rollCombatantInitiative(
+          encounterId as number,
+          combatantId as number,
+          idempotencyKey as string,
+          overwrite as boolean | undefined,
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'remove_combatant',
       'DM only: remove a combatant from an encounter. Returns a server-issued { undoToken, encounterId, combatantId }; the one-use token is valid for 30 seconds. Supply an idempotencyKey and reuse it after a lost response to replay that receipt.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantRemoveRequest.shape },

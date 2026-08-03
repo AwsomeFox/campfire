@@ -349,6 +349,17 @@ function manualInitiativeBreakdown(adapter: RuleSystemAdapter, modifier: number)
   });
 }
 
+/** Bare dice expression for a shared dice-log row (issue #1904) — e.g. "1d20+3", "1d20-1", "1d20". */
+function initiativeRollExpr(die: number, modifier: number): string {
+  if (modifier === 0) return `1d${die}`;
+  return `1d${die}${modifier >= 0 ? '+' : ''}${modifier}`;
+}
+
+/** Dice-log label for a group-initiative side roll (issue #765 / #1904) — "party" -> "Party". */
+function groupInitiativeLabel(group: string): string {
+  return group.length > 0 ? group[0].toUpperCase() + group.slice(1) : group;
+}
+
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
     id: row.id,
@@ -5482,13 +5493,28 @@ export class EncountersService {
         .where(and(eq(combatants.encounterId, encounterId), isNull(combatants.initiative)))
         .all();
 
+      // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
+      // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
+      // it leave the same campaign-wide trail a manual roll would. Built alongside `rolled`
+      // so a fully-rolled roster (rolled.length === 0 below) still inserts nothing.
+      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number }> = [];
+
       if (initModel.mode === 'group') {
         // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
         const groupRolls = new Map<string, number>();
         rolled = unrolled.map((row) => {
           const group = row.initiativeGroup ?? (row.kind === 'character' || row.kind === 'npc' ? 'party' : 'monsters');
-          if (!groupRolls.has(group)) groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
+          const isNewGroupRoll = !groupRolls.has(group);
+          if (isNewGroupRoll) groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
           const base = groupRolls.get(group)!;
+          if (isNewGroupRoll) {
+            diceLogEntries.push({
+              label: `${groupInitiativeLabel(group)} · Initiative`,
+              expr: `1d${adapter.initiativeDie}`,
+              rolls: [base],
+              total: base,
+            });
+          }
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, 0);
           const breakdown = CombatantInitiativeBreakdown.parse({
             ...existing,
@@ -5514,11 +5540,30 @@ export class EncountersService {
             total: initiative,
             formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
           });
+          diceLogEntries.push({
+            label: `${row.name} · Initiative`,
+            expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
+            rolls: [natural],
+            total: initiative,
+          });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
       }
 
       if (rolled.length === 0) return;
+
+      // Issue #1904 secrecy: the dice log is campaign-wide, so a hidden encounter's bulk
+      // roll must never leak into it (matches the per-combatant roll's same rule below).
+      if (!fresh.hidden) {
+        for (const entry of diceLogEntries) {
+          this.rolls.recordInTransaction(
+            tx,
+            fresh.campaignId,
+            { expr: entry.expr, rolls: entry.rolls, total: entry.total, label: entry.label, source: 'rolled' },
+            user,
+          );
+        }
+      }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
       const breakdownCases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${toJsonText(r.breakdown)}`), sql` `);
       tx.update(combatants)
@@ -5588,6 +5633,212 @@ export class EncountersService {
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
+  }
+
+  /**
+   * Server-authoritative initiative roll for ONE combatant (issue #1904) — the player-facing
+   * counterpart to the DM's bulk {@link rollInitiative}. The DM may roll any combatant; a
+   * player may roll only a combatant linked to a character they own (everyone else 403s).
+   * Allowed while `preparing`, or while `running` with a still-null initiative (the same
+   * late-joiner case the bulk roll fills); a combatant that already has initiative set 409s
+   * unless the DM passes `overwrite: true`. The rolled face, its breakdown, a combat-log
+   * 'roll' event, and one labeled shared dice-log row all commit in ONE transaction
+   * (death-save precedent, issue #1462) — except the dice-log row, which is skipped for a
+   * hidden encounter since the dice log is campaign-wide (only the DM can even reach a
+   * hidden encounter here; non-DM callers already 404 above).
+   *
+   * 400s for a group-initiative rule system (issue #765): a side shares ONE roll, so a
+   * single-combatant write here would desync it from the rest of its side. That side-wide
+   * roll stays exclusively the bulk `rollInitiative` path.
+   */
+  async rollCombatantInitiative(
+    encounterId: number,
+    combatantId: number,
+    idempotencyKey: string,
+    overwrite: boolean | undefined,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ combatant: Combatant; roll: DiceRoll | null }> {
+    // A retained trashed row is sufficient to authorize an existing keyed replay; fresh
+    // writes still fail in the transaction-local mutable check below.
+    const encounter = await this.getRowOrThrow(encounterId, true);
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const opClaim: EncounterOpClaim = {
+      actorId: user.id,
+      operation: 'combatant.roll_initiative',
+      key: idempotencyKey,
+      encounterId,
+      campaignId: encounter.campaignId,
+      fingerprint: encounterOpFingerprint({ combatantId, overwrite: overwrite === true }),
+    };
+    const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll | null } | null => {
+      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }>;
+      return candidate.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
+    };
+    const replayCommitted = (): { combatant: Combatant; roll: DiceRoll | null } | null => {
+      let replay: { combatant: Combatant; roll: DiceRoll | null } | null = null;
+      this.db.transaction((tx) => {
+        const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+        replay = prior ? replayResponse(prior.response) : null;
+      });
+      return replay;
+    };
+    const earlyReplay = replayCommitted();
+    if (earlyReplay) return earlyReplay;
+
+    try {
+      const adapter = await this.adapterForCampaign(encounter.campaignId);
+      const initModel = initiativeModelForAdapter(adapter);
+
+      // This pre-read authorizes the actor before any transactional work. The mutable /
+      // already-set checks live inside the transaction below, off a fresh row, so a
+      // concurrent change between this read and the write cannot be raced past.
+      const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+      if (role !== 'dm') {
+        if (combatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+        }
+      }
+      // Group-initiative systems (issue #765) share ONE die per side — a per-combatant
+      // roll that only wrote this one row would leave it out of sync with the rest of its
+      // side (and with whatever the DM's bulk roll later assigns everyone else on it).
+      // That side-wide roll stays exclusively the bulk `rollInitiative` path; this
+      // single-combatant action is for individual-initiative systems only.
+      if (initModel.mode === 'group') {
+        throw new BadRequestException(
+          'This rule system uses group initiative — ask the DM to roll for the whole side (Roll remaining).',
+        );
+      }
+
+      let roll: DiceRoll | null = null;
+      let committed!: Combatant;
+      let freshEncounterRow!: typeof encounters.$inferSelect;
+      let replayed: { combatant: Combatant; roll: DiceRoll | null } | null = null;
+
+      this.db.transaction((tx) => {
+        const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+        if (prior) {
+          replayed = replayResponse(prior.response);
+          return;
+        }
+        const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+        if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        this.assertMutable(fresh);
+        this.assertCampaignWritableInTx(tx, fresh.campaignId);
+        if (!isVisibleTo({ hidden: fresh.hidden }, role)) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
+        const [freshCombatant] = tx
+          .select()
+          .from(combatants)
+          .where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId)))
+          .limit(1)
+          .all();
+        if (!freshCombatant) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+        if (role !== 'dm') {
+          if (freshCombatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
+          const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, freshCombatant.characterId)).limit(1).all();
+          if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
+            throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+          }
+        }
+        if (freshCombatant.initiative !== null && !(role === 'dm' && overwrite === true)) {
+          throw new ConflictException({
+            code: 'INITIATIVE_ALREADY_SET',
+            message: 'This combatant already has an initiative — the DM can pass overwrite to re-roll.',
+          });
+        }
+        // Running combat only ever fills a still-null initiative here (the late-joiner
+        // case `rollInitiative` also handles) — the check above already guarantees that
+        // unless a DM explicitly opted into overwriting mid-fight.
+
+        const rollModifier = freshCombatant.initMod;
+        const initiative = rollInitiative(rollModifier, adapter.initiativeDie);
+        const natural = initiative - rollModifier;
+        const existing = parseInitiativeBreakdown(freshCombatant.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, rollModifier);
+        const breakdown = CombatantInitiativeBreakdown.parse({
+          ...existing,
+          die: adapter.initiativeDie,
+          roll: natural,
+          modifier: rollModifier,
+          total: initiative,
+          formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+        });
+
+        tx.update(combatants)
+          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .where(eq(combatants.id, combatantId))
+          .run();
+
+        // Filling a late joiner's initiative mid-fight re-sorts the order, so keep the
+        // positional index aligned with the unchanged identity pointer (mirrors the bulk roll).
+        if (fresh.status === 'running') {
+          const sorted = this.sortCombatantsWithAdapter(
+            tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+            'running',
+            adapter,
+          );
+          const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+          tx.update(encounters).set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+          }).where(eq(encounters.id, encounterId)).run();
+        }
+
+        this.appendEventInTransaction(tx, encounterId, fresh.round, 'roll', {
+          target: freshCombatant.name,
+          targetId: combatantId,
+          detail: `initiative ${breakdown.formula}`,
+        });
+
+        // Issue #1904 secrecy: the dice log is campaign-wide. Only the DM can reach a
+        // hidden encounter this far (non-DM callers already 404 above), and a hidden
+        // encounter's roll must never leak into the shared log.
+        if (!fresh.hidden) {
+          const label = `${freshCombatant.name} · Initiative`;
+          const expr = initiativeRollExpr(adapter.initiativeDie, rollModifier);
+          roll = this.rolls.recordInTransaction(
+            tx,
+            fresh.campaignId,
+            { expr, rolls: [natural], total: initiative, label, source: 'rolled' },
+            user,
+          );
+        }
+
+        this.audit.logInTx(tx, {
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'encounter.combatant.roll_initiative',
+          entityType: 'combatant',
+          entityId: combatantId,
+          campaignId: fresh.campaignId,
+          detail: `${freshCombatant.name}: ${initiative}`,
+        });
+
+        const [updatedRow] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        committed = combatantToDomain(updatedRow);
+        freshEncounterRow = fresh;
+
+        recordEncounterOp(tx, opClaim, nowIso(), { body: { combatant: committed, roll }, role });
+      });
+
+      if (replayed) return replayed;
+      this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      return { combatant: committed, roll };
+    } catch (err) {
+      // The original same-key request can commit after our early replay lookup but before
+      // a mutable-row preflight (for example, before another DM ends the encounter).
+      // Recheck the stored outcome before surfacing that later 404/409/403 so an ambiguous
+      // retry still recovers the committed authoritative result.
+      const lateReplay = replayCommitted();
+      if (lateReplay) return lateReplay;
+      throw err;
+    }
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {

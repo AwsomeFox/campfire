@@ -4770,6 +4770,321 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
 });
 
 // ---------------------------------------------------------------------------
+// Issue #1904 — server-authoritative per-combatant initiative rolls, and the
+// DM's bulk roll landing in the shared campaign dice log.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-log evidence (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let ariaCombatantId: number; // owned by dev:p-1
+  let zedCombatantId: number; // owned by dev:p-2
+  let monsterCombatantId: number; // DM-only, no linked character
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Initiative Table' })).body.id;
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria', stats: { DEX: 16 }, hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Zed', stats: { DEX: 10 }, hpCurrent: 18, hpMax: 18, ownerUserId: 'dev:p-2' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'First Blood', hidden: false });
+    encounterId = encounter.body.id;
+    const seededCombatants = encounter.body.combatants as Array<{ id: number; name: string }>;
+    ariaCombatantId = seededCombatants.find((c) => c.name === 'Aria')!.id;
+    zedCombatantId = seededCombatants.find((c) => c.name === 'Zed')!.id;
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Kobold', hpMax: 5 });
+    monsterCombatantId = monster.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Every "<name> · Initiative" row currently in the campaign's shared dice log. */
+  async function initiativeRolls(): Promise<Array<{ label?: string; total?: number }>> {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    return (res.body as Array<{ label?: string; total?: number }>).filter((roll) => (roll.label ?? '').endsWith('· Initiative'));
+  }
+
+  it("a viewer and a non-owning player cannot roll another combatant's initiative; a player cannot roll an unlinked (DM-only) combatant", async () => {
+    const server = ctx.app.getHttpServer();
+    const viewerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(viewer)
+      .send({ idempotencyKey: 'aria-viewer-attempt' });
+    expect(viewerAttempt.status).toBe(403);
+
+    const otherPlayerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send({ idempotencyKey: 'aria-other-player-attempt' });
+    expect(otherPlayerAttempt.status).toBe(403);
+
+    const monsterByPlayer = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'kobold-player-attempt' });
+    expect(monsterByPlayer.status).toBe(403);
+  });
+
+  it("the owning player can roll their own combatant's initiative — value, breakdown, combat-log event, and dice-log row all appear", async () => {
+    const server = ctx.app.getHttpServer();
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'aria-owner-roll' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatant).toMatchObject({ id: ariaCombatantId, name: 'Aria' });
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.combatant.initiativeBreakdown).toMatchObject({ total: res.body.combatant.initiative });
+    expect(res.body.roll).toMatchObject({ label: 'Aria · Initiative', total: res.body.combatant.initiative });
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    expect(events.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'roll', targetId: ariaCombatantId, detail: expect.stringContaining('initiative') }),
+      ]),
+    );
+
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + 1);
+    expect(afterRolls.some((r) => r.label === 'Aria · Initiative')).toBe(true);
+  });
+
+  it('the DM can roll any combatant, including one with no linked character', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'kobold-dm-roll' });
+    expect(res.status).toBe(201);
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.roll).toMatchObject({ label: 'Kobold · Initiative' });
+  });
+
+  it('a second roll on the same combatant 409s; the DM can pass overwrite to re-roll', async () => {
+    const server = ctx.app.getHttpServer();
+    // Aria already rolled in the prior test.
+    const playerRetry = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'aria-second-roll' });
+    expect(playerRetry.status).toBe(409);
+
+    const dmWithoutOverwrite = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-dm-without-overwrite' });
+    expect(dmWithoutOverwrite.status).toBe(409);
+
+    const overwrite = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-dm-overwrite', overwrite: true });
+    expect(overwrite.status).toBe(201);
+    expect(typeof overwrite.body.combatant.initiative).toBe('number');
+    expect(overwrite.body.roll).toMatchObject({ label: 'Aria · Initiative' });
+  });
+
+  it('replaying the same idempotencyKey returns the original result and inserts no duplicate rows', async () => {
+    const server = ctx.app.getHttpServer();
+    const beforeRolls = await initiativeRolls();
+    const body = { idempotencyKey: 'zed-replay-key' };
+
+    const first = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${zedCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send(body);
+    expect(first.status).toBe(201);
+
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${zedCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + 1);
+  });
+
+  it('rolls back the initiative write when the matching dice-log entry cannot persist (transactional pairing, issue #1462 precedent)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Rollback Check', hidden: false });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const freshCombatantId = (freshEncounter.body.combatants as Array<{ id: number; name: string }>).find((c) => c.name === 'Aria')!.id;
+    const rolls = ctx.app.get(RollsService);
+    const recordSpy = jest.spyOn(rolls, 'recordInTransaction').mockImplementation(() => {
+      throw new Error('simulated dice storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${freshEncounterId}/combatants/${freshCombatantId}/roll-initiative`)
+        .set(player)
+        .send({ idempotencyKey: 'aria-rollback-check' });
+      expect(res.status).toBe(500);
+      const after = await request(server).get(`/api/v1/encounters/${freshEncounterId}`).set(dm);
+      const combatant = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === freshCombatantId)!;
+      expect(combatant.initiative).toBeNull();
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('a hidden encounter DM roll writes initiative but no dice-log row (the dice log is campaign-wide)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ambush Prep', hidden: true });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const freshCombatantId = (freshEncounter.body.combatants as Array<{ id: number; name: string }>).find((c) => c.name === 'Aria')!.id;
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants/${freshCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-hidden-roll' });
+    expect(res.status).toBe(201);
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.roll).toBeNull();
+
+    expect(await initiativeRolls()).toHaveLength(beforeRolls.length);
+  });
+
+  it('a DM bulk roll produces one dice-log row per rolled combatant; a fully-rolled roster inserts nothing', async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll Table', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const combatantIds = (bulkEncounter.body.combatants as Array<{ id: number }>).map((c) => c.id);
+    expect(combatantIds.length).toBeGreaterThan(0);
+
+    const beforeRolls = await initiativeRolls();
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBe(combatantIds.length);
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + combatantIds.length);
+
+    // Fully-rolled roster: no additional write, no additional dice-log rows.
+    const noop = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(noop.status).toBe(201);
+    expect(noop.body.rolledCount).toBe(0);
+    expect(await initiativeRolls()).toHaveLength(afterRolls.length);
+  });
+
+  it("a hidden encounter's bulk roll produces no dice-log rows", async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Hidden Bulk Roll', hidden: true });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBeGreaterThan(0);
+    expect(await initiativeRolls()).toHaveLength(beforeRolls.length);
+  });
+});
+
+describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE under group initiative', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Old-School Table' })).body.id;
+    // 'old-school-essentials' resolves to a native OSR adapter with group initiative
+    // (issue #765) purely from the ruleSystem string — no installed rule pack required
+    // for combat math. PATCH /campaigns validates ruleSystem against an installed pack
+    // slug, so this writes the column directly, matching this file's existing
+    // rulePacks/ruleEntries direct-DB seeding convention.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'old-school-essentials' }).where(eq(campaigns.id, campaignId));
+
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Rook', hpCurrent: 8, hpMax: 8, ownerUserId: 'dev:p-1' });
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Wren', hpCurrent: 8, hpMax: 8, ownerUserId: 'dev:p-2' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Group Initiative Skirmish', hidden: false });
+    encounterId = encounter.body.id;
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Bandit A', hpMax: 4 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Bandit B', hpMax: 4 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rolls one d6 dice-log row per SIDE, not per combatant (2 party + 2 monsters -> 2 rows)', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    const beforeCount = (before.body as Array<{ label?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative')).length;
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBe(4); // 2 party + 2 monsters, each combatant gets a value
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    const initiativeRows = (after.body as Array<{ label?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative'));
+    // One row per SIDE (party, monsters), not one per combatant.
+    expect(initiativeRows).toHaveLength(beforeCount + 2);
+    expect(initiativeRows.map((r) => r.label).sort()).toEqual(['Monsters · Initiative', 'Party · Initiative']);
+
+    // Every combatant on the same side shares the exact same rolled value.
+    const encAfter = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatants = encAfter.body.combatants as Array<{ name: string; initiative: number }>;
+    const partyInit = combatants.filter((c) => c.name === 'Rook' || c.name === 'Wren').map((c) => c.initiative);
+    const monsterInit = combatants.filter((c) => c.name === 'Bandit A' || c.name === 'Bandit B').map((c) => c.initiative);
+    expect(new Set(partyInit).size).toBe(1);
+    expect(new Set(monsterInit).size).toBe(1);
+  });
+
+  it('the per-combatant roll-initiative endpoint 400s under group initiative — a side shares one roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatantId = (enc.body.combatants as Array<{ id: number }>)[0].id;
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'group-mode-per-combatant-rejected' });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #114 — combatant identity: count-add distinguishable copies, and
 // rename / hpMax / initMod edits via CombatantUpdate.
 // ---------------------------------------------------------------------------

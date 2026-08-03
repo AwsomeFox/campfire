@@ -10319,6 +10319,25 @@ export const DeathSaveRollRequest = z.object({
 export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**
+ * Body for the server-authoritative per-combatant initiative roll (issue #1904). The
+ * caller supplies no die result — the server rolls `adapter.initiativeDie + initMod`
+ * (or one shared d-die for the combatant's side under group initiative), writes the
+ * roll + its breakdown, and records one matching campaign-shared dice-log entry (skipped
+ * only for a hidden encounter, since the dice log is campaign-wide). A combatant that
+ * already has initiative set 409s unless `overwrite` is sent by the DM.
+ */
+export const CombatantRollInitiativeRequest = z.object({
+  // Same replay contract as DeathSaveRollRequest: a lost-response retry replays the
+  // committed roll instead of rolling again.
+  idempotencyKey: z.string().min(1).max(128),
+  // DM-only escape hatch to re-roll a combatant that already has initiative set. A
+  // non-DM caller sending this is still 409'd server-side — the field is silently
+  // ignored rather than granting a player overwrite power via a body flag.
+  overwrite: z.boolean().optional(),
+});
+export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiativeRequest>;
+
+/**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
  * When the sheet advanced after /end, the DM must choose a resync direction before
  * reopening — never silently overwrite intervening healing/rest.

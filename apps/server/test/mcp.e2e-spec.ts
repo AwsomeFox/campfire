@@ -1134,6 +1134,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Retry Nyx · death save')).toHaveLength(1);
   });
 
+  // Issue #1904 — REST/MCP parity for the per-combatant initiative roll: the MCP tool
+  // must behave identically to POST .../combatants/:cid/roll-initiative (same write, same
+  // shared dice-log evidence, same idempotent replay contract).
+  it('roll_combatant_initiative rolls a combatant, lands one dice-log row, and replays a lost response', async () => {
+    const encounter = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'MCP Initiative Roll', hidden: false });
+    expect(encounter.status).toBe(201);
+    const monster = await dmAgent
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .send({ kind: 'monster', name: 'MCP Kobold', hpMax: 5 });
+    expect(monster.status).toBe(201);
+    const combatantId = monster.body.id as number;
+
+    const client = await mcpClient(dmToken);
+    const arguments_ = { encounterId: encounter.body.id, combatantId, idempotencyKey: 'mcp-roll-combatant-initiative' };
+    const first = parseResult(await client.callTool({ name: 'roll_combatant_initiative', arguments: arguments_ })) as {
+      combatant: { initiative: number | null };
+      roll: { label?: string } | null;
+    };
+    expect(first.combatant.initiative).not.toBeNull();
+    expect(first.roll).toMatchObject({ label: 'MCP Kobold · Initiative' });
+
+    const rolls = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Kobold · Initiative')).toHaveLength(1);
+
+    // Same key replays the original outcome — no second roll, no duplicate dice-log row.
+    const replay = parseResult(await client.callTool({ name: 'roll_combatant_initiative', arguments: arguments_ }));
+    expect(replay).toEqual(first);
+    const rollsAfterReplay = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(rollsAfterReplay.body.filter((roll: { label?: string }) => roll.label === 'MCP Kobold · Initiative')).toHaveLength(1);
+
+    // Already-set initiative 409s over MCP too, matching REST.
+    const again = await client.callTool({ name: 'roll_combatant_initiative', arguments: { ...arguments_, idempotencyKey: 'mcp-roll-combatant-initiative-2' } });
+    expect(again.isError).toBe(true);
+  });
+
   it('rejects legacy deathSaveRoll MCP input with migration guidance before any mutation', async () => {
     const character = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)
