@@ -273,6 +273,21 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(computeSpellSlots([{ level: 7, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Champion' } }])).toEqual({});
   });
 
+  // Regression for a Devin/Kilo review finding on PR #1950: an unclamped ceil(level/3) for a
+  // SOLO third-caster read row 7 of the full-caster table (4/3/3/1) at class levels 19-20,
+  // inventing a 4th-level slot the real Eldritch Knight/Arcane Trickster table never grants
+  // (it stops progressing at 4/3/3 for levels 16-20 — full-caster row 6).
+  it('a solo Eldritch Knight/Arcane Trickster at level 19-20 does not get an invented 4th-level slot', () => {
+    const level19 = computeSpellSlots([{ level: 19, definition: { name: 'Fighter' }, subclassDefinition: { name: 'Eldritch Knight' } }]);
+    expect(level19).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 3, used: 0 },
+      '3': { max: 3, used: 0 },
+    });
+    const level20 = computeSpellSlots([{ level: 20, definition: { name: 'Rogue' }, subclassDefinition: { name: 'Arcane Trickster' } }]);
+    expect(level20).toEqual(level19);
+  });
+
   // Regression for a PR #1950 review finding: an overlong spell name must never abort the
   // whole import — CharacterAction.name is capped at 120 chars (mirrors
   // expandRawStatblockAction's identical clamp for weapon/feature actions).
@@ -396,6 +411,36 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summary.textOnly).toContain('Mystery Breath');
   });
 
+  // Regression for a PR #1950 review finding: an attack-shaped feature's `spec.cost.slot`
+  // was hardcoded to 'action' regardless of the feature's real DDB activation type, so an
+  // imported reaction or bonus-action feature would consume the actor's ACTION when
+  // resolved in an encounter instead of the correct action-economy resource.
+  it('an attack-shaped feature reads its cost.slot from the DDB activation type (bonus/reaction/default action)', () => {
+    const stats = [{ id: 1, value: 16 }];
+    const bonusFeature = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      actions: { class: [{ name: 'Bonus Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 3 } }] },
+    }).actions?.find((a) => a.name === 'Bonus Strike');
+    expect(bonusFeature?.spec?.cost.slot).toBe('bonus');
+
+    const reactionFeature = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      actions: { class: [{ name: 'Reaction Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 4 } }] },
+    }).actions?.find((a) => a.name === 'Reaction Strike');
+    expect(reactionFeature?.spec?.cost.slot).toBe('reaction');
+
+    // No activation info (or an ordinary action activationType of 1) keeps the previous,
+    // correct-for-that-case default.
+    const actionFeature = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1 }] },
+    }).actions?.find((a) => a.name === 'Plain Strike');
+    expect(actionFeature?.spec?.cost.slot).toBe('action');
+  });
+
   // Regression for a PR #1950 review finding: same principle as the two feature-action
   // cases above, applied to equipped weapons — a sparse/changed sheet that omits the
   // governing STR/DEX score used to default to a modifier of 0 and stay resolvable.
@@ -452,6 +497,52 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
     const weapon = c.actions?.find((a) => a.name === 'Quarterstaff');
     expect(weapon?.spec).toBeDefined();
+  });
+
+  // Regression for a PR #1950 review finding: a Fighting-Style-shaped bonus modifier (e.g.
+  // Archery's +2 to ranged attack rolls, Dueling's +2 to melee damage) is not read anywhere
+  // in the weapon-attack math, so it used to be silently omitted while the action still
+  // came back resolvable — a confident but incomplete to-hit/damage number.
+  it('a weapon affected by an unmodeled attack/damage bonus modifier (Fighting Style) lands text-only', () => {
+    const stats = [
+      { id: 1, value: 16 },
+      { id: 2, value: 12 },
+    ];
+    // Archery (ranged-attacks) affects the ranged weapon only.
+    const archer = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      modifiers: { class: [{ type: 'bonus', subType: 'ranged-attacks', value: 2 }] },
+      inventory: [
+        { equipped: true, definition: { name: 'Shortbow', filterType: 'Weapon', attackType: 2, damage: { diceString: '1d6' }, damageType: 'Piercing' } },
+        { equipped: true, definition: { name: 'Handaxe', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d6' }, damageType: 'Slashing' } },
+      ],
+    });
+    const bow = archer.actions?.find((a) => a.name === 'Shortbow');
+    expect(bow?.spec).toBeUndefined();
+    expect(summarizeDdbImport(archer).textOnly).toContain('Shortbow');
+    // The melee weapon is unaffected by an Archery-only bonus and stays resolvable.
+    const axe = archer.actions?.find((a) => a.name === 'Handaxe');
+    expect(axe?.spec).toBeDefined();
+
+    // Dueling (melee-damage) affects the melee weapon only.
+    const duelist = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      modifiers: { class: [{ type: 'bonus', subType: 'melee-damage', value: 2 }] },
+      inventory: [{ equipped: true, definition: { name: 'Longsword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' } }],
+    });
+    const sword = duelist.actions?.find((a) => a.name === 'Longsword');
+    expect(sword?.spec).toBeUndefined();
+    expect(summarizeDdbImport(duelist).textOnly).toContain('Longsword');
+
+    // No such modifier at all -> unaffected, matches the pre-existing resolvable behavior.
+    const plain = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats,
+      inventory: [{ equipped: true, definition: { name: 'Longsword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' } }],
+    });
+    expect(plain.actions?.find((a) => a.name === 'Longsword')?.spec).toBeDefined();
   });
 
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not

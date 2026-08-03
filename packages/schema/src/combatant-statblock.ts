@@ -242,6 +242,12 @@ function attackBonusFrom(item: Record<string, unknown>): number | null {
 function costSlotForSource(source: string): string {
   if (source === 'reaction') return 'reaction';
   if (source === 'legendary') return 'legendary';
+  // 'bonus' (issue #1903 review, PR #1950): a caller mapping a bonus-action-activated
+  // feature (e.g. the D&D Beyond importer) needs its cost tracked against the DND5E_ACTION_ECONOMY
+  // 'bonus' slot, not the default 'action' slot — otherwise resolving it would silently
+  // consume the actor's action instead of their bonus action. No existing caller passed
+  // 'bonus' before this, so adding the branch changes nothing for 'action'/'reaction'/'legendary'/'special'.
+  if (source === 'bonus') return 'bonus';
   return 'action';
 }
 

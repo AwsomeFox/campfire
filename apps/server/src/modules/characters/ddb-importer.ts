@@ -125,6 +125,11 @@ interface DdbActionEntry {
   attackTypeRange?: number | null; // 1 melee, 2 ranged
   fixedSaveDc?: number | null;
   saveStatId?: number | null; // 1..6, the ability the TARGET saves with
+  // Action-economy source (issue #1903 review, PR #1950): DDB's activationType numbering —
+  // 1 action, 2 no action, 3 bonus action, 4 reaction, 5 minute, 6 hour, 7 special,
+  // 8 legendary. Only 3/4 change which turn resource this maps to below; every other value
+  // (including missing/unrecognized) keeps the pre-existing 'action' behavior.
+  activation?: { activationType?: number | null } | null;
 }
 
 /** One entry in `classSpells[].spells[]` or `spells.<section>[]` — a known/prepared/granted spell. */
@@ -501,6 +506,31 @@ function hasAmbiguousMeleeAbilityClass(classes: DdbClass[] | null | undefined): 
 }
 
 /**
+ * DDB `bonus`-type modifier subTypes that add to weapon attack rolls or damage which this
+ * importer's ability-mod + proficiency math (below) has no way to read (issue #1903 review,
+ * PR #1950 finding) — most commonly a Fighting Style (Archery: +2 to ranged attack rolls;
+ * Dueling: +2 to melee damage) but also some feat/item bonuses phrased the same way in the
+ * sheet's modifiers. Same "never fabricate a resolvable spec" principle as the magic-weapon,
+ * missing-ability-score, and ambiguous-melee-ability cases: when one of these is present,
+ * the affected weapon(s) go text-only instead of a resolvable-but-silently-incomplete
+ * to-hit/damage number.
+ */
+const MELEE_WEAPON_BONUS_SUBTYPES = new Set(['melee-attacks', 'melee-damage', 'weapon-attacks', 'weapon-damage']);
+const RANGED_WEAPON_BONUS_SUBTYPES = new Set(['ranged-attacks', 'ranged-damage', 'weapon-attacks', 'weapon-damage']);
+
+/** Whether any `bonus` modifier grants an unmodeled melee and/or ranged weapon attack/damage bonus. */
+function weaponBonusModifierFlags(mods: DdbModifier[]): { melee: boolean; ranged: boolean } {
+  let melee = false;
+  let ranged = false;
+  for (const m of mods) {
+    if (m.type !== 'bonus' || typeof m.subType !== 'string' || typeof m.value !== 'number' || m.value === 0) continue;
+    if (MELEE_WEAPON_BONUS_SUBTYPES.has(m.subType)) melee = true;
+    if (RANGED_WEAPON_BONUS_SUBTYPES.has(m.subType)) ranged = true;
+  }
+  return { melee, ranged };
+}
+
+/**
  * Equipped-weapon attacks (issue #1903). Assumes proficiency with the character's own
  * equipped weapons — true for the overwhelming majority of DDB-built PCs (the DDB
  * character builder only lets you equip what your class/background/feats grant
@@ -514,11 +544,14 @@ function hasAmbiguousMeleeAbilityClass(classes: DdbClass[] | null | undefined): 
  * flat "+N" anywhere consistently shaped across sheets), so computing mundane numbers for
  * it would silently under-report a magic weapon's real bonus — the exact "silent fallback
  * math" this importer avoids elsewhere. It lands as a text-only action instead (never
- * dropped, flagged in the summary) so the DM adds the enchantment bonus by hand.
+ * dropped, flagged in the summary) so the DM adds the enchantment bonus by hand. A weapon
+ * affected by an unmodeled Fighting-Style-shaped attack/damage bonus modifier (see
+ * {@link weaponBonusModifierFlags}) degrades the same way, for the same reason.
  */
 function computeWeaponActions(data: DdbCharacterData, stats: Record<string, number>, proficiencyBonus: number): CharacterActionType[] {
   const items = Array.isArray(data.inventory) ? data.inventory : [];
   const ambiguousMeleeAbility = hasAmbiguousMeleeAbilityClass(data.classes);
+  const weaponBonusFlags = weaponBonusModifierFlags(allModifiers(data));
   const out: CharacterActionType[] = [];
   for (const item of items) {
     if (out.length >= RAW_ENTRY_SAFETY_CAP) break;
@@ -530,6 +563,24 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
       out.push(
         expandRawStatblockAction(
           { name, desc: 'Magic weapon — add its enchantment bonus to attack and damage manually; not inferred from the import.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
+    const isRangedWeapon = def.attackType === 2;
+    if (isRangedWeapon ? weaponBonusFlags.ranged : weaponBonusFlags.melee) {
+      // A Fighting Style or similar bonus modifier applies to this weapon's attack/damage
+      // (see MELEE_/RANGED_WEAPON_BONUS_SUBTYPES) but isn't incorporated into the math
+      // below — leave it text-only rather than silently under-reporting to-hit/damage.
+      out.push(
+        expandRawStatblockAction(
+          {
+            name,
+            desc: 'This character has a weapon attack or damage bonus (e.g. a Fighting Style) not applied here — check attack bonus and damage manually.',
+            attackBonus: null,
+          },
           'attack',
           'dnd5e',
         ),
@@ -578,6 +629,25 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
 const ACTION_SECTIONS = ['class', 'race', 'background', 'item', 'feat'] as const;
 
 /**
+ * Map a DDB feature's `activation.activationType` to the `expandRawStatblockAction` source
+ * that determines its `spec.cost.slot` (issue #1903 review, PR #1950 finding): this used to
+ * be hardcoded to `'action'` for every feature regardless of activation, so an imported
+ * reaction (e.g. a Fighter subclass's free interrupt, "Uncanny Dodge"-shaped features) or
+ * bonus-action feature would consume the actor's ACTION when resolved in an encounter,
+ * leaving the real action-economy slot untouched — `turnState.used['action']` bumps instead
+ * of `turnState.used['bonus']`/`['reaction']` (see `action-resolver.service.ts`). Only 3
+ * (Bonus Action) and 4 (Reaction) are mapped; every other DDB activation type (1 action,
+ * 2 no action, 5 minute, 6 hour, 7 special, 8 legendary) or a missing/unrecognized value
+ * keeps the previous, correct-for-those-cases 'action' default.
+ */
+function featureActionSource(item: DdbActionEntry): 'action' | 'bonus' | 'reaction' {
+  const activationType = item.activation?.activationType;
+  if (activationType === 3) return 'bonus';
+  if (activationType === 4) return 'reaction';
+  return 'action';
+}
+
+/**
  * Class/race/background/item/feat actions and features (issue #1903) — "Second Wind",
  * "Unarmed Strike", "Stunning Strike", a racial breath weapon, etc. An entry with
  * `attackTypeRange` set is attack-shaped (to-hit from its governing ability + proficiency);
@@ -619,7 +689,7 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
       const saveAbilityKey = item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined;
       const savingThrow = typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : undefined;
-      out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, 'action', 'dnd5e'));
+      out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, featureActionSource(item), 'dnd5e'));
     }
   }
   return out;
@@ -823,8 +893,14 @@ export function computeSpellSlots(
       fullEquivalentLevel += Math.ceil(entry.level / 2);
     } else {
       // Same level-floor guard as the half-caster case: Eldritch Knight/Arcane Trickster
-      // spellcasting doesn't begin before class level 3.
-      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.ceil(entry.level / 3)) : Math.floor(entry.level / 3);
+      // spellcasting doesn't begin before class level 3. The ceil() read is also clamped to
+      // full-caster level 6 (4/3/3 slots): the real third-caster table stops progressing
+      // there for class levels 16-20, but an unclamped ceil(19/3) or ceil(20/3) reads 7,
+      // which is FULL_CASTER_SLOT_TABLE row 7 (4/3/3/1) — inventing a 4th-level slot a
+      // level-19/20 solo Eldritch Knight or Arcane Trickster never receives (review finding
+      // on PR #1950). The multiclass floor(level/3) branch doesn't have this problem:
+      // floor(19/3) and floor(20/3) are both already 6.
+      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.min(6, Math.ceil(entry.level / 3))) : Math.floor(entry.level / 3);
     }
   }
 
