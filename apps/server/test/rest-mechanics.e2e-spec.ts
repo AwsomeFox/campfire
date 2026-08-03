@@ -537,6 +537,39 @@ describe('rest mechanics (#1041, e2e)', () => {
   });
 
   /**
+   * Issue #1902 rework, round 17 (codex P2) — `applyPartyRecovery`/`undoPartyRecovery`
+   * advance the sheet's `updatedAt` per-character (round 11), but passed the linked
+   * combatant's sync a DIFFERENT value: the shared batch timestamp `at`, not the actual
+   * per-character token just written to the sheet. `sheetSyncedUpdatedAt` is defined as
+   * "the sheet's `updatedAt` at the moment of sync" — `canWriteBackHp` and
+   * `endEncounter`'s CAS predicate both compare the two directly (the identical mismatch
+   * class fixed for `endEncounter` itself in round 15), so a later `endEncounter` could
+   * report a false `HP_SYNC_CONFLICT`, or silently no-op its write-back, purely because
+   * this recovery's sync marker never matched the sheet it claims to describe.
+   */
+  it("#1902 rework: applyPartyRecovery and undoPartyRecovery stamp the linked combatant's sheetSyncedUpdatedAt with the EXACT token written to the sheet", async () => {
+    const id = await batteredCharacter('Sync marker check');
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Sync marker fight', status: 'running', createdAt: now, updatedAt: now }).returning();
+    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Sync marker check', hpCurrent: 5, hpMax: 40 });
+
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'sync-marker-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+
+    const [sheetAfterApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [combatantAfterApply] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatantAfterApply.sheetSyncedUpdatedAt).toBe(sheetAfterApply.updatedAt);
+
+    await characters.undoPartyRecovery(campaignId, applied.batchId, 'sync-marker-undo', dmUser, 'dm');
+    const [sheetAfterUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [combatantAfterUndo] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatantAfterUndo.sheetSyncedUpdatedAt).toBe(sheetAfterUndo.updatedAt);
+    // Both markers genuinely advanced across the apply -> undo sequence, not just
+    // coincidentally equal by both staying unset.
+    expect(sheetAfterUndo.updatedAt).not.toBe(sheetAfterApply.updatedAt);
+  });
+
+  /**
    * Issue #1902 rework, round 12 (devin) — a regression the round-10 WHERE-clause CAS
    * introduced. `restParty` built `targets = characterIds.map(...)` with no
    * de-duplication, so `characterIds: [id, id]` produced TWO plans for the SAME row.
