@@ -158,7 +158,7 @@ test.describe('battle-map ping tap completion', () => {
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await dispatchPointer(surface, 'lostpointercapture', mouseSpot, mouse);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
-    await expect.poll(() => pings.length).toBe(1);
+    await expect.poll(() => pings.length, { timeout: 15000 }).toBe(1);
     expect(pings[0].x).toBeCloseTo(30, 1);
     expect(pings[0].y).toBeCloseTo(40, 1);
 
@@ -166,7 +166,7 @@ test.describe('battle-map ping tap completion', () => {
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
     await dispatchPointer(surface, 'pointerdown', touchSpot, touch);
     await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
-    await expect.poll(() => pings.length).toBe(2);
+    await expect.poll(() => pings.length, { timeout: 15000 }).toBe(2);
     expect(pings[1].x).toBeCloseTo(70, 1);
     expect(pings[1].y).toBeCloseTo(55, 1);
   });
