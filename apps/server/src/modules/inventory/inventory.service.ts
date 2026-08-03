@@ -104,6 +104,15 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
   if (input.displaceEquipped !== undefined) {
     rest.displaceEquipped = input.displaceEquipped;
   }
+  // Issue #1901 review (chatgpt-codex-connector P2 + devin-ai-integration): same rule as
+  // `displaceEquipped` above — `expectedConflictingItemId` changes what the write is
+  // AUTHORIZED to do (which incumbent it's allowed to displace), so it must be in the
+  // fingerprint too. Without this, replaying the same idempotencyKey with identical
+  // qty/equip fields but a DIFFERENT confirmed incumbent would silently replay the earlier
+  // response instead of re-running the CAS check against the new confirmation.
+  if (input.expectedConflictingItemId !== undefined) {
+    rest.expectedConflictingItemId = input.expectedConflictingItemId;
+  }
   const restPart = JSON.stringify(rest);
   return `${qtyPart}|${restPart}`;
 }

@@ -10503,9 +10503,11 @@ export const TurnSuggestedAction = z.object({
    * equipped-item action — `null` for a hand-authored sheet action or a monster/NPC
    * statblock action. Kept SEPARATE from `source` (see above) precisely so the "equipped:
    * <item>" label the web UI renders alongside an action never contaminates `source`'s
-   * economy-hint meaning.
+   * economy-hint meaning. Capped at 200 to match `InventoryItem.name` (review:
+   * chatgpt-codex-connector P2) — a shorter limit here would reject an otherwise-valid
+   * item's full name once forwarded into this field, failing this exported response schema.
    */
-  equippedItemName: z.string().max(120).nullable().default(null),
+  equippedItemName: z.string().max(200).nullable().default(null),
   summary: z.string().max(600).default(''),
   toHit: z.string().default(''),
   damage: z.string().default(''),

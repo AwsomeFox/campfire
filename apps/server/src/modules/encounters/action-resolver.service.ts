@@ -403,10 +403,18 @@ export class ActionResolverService {
   ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
     const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
+    // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
+    // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
+    // sheet-action maximum would push every appended equipped-item action to index >= 100,
+    // where it can never be resolved (and the /turn payload's own `out.slice(0, 100)` would
+    // silently drop it too). Cap the SAME merged index space every caller of this method
+    // shares (listUsableActions, resolveSpec, and EncountersService's /turn payload) here,
+    // once, so nothing this method ever returns can land outside the resolvable range.
     return [
       ...manual.map((row) => ({ row, itemName: null as string | null })),
       ...equipped.map(({ action, itemName }) => ({ row: action as unknown as Record<string, unknown>, itemName })),
-    ];
+    ].slice(0, 100);
   }
 
   private characterActionRows(

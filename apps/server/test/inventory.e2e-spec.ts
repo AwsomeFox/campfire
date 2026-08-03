@@ -425,6 +425,55 @@ describe('inventory & treasury (e2e)', () => {
       expect(replay.body.qty).toBe(2);
     });
 
+    // Issue #1901 review (chatgpt-codex-connector P2 + devin-ai-integration): the SAME rule
+    // as displaceEquipped above applies to expectedConflictingItemId — it changes what the
+    // write is AUTHORIZED to do (which incumbent it may displace), so reusing an idempotency
+    // key while confirming a DIFFERENT incumbent must 409, not silently replay the prior
+    // response as if the caller's (different) confirmation had been honored.
+    it('issue #1901 review: qty idempotency fingerprint covers expectedConflictingItemId', async () => {
+      const server = ctx.app.getHttpServer();
+      const slot = 'idempotency-cas-slot-1901';
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Hired Guard Cudgel', ownerType: 'character', characterId: dmCharacterId, qty: 1 });
+      const id = created.body.id;
+      const incumbentA = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Incumbent A', ownerType: 'character', characterId: dmCharacterId });
+      const incumbentB = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Incumbent B', ownerType: 'character', characterId: dmCharacterId });
+      await request(server).patch(`/api/v1/inventory/${incumbentA.body.id}`).set(dm).send({ equipped: true, equipSlot: slot });
+
+      const key = 'cas-fingerprint-1901';
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentA.body.id });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Same key, same qty/equip/displaceEquipped — but confirming a DIFFERENT incumbent.
+      // This authorizes displacing incumbentB, which the original request never confirmed.
+      const flipped = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentB.body.id });
+      expect(flipped.status).toBe(409);
+      expect(flipped.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The identical request, replayed, is still a clean idempotent no-op.
+      const replay = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentA.body.id });
+      expect(replay.status).toBe(200);
+      expect(replay.body.qty).toBe(2);
+    });
+
     it('prunes expired inventory_qty_idempotency rows on the next qty write (#782)', async () => {
       const server = ctx.app.getHttpServer();
       const created = await request(server)

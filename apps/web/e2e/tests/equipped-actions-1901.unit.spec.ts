@@ -78,6 +78,14 @@ test.describe('inventory equip/unequip UI (#1901)', () => {
     expect(inventoryShared).toContain("t('inventory.equip.grantsAction', { name: committed.equippedAction.name })");
   });
 
+  // Rework (review: devin-ai-integration, PR #1951): an authored equippedAction only
+  // contributes to the merged usable-action list while equipped (equippedItemActionRows
+  // filters equipped=true) — the "grants combat action" line must not claim a stowed item
+  // grants one it currently doesn't offer.
+  test('the "grants combat action" line is gated on committed.equipped, not just an authored equippedAction', () => {
+    expect(inventoryShared).toMatch(/\{committed\.equipped\s*&&\s*committed\.equippedAction\s*&&\s*\(/);
+  });
+
   test('a 409 INVENTORY_SLOT_CONFLICT surfaces a one-tap swap', () => {
     expect(inventoryShared).toContain("err.code === 'INVENTORY_SLOT_CONFLICT'");
     expect(inventoryShared).toContain('data-testid="inventory-slot-swap-btn"');

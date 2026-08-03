@@ -413,7 +413,12 @@ export function ItemRow({
                 </>
               )
             )}
-            {committed.equippedAction && (
+            {/* Issue #1901 review (devin-ai-integration): an authored equippedAction only
+                contributes to the merged usable-action list while the item is EQUIPPED
+                (ActionResolverService.equippedItemActionRows filters on equipped=true) — this
+                line must not claim a stowed item grants a combat action it doesn't currently
+                offer. */}
+            {committed.equipped && committed.equippedAction && (
               <p className="text-[11px] text-secondary" data-testid="inventory-grants-action">
                 {t('inventory.equip.grantsAction', { name: committed.equippedAction.name })}
               </p>

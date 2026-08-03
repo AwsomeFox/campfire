@@ -42,7 +42,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     // an absent hook would silently stop capturing abuse evidence.
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
-    const campaignLibrary = new CampaignLibraryService(orm, audit);
+    const campaignLibrary = new CampaignLibraryService(orm, audit, events);
     const actions = new ActionResolverService(orm, events, audit);
     // Issue #1901: wire ActionResolverService in (the last, optional constructor param) so
     // suggestedActionsForCombatant's character branch merges equipped-item actions the same
@@ -1950,6 +1950,40 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       // The item's name contains "spell" — confirms `source` (what the web fallback
       // spell-list filter checks) is NOT contaminated with the item label.
       expect(row.source.toLowerCase()).not.toContain('spell');
+    });
+
+    // Issue #1901 review (chatgpt-codex-connector P2): `InventoryItem.name` permits up to 200
+    // characters, so `equippedItemName` must accept the same range — a narrower schema limit
+    // here would make an otherwise-valid item name fail this exported `TurnSuggestedAction`
+    // response shape.
+    it('an equipped item name up to the inventory contract\'s 200-character limit survives the /turn payload', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([]) }).where(eq(characters.id, characterId)).run();
+      const longName = 'A'.repeat(200);
+      const ts = new Date().toISOString();
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: longName,
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(1);
+      expect(workspace.suggestedActions[0].equippedItemName).toBe(longName);
     });
 
     it('unequipping removes the item action from suggestedActions', async () => {

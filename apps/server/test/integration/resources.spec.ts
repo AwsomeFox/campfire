@@ -40,7 +40,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     const rolls = new RollsService(db);
     const fsDeletion = new FsDeletionService(db, audit);
     const attachments = new AttachmentsService(db, audit, fsDeletion, new AttachmentDerivativesService(db));
-    const campaignLibrary = new CampaignLibraryService(db, audit);
+    const campaignLibrary = new CampaignLibraryService(db, audit, events);
 
     const access = new CampaignAccessService(db, new RoleResolver(db));
     charactersService = new CharactersService(db, audit, revisions, events, rolls, access);
