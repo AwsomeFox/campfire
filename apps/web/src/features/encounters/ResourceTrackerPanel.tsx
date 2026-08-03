@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ruleSystemAdapter, restOptionsForAdapter } from '@campfire/schema';
-import type { Character, Combatant, CharacterResource, RestOptionDef, SpellSlotLevel } from '@campfire/schema';
+import type { Character, Combatant, CharacterResource, EncounterWithCombatants, RestOptionDef, SpellSlotLevel } from '@campfire/schema';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 import { api, API, translateApiError } from '../../lib/api';
 import { invalidateEncounter, invalidateCampaignCharacters, queryKeys } from '../../lib/query';
@@ -14,9 +14,7 @@ import {
   spellSlotPatchBody,
   canEditCharacterResource,
   hasTrackedResources,
-  restPendingKey,
-  resourcePendingKey,
-  slotPendingKey,
+  pendingTargetKey,
   addPendingKey,
   removePendingKey,
   type PipOwnerScope,
@@ -101,28 +99,26 @@ export function ResourceTrackerPanel({
     if (campaignId != null) invalidateCampaignCharacters(queryClient, campaignId);
   };
 
-  // Issue #1902 rework (round 5): pending identities are tracked in OUR OWN state via
-  // each mutation's `onMutate`/`onSettled`, not derived from a `useMutation` hook's
-  // `isPending`/`variables` (round 4's approach). `isPending`/`variables` describe only
-  // the SINGLE MOST RECENT call on a hook — firing rest for Alice then Bob before
-  // Alice's request settles flips the shared `restMutation` hook's `variables` to Bob's,
-  // so Alice's button read as "not pending" and re-enabled while her request was still in
-  // flight. `onMutate`/`onSettled` fire once per `mutate()` INVOCATION with THAT call's
-  // own variables, so two concurrent calls of the same kind are each tracked correctly.
-  // See `addPendingKey`/`removePendingKey`'s doc comments.
+  // Issue #1902 rework (round 5, key granularity corrected in round 6): pending
+  // identities are tracked in OUR OWN state via each mutation's `onMutate`/`onSettled`,
+  // not derived from a `useMutation` hook's `isPending`/`variables` (round 4's
+  // approach — `isPending`/`variables` describe only the SINGLE MOST RECENT call on a
+  // hook, so two concurrent same-kind mutations lost track of the first). Keyed per
+  // TARGET (one character sheet, or one statblock combatant), not per resource/slot —
+  // see `pendingTargetKey`'s doc comment for why finer-than-target scoping (round 4/5)
+  // let two writes to the SAME row race past each other and corrupt or falsely reject
+  // one another.
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set());
   const beginPending = (key: string) => setPendingKeys((prev) => addPendingKey(prev, key));
   const endPending = (key: string) => setPendingKeys((prev) => removePendingKey(prev, key));
 
-  // Every write reconciles the character it touched into the `campaignCharacters` cache
-  // from its OWN response, before `invalidate()`'s async refetch (issue #1902 rework):
-  // round 1 did this for slotMutation, round 2 for restMutation. resourceMutation was the
-  // one write path that didn't (round 5) — its `onSuccess` only called `invalidate()`, so
-  // the row's cached `updatedAt` stayed stale until that refetch landed. Since EVERY
-  // spell-slot write now carries `expectedUpdatedAt`, that staleness meant clicking a
-  // resource dot and then a spell-slot dot on the SAME character — the single most
-  // ordinary sequence in this panel — sent a self-inflicted stale token and 409'd against
-  // the user's own prior write.
+  // Every write reconciles the ROW it touched into the relevant cache from its OWN
+  // response, before `invalidate()`'s async refetch (issue #1902 rework): round 1 did
+  // this for slotMutation, round 2 for restMutation, round 5 for resourceMutation.
+  // `reconcileCombatant` (round 6) is the statblock-side equivalent — `statblockMutation`
+  // was the one write path still relying on `invalidate()` alone, so the SAME defect
+  // class (self-inflicted revert from a stale local snapshot) applied to a monster's
+  // combatant row that applied to a character's sheet before round 5.
   const reconcileCharacter = (updated: Character) => {
     if (campaignId != null) {
       queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
@@ -130,12 +126,17 @@ export function ResourceTrackerPanel({
       );
     }
   };
+  const reconcileCombatant = (updated: Combatant) => {
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(encounterId), (old) =>
+      old ? { ...old, combatants: old.combatants.map((c) => (c.id === updated.id ? updated : c)) } : old,
+    );
+  };
 
   const restMutation = useMutation({
     mutationFn: async ({ characterId, kind }: { characterId: number; kind: RestOptionDef['type'] }) =>
       api.post<Character>(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
-    onMutate: (vars) => beginPending(restPendingKey(vars.characterId)),
-    onSettled: (_data, _error, vars) => endPending(restPendingKey(vars.characterId)),
+    onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
+    onSettled: (_data, _error, vars) => endPending(pendingTargetKey({ characterId: vars.characterId })),
     onSuccess: (updated) => {
       setError(null);
       reconcileCharacter(updated);
@@ -150,8 +151,8 @@ export function ResourceTrackerPanel({
   const resourceMutation = useMutation({
     mutationFn: async ({ characterId, key, used }: { characterId: number; key: string; used: number }) =>
       api.post<Character>(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used)),
-    onMutate: (vars) => beginPending(resourcePendingKey({ characterId: vars.characterId }, vars.key)),
-    onSettled: (_data, _error, vars) => endPending(resourcePendingKey({ characterId: vars.characterId }, vars.key)),
+    onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
+    onSettled: (_data, _error, vars) => endPending(pendingTargetKey({ characterId: vars.characterId })),
     onSuccess: (updated) => {
       setError(null);
       reconcileCharacter(updated);
@@ -191,8 +192,8 @@ export function ResourceTrackerPanel({
     // (server-authoritative `spellSlots`), so write it into the cache synchronously,
     // before the query has any chance to be read again — this closes that second-order
     // race too, without a debounce or a second round-trip.
-    onMutate: (vars) => beginPending(slotPendingKey({ characterId: vars.characterId }, vars.level)),
-    onSettled: (_data, _error, vars) => endPending(slotPendingKey({ characterId: vars.characterId }, vars.level)),
+    onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
+    onSettled: (_data, _error, vars) => endPending(pendingTargetKey({ characterId: vars.characterId })),
     onSuccess: (updated) => {
       setError(null);
       reconcileCharacter(updated);
@@ -203,12 +204,6 @@ export function ResourceTrackerPanel({
       invalidate();
     },
   });
-
-  /** Which pending-key namespace a statblockMutation call's `targetKey` falls into. */
-  const statblockPendingKey = (vars: { combatantId: number; kind: 'resource' | 'slot'; targetKey: string }): string =>
-    vars.kind === 'resource'
-      ? resourcePendingKey({ combatantId: vars.combatantId }, vars.targetKey)
-      : slotPendingKey({ combatantId: vars.combatantId }, Number(vars.targetKey));
 
   const statblockMutation = useMutation({
     mutationFn: async ({
@@ -221,15 +216,12 @@ export function ResourceTrackerPanel({
       // statblock spell-slot pips. `kind` lets `onError` pick the fallback message that
       // matches which control actually failed, instead of always reporting "resource".
       kind: 'resource' | 'slot';
-      // Issue #1902 rework (round 4): the resource `key` or spell-slot `level` (as a
-      // string) this write targets, so pending state can be scoped to the one pip
-      // that's actually in flight rather than every pip on this combatant.
-      targetKey: string;
-    }) => api.patch(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
-    onMutate: (vars) => beginPending(statblockPendingKey(vars)),
-    onSettled: (_data, _error, vars) => endPending(statblockPendingKey(vars)),
-    onSuccess: () => {
+    }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
+    onMutate: (vars) => beginPending(pendingTargetKey({ combatantId: vars.combatantId })),
+    onSettled: (_data, _error, vars) => endPending(pendingTargetKey({ combatantId: vars.combatantId })),
+    onSuccess: (updated) => {
       setError(null);
+      reconcileCombatant(updated);
       invalidate();
     },
     onError: (err, variables) => {
@@ -319,7 +311,7 @@ export function ResourceTrackerPanel({
                     <Btn
                       key={opt.type}
                       density="compact"
-                      disabled={pendingKeys.has(restPendingKey(c.characterId as number)) || (opt.type === 'stamina' && rpCurrent != null && rpCurrent < 1)}
+                      disabled={pendingKeys.has(pendingTargetKey(scope)) || (opt.type === 'stamina' && rpCurrent != null && rpCurrent < 1)}
                       title={opt.description}
                       onClick={() => {
                         if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: opt.label, defaultValue: `${opt.label} for ${name}?` }))) return;
@@ -349,7 +341,7 @@ export function ResourceTrackerPanel({
                       <Pips
                         max={res.max}
                         used={res.used}
-                        disabled={!canEdit || pendingKeys.has(resourcePendingKey(scope, key))}
+                        disabled={!canEdit || pendingKeys.has(pendingTargetKey(scope))}
                         onChange={(val) => {
                           if (!canEdit) return;
                           if (c.kind === 'character' && c.characterId) {
@@ -360,7 +352,6 @@ export function ResourceTrackerPanel({
                               combatantId: c.id,
                               statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } },
                               kind: 'resource',
-                              targetKey: key,
                             });
                           }
                         }}
@@ -380,7 +371,7 @@ export function ResourceTrackerPanel({
                     <Pips
                       max={slot.max}
                       used={slot.used}
-                      disabled={!canEdit || pendingKeys.has(slotPendingKey(scope, Number(level)))}
+                      disabled={!canEdit || pendingKeys.has(pendingTargetKey(scope))}
                       onChange={(val) => {
                         if (!canEdit) return;
                         if (c.kind === 'character' && c.characterId) {
@@ -399,7 +390,6 @@ export function ResourceTrackerPanel({
                             combatantId: c.id,
                             statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } },
                             kind: 'slot',
-                            targetKey: level,
                           });
                         }
                       }}

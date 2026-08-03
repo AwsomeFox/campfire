@@ -196,4 +196,60 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
     await service.patchSpellSlots(id, { level: 1, delta: 1 }, dmUser, 'dm');
     expect(usedAt(orm, id)).toBe(2);
   });
+
+  /**
+   * Issue #1902 rework, round 6 — the LOAD-BEARING fix this round, and per its own
+   * review comment "invisible in normal use and will regress silently" if left
+   * uncovered. `patchSpellSlots` used to stamp its write with `nowIso()`
+   * (`new Date().toISOString()`). Two writes landing inside the SAME millisecond can
+   * therefore produce the IDENTICAL ISO string — a real write happens, but the character
+   * row's `updatedAt` (the CAS token every `expectedUpdatedAt` check above compares
+   * against) never visibly moves. A caller who read the sheet BEFORE that write would
+   * then present the OLD token, find it still matches the (unmoved) stored value, and
+   * have its stale delta silently applied on top of state it never saw — exactly the
+   * defect `expectedUpdatedAt` exists to prevent, defeated by the token itself failing to
+   * advance. `nextUpdatedAt` guarantees monotonic advancement even inside one
+   * millisecond; this test freezes the clock to reproduce the collision deterministically
+   * rather than relying on real-clock timing luck (which would make this pass or fail
+   * depending on machine speed).
+   */
+  it('#1902 rework: nextUpdatedAt keeps the CAS token monotonic even when two writes land in the exact same millisecond', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      // Force the character's stored `updatedAt` to match the frozen instant EXACTLY —
+      // this is the precondition the reviewer described ("two character writes occur
+      // within the same millisecond").
+      orm.update(characters).set({ updatedAt: frozen.toISOString() }).where(eq(characters.id, id)).run();
+      const before = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      expect(before.updatedAt).toBe(frozen.toISOString());
+
+      // Write X: some other actor spends a slot, unconditionally (no expectedUpdatedAt).
+      // The clock has not advanced by even one tick.
+      await service.patchSpellSlots(id, { level: 1, delta: 1 }, dmUser, 'dm');
+      const afterWriteX = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+
+      // The defect this guards against: with the old `nowIso()` write, `afterWriteX`'s
+      // token would be IDENTICAL to `before`'s — a real write happened, but the CAS
+      // token never moved, so the compare-and-set below would incorrectly pass.
+      expect(afterWriteX.updatedAt).not.toBe(before.updatedAt);
+
+      // A caller who read the sheet BEFORE Write X (holding `before.updatedAt`) must now
+      // be correctly rejected as stale — the token DID advance despite the frozen clock,
+      // so the CAS guard actually protects against Write X rather than looking like it
+      // did while rejecting nothing.
+      await expect(
+        service.patchSpellSlots(id, { level: 1, delta: 1, expectedUpdatedAt: before.updatedAt }, dmUser, 'dm'),
+      ).rejects.toMatchObject({ status: 409 });
+      // The rejected write applied nothing — still 1 (Write X's spend), not 2.
+      expect(usedAt(orm, id)).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

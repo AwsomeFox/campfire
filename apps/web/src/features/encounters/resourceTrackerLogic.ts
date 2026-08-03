@@ -95,22 +95,38 @@ export function hasTrackedResources(
   return Object.keys(resources).length > 0 || Object.keys(spellSlots).length > 0;
 }
 
-/** The character sheet or statblock combatant a resource/slot pip belongs to. */
+/** The character sheet or statblock combatant a resource/slot/rest control belongs to. */
 export type PipOwnerScope = { characterId: number } | { combatantId: number };
 
-/** Identity of ONE character-linked combatant's rest controls. */
-export function restPendingKey(characterId: number): string {
-  return `rest:${characterId}`;
-}
-
-/** Identity of ONE resource pip, scoped to its owning character sheet or statblock combatant. */
-export function resourcePendingKey(scope: PipOwnerScope, key: string): string {
-  return 'characterId' in scope ? `resource:char:${scope.characterId}:${key}` : `resource:combatant:${scope.combatantId}:${key}`;
-}
-
-/** Identity of ONE spell-slot pip, scoped the same way as {@link resourcePendingKey}. */
-export function slotPendingKey(scope: PipOwnerScope, level: number): string {
-  return 'characterId' in scope ? `slot:char:${scope.characterId}:${level}` : `slot:combatant:${scope.combatantId}:${level}`;
+/**
+ * Identity of every pending-tracked control on ONE target (a character sheet, or a
+ * statblock-only combatant) — issue #1902 rework, round 6.
+ *
+ * Rounds 4/5 keyed pending state per RESOURCE/SLOT (`resource:char:1:rage` vs.
+ * `slot:char:1:2`), which correctly let a different combatant's controls stay responsive
+ * (round 4's ask) and correctly tracked multiple concurrent same-kind mutations (round
+ * 5's fix). But it ALSO let two DIFFERENT writes to the SAME character/combatant run
+ * concurrently — and both a character sheet and a statblock combatant have exactly ONE
+ * revision token / ONE saved object, shared across every resource, slot, and rest control
+ * on that row:
+ *
+ *   - a character's `expectedUpdatedAt` CAS token is the SHEET's `updatedAt`, not a
+ *     per-resource one — a resource write and a spell-slot write on the SAME character
+ *     racing past each other means the second one's token is stale by the time it lands,
+ *     rejected with a "someone else changed this" the user never caused (their own prior
+ *     click did);
+ *   - a statblock combatant's resource/slot writes each PATCH the ENTIRE saved
+ *     `statblock` object rebuilt from whatever this client currently has cached — two
+ *     such writes racing past each other means the second is composed from a snapshot
+ *     that doesn't yet include the first's change, and silently reverts it on success.
+ *
+ * Collapsing the key to the TARGET (not the specific resource/slot) serializes every
+ * control on that one character/combatant against each other, while different
+ * characters/combatants remain fully independent — exactly round 4's original ask,
+ * correctly scoped this time.
+ */
+export function pendingTargetKey(scope: PipOwnerScope): string {
+  return 'characterId' in scope ? `char:${scope.characterId}` : `combatant:${scope.combatantId}`;
 }
 
 /**

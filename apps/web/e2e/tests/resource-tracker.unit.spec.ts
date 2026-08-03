@@ -13,9 +13,7 @@ import {
   resourcePatchBody,
   restRequestBody,
   spellSlotPatchBody,
-  restPendingKey,
-  resourcePendingKey,
-  slotPendingKey,
+  pendingTargetKey,
   addPendingKey,
   removePendingKey,
 } from '../../src/features/encounters/resourceTrackerLogic';
@@ -168,6 +166,20 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(reconcileCalls.length).toBe(3);
   });
 
+  // Sixth-round finding (devin): statblockMutation PATCHes the ENTIRE saved statblock
+  // object, composed from `c.statblock` as it currently sits in the encounter query
+  // cache. Without reconciling the response, a second click on the SAME monster (even
+  // just after the first settled, before invalidate()'s async refetch lands) rebuilt
+  // the statblock from pre-write data and silently reverted the first saved change.
+  // `reconcileCombatant` is the statblock-side equivalent of `reconcileCharacter`.
+  test('ResourceTrackerPanel reconciles statblockMutation\'s response into the encounter cache, so two clicks on the same monster never revert each other', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/api\.patch<Combatant>\(`\$\{API\}\/encounters\/\$\{encounterId\}\/combatants\/\$\{combatantId\}`/);
+    expect(src).toMatch(/const reconcileCombatant = \(updated: Combatant\) => \{/);
+    expect(src).toMatch(/queryClient\.setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(encounterId\)/);
+    expect(src).toMatch(/reconcileCombatant\(updated\);/);
+  });
+
   // Rework finding E (copilot): statblockMutation backs both resource and spell-slot
   // writes for statblock-only combatants; onError must not always blame "resource".
   test('ResourceTrackerPanel picks the slot vs resource error key by mutation kind, not a single hardcoded fallback', () => {
@@ -258,40 +270,52 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   // (OR of all four mutation hooks) disabled every combatant's controls whenever ANY
   // single write anywhere in the panel was in flight — a slow save for one character
   // visibly locked out every other player's controls at the table.
-  test('addPendingKey/removePendingKey scope pending state per key, immutably', () => {
+  test('pendingTargetKey scopes pending state per character/combatant, immutably', () => {
     const empty: ReadonlySet<string> = new Set();
 
-    // Only Alice's (characterId 1) resource write is added — Bob's (characterId 2) rest
-    // key and slot key must NOT be present.
-    const withAlice = addPendingKey(empty, resourcePendingKey({ characterId: 1 }, 'rage'));
-    expect(withAlice.has(resourcePendingKey({ characterId: 1 }, 'rage'))).toBe(true);
-    expect(withAlice.has(restPendingKey(2))).toBe(false);
-    expect(withAlice.has(slotPendingKey({ characterId: 2 }, 1))).toBe(false);
-    // A DIFFERENT resource on the SAME character (Alice's own hitDice, not rage) is a
-    // different key — pending is scoped per resource key, not just per character.
-    expect(withAlice.has(resourcePendingKey({ characterId: 1 }, 'hitDice'))).toBe(false);
+    // Alice's (characterId 1) write is added — Bob's (characterId 2) key must NOT be
+    // present, but a DIFFERENT control on Alice's SAME character (round 6: any control,
+    // not just the exact resource/slot) IS blocked too — see the dedicated round-6 test
+    // below for why finer-than-target scoping (rounds 4/5) let two writes to the SAME
+    // row race past each other.
+    const withAlice = addPendingKey(empty, pendingTargetKey({ characterId: 1 }));
+    expect(withAlice.has(pendingTargetKey({ characterId: 1 }))).toBe(true);
+    expect(withAlice.has(pendingTargetKey({ characterId: 2 }))).toBe(false);
 
     // Immutable: the original set is untouched by add.
     expect(empty.size).toBe(0);
 
     // Removing a key that isn't present is a no-op (returns an equivalent, possibly the
     // SAME, set) rather than throwing.
-    const stillWithAlice = removePendingKey(withAlice, restPendingKey(2));
-    expect(stillWithAlice.has(resourcePendingKey({ characterId: 1 }, 'rage'))).toBe(true);
+    const stillWithAlice = removePendingKey(withAlice, pendingTargetKey({ characterId: 2 }));
+    expect(stillWithAlice.has(pendingTargetKey({ characterId: 1 }))).toBe(true);
 
-    const withoutAlice = removePendingKey(withAlice, resourcePendingKey({ characterId: 1 }, 'rage'));
-    expect(withoutAlice.has(resourcePendingKey({ characterId: 1 }, 'rage'))).toBe(false);
+    const withoutAlice = removePendingKey(withAlice, pendingTargetKey({ characterId: 1 }));
+    expect(withoutAlice.has(pendingTargetKey({ characterId: 1 }))).toBe(false);
     // Immutable the other direction too: removal didn't touch the set it was called on.
-    expect(withAlice.has(resourcePendingKey({ characterId: 1 }, 'rage'))).toBe(true);
+    expect(withAlice.has(pendingTargetKey({ characterId: 1 }))).toBe(true);
   });
 
-  test('addPendingKey/removePendingKey scope a statblock combatant\'s resource pip separately from its spell-slot pip', () => {
-    const withResource = addPendingKey(new Set(), resourcePendingKey({ combatantId: 7 }, 'legendaryActions'));
-    expect(withResource.has(resourcePendingKey({ combatantId: 7 }, 'legendaryActions'))).toBe(true);
-    // The SAME combatant's spell-slot pip is a different key — not blocked.
-    expect(withResource.has(slotPendingKey({ combatantId: 7 }, 1))).toBe(false);
-    // A different combatant entirely is never touched.
-    expect(withResource.has(resourcePendingKey({ combatantId: 8 }, 'legendaryActions'))).toBe(false);
+  // Sixth-round finding (codex P2): rounds 4/5 keyed pending state per RESOURCE/SLOT, so
+  // a rest/resource write and a spell-slot write on the SAME character could race past
+  // each other — the second one's `expectedUpdatedAt` (captured before the first
+  // committed) is stale by the time it lands, rejected with a self-inflicted "someone
+  // else changed this". `pendingTargetKey` collapses ALL of a character's controls (or
+  // ALL of a statblock combatant's pips) to ONE key, serializing them against each other,
+  // while a DIFFERENT character/combatant stays fully independent.
+  test('pendingTargetKey serializes every control on the SAME character, but keeps different characters independent', () => {
+    // Same character (1): a rest write and a resource write share ONE key.
+    expect(pendingTargetKey({ characterId: 1 })).toBe(pendingTargetKey({ characterId: 1 }));
+    // Different characters never collide.
+    expect(pendingTargetKey({ characterId: 1 })).not.toBe(pendingTargetKey({ characterId: 2 }));
+    // A statblock combatant's resource pip and spell-slot pip also share ONE key now —
+    // sixth-round finding (devin): a second click on the SAME monster while the first is
+    // still in flight must be blocked, or it composes its whole-statblock PATCH from a
+    // snapshot that doesn't yet include the first write, silently reverting it.
+    expect(pendingTargetKey({ combatantId: 7 })).toBe(pendingTargetKey({ combatantId: 7 }));
+    // A character-linked target and a statblock target never collide even with the same
+    // numeric id, since the two scopes are namespaced separately.
+    expect(pendingTargetKey({ characterId: 7 })).not.toBe(pendingTargetKey({ combatantId: 7 }));
   });
 
   // Fifth-round finding (devin): TWO CONCURRENT calls of the SAME mutation kind (rest
@@ -303,33 +327,35 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('add/removePendingKey support two concurrent same-kind mutations without losing track of either', () => {
     let keys: ReadonlySet<string> = new Set();
     // Alice's rest starts.
-    keys = addPendingKey(keys, restPendingKey(1));
+    keys = addPendingKey(keys, pendingTargetKey({ characterId: 1 }));
     // Bob's rest starts BEFORE Alice's settles — both must be tracked.
-    keys = addPendingKey(keys, restPendingKey(2));
-    expect(keys.has(restPendingKey(1))).toBe(true);
-    expect(keys.has(restPendingKey(2))).toBe(true);
+    keys = addPendingKey(keys, pendingTargetKey({ characterId: 2 }));
+    expect(keys.has(pendingTargetKey({ characterId: 1 }))).toBe(true);
+    expect(keys.has(pendingTargetKey({ characterId: 2 }))).toBe(true);
 
     // Bob's settles first — only Bob's key is removed, Alice's request is still pending.
-    keys = removePendingKey(keys, restPendingKey(2));
-    expect(keys.has(restPendingKey(1))).toBe(true);
-    expect(keys.has(restPendingKey(2))).toBe(false);
+    keys = removePendingKey(keys, pendingTargetKey({ characterId: 2 }));
+    expect(keys.has(pendingTargetKey({ characterId: 1 }))).toBe(true);
+    expect(keys.has(pendingTargetKey({ characterId: 2 }))).toBe(false);
 
     // Alice's settles — nothing left pending.
-    keys = removePendingKey(keys, restPendingKey(1));
+    keys = removePendingKey(keys, pendingTargetKey({ characterId: 1 }));
     expect(keys.size).toBe(0);
   });
 
-  test('ResourceTrackerPanel tracks pending state itself via onMutate/onSettled, not a mutation hook\'s isPending/variables snapshot', () => {
+  test('ResourceTrackerPanel tracks pending state itself via onMutate/onSettled, keyed per target (not per resource/slot)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/useState<ReadonlySet<string>>\(new Set\(\)\)/);
-    expect(src).toMatch(/onMutate: \(vars\) => beginPending\(/);
-    expect(src).toMatch(/onSettled: \(_data, _error, vars\) => endPending\(/);
-    expect(src).toMatch(/pendingKeys\.has\(restPendingKey\(/);
-    expect(src).toMatch(/pendingKeys\.has\(resourcePendingKey\(/);
-    expect(src).toMatch(/pendingKeys\.has\(slotPendingKey\(/);
-    // The blanket boolean AND the round-4 hook-snapshot derivation are both gone.
+    expect(src).toMatch(/onMutate: \(vars\) => beginPending\(pendingTargetKey\(/);
+    expect(src).toMatch(/onSettled: \(_data, _error, vars\) => endPending\(pendingTargetKey\(/);
+    expect(src).toMatch(/pendingKeys\.has\(pendingTargetKey\(scope\)\)/);
+    // The blanket boolean, the round-4 hook-snapshot derivation, AND the round-4/5
+    // per-resource/per-slot key builders are all gone.
     expect(src).not.toMatch(/const isPending =/);
     expect(src).not.toMatch(/pendingResourceKeys\(/);
+    expect(src).not.toMatch(/restPendingKey\(/);
+    expect(src).not.toMatch(/resourcePendingKey\(/);
+    expect(src).not.toMatch(/slotPendingKey\(/);
   });
 
   // Fourth-round finding (codex P1, THIRD review pass on this exact defect): a
@@ -360,5 +386,25 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     // The new entry starts from `...current` so an unmentioned field (source above all)
     // survives a plain used-only write.
     expect(src).toMatch(/resources\[patch\.key\] = \{\s*\n\s*\.\.\.current,/);
+  });
+
+  // Sixth-round finding (codex P2) — the LOAD-BEARING fix this round: `patchSpellSlots`
+  // stamped its write with `nowIso()`, which can produce the IDENTICAL ISO string for two
+  // writes inside the same millisecond. A caller holding the pre-write `expectedUpdatedAt`
+  // token would then pass the compare-and-set check against a row THIS SECOND write just
+  // produced — the CAS guard the whole rework depends on would look like it protected the
+  // write while actually rejecting nothing. `nextUpdatedAt` guarantees monotonic
+  // advancement even inside one millisecond, matching every other CAS-protected write in
+  // the codebase. The behavioral guarantee (two same-millisecond writes actually produce
+  // two DIFFERENT tokens) is exercised directly against the real helper in
+  // `apps/server/test/integration/spell-slot-concurrency.spec.ts` — this is the
+  // source-grep confirming `patchSpellSlots` actually calls it.
+  test('CharactersService.patchSpellSlots stamps its CAS-protected write with nextUpdatedAt, not nowIso, so same-millisecond writes still advance the token', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../../../apps/server/src/modules/characters/characters.service.ts'),
+      'utf8',
+    );
+    expect(src).toMatch(/import \{ nextUpdatedAt \} from '\.\.\/\.\.\/common\/stale-write';/);
+    expect(src).toMatch(/spellSlots: toJsonText\(outcome\.slots\), updatedAt: nextUpdatedAt\(fresh\.updatedAt\)/);
   });
 });

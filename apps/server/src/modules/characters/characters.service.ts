@@ -69,6 +69,7 @@ import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog, campaigns, characters, checkRequests, combatants, encounters, partyRestBatches } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
@@ -1926,9 +1927,19 @@ export class CharactersService {
         });
       }
 
+      // Issue #1902 rework (round 6): `nextUpdatedAt`, not `nowIso()` — this write is now
+      // the compare-and-set TOKEN `expectedUpdatedAt` is checked against (see
+      // `assertNotStale` above). Two spell-slot writes landing inside the same
+      // millisecond would otherwise stamp the IDENTICAL ISO string, so a caller holding
+      // the PRE-write token would pass the staleness check against the row this second
+      // write just produced — the CAS guard would look like it protected the write while
+      // actually rejecting nothing. `nextUpdatedAt` guarantees monotonic advancement even
+      // inside one millisecond, the same guarantee every other CAS-protected write in this
+      // codebase (quests, npcs, locations, sessions, factions, storylines, timeline,
+      // encounters) already relies on.
       const [updated] = tx
         .update(characters)
-        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nowIso() })
+        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
