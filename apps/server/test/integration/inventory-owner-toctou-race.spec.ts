@@ -7,6 +7,7 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { InventoryService } from '../../src/modules/inventory/inventory.service';
 import type { RequestUser } from '../../src/common/user.types';
+import type { Role } from '@campfire/schema';
 import { nowIso } from '../../src/common/time';
 import { makeTempDataDir } from './fixtures';
 
@@ -45,6 +46,7 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
 
   const alice: RequestUser = { id: 'user-alice', name: 'Alice', serverRole: 'user', devRole: 'player' };
   const bob: RequestUser = { id: 'user-bob', name: 'Bob', serverRole: 'user', devRole: 'player' };
+  const dm: RequestUser = { id: 'user-dm', name: 'DM', serverRole: 'admin', devRole: 'dm' };
 
   function build() {
     dataDir = makeTempDataDir();
@@ -158,6 +160,46 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
     orm.update(characters).set({ ownerUserId, updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
   }
 
+  /**
+   * `assertCanWriteOwner` is private; `as any` is required to spy on it. Unlike
+   * `getRowOrThrow` (called at the very top of `update()`, BEFORE either
+   * `assertCanWriteOwner` call), hooking a character-reassignment race into
+   * `getRowOrThrow` fires too early: `assertCanWriteOwner` would then read the
+   * ALREADY-reassigned character and correctly (legitimately) reject with
+   * `ForbiddenException` before the request ever reaches the transaction this PR
+   * hardened — which is a real rejection, but not the TOCTOU window under test, and an
+   * earlier version of these two tests made exactly that mistake (confirmed by a real CI
+   * run: both failed with `ForbiddenException`, "Only dm or the owning player may manage
+   * this character's items" — case (2), the test didn't reproduce the described race, not
+   * case (1), a broken guard). The race must fire AFTER the real `assertCanWriteOwner`
+   * call has already captured its (still-valid) decision — exactly where the review
+   * describes it: "between assertCanWriteOwner and the transaction."
+   */
+  function raceCharacterOwnerAfterAuth(
+    service: InventoryService,
+    orm: ReturnType<typeof build>['orm'],
+    targetCharacterId: number,
+    newOwnerUserId: string,
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const svc = service as any;
+    const original: (
+      ownerType: 'party' | 'character',
+      characterId: number | null,
+      campaignId: number,
+      u: RequestUser,
+      r: Role,
+    ) => Promise<unknown> = svc.assertCanWriteOwner.bind(svc);
+    return jest.spyOn(svc, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const [ownerType, characterId, campaignId, u, r] = args as ['party' | 'character', number | null, number, RequestUser, Role];
+      const result = await original(ownerType, characterId, campaignId, u, r);
+      if (characterId === targetCharacterId) {
+        raceReassignCharacterOwner(orm, targetCharacterId, newOwnerUserId);
+      }
+      return result;
+    });
+  }
+
   it('rejects a displacing equip when the SOURCE character is reassigned to a different owner mid-request (item itself never moves)', async () => {
     const { orm, service } = build();
     const { characterA, item, bobIncumbent } = seed(orm);
@@ -165,16 +207,10 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
     // equipping into — the item never changes owner, only character A's owner does.
     orm.update(inventoryItems).set({ characterId: characterA.id }).where(eq(inventoryItems.id, bobIncumbent.id)).run();
 
-    const original = service.getRowOrThrow.bind(service);
-    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
-      const row = await original(id, opts);
-      if (id === item.id) {
-        // The window: the DM transfers character A itself to a different player right
-        // after Alice's assertCanWriteOwner authorized her against it.
-        raceReassignCharacterOwner(orm, characterA.id, 'user-someone-else');
-      }
-      return row;
-    });
+    // The window: the DM transfers character A itself to a different player right after
+    // Alice's assertCanWriteOwner(characterA) authorized her against it (still A's owner
+    // at that moment), but before the transaction opens.
+    const spy = raceCharacterOwnerAfterAuth(service, orm, characterA.id, 'user-someone-else');
 
     await expect(
       service.update(
@@ -207,16 +243,12 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
       .returning()
       .all();
 
-    const original = service.getRowOrThrow.bind(service);
-    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
-      const row = await original(id, opts);
-      if (id === item.id) {
-        // The window: the DM transfers the DESTINATION character to a different player
-        // right after Alice's destination authorization check passed against her own C.
-        raceReassignCharacterOwner(orm, characterC.id, 'user-someone-else');
-      }
-      return row;
-    });
+    // The window: the DM transfers the DESTINATION character to a different player right
+    // after Alice's destination assertCanWriteOwner(characterC) passed against her own C
+    // (still hers at that moment), but before the transaction opens. Racing specifically on
+    // characterC's id means character A's OWN (source) authorization call is untouched —
+    // only the destination check goes stale.
+    const spy = raceCharacterOwnerAfterAuth(service, orm, characterC.id, 'user-someone-else');
 
     await expect(
       service.update(item.id, { characterId: characterC.id, equipped: true, equipSlot: 'main-hand' }, alice, 'player'),
@@ -228,5 +260,51 @@ describe('InventoryService.update() owner TOCTOU race (#1901 review: chatgpt-cod
     const [itemAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, item.id)).all();
     expect(itemAfter.equipped).toBe(false);
     expect(itemAfter.characterId).toBe(characterA.id);
+  });
+
+  /**
+   * Issue #1901 review (devin-ai-integration): the item-owner guard above was scoped too
+   * broadly — it fired for EVERY write, including a DM's bare qty/name/notes edit that never
+   * depended on the item's owner at all (`assertCanWriteOwner` returns early for `role ===
+   * 'dm'`), and a non-equip/non-move player edit that likewise doesn't feed the stale
+   * `finalCharacterId` into anything security-relevant. Narrowed to fire only when
+   * `equipWillChange || moved || role !== 'dm'`. These two tests cover both edges: the DM's
+   * bare edit must now SUCCEED despite the concurrent move (the bug), and a PLAYER's bare edit
+   * must still be REJECTED the same way (confirming the narrowing didn't overshoot and drop
+   * protection for non-DM callers).
+   */
+  it('a DM\'s bare rename succeeds despite a concurrent move to a different character (review: devin-ai-integration)', async () => {
+    const { orm, service } = build();
+    const { characterB, item } = seed(orm);
+
+    const original = service.getRowOrThrow.bind(service);
+    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
+      const row = await original(id, opts);
+      if (id === item.id) raceMoveItem(orm, item.id, characterB.id);
+      return row;
+    });
+
+    const updated = await service.update(item.id, { name: 'Renamed Blade' }, dm, 'dm');
+    spy.mockRestore();
+
+    expect(updated.name).toBe('Renamed Blade');
+  });
+
+  it('a PLAYER\'s bare rename is still rejected when the item concurrently moved off their character', async () => {
+    const { orm, service } = build();
+    const { characterB, item } = seed(orm);
+
+    const original = service.getRowOrThrow.bind(service);
+    const spy = jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id: number, opts?: { includeDeleted?: boolean }) => {
+      const row = await original(id, opts);
+      if (id === item.id) raceMoveItem(orm, item.id, characterB.id);
+      return row;
+    });
+
+    await expect(service.update(item.id, { name: 'Renamed Blade' }, alice, 'player')).rejects.toThrow(ConflictException);
+    spy.mockRestore();
+
+    const [itemAfter] = orm.select().from(inventoryItems).where(eq(inventoryItems.id, item.id)).all();
+    expect(itemAfter.name).toBe('Contested Blade');
   });
 });

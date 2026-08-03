@@ -661,18 +661,27 @@ export class InventoryService {
         // await, and better-sqlite3 transactions must be synchronous). If a concurrent
         // request moved this item to a DIFFERENT owner in that window, the authorization we
         // just performed was checked against an owner that is no longer current — proceeding
-        // would let this write (equip, displaceEquipped, qty, rename, …) cross a permission
-        // boundary the SERVER is supposed to enforce, not merely observe (AGENTS.md). This is
-        // sharpest for `displaceEquipped`: without this guard, the slot-conflict query below
-        // still runs against the STALE `finalCharacterId`, and the final update targets this
-        // item BY ID ALONE — so a caller authorized against character A could end up
-        // equipping (and displacing an incumbent for) an item that fresh() shows now belongs
-        // to character B. Fail closed on ANY owner mismatch between `existing` and `fresh`
-        // rather than silently retargeting the write at whatever the current owner happens to
-        // be — a lost update surfaced as a 409 is correct here; a silent retarget is not. The
-        // caller must refetch and resubmit against current state (and will be re-authorized
-        // against the NEW owner when it does).
-        if (fresh.ownerType !== existing.ownerType || fresh.characterId !== existing.characterId) {
+        // would let this write (equip, displaceEquipped, a move) cross a permission boundary
+        // the SERVER is supposed to enforce, not merely observe (AGENTS.md). This is sharpest
+        // for `displaceEquipped`: without this guard, the slot-conflict query below still runs
+        // against the STALE `finalCharacterId`, and the final update targets this item BY ID
+        // ALONE — so a caller authorized against character A could end up equipping (and
+        // displacing an incumbent for) an item that fresh() shows now belongs to character B.
+        // Fail closed on an owner mismatch rather than silently retargeting the write at
+        // whatever the current owner happens to be — a lost update surfaced as a 409 is
+        // correct here; a silent retarget is not.
+        //
+        // Review (devin-ai-integration): scoped to when the pre-transaction owner actually
+        // FEEDS the write — an equip transition (`equipWillChange`, since the slot-conflict
+        // query below is built from the pre-transaction `finalCharacterId`), a move (`moved`,
+        // computed from the same stale snapshot), or any non-DM caller (whose
+        // `assertCanWriteOwner` result WAS owner-derived — the round-2 character-owner check
+        // right below already exempts DM callers the same way). A bare qty/name/notes/iconSlug
+        // edit from the DM — who is authorized for every character's items regardless of
+        // owner, per `assertCanWriteOwner`'s `role === 'dm'` early return — never depended on
+        // this item's owner at all, so it must not 409 just because someone else picked the
+        // item up in the same window; a retry would only succeed unchanged.
+        if ((equipWillChange || moved || role !== 'dm') && (fresh.ownerType !== existing.ownerType || fresh.characterId !== existing.characterId)) {
           throw new ConflictException({
             code: 'INVENTORY_OWNER_CHANGED',
             message: `Item ${id}'s owner changed after this request was authorized — refetch and retry.`,
