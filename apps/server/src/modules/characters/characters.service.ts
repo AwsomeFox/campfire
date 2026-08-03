@@ -1274,17 +1274,17 @@ export class CharactersService {
     // so a non-dm write is silently ignored, same as ownerUserId above.
     if (input.dmSecret !== undefined && role === 'dm') update.dmSecret = input.dmSecret;
 
-    // Issue #1902 rework (round 12, codex P2): `existing.updatedAt` was captured before the
-    // awaited `assertProgressionAllowed`/`adapterForCampaign` checks above — a concurrent
-    // CAS-protected write (e.g. `patchSpellSlots`) can land in that gap. `nextUpdatedAt`
-    // computed from that now-stale snapshot could then publish the IDENTICAL token a
-    // concurrent same-millisecond writer already produced from the SAME stale root (`nextUpdatedAt`
-    // is a pure function of its input and the current instant), which a client holding that
-    // token as `expectedUpdatedAt` would incorrectly read as "still current" even though this
-    // PATCH's OWN fields (spellSlots included, when supplied) are newer than what that client
-    // last saw. Re-read right before the write, as close to it as this method's structure
-    // allows without restructuring every branch above into one transaction.
+    // Issue #1902 rework (round 12, codex P2, corrected round 15): `existing.updatedAt` was
+    // captured before the awaited `assertProgressionAllowed`/`adapterForCampaign` checks
+    // above — a concurrent CAS-protected write (e.g. `patchSpellSlots`) can land in that
+    // gap. Round 12 re-read the row here to keep the TOKEN monotonic, but that alone did
+    // not close the gap: `opts?.expectedUpdatedAt` had already been validated against the
+    // now-stale `existing` at the top of this method, so a genuinely concurrent change in
+    // that gap was invisible to it — the write proceeded and silently overwrote whatever
+    // changed, instead of the documented 409. Re-validate against THIS fresh read too, not
+    // just use it to advance the token.
     const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
+    this.revisions.assertNotStale({ updatedAt: freshUpdatedAt }, opts?.expectedUpdatedAt);
     update.updatedAt = nextUpdatedAt(freshUpdatedAt);
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();

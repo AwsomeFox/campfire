@@ -353,6 +353,48 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
   });
 
   /**
+   * Issue #1902 rework, round 15 (codex P2) — round 12's fix above re-read the row to keep
+   * the TOKEN monotonic, but never re-validated the CALLER's `opts.expectedUpdatedAt`
+   * against that fresh read: `assertNotStale` was only ever checked against the STALE
+   * pre-await `existing` at the top of `update()`. A concurrent change landing in the
+   * awaited `assertProgressionAllowed`/`adapterForCampaign` gap was therefore invisible to
+   * the CAS check entirely — the write proceeded and silently overwrote whatever changed,
+   * instead of the documented 409 STALE_WRITE. Fixed by re-running `assertNotStale`
+   * against the fresh read, not just using it to advance the token.
+   */
+  it('#1902 rework (round 15): update() rejects a caller-supplied expectedUpdatedAt that went stale during its own awaited progression check', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+
+    const original = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+
+    const spy = jest
+      .spyOn(service as unknown as { assertProgressionAllowed: (...args: unknown[]) => Promise<void> }, 'assertProgressionAllowed')
+      .mockImplementation(async () => {
+        // A concurrent, already-committed write landing in the exact gap between the
+        // outer `assertNotStale` check (already passed, using `original.updatedAt`) and
+        // this method's eventual write.
+        orm.update(characters).set({ name: 'Concurrent renamer', updatedAt: nextUpdatedAt(original.updatedAt) }).where(eq(characters.id, id)).run();
+      });
+
+    try {
+      // The defect this guards against: without the round-15 fix, this call would
+      // succeed (silently overwriting the concurrent rename's effect on `xp`, though not
+      // its `name`, since this PATCH doesn't touch `name`) instead of rejecting.
+      await expect(service.update(id, { xp: 100 }, dmUser, 'dm', { expectedUpdatedAt: original.updatedAt })).rejects.toMatchObject({ status: 409 });
+
+      const after = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      // The concurrent write's effect (the rename) must still be the stored truth — not
+      // overwritten by a PATCH that should have been rejected.
+      expect(after.name).toBe('Concurrent renamer');
+      expect(after.xp).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
    * Issue #1902 rework, round 13 (codex P2) — both `breakConcentration` mirrors (one in
    * `action-resolver.service.ts`, one in `encounters.service.ts`; they cascade a broken
    * concentrator's dependent conditions onto every affected combatant, mirroring the

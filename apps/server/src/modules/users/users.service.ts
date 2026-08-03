@@ -41,6 +41,7 @@ import {
   castSessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { hashPassword } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
@@ -492,10 +493,19 @@ export class UsersService {
         .where(eq(participantSupportPreferences.ownerUserId, String(id)))
         .run();
       tx.delete(campaignMembers).where(eq(campaignMembers.userId, id)).run();
-      tx.update(characters)
-        .set({ ownerUserId: null, updatedAt: nowIso() })
+      // Issue #1902 rework (round 15, codex P2 sweep): per character, not one shared
+      // `nowIso()` for every character this deleted account owned (potentially across
+      // multiple campaigns) — restructured from a single bulk UPDATE into a
+      // read-then-per-row-write, matching every other multi-character `characters`
+      // writer in this rework.
+      const ownedRows = tx
+        .select({ id: characters.id, updatedAt: characters.updatedAt })
+        .from(characters)
         .where(eq(characters.ownerUserId, String(id)))
-        .run();
+        .all();
+      for (const owned of ownedRows) {
+        tx.update(characters).set({ ownerUserId: null, updatedAt: nextUpdatedAt(owned.updatedAt) }).where(eq(characters.id, owned.id)).run();
+      }
       tx.delete(users).where(eq(users.id, id)).run();
       this.audit.logInTx(tx, {
         actor: auditActor(actor),

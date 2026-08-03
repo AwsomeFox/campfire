@@ -7246,6 +7246,22 @@ export class EncountersService {
       }
       for (const w of characterWrites) {
         const prior = priorById.get(w.characterId);
+        // Issue #1902 rework (round 13, codex P2 sweep; corrected round 15, devin): PER
+        // CHARACTER, from `prior` (already read fresh, inside this transaction, a few
+        // lines above) — not the shared `ts` this whole encounter-end call uses for OTHER
+        // purposes (endedAt, the encounter's own updatedAt). This column is the CAS token
+        // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every
+        // writer. Computed ONCE here (not inline in `set` below) because
+        // `sheetSyncedUpdatedAt` on the combatant row MUST be stamped with this EXACT same
+        // value — `sheetSyncedUpdatedAt` is defined as "the sheet's `updatedAt` at the
+        // moment of sync" (see `CharactersService.syncActiveCombatants` and
+        // `updateCombatant`'s mirror, which both write one shared value to both rows).
+        // Round 13 advanced the character's token per-character but left the combatant
+        // stamped with the shared `ts`, breaking that equality — `canWriteBackHp` and the
+        // CAS predicate below both compare the two directly, so ANY later end would either
+        // report a false HP_SYNC_CONFLICT or silently no-op its write-back (0 rows
+        // matched) once the two values diverged.
+        let sheetSyncToken = nextUpdatedAt(prior?.updatedAt ?? ts);
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
@@ -7263,15 +7279,7 @@ export class EncountersService {
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
           conditionInstances: w.conditionInstances,
-          // Issue #1902 rework (round 13, codex P2 sweep): PER CHARACTER, from `prior`
-          // (already read fresh, inside this transaction, a few lines above) — not the
-          // shared `ts` this whole encounter-end call uses for OTHER purposes (endedAt,
-          // the encounter's own updatedAt, sheetSyncedUpdatedAt). This column is the CAS
-          // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
-          // every writer, the same reason every other multi-character write in this
-          // rework (restParty, applyPartyRecovery, awardXp) keys off each row's own prior
-          // value rather than one shared stamp.
-          updatedAt: nextUpdatedAt(prior?.updatedAt ?? ts),
+          updatedAt: sheetSyncToken,
         };
         if (prior !== undefined && prior.status !== w.status) {
           set.status = w.status;
@@ -7307,17 +7315,19 @@ export class EncountersService {
             });
           }
           // Slices already match (e.g. name-only sheet edit) — bump updatedAt + token.
-          // `nextUpdatedAt(fresh.updatedAt)` (issue #1902 rework, round 13), not the
-          // shared `ts` — `fresh` was just read above, inside this same transaction.
+          // `nextUpdatedAt(fresh.updatedAt)` (issue #1902 rework, round 13) — `fresh` was
+          // just read above, inside this same transaction. Reassign `sheetSyncToken` to
+          // whatever was ACTUALLY written here, so the combatant marker below matches.
           if (fresh) {
+            sheetSyncToken = nextUpdatedAt(fresh.updatedAt);
             tx.update(characters)
-              .set({ updatedAt: nextUpdatedAt(fresh.updatedAt) })
+              .set({ updatedAt: sheetSyncToken })
               .where(eq(characters.id, w.characterId))
               .run();
           }
         }
         tx.update(combatants)
-          .set({ sheetSyncedUpdatedAt: ts })
+          .set({ sheetSyncedUpdatedAt: sheetSyncToken })
           .where(eq(combatants.id, w.combatantId))
           .run();
       }
