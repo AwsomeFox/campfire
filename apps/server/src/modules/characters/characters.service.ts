@@ -2159,7 +2159,17 @@ export class CharactersService {
     // `stacks` value has nowhere honest to persist except that same structured column — so it is
     // fixed here rather than left half-migrated a second time.
     const nameKey = (name: string) => name.trim().toLowerCase();
-    const at = nowIso();
+    // Issue #1902 rework (round 7): PER CHARACTER, not one shared timestamp for the whole
+    // batch. `restParty` writes `spellSlots` — the same field `patchSpellSlots`'s
+    // `expectedUpdatedAt` CAS guard protects — so a rest that stamped every character with
+    // one `nowIso()` value had the identical same-millisecond non-advancement risk: if that
+    // shared timestamp happened to equal a character's PRE-rest `updatedAt` (two writes
+    // landing in the same millisecond), a spell-slot request already in flight with that
+    // pre-rest token as `expectedUpdatedAt` would pass the CAS check against a sheet the
+    // rest had, in fact, just changed. `nextUpdatedAt`, keyed off each character's OWN prior
+    // `updatedAt` (captured in `targets` above), guarantees every rested character's token
+    // advances, matching `patchSpellSlots`'s own fix for the identical class of bug.
+    const priorUpdatedAtByCharacter = new Map(targets.map((row) => [row.id, row.updatedAt]));
     // Captured per character so the post-commit mirror loop below can pass the exact
     // instances just written — including any decremented `stacks` — to
     // syncActiveCombatantConditions, rather than recomputing them a second time (or
@@ -2187,7 +2197,7 @@ export class CharactersService {
             ...conditionWriteSet,
             spellSlots: toJsonText(p.spellSlotsAfter),
             resources: toJsonText(p.resourcesAfter),
-            updatedAt: at,
+            updatedAt: nextUpdatedAt(priorUpdatedAtByCharacter.get(p.characterId)!),
           })
           .where(eq(characters.id, p.characterId))
           .run();

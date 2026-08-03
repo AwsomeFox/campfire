@@ -60,6 +60,16 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(body.expectedUpdatedAt).toBe('sheet-updated-at-token');
   });
 
+  // Seventh-round finding (kilo-code-bot, two independent threads on the call site and
+  // the function signature): `expectedUpdatedAt` must be `string | undefined`, matching
+  // the schema's own optional `ExpectedUpdatedAt` and the server's documented
+  // unconditional-write fallback — not a bare `string` a caller has to lie to the type
+  // checker about via `as string` when the linked character hasn't resolved yet.
+  test('spellSlotPatchBody accepts undefined expectedUpdatedAt honestly, without a caller-side cast', () => {
+    const body = spellSlotPatchBody(2, 0, 1, undefined);
+    expect(body).toEqual({ level: 2, delta: 1, expectedUpdatedAt: undefined });
+  });
+
   test('gating matrix: DM edits any character; owning player edits only their own; others read-only', () => {
     const ownedCharacterIds = new Set([42]);
 
@@ -366,9 +376,19 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   // `updatedAt` captured in the same row-builder pass that reads `spellSlots`.
   test('ResourceTrackerPanel sends expectedUpdatedAt on every character spell-slot write — the real CAS fix, not another pending guard', () => {
     const src = readFileSync(PANEL, 'utf8');
-    expect(src).toMatch(/expectedUpdatedAt: updatedAt as string/);
+    expect(src).toMatch(/expectedUpdatedAt: updatedAt,/);
     expect(src).toMatch(/let updatedAt: string \| undefined;/);
     expect(src).toMatch(/updatedAt = char\.updatedAt;/);
+  });
+
+  // Seventh-round finding (kilo-code-bot, two threads: the call site and the function
+  // signature): `updatedAt as string` silently lied to the type checker — `updatedAt` is
+  // genuinely `string | undefined` (unset when the linked character hasn't resolved).
+  // The cast is gone; `updatedAt` flows through as-is to `spellSlotPatchBody`, which now
+  // accepts `string | undefined` honestly (see the dedicated pure test above).
+  test('ResourceTrackerPanel no longer casts updatedAt to string when sending expectedUpdatedAt', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).not.toMatch(/updatedAt as string/);
   });
 
   // Fourth-round finding (codex P2): the first successful resource pip click discarded a

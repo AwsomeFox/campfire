@@ -199,6 +199,43 @@ describe('rest mechanics (#1041, e2e)', () => {
     }
   });
 
+  /**
+   * Issue #1902 rework, round 7 (codex P2) — `restParty` writes `spellSlots`, the same
+   * field `patchSpellSlots`'s `expectedUpdatedAt` compare-and-set guards, but stamped
+   * every character in the batch with ONE shared `nowIso()` timestamp. If that shared
+   * value happened to equal a character's PRE-rest `updatedAt` (two writes landing in
+   * the same millisecond — the identical class of bug fixed for `patchSpellSlots` in an
+   * earlier round), the rest would visibly change nothing about the token even though it
+   * changed the sheet, and a spell-slot request already in flight with that pre-rest
+   * token as `expectedUpdatedAt` would incorrectly pass the CAS check against a sheet the
+   * rest had, in fact, just rested. Freezes the clock to reproduce the collision
+   * deterministically, matching `spell-slot-concurrency.spec.ts`'s equivalent test for
+   * `patchSpellSlots` itself.
+   */
+  it('#1902 rework: restParty advances each character\'s revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock caster');
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await db.update(charactersTable).set({ updatedAt: frozen.toISOString() }).where(eq(charactersTable.id, id));
+      const [before] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+      expect(before.updatedAt).toBe(frozen.toISOString());
+
+      await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');
+      const [after] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `after`'s
+      // token would be IDENTICAL to `before`'s — the rest happened (spell slots reset,
+      // HP restored), but the CAS token a concurrent request might be holding never
+      // visibly moved.
+      expect(after.updatedAt).not.toBe(before.updatedAt);
+      expect(JSON.parse(after.spellSlots)['1'].used).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('reports what it did NOT clear, so a DM never has to diff two sheets', async () => {
     const id = await batteredCharacter('Sil');
     const result = await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');

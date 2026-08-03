@@ -48,12 +48,20 @@ export function resourcePatchBody(key: string, nextUsed: number): Pick<ResourceP
  * `updatedAt` at the moment `currentUsed` was read) makes the server verify nothing else
  * changed the sheet first: a mismatch is rejected with 409 `STALE_WRITE` instead of being
  * silently mis-applied. This is a real compare-and-set, not a client-side mitigation.
+ *
+ * `expectedUpdatedAt` is typed `string | undefined`, matching the schema's own
+ * `ExpectedUpdatedAt` optionality (issue #1902 rework, round 7) rather than a bare
+ * `string` a caller would have to lie to via an `as string` cast if the character
+ * hasn't resolved yet (data still loading, or a combatant with no matching character
+ * row). `undefined` reaches the server as an omitted field, which is the documented
+ * unconditional-write fallback every other caller of this contract already gets —
+ * honest, not a silent gap.
  */
 export function spellSlotPatchBody(
   level: number,
   currentUsed: number,
   nextUsed: number,
-  expectedUpdatedAt: string,
+  expectedUpdatedAt: string | undefined,
 ): SpellSlotPatch {
   const body: SpellSlotPatch = { level, delta: nextUsed - currentUsed, expectedUpdatedAt };
   return body;

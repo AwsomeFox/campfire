@@ -176,7 +176,10 @@ export function ResourceTrackerPanel({
       level: number;
       currentUsed: number;
       used: number;
-      expectedUpdatedAt: string;
+      // `string | undefined` (issue #1902 rework, round 7), matching
+      // `spellSlotPatchBody`'s own parameter and the schema's optional
+      // `ExpectedUpdatedAt` — see that function's doc comment.
+      expectedUpdatedAt: string | undefined;
     }) =>
       api.post<Character>(
         `${API}/characters/${characterId}/spell-slots`,
@@ -388,9 +391,16 @@ export function ResourceTrackerPanel({
                             level: Number(level),
                             currentUsed: slot.used,
                             used: val,
-                            // Always set together with `spellSlots` from the same `char`
-                            // read in the row builder above — see that comment.
-                            expectedUpdatedAt: updatedAt as string,
+                            // No cast (issue #1902 rework, round 7): `updatedAt` is
+                            // `string | undefined` here honestly — it's set together
+                            // with `spellSlots` from the same `char` read in the row
+                            // builder above whenever a linked character was actually
+                            // found, but stays `undefined` if it wasn't (data still
+                            // loading, or a stale combatant->character link). Letting
+                            // `undefined` flow through to `spellSlotPatchBody` means
+                            // that rare case degrades to the documented unconditional
+                            // write instead of a cast lying to the type checker.
+                            expectedUpdatedAt: updatedAt,
                           });
                         } else if (c.statblock) {
                           const sb = c.statblock as unknown as Record<string, unknown>;
