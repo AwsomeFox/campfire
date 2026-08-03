@@ -18,7 +18,7 @@
  * Extracted so the e2e unit suite can drive every reorder / End-during-load /
  * campaign-change scenario without mounting React.
  */
-import type { CampaignSummary, Encounter, EncounterWithCombatants } from '@campfire/schema';
+import type { CampaignSummary, CastSafetyState, Encounter, EncounterWithCombatants } from '@campfire/schema';
 import { ApiError, isTransientError } from '../../lib/api';
 
 /** One consistent Player Display paint — summary and encounter from the same load. */
@@ -203,6 +203,90 @@ export class PlayerDisplayLoadSequencer {
     this.controller = null;
     this.generation += 1;
     this.activeCampaignId = null;
+  }
+}
+
+/**
+ * Cast-token X-Card safety poll sequencing (issue #1908 rework).
+ *
+ * The safety poll is a single anonymous `GET /cast/:token/safety` on the same
+ * visible-tab cadence as the rest of this page. A poll that takes longer than
+ * the interval can overlap the next one, and an unconditional "apply whatever
+ * comes back" update lets a slow pre-hold `false` land AFTER a fresh post-hold
+ * `true` already resolved — removing the safety curtain while the X-Card is
+ * still raised. This mirrors `PlayerDisplayLoadSequencer`'s generation +
+ * AbortController gate (scoped down to one fetch, no campaign identity) so
+ * only the latest in-flight request may ever commit, and a superseded or
+ * aborted response is always ignored rather than applied.
+ */
+export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
+
+export type CastSafetyPollResult =
+  | { kind: 'ok'; generation: number; active: boolean }
+  | { kind: 'ignored'; generation: number; reason: 'aborted' | 'superseded' }
+  /** Real (non-abort) failure on the request that is still current. Callers
+   * must fail safe: leave the last-known hold state untouched rather than
+   * clearing an active curtain or guessing a new value. */
+  | { kind: 'failed'; generation: number };
+
+export class CastSafetyPollSequencer {
+  private generation = 0;
+  private controller: AbortController | null = null;
+
+  /** Start a new poll. Aborts any prior in-flight poll so a late response from
+   * an older tick cannot resolve after (and overwrite) a newer one. */
+  begin(): { generation: number; signal: AbortSignal } {
+    this.controller?.abort();
+    const controller = new AbortController();
+    this.controller = controller;
+    this.generation += 1;
+    return { generation: this.generation, signal: controller.signal };
+  }
+
+  /** True when this generation is still the active, non-aborted poll. */
+  isCurrent(generation: number): boolean {
+    return (
+      generation === this.generation
+      && this.controller != null
+      && !this.controller.signal.aborted
+    );
+  }
+
+  /** Abort in-flight work and bump the generation so a late response cannot
+   * commit. Call on unmount / cast identity (token) change. */
+  invalidate(): void {
+    this.controller?.abort();
+    this.controller = null;
+    this.generation += 1;
+  }
+}
+
+/**
+ * Run one sequenced cast-safety poll. Only the latest generation's response
+ * may ever be applied — a superseded or aborted request resolves `ignored`,
+ * and a genuine failure on the still-current request resolves `failed` so the
+ * caller can fail safe (keep last-known state) rather than strand the display
+ * in whatever value a prior out-of-order response happened to set.
+ */
+export async function runCastSafetyPoll(
+  sequencer: CastSafetyPollSequencer,
+  fetchSafety: CastSafetyFetcher,
+): Promise<CastSafetyPollResult> {
+  const { generation, signal } = sequencer.begin();
+  try {
+    const state = await fetchSafety(signal);
+    if (!sequencer.isCurrent(generation)) {
+      return { kind: 'ignored', generation, reason: 'superseded' };
+    }
+    return { kind: 'ok', generation, active: state.active };
+  } catch (error) {
+    if (isAbortError(error) || signal.aborted) {
+      return { kind: 'ignored', generation, reason: 'aborted' };
+    }
+    if (!sequencer.isCurrent(generation)) {
+      return { kind: 'ignored', generation, reason: 'superseded' };
+    }
+    return { kind: 'failed', generation };
   }
 }
 

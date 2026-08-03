@@ -64,10 +64,12 @@ import {
   type SafeQuest,
 } from './playerSafe';
 import {
+  CastSafetyPollSequencer,
   PlayerDisplayLoadSequencer,
   playerDisplaySyncMessage,
   playerDisplaySyncState,
   projectionAfterLoadFailure,
+  runCastSafetyPoll,
   runPlayerDisplayLoad,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
@@ -357,23 +359,38 @@ export default function PlayerDisplayPage() {
    * `GET /campaigns/:id/safety` that backs the authed overlay, so it polls the
    * anonymous `/cast/:token/safety` capability on the same visible-tab cadence as
    * the rest of this page — comfortably inside the 15s bound raising a hold must
-   * blank the display within. A transient poll failure leaves the last-known state
-   * rather than clearing it: the regular projection poll already surfaces a hard
-   * failure (expired/revoked token) for the page as a whole.
+   * blank the display within.
+   *
+   * A `/safety` request that outruns the poll interval can overlap the next one,
+   * so this goes through `CastSafetyPollSequencer` (same generation + abort gate
+   * as the main projection load, scoped to one fetch) — only the latest request
+   * may ever set `castSafetyActive`. Fail safe throughout: a superseded/aborted
+   * response is ignored, and a genuine failure on the still-current request
+   * leaves the last-known hold state alone rather than guessing a new value —
+   * it can never clear an active curtain, nor strand one cleared by a stale
+   * response. The regular projection poll already surfaces a hard failure
+   * (expired/revoked token) for the page as a whole.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
+  const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());
   const loadCastSafety = useCallback(async () => {
     if (!isCastMode || !castToken) return;
-    try {
-      const state = await castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`);
-      setCastSafetyActive(state.active);
-    } catch {
-      /* transient/blip — keep the last-known hold state */
-    }
+    const result = await runCastSafetyPoll(castSafetySequencerRef.current, (signal) =>
+      castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
+    );
+    if (result.kind === 'ok') setCastSafetyActive(result.active);
+    // 'ignored' (superseded/aborted) and 'failed' (transient, still-current
+    // request) both leave castSafetyActive untouched — see fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
+    const sequencer = castSafetySequencerRef.current;
     if (isCastMode) void loadCastSafety();
+    // Abort any in-flight poll on unmount or when the cast identity (token)
+    // changes, so a late response never calls setState past that point.
+    return () => {
+      sequencer.invalidate();
+    };
   }, [isCastMode, loadCastSafety]);
 
   usePollWhileVisible(() => void loadCastSafety(), POLL_MS, isCastMode);
