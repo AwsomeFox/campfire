@@ -77,6 +77,14 @@ export function ResourceTrackerPanel({
   const campaign = useCampaign(campaignId);
   const adapter = ruleSystemAdapter(campaign?.ruleSystem);
   const restOptions = restOptionsForAdapter(adapter);
+  // Issue #1902 rework: `CampaignProvider`'s campaign list loads asynchronously, so on
+  // first paint `useCampaign(campaignId)` can still be `undefined` for a moment even
+  // though `campaignId` itself is set — and `ruleSystemAdapter(undefined)` deliberately
+  // falls back to 5e. Without this gate the panel would flash generic Short/Long Rest
+  // buttons for a non-5e campaign before the real adapter (and its stamina/night, or
+  // other, rest options) resolves. Only require resolution when a campaignId was
+  // actually passed in.
+  const campaignResolved = campaignId == null || campaign != null;
 
   const invalidate = () => {
     invalidateEncounter(queryClient, encounterId);
@@ -175,14 +183,23 @@ export function ResourceTrackerPanel({
     .map((c) => {
       let resources: Record<string, CharacterResource> = {};
       let spellSlots: Record<string, SpellSlotLevel> = {};
-      let name = c.name;
+      // Issue #1902 rework: always the COMBATANT's own name, never the linked character
+      // sheet's name. A DM can rename a fighter for this encounter (duplicate PCs,
+      // disguises, "Vesh (charmed)") via `patchCombatant`; overriding it here made this
+      // panel the one place in the fight that disagreed with the combatant list,
+      // initiative order, and combat log.
+      const name = c.name;
+      // Stamina rests spend a Resolve Point (issue #1902 rework) — mirrors the same
+      // `rpCurrent < 1` guard CharacterPage's RestControls already applies, so this
+      // panel doesn't offer a rest button the server is guaranteed to reject.
+      let rpCurrent: number | undefined;
 
       if (c.kind === 'character' && c.characterId) {
         const char = characters.find((ch) => ch.id === c.characterId);
         if (char) {
           resources = char.resources;
           spellSlots = char.spellSlots;
-          name = char.name;
+          rpCurrent = char.rpCurrent;
         }
       } else if (c.statblock) {
         const sb = c.statblock as unknown as Record<string, unknown>;
@@ -197,7 +214,7 @@ export function ResourceTrackerPanel({
         ownedCharacterIds,
       });
 
-      return { combatant: c, name, resources, spellSlots, canEdit };
+      return { combatant: c, name, resources, spellSlots, canEdit, rpCurrent };
     })
     .filter((row) => hasTrackedResources(row.resources, row.spellSlots));
 
@@ -219,17 +236,17 @@ export function ResourceTrackerPanel({
       )}
 
       <div className="space-y-4 max-h-96 overflow-y-auto">
-        {rows.map(({ combatant: c, name, resources, spellSlots, canEdit }) => (
+        {rows.map(({ combatant: c, name, resources, spellSlots, canEdit, rpCurrent }) => (
           <div key={c.id} className="border-t pt-2 mt-2 first:mt-0 first:border-0 first:pt-0">
             <div className="flex items-center justify-between mb-2 gap-2">
               <div className="font-medium">{name}</div>
-              {canEdit && c.kind === 'character' && c.characterId != null && restOptions.length > 0 && (
+              {canEdit && c.kind === 'character' && c.characterId != null && campaignResolved && restOptions.length > 0 && (
                 <div className="flex gap-2">
                   {restOptions.map((opt) => (
                     <Btn
                       key={opt.type}
                       density="compact"
-                      disabled={isPending}
+                      disabled={isPending || (opt.type === 'stamina' && rpCurrent != null && rpCurrent < 1)}
                       title={opt.description}
                       onClick={() => {
                         if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: opt.label, defaultValue: `${opt.label} for ${name}?` }))) return;

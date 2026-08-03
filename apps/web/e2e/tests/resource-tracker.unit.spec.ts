@@ -134,4 +134,31 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/<Link to=\{`\/c\/\$\{campaignId\}\/party`\}/);
     expect(src).not.toMatch(/<a href=\{`\/c\/\$\{campaignId\}\/party`\}/);
   });
+
+  // Second-round finding (devin, re-review of the rework commit): a renamed combatant
+  // must keep showing its OWN name here, not the linked character sheet's name — the
+  // combatant list, initiative order, and combat log all key off the combatant's name.
+  test('ResourceTrackerPanel rows use the combatant\'s own name, never the linked character sheet\'s name', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/const name = c\.name;/);
+    expect(src).not.toMatch(/name = char\.name/);
+  });
+
+  // Second-round finding (codex P1, re-review): `useCampaign` can still be resolving
+  // when this panel first mounts, and `ruleSystemAdapter(undefined)` falls back to 5e —
+  // rest controls must wait for the real campaign before offering short/long as if that
+  // were confirmed to be the ruleset.
+  test('ResourceTrackerPanel gates rest controls on the campaign having actually resolved', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/campaignResolved/);
+    expect(src).toMatch(/campaignId == null \|\| campaign != null/);
+  });
+
+  // Second-round finding (codex P2, re-review): a Stamina Rest button must not be offered
+  // when the character has no RP to spend it — CharactersService.rest() rejects it, so an
+  // enabled button here is a guaranteed-failing action. Mirrors CharacterPage's guard.
+  test('ResourceTrackerPanel disables Stamina Rest when the character has no Resolve Points', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/opt\.type === 'stamina' && rpCurrent != null && rpCurrent < 1/);
+  });
 });
