@@ -656,6 +656,28 @@ export class InventoryService {
           .limit(1)
           .all();
         if (!fresh) throw new NotFoundException(`Item ${id} not found`);
+        // Issue #1901 review (chatgpt-codex-connector P1) — time-of-check/time-of-use.
+        // `existing` and `assertCanWriteOwner` both ran BEFORE this transaction opened (they
+        // await, and better-sqlite3 transactions must be synchronous). If a concurrent
+        // request moved this item to a DIFFERENT owner in that window, the authorization we
+        // just performed was checked against an owner that is no longer current — proceeding
+        // would let this write (equip, displaceEquipped, qty, rename, …) cross a permission
+        // boundary the SERVER is supposed to enforce, not merely observe (AGENTS.md). This is
+        // sharpest for `displaceEquipped`: without this guard, the slot-conflict query below
+        // still runs against the STALE `finalCharacterId`, and the final update targets this
+        // item BY ID ALONE — so a caller authorized against character A could end up
+        // equipping (and displacing an incumbent for) an item that fresh() shows now belongs
+        // to character B. Fail closed on ANY owner mismatch between `existing` and `fresh`
+        // rather than silently retargeting the write at whatever the current owner happens to
+        // be — a lost update surfaced as a 409 is correct here; a silent retarget is not. The
+        // caller must refetch and resubmit against current state (and will be re-authorized
+        // against the NEW owner when it does).
+        if (fresh.ownerType !== existing.ownerType || fresh.characterId !== existing.characterId) {
+          throw new ConflictException({
+            code: 'INVENTORY_OWNER_CHANGED',
+            message: `Item ${id}'s owner changed after this request was authorized — refetch and retry.`,
+          });
+        }
 
         const ts = nowIso();
         const update: Record<string, unknown> = { updatedAt: ts };
