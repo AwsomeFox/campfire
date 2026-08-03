@@ -432,4 +432,23 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
       expect(src).toMatch(/updatedAt: sheetToken!/);
     }
   });
+
+  /**
+   * Issue #1902 rework, round 19/20 (codex P2 sweep continuation) — `apply()`'s
+   * `encounter.updated` frame is tagged `sheetMirrored` (round 19), but `undo()` mirrors
+   * onto a linked character sheet too (restoring HP/conditions, refunding a spent spell
+   * slot) and originally emitted its OWN `encounter.updated` untagged — the client would
+   * therefore skip invalidating `campaignCharacters` after an undo that DID change a
+   * sheet. Self-caught while reviewing round 19's own diff, before a reviewer flagged it.
+   */
+  it('#1902 rework (round 20): undo() also tags its encounter.updated frame with sheetMirrored, tracked the same way as apply()', () => {
+    const src = readFileSync(resolve(__dirname, '../../src/modules/encounters/action-resolver.service.ts'), 'utf8');
+    // undo()'s own flag declaration, distinct from apply()'s.
+    expect(src).toMatch(/undo\(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role\): \{ ok: true \} \{\s*\n\s*const encounter = this\.encounterRowOrThrow\(encounterId\);\s*\n[\s\S]*?let sheetMirrored = false;/);
+    // Set at BOTH mirror sites (HP/condition restore, spell-slot refund) — same shape as
+    // apply()'s own tracking.
+    const sheetMirroredAssignments = src.match(/sheetMirrored = true;/g) ?? [];
+    expect(sheetMirroredAssignments.length).toBe(4); // 2 in apply(), 2 in undo()
+    expect(src).toMatch(/this\.events\.emit\(\{ type: 'encounter\.updated', campaignId: encounter\.campaignId, encounterId: encounter\.id, sheetMirrored \}\);\s*\n\s*return \{ ok: true \};/);
+  });
 });

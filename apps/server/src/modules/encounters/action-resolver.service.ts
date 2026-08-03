@@ -2070,6 +2070,11 @@ export class ActionResolverService {
    */
   undo(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role): { ok: true } {
     const encounter = this.encounterRowOrThrow(encounterId);
+    // Issue #1902 rework (round 19, codex P2 sweep continuation): mirrors `apply()`'s own
+    // `sheetMirrored` tracking (see that method's doc comment) — undo restores each
+    // target's HP/condition slice and refunds a spent spell slot, both onto the linked
+    // character sheet, so this event needs the same precise tag as apply's.
+    let sheetMirrored = false;
     if (token.encounterId !== encounterId) {
       this.auditRejectedUndo(encounter, token, user, role, 'cross_encounter_token');
       throw new BadRequestException('Undo token is for a different encounter.');
@@ -2257,6 +2262,7 @@ export class ActionResolverService {
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          sheetMirrored = true;
         }
       }
       // Refund the actor's resources — from the STORED chain, never the client token.
@@ -2307,6 +2313,7 @@ export class ActionResolverService {
             // transaction just above, so there's no separate atomicity gap to guard here
             // (unlike `restParty`'s pre-transaction plan).
             tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, actor.characterId)).run();
+            sheetMirrored = true;
           }
         }
       }
@@ -2352,7 +2359,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored });
     return { ok: true };
   }
 
