@@ -55,7 +55,7 @@
  * structurally impossible rather than merely checked-for — there is no
  * `generation` field left to get the comparison wrong on.
  *
- * Two more findings landed on THAT redesign itself:
+ * Three more findings landed on THAT redesign itself:
  *
  * 11a. Single-writer closes cross-request ordering, but a single SLOW
  *      request is still a problem: it can observe `active: false` moments
@@ -79,6 +79,17 @@
  *      first check by up to one poll interval. Fix: `invalidate()` frees
  *      the bookkeeping itself, synchronously; the abandoned call's own
  *      cleanup checks it is still the current owner before touching it.
+ * 11c. Round 11a judged a failure/timeout by its OWN duration, same as a
+ *      value — wrong specifically for failures: after a successful
+ *      `false`, a BURST of individually-fast failures (each well inside
+ *      the freshness window on its own) could hold `castSafetyKnown`
+ *      confidently "inactive" forever, since no single one of them was
+ *      ever slow enough to trip the check. The display's confidence
+ *      depended on how FAST the server errored, unrelated to whether its
+ *      information was still true. Fix: track `lastConfirmedAt` (the last
+ *      successful observation of any value) and judge a failure/timeout by
+ *      elapsed time since THAT, not by its own duration — collapsing the
+ *      slow-failure and fast-failure-burst paths into one rule.
  *
  * Consequently, several of the ORIGINAL rounds' specific scenarios (6, 7, 8,
  * 9 — all about comparing generation numbers against each other) are not
@@ -281,10 +292,15 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
       throw new TypeError('network down');
     };
 
+    // A fresh poller has never confirmed anything (`lastConfirmedAt` is
+    // `null`), which round 11c treats the same as "expired" — matching the
+    // page's own fail-safe starting state. Either way (this or a plain
+    // no-op 'failed'), neither kind is ever applied as an active hold.
     const result = await runCastSafetyPoll(poller, failing);
-    expect(result.kind).toBe('failed');
-    // The caller only calls setCastSafetyActive on 'ok' — a 'failed' result
-    // carries no value, so it can never strand an unsafe false.
+    expect(['unknown', 'failed']).toContain(result.kind);
+    // The caller only calls setCastSafetyActive on 'ok' — neither 'unknown'
+    // nor 'failed' carries an active value, so this can never strand an
+    // unsafe false.
 
     const next = await runCastSafetyPoll(poller, async () => ({ active: true }));
     expect(next).toMatchObject({ kind: 'ok', active: true });
@@ -387,17 +403,26 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     expect(result).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('regression (round 11a): a genuine failure concluding within the freshness window stays a fail-safe no-op', async () => {
+  test('regression (round 11c): a genuine failure arriving soon after a confirmed observation stays a fail-safe no-op', async () => {
+    // Judged against `lastConfirmedAt`, not this request's own duration
+    // (round 11c) — so this test first establishes a confirmation, unlike
+    // the pre-round-11c version which relied on a brand-new poller (whose
+    // `lastConfirmedAt` is `null` — itself now treated as "expired", not
+    // "not yet applicable"; see the very first poll ever in the "no
+    // confirmation yet" test below).
     const poller = new CastSafetyPoller();
+    const freshnessMs = 5_000;
+    const confirmed = await runCastSafetyPoll(poller, async () => ({ active: false }), { freshnessMs });
+    expect(confirmed).toMatchObject({ kind: 'ok', active: false });
+
     const failing: CastSafetyFetcher = async () => {
       throw new TypeError('network down');
     };
-
-    const result = await runCastSafetyPoll(poller, failing, { freshnessMs: 5_000 });
+    const result = await runCastSafetyPoll(poller, failing, { freshnessMs });
     expect(result.kind).toBe('failed');
   });
 
-  test('regression (round 11a): a genuine failure that takes too long to conclude also reverts to unknown', async () => {
+  test('regression (round 11a/11c): a genuine failure that takes too long to conclude also reverts to unknown', async () => {
     const poller = new CastSafetyPoller();
     const slowFailure = deferred<CastSafetyState>();
     const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowFailure.promise);
@@ -408,6 +433,84 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
 
     const result = await pending;
     expect(result).toEqual({ kind: 'unknown' });
+  });
+
+  test('regression (round 11c): with no confirmation EVER, even a fast failure reverts to unknown, matching the page default', async () => {
+    // `lastConfirmedAt === null` (nothing ever confirmed) counts as
+    // "expired" too — the page's own fail-safe starting state is already
+    // "unknown" (curtain shown), so a fast failure before any success has
+    // no different, more-confident state to protect.
+    const poller = new CastSafetyPoller();
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('network down');
+    };
+
+    const result = await runCastSafetyPoll(poller, failing, { freshnessMs: 5_000 });
+    expect(result).toEqual({ kind: 'unknown' });
+  });
+
+  test('regression (P1 round 11c, the reviewer-supplied scenario): a burst of individually-FAST failures still expires confidence once their cumulative gap exceeds the bound', async () => {
+    // The exact scenario from the finding: after a successful `false`, if
+    // every subsequent request fails QUICKLY (inside freshnessMs on its
+    // own), round 11a's per-request-duration check alone would let every
+    // single one resolve 'failed' (a no-op) forever — an X-Card raised
+    // during a fast-failing outage would never raise the curtain. This
+    // must expire exactly as surely as one slow failure does, once the
+    // CUMULATIVE gap since the last confirmation crosses the bound.
+    const poller = new CastSafetyPoller();
+    const freshnessMs = 30;
+
+    const confirmed = await runCastSafetyPoll(poller, async () => ({ active: false }), { freshnessMs });
+    expect(confirmed).toMatchObject({ kind: 'ok', active: false });
+
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('fast 500');
+    };
+
+    let sawUnknown = false;
+    for (let i = 0; i < 8; i += 1) {
+      // Simulates the poll cadence between individually-fast failures —
+      // each `failing()` call itself resolves in well under a millisecond.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const result = await runCastSafetyPoll(poller, failing, { freshnessMs });
+      if (result.kind === 'unknown') {
+        sawUnknown = true;
+        break;
+      }
+      expect(result.kind).toBe('failed');
+    }
+
+    expect(sawUnknown).toBe(true);
+  });
+
+  test('regression (round 11c): a fresh, fast false response resets confidence even after a preceding burst of failures', async () => {
+    // A successful, fast round trip is fresh evidence as of right now,
+    // regardless of how long the PRIOR gap of failures was — it must
+    // apply confidently and reset the clock for whatever comes after it,
+    // not be penalized by history it has nothing to do with.
+    const poller = new CastSafetyPoller();
+    const freshnessMs = 30;
+
+    const confirmed = await runCastSafetyPoll(poller, async () => ({ active: false }), { freshnessMs });
+    expect(confirmed).toMatchObject({ kind: 'ok', active: false });
+
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('fast 500');
+    };
+    // Burn past the freshness window with failures first.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const staleFailure = await runCastSafetyPoll(poller, failing, { freshnessMs });
+    expect(staleFailure).toEqual({ kind: 'unknown' });
+
+    // A fresh, fast success immediately afterward must still apply
+    // confidently — the earlier failure's staleness does not linger.
+    const freshFalse = await runCastSafetyPoll(poller, async () => ({ active: false }), { freshnessMs });
+    expect(freshFalse).toMatchObject({ kind: 'ok', active: false });
+
+    // And a subsequent fast failure, right after THAT fresh confirmation,
+    // is back to being a benign no-op.
+    const nextFailure = await runCastSafetyPoll(poller, failing, { freshnessMs });
+    expect(nextFailure.kind).toBe('failed');
   });
 
   test('regression (P1, the reviewer-supplied scenario): two consecutive slow responses do not compound exposure past one timeout', async () => {

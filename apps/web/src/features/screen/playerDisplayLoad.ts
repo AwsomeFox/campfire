@@ -322,17 +322,39 @@ export class PlayerDisplayLoadSequencer {
  *      abandoned call's own cleanup; that cleanup checks it is still the
  *      current owner before touching shared state, so it can never
  *      clobber a NEWER call's bookkeeping if one has already started.
+ * 11c. Round 11a's freshness check judged a FAILURE/timeout conclusion by
+ *      its OWN duration (issue to conclusion) — the same yardstick used for
+ *      a value. That is wrong for a failure specifically: after a
+ *      successful `false`, if every SUBSEQUENT request fails quickly
+ *      (each individually well inside the freshness window), every one of
+ *      them passed its own-duration check and stayed `failed` (a no-op) —
+ *      so a fast-failing outage could hold `castSafetyKnown` confidently
+ *      "inactive" indefinitely, even with a hold raised and un-observed
+ *      the entire time, no single request ever slow enough to trip
+ *      anything. The display's confidence depended on how FAST the server
+ *      errored, unrelated to whether its last known information was still
+ *      true. Fix: track `lastConfirmedAt`, the timestamp of the last
+ *      successful observation of ANY value (true or false); judge a
+ *      FAILURE/timeout conclusion by elapsed time since THAT, not by its
+ *      own duration. A burst of individually-fast failures now expires
+ *      confidence exactly as surely as one slow one, once their cumulative
+ *      gap since the last confirmation exceeds the window — collapsing the
+ *      slow-failure and fast-failure-burst paths into the same rule. (A
+ *      value response's OWN round-trip freshness check is unaffected and
+ *      still needed — see the note on that branch in `poll()` for why it
+ *      is not simply replaced by the same `lastConfirmedAt` comparison.)
  *
  * The trade round 11a accepts, explicitly: a hung request now DOES delay
  * the next observation (rounds 1-3's exact tension), bounded by
  * `CAST_SAFETY_POLL_TIMEOUT_MS` rather than the sequencing being free of it.
  * That constant is therefore back to being load-bearing for correctness —
  * unlike the generation scheme's version, which (rounds 4-9) explicitly
- * carried none. Combined with round 11a's freshness check, the worst-case
- * exposure from hold-raised to curtain-shown is bounded by
- * `CAST_SAFETY_POLL_TIMEOUT_MS` alone (not that value plus another poll
- * interval, and not two of them back to back) — see that constant's own
- * doc for the exact reasoning.
+ * carried none. Combined with round 11a's freshness check (and round 11c's
+ * extension of it to failures), the worst-case exposure from hold-raised
+ * to curtain-shown is bounded by `CAST_SAFETY_POLL_TIMEOUT_MS` alone (not
+ * that value plus another poll interval, not two of them back to back, and
+ * not stretched arbitrarily far by a run of fast failures) — see that
+ * constant's own doc for the exact reasoning.
  *
  * Cancellation on an identity change (unmount / cast-token change) is just
  * "abort the one possible in-flight request and free the poller"
@@ -380,12 +402,13 @@ export const CAST_SAFETY_OBSERVATION_FRESHNESS_MS = 5_000;
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }
   /**
-   * A conclusion arrived (a confirmed `active: false`, a genuine failure,
-   * or the hygiene timeout), but it took longer than
-   * `CAST_SAFETY_OBSERVATION_FRESHNESS_MS` to get here — too old to trust
-   * as still describing the CURRENT state. The caller must revert to the
-   * same "not yet confirmed" fail-safe state the page starts in (show the
-   * curtain), not silently keep whatever it last believed — see round 11a.
+   * A conclusion arrived that is too old to trust as still describing the
+   * CURRENT state — either a confirmed `active: false` whose OWN round
+   * trip exceeded `CAST_SAFETY_OBSERVATION_FRESHNESS_MS` (round 11a), or a
+   * failure/hygiene-timeout that arrived more than that long after the
+   * last successful confirmation of any value (round 11c). The caller must
+   * revert to the same "not yet confirmed" fail-safe state the page starts
+   * in (show the curtain), not silently keep whatever it last believed.
    */
   | { kind: 'unknown' }
   /** Skipped outright (a poll was already in flight — single-writer), or
@@ -394,12 +417,14 @@ export type CastSafetyPollResult =
    * caller does nothing — the identity-change case already has its own
    * reset (see `PlayerDisplayPage.tsx`'s doc). */
   | { kind: 'ignored' }
-  /** A genuine (non-abort) failure that concluded WITHIN the freshness
-   * window — recent enough that it doesn't itself demand reverting
+  /** A genuine (non-abort) failure arriving while the LAST successful
+   * confirmation (of any value) is still within the freshness window —
+   * recent enough that this failure alone doesn't demand reverting
    * confidence; the caller fails safe by leaving the last-known hold state
-   * untouched rather than guessing a new value. A failure that takes
-   * LONGER than the freshness window to conclude is `unknown` instead —
-   * see round 11a. */
+   * untouched rather than guessing a new value. Once enough elapsed time
+   * has passed since that last confirmation — whether from one slow
+   * failure or a burst of fast ones — this becomes `unknown` instead
+   * (round 11c). */
   | { kind: 'failed' };
 
 /** Internal marker distinguishing an `invalidate()`-triggered abort (drop
@@ -419,6 +444,13 @@ const INVALIDATE_ABORT_REASON = 'campfire/cast-safety-poller-invalidated';
 export class CastSafetyPoller {
   private controller: AbortController | null = null;
   private busy = false;
+  /**
+   * When the last successful observation (of ANY value, true or false) was
+   * confirmed. `null` means never — the fail-safe starting state. Round
+   * 11c: this is what a FAILURE/timeout conclusion is judged against, not
+   * its own individual duration — see that round's note on `poll()` below.
+   */
+  private lastConfirmedAt: number | null = null;
 
   /** True while a request is in flight. Exposed for tests/observability —
    * `poll()` already consults this itself. */
@@ -456,21 +488,46 @@ export class CastSafetyPoller {
         // the signal and resolved anyway (round 8's backstop).
         return { kind: 'ignored' };
       }
-      if (state.active) return { kind: 'ok', active: true };
-      const age = Date.now() - issuedAt;
-      if (age > freshnessMs) return { kind: 'unknown' };
+      if (state.active) {
+        this.lastConfirmedAt = Date.now();
+        return { kind: 'ok', active: true };
+      }
+      // This value's OWN round trip (issue to conclusion) must itself be
+      // fresh to trust — a slow pre-hold `false` describes a moment that,
+      // by delivery, may already be stale (round 11a). Because single-writer
+      // guarantees `issuedAt >= lastConfirmedAt` (no overlapping requests),
+      // this check is at least as strict as comparing against
+      // `lastConfirmedAt` would be, so a fresh, fast `false` is always
+      // trusted here regardless of how long ago the PRIOR confirmation was
+      // — this new reading itself supersedes that gap.
+      const concludedAt = Date.now();
+      if (concludedAt - issuedAt > freshnessMs) return { kind: 'unknown' };
+      this.lastConfirmedAt = concludedAt;
       return { kind: 'ok', active: false };
-    } catch (error) {
+    } catch {
+      // The specific error is never inspected: round 11c judges every
+      // non-invalidate failure/timeout the same way, by elapsed time since
+      // the last confirmation — not by which error it was or how long THIS
+      // one took (see below).
       if (signal.aborted && signal.reason === INVALIDATE_ABORT_REASON) {
         return { kind: 'ignored' };
       }
-      const age = Date.now() - issuedAt;
-      if ((isAbortError(error) || signal.aborted) || age > freshnessMs) {
-        // Either the hygiene timeout fired (by construction this took the
-        // full timeoutMs, past the freshness window) or a genuine failure
-        // itself took too long to conclude — either way, too old to trust
-        // as a confident "last known state stands"; revert instead of
-        // silently keeping stale state (round 11a).
+      // No value at all here — a genuine failure or the hygiene timeout
+      // firing. Round 11c: judge this purely by how long it has been since
+      // the last successful confirmation of ANY value, NOT by how long
+      // THIS particular failure took. A single slow failure/timeout always
+      // exceeds the freshness window this way too (by construction its
+      // `issuedAt` predates `now` by at least `timeoutMs > freshnessMs`,
+      // and `lastConfirmedAt <= issuedAt`) — but so does a BURST of
+      // individually-fast failures whose cumulative gap since the last
+      // confirmation has grown past the window, which a purely
+      // this-request's-own-duration check (as round 11a used) would have
+      // missed entirely: no single one of them is ever slow, so a
+      // fast-failing outage could hold `castSafetyKnown` confidently
+      // "inactive" indefinitely. `lastConfirmedAt === null` (nothing ever
+      // confirmed) counts as expired too, matching the page's own fail-safe
+      // starting state.
+      if (this.lastConfirmedAt === null || Date.now() - this.lastConfirmedAt > freshnessMs) {
         return { kind: 'unknown' };
       }
       return { kind: 'failed' };
@@ -498,12 +555,15 @@ export class CastSafetyPoller {
    * identity's first check by up to one poll interval for no reason
    * (round 11b). A later `poll()` call (e.g. cast mode re-entered) is
    * otherwise unaffected — this is a one-time flush, not a permanent
-   * shutdown.
+   * shutdown. `lastConfirmedAt` is also cleared: a confirmation from the
+   * OLD identity must never lend false confidence to the NEW one's early
+   * failures.
    */
   invalidate(): void {
     this.controller?.abort(INVALIDATE_ABORT_REASON);
     this.controller = null;
     this.busy = false;
+    this.lastConfirmedAt = null;
   }
 }
 
