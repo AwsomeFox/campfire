@@ -217,6 +217,9 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   // fallback and then overridden by a later h1).
   let expectingOwnFocus = false;
   let fallbackListenersInstalled = false;
+  // Set between scheduling the deferred upgrade and that frame running, so a second
+  // observer fire in the gap cannot queue a duplicate focus move.
+  let upgradeScheduled = false;
 
   const cancelFrames = () => {
     for (const id of frames) window.cancelAnimationFrame(id);
@@ -253,7 +256,6 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     'Home',
     'End',
     ' ',
-    'Spacebar',
   ]);
 
   const handleUserKeydown = (event: KeyboardEvent) => {
@@ -351,14 +353,26 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     if (!settledOnMainFallback) return false;
     const h1 = main.querySelector('h1');
     if (!(h1 instanceof HTMLElement)) return false;
-    teardownFallbackWatch();
-    if (moveFocus) {
-      scheduleFrame(() => {
-        if (document.activeElement !== main) return;
-        if (shouldPreserveFocusInsideMain(main, document)) return;
-        focusOwned(h1);
-      });
+    if (!moveFocus) {
+      teardownFallbackWatch();
+      return true;
     }
+    if (upgradeScheduled) return true;
+    upgradeScheduled = true;
+    // The takeover listeners stay installed across this frame on purpose. The focus
+    // transfer is deferred, and a repeat ArrowDown/PageDown landing in the gap must
+    // still cancel it — tearing down here would remove the listeners first and let the
+    // scheduled callback steal focus from a keyboard user who is mid-scroll, since
+    // `document.activeElement` is still `main` while they scroll (review finding: P2
+    // codex). A takeover clears `settledOnMainFallback`, which the callback rechecks.
+    scheduleFrame(() => {
+      upgradeScheduled = false;
+      if (!settledOnMainFallback) return;
+      teardownFallbackWatch();
+      if (document.activeElement !== main) return;
+      if (shouldPreserveFocusInsideMain(main, document)) return;
+      focusOwned(h1);
+    });
     return true;
   };
 
