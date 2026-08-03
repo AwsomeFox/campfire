@@ -17,7 +17,8 @@ import {
   restPendingKey,
   resourcePendingKey,
   slotPendingKey,
-  pendingResourceKeys,
+  addPendingKey,
+  removePendingKey,
   type PipOwnerScope,
 } from './resourceTrackerLogic';
 
@@ -100,24 +101,44 @@ export function ResourceTrackerPanel({
     if (campaignId != null) invalidateCampaignCharacters(queryClient, campaignId);
   };
 
+  // Issue #1902 rework (round 5): pending identities are tracked in OUR OWN state via
+  // each mutation's `onMutate`/`onSettled`, not derived from a `useMutation` hook's
+  // `isPending`/`variables` (round 4's approach). `isPending`/`variables` describe only
+  // the SINGLE MOST RECENT call on a hook — firing rest for Alice then Bob before
+  // Alice's request settles flips the shared `restMutation` hook's `variables` to Bob's,
+  // so Alice's button read as "not pending" and re-enabled while her request was still in
+  // flight. `onMutate`/`onSettled` fire once per `mutate()` INVOCATION with THAT call's
+  // own variables, so two concurrent calls of the same kind are each tracked correctly.
+  // See `addPendingKey`/`removePendingKey`'s doc comments.
+  const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set());
+  const beginPending = (key: string) => setPendingKeys((prev) => addPendingKey(prev, key));
+  const endPending = (key: string) => setPendingKeys((prev) => removePendingKey(prev, key));
+
+  // Every write reconciles the character it touched into the `campaignCharacters` cache
+  // from its OWN response, before `invalidate()`'s async refetch (issue #1902 rework):
+  // round 1 did this for slotMutation, round 2 for restMutation. resourceMutation was the
+  // one write path that didn't (round 5) — its `onSuccess` only called `invalidate()`, so
+  // the row's cached `updatedAt` stayed stale until that refetch landed. Since EVERY
+  // spell-slot write now carries `expectedUpdatedAt`, that staleness meant clicking a
+  // resource dot and then a spell-slot dot on the SAME character — the single most
+  // ordinary sequence in this panel — sent a self-inflicted stale token and 409'd against
+  // the user's own prior write.
+  const reconcileCharacter = (updated: Character) => {
+    if (campaignId != null) {
+      queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
+        old?.map((c) => (c.id === updated.id ? updated : c)),
+      );
+    }
+  };
+
   const restMutation = useMutation({
     mutationFn: async ({ characterId, kind }: { characterId: number; kind: RestOptionDef['type'] }) =>
       api.post<Character>(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
-    // Issue #1902 rework (round 2): same reconciliation-before-invalidate fix as
-    // slotMutation below. `POST .../rest` returns the fully-rested character (fresh
-    // rpCurrent/spCurrent/hpCurrent/…) — without caching it here, `isPending` flips back
-    // to false (re-enabling the buttons) before invalidate()'s background refetch lands,
-    // so a Starfinder character who just spent their only RP on a Stamina Rest briefly
-    // shows an enabled Stamina Rest button the server is guaranteed to reject next click
-    // (and, in the other direction, a Night's Rest that restored RP can render the button
-    // still disabled).
+    onMutate: (vars) => beginPending(restPendingKey(vars.characterId)),
+    onSettled: (_data, _error, vars) => endPending(restPendingKey(vars.characterId)),
     onSuccess: (updated) => {
       setError(null);
-      if (campaignId != null) {
-        queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
-          old?.map((c) => (c.id === updated.id ? updated : c)),
-        );
-      }
+      reconcileCharacter(updated);
       invalidate();
     },
     onError: (err) => {
@@ -128,9 +149,12 @@ export function ResourceTrackerPanel({
 
   const resourceMutation = useMutation({
     mutationFn: async ({ characterId, key, used }: { characterId: number; key: string; used: number }) =>
-      api.post(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used)),
-    onSuccess: () => {
+      api.post<Character>(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used)),
+    onMutate: (vars) => beginPending(resourcePendingKey({ characterId: vars.characterId }, vars.key)),
+    onSettled: (_data, _error, vars) => endPending(resourcePendingKey({ characterId: vars.characterId }, vars.key)),
+    onSuccess: (updated) => {
       setError(null);
+      reconcileCharacter(updated);
       invalidate();
     },
     onError: (err) => {
@@ -167,13 +191,11 @@ export function ResourceTrackerPanel({
     // (server-authoritative `spellSlots`), so write it into the cache synchronously,
     // before the query has any chance to be read again — this closes that second-order
     // race too, without a debounce or a second round-trip.
+    onMutate: (vars) => beginPending(slotPendingKey({ characterId: vars.characterId }, vars.level)),
+    onSettled: (_data, _error, vars) => endPending(slotPendingKey({ characterId: vars.characterId }, vars.level)),
     onSuccess: (updated) => {
       setError(null);
-      if (campaignId != null) {
-        queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
-          old?.map((c) => (c.id === updated.id ? updated : c)),
-        );
-      }
+      reconcileCharacter(updated);
       invalidate();
     },
     onError: (err) => {
@@ -181,6 +203,12 @@ export function ResourceTrackerPanel({
       invalidate();
     },
   });
+
+  /** Which pending-key namespace a statblockMutation call's `targetKey` falls into. */
+  const statblockPendingKey = (vars: { combatantId: number; kind: 'resource' | 'slot'; targetKey: string }): string =>
+    vars.kind === 'resource'
+      ? resourcePendingKey({ combatantId: vars.combatantId }, vars.targetKey)
+      : slotPendingKey({ combatantId: vars.combatantId }, Number(vars.targetKey));
 
   const statblockMutation = useMutation({
     mutationFn: async ({
@@ -194,10 +222,12 @@ export function ResourceTrackerPanel({
       // matches which control actually failed, instead of always reporting "resource".
       kind: 'resource' | 'slot';
       // Issue #1902 rework (round 4): the resource `key` or spell-slot `level` (as a
-      // string) this write targets, so `pendingResourceKeys` can scope the pending state
-      // to the one pip that's actually in flight rather than every pip on this combatant.
+      // string) this write targets, so pending state can be scoped to the one pip
+      // that's actually in flight rather than every pip on this combatant.
       targetKey: string;
     }) => api.patch(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
+    onMutate: (vars) => beginPending(statblockPendingKey(vars)),
+    onSettled: (_data, _error, vars) => endPending(statblockPendingKey(vars)),
     onSuccess: () => {
       setError(null);
       invalidate();
@@ -208,17 +238,6 @@ export function ResourceTrackerPanel({
       setError(translateApiError(err, t, { fallbackKey }));
       invalidate();
     },
-  });
-
-  // Issue #1902 rework (round 4): scoped per-control pending state — see
-  // `pendingResourceKeys`'s doc comment for why a blanket OR of all four mutations'
-  // `isPending` was disabling every combatant's controls for the duration of any single
-  // in-flight write anywhere in the panel.
-  const pendingKeys = pendingResourceKeys({
-    rest: { isPending: restMutation.isPending, variables: restMutation.variables },
-    resource: { isPending: resourceMutation.isPending, variables: resourceMutation.variables },
-    slot: { isPending: slotMutation.isPending, variables: slotMutation.variables },
-    statblock: { isPending: statblockMutation.isPending, variables: statblockMutation.variables },
   });
 
   const rows = combatants

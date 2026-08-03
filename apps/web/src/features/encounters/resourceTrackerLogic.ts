@@ -114,44 +114,30 @@ export function slotPendingKey(scope: PipOwnerScope, level: number): string {
 }
 
 /**
- * Derives which controls are currently in flight from each `useMutation` hook's own
- * `isPending`/`variables` (issue #1902 rework, round 4). React Query's `isPending` is per
- * MUTATION HOOK, not per write target, so the previous blanket
- * `restMutation.isPending || resourceMutation.isPending || slotMutation.isPending ||
- * statblockMutation.isPending` disabled every control for every combatant for the
- * duration of ANY single in-flight write — a slow save for one character at a live table
- * visibly locked out every other player's controls too. Each control instead disables
- * only when ITS OWN identity ({@link restPendingKey} / {@link resourcePendingKey} /
- * {@link slotPendingKey}) is in the returned set. Takes plain `{ isPending, variables }`
- * descriptors rather than the real `UseMutationResult` objects so this stays a pure,
- * render-independent function — the component passes each mutation's own two fields.
+ * Add `key` to a pending-control set, returning a NEW set (issue #1902 rework, round 5).
+ *
+ * Round 4 derived the pending set from each `useMutation` HOOK's own `isPending`/
+ * `variables` — but those two fields describe only the SINGLE MOST RECENT call on that
+ * hook. Firing a second `mutate()` on the same hook (e.g. resting Alice, then Bob, before
+ * Alice's request settles) makes the hook's `variables` flip to Bob's — so Alice's control
+ * read as "not pending" and re-enabled while her request was still in flight server-side,
+ * letting a second click fire on top of it. `onMutate`/`onSettled` (unlike `isPending`/
+ * `variables`) fire once per INVOCATION of `mutate()`, each with that call's own
+ * variables, so tracking pending identities through them (adding here, removing in
+ * {@link removePendingKey}) correctly represents however many of the SAME mutation kind
+ * are genuinely in flight at once — not just the newest.
  */
-export function pendingResourceKeys(mutations: {
-  rest?: { isPending: boolean; variables?: { characterId: number } };
-  resource?: { isPending: boolean; variables?: { characterId: number; key: string } };
-  slot?: { isPending: boolean; variables?: { characterId: number; level: number } };
-  statblock?: {
-    isPending: boolean;
-    variables?: { combatantId: number; kind: 'resource' | 'slot'; targetKey: string };
-  };
-}): ReadonlySet<string> {
-  const keys = new Set<string>();
-  if (mutations.rest?.isPending && mutations.rest.variables) {
-    keys.add(restPendingKey(mutations.rest.variables.characterId));
-  }
-  if (mutations.resource?.isPending && mutations.resource.variables) {
-    keys.add(resourcePendingKey({ characterId: mutations.resource.variables.characterId }, mutations.resource.variables.key));
-  }
-  if (mutations.slot?.isPending && mutations.slot.variables) {
-    keys.add(slotPendingKey({ characterId: mutations.slot.variables.characterId }, mutations.slot.variables.level));
-  }
-  if (mutations.statblock?.isPending && mutations.statblock.variables) {
-    const v = mutations.statblock.variables;
-    if (v.kind === 'resource') {
-      keys.add(resourcePendingKey({ combatantId: v.combatantId }, v.targetKey));
-    } else {
-      keys.add(slotPendingKey({ combatantId: v.combatantId }, Number(v.targetKey)));
-    }
-  }
-  return keys;
+export function addPendingKey(keys: ReadonlySet<string>, key: string): ReadonlySet<string> {
+  if (keys.has(key)) return keys;
+  const next = new Set(keys);
+  next.add(key);
+  return next;
+}
+
+/** Remove `key` from a pending-control set, returning a NEW set. Companion to {@link addPendingKey}. */
+export function removePendingKey(keys: ReadonlySet<string>, key: string): ReadonlySet<string> {
+  if (!keys.has(key)) return keys;
+  const next = new Set(keys);
+  next.delete(key);
+  return next;
 }
