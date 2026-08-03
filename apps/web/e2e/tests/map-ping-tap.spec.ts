@@ -276,7 +276,14 @@ test.describe('battle-map ping tap completion', () => {
     const touchSpot = { xRatio: 0.7, yRatio: 0.55 };
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
     const touchExpected = await dispatchArmingPointerDown(surface, touchSpot, touch);
-    await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
+    // Deliberately inside the slop budget with headroom, not sitting on it.
+    // `mapPingTapDistancePx` uses Math.hypot and cancels above the threshold, so a
+    // release at exactly MAP_PING_TAP_SLOP_PX has zero tolerance for the residual
+    // vertical drift waitForStableBounds still permits — sqrt(slop² + dy²) > slop for
+    // any dy > 0, which would re-introduce the timeout this spec exists to prevent.
+    // The exact boundary is covered by map-ping-tap.unit.spec.ts; here the point is
+    // that an ordinary tap with a little movement still publishes.
+    await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX - 4, y: 0 });
     await expect.poll(() => pings.length).toBe(2);
     // Same independent-oracle reasoning as the mouse tap above.
     expect(touchExpected.x).toBeCloseTo(70, 1);
