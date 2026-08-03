@@ -3871,7 +3871,7 @@ export default function RunSessionPage() {
             </div>
           }
           confirmLabel={t('run.reopenDialog.confirm')}
-          pendingLabel="Reopening encounter…"
+          pendingLabel={t('run.reopenDialog.pending')}
 
           busy={runControl.isPending}
           confirmDisabled={!reopenChoicesComplete}

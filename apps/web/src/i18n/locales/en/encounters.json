@@ -160,7 +160,7 @@
         "body": "It returns to Running where combat left off. Character sheets were synced when it ended — if a sheet has healed, rested, or otherwise changed since then, choose which HP to keep before reopening.",
         "noConflicts": "No sheet HP conflicts — combatant snapshots still match the sheets.",
         "confirm": "Reopen encounter",
-        "pending": "Reopening…"
+        "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
       "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
