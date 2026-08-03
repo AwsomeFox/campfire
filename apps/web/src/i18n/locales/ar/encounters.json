@@ -107,6 +107,20 @@
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
       }
+    },
+    "resourceTracker": {
+      "title": "متتبع الموارد",
+      "features": "القدرات",
+      "spellSlots": "خانات التعاويذ",
+      "level": "المستوى {{level}}",
+      "shortRest": "راحة قصيرة",
+      "longRest": "راحة طويلة",
+      "partyRest": "راحة الفريق",
+      "confirmRest": "{{kind}} لـ {{name}}؟",
+      "restError": "تعذر إكمال الراحة.",
+      "updateResourceError": "تعذر تحديث المورد.",
+      "updateSlotError": "تعذر تحديث خانة التعويذة.",
+      "setUsedTitle": "تعيين المستخدم إلى {{val}}"
     }
   }
 }

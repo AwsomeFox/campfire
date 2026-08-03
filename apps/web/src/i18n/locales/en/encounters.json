@@ -107,6 +107,20 @@
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
       }
+    },
+    "resourceTracker": {
+      "title": "Resource Tracker",
+      "features": "Features",
+      "spellSlots": "Spell Slots",
+      "level": "Level {{level}}",
+      "shortRest": "Short Rest",
+      "longRest": "Long Rest",
+      "partyRest": "Party Rest",
+      "confirmRest": "{{kind}} for {{name}}?",
+      "restError": "Couldn't complete the rest.",
+      "updateResourceError": "Couldn't update the resource.",
+      "updateSlotError": "Couldn't update the spell slot.",
+      "setUsedTitle": "Set used to {{val}}"
     }
   }
 }
