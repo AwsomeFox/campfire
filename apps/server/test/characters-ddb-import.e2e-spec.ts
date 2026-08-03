@@ -718,6 +718,58 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(fine.actions?.find((a) => a.name === 'Fine DC Breath')?.spec).toBeDefined();
   });
 
+  // Regression for a PR #1950 review finding: a feature carrying a DDB limited-use pool
+  // (e.g. a racial breath weapon usable a fixed number of times per long rest) used to still
+  // get a freely-resolvable spec — this importer has no mapping from that pool to a Campfire
+  // character resource, so encounter resolution would silently permit unlimited uses.
+  it('a feature with a DDB limited-use pool lands text-only instead of freely resolvable', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [
+          {
+            name: 'Breath Weapon',
+            attackTypeRange: 5,
+            abilityModifierStatId: 1,
+            activation: { activationType: 1 },
+            limitedUse: { maxUses: 1, resetType: 'longRest' },
+          },
+        ],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Breath Weapon');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Breath Weapon');
+  });
+
+  // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.
+  // A fractional `definition.level` like 1.5 passed the earlier range check and reached
+  // `CharacterAction.parse` unvalidated, throwing an uncaught ZodError that aborted the
+  // whole import instead of degrading just that spell to text-only.
+  it('a fractional spell level omits spec instead of crashing the import', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Wizard' } }],
+      classSpells: [{ spells: [{ definition: { name: 'Fractional Level Spell', level: 1.5 }, prepared: true }] }],
+    });
+    expect(c.actions?.find((a) => a.name === 'Fractional Level Spell')?.spec).toBeUndefined();
+  });
+
+  // Regression for a PR #1950 review finding: a class/race/feat entry whose `description`
+  // field is present but not a string (a sparse/changed sheet's number or object) used to
+  // reach `stripDdbHtml`'s `html.replace(...)` unguarded and throw a TypeError, aborting the
+  // whole import instead of degrading just that one entry.
+  it('a non-string feature description does not crash the import', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Weird Description Feature', description: 12345 as unknown as string }] },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Weird Description Feature');
+    expect(feature).toBeDefined();
+    expect(feature?.notes).toBe('');
+  });
+
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not
   // plain text, and the character sheet renders notes as plain text — so literal tags were
   // showing up on imported characters' sheets.

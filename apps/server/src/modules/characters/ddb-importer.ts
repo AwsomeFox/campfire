@@ -130,6 +130,20 @@ interface DdbActionEntry {
   // 8 legendary. Only 3/4 change which turn resource this maps to below; every other value
   // (including missing/unrecognized) keeps the pre-existing 'action' behavior.
   activation?: { activationType?: number | null } | null;
+  // Presence (any shape) signals a per-rest/per-day limited-use resource on this feature
+  // (issue #1903 review, PR #1950 round 12) — e.g. a racial breath weapon usable a fixed
+  // number of times per long rest. This importer has no mapping from a DDB limited-use pool
+  // to a Campfire character resource, so a feature carrying this must not be presented as a
+  // freely-resolvable action: `expandRawStatblockAction` has no way to represent the limit
+  // either (it would default to unlimited), which would let encounter resolution permit
+  // uses the source feature doesn't actually have. See hasUnmappedLimitedUse below.
+  limitedUse?: unknown;
+}
+
+/** True when a feature entry carries a per-rest/per-day limited-use pool this importer
+ * cannot map to a Campfire character resource (see the field's own doc comment). */
+function hasUnmappedLimitedUse(item: DdbActionEntry): boolean {
+  return item.limitedUse !== null && item.limitedUse !== undefined;
 }
 
 /** One entry in `classSpells[].spells[]` or `spells.<section>[]` — a known/prepared/granted spell. */
@@ -748,8 +762,14 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       const name = typeof item.name === 'string' ? item.name.trim() : '';
       if (!name) continue;
       // `snippet` is DDB's short plain-text summary; the `description` fallback is full HTML
-      // markup, so stripDdbHtml is a no-op on the former and a real fix on the latter.
-      const desc = stripDdbHtml((typeof item.snippet === 'string' && item.snippet.trim() ? item.snippet : item.description) ?? '');
+      // markup, so stripDdbHtml is a no-op on the former and a real fix on the latter. Both
+      // branches are typeof-guarded (review finding on PR #1950 round 12) — a sparse/changed
+      // sheet whose `description` is a number or object (not a string) would otherwise reach
+      // `stripDdbHtml`'s `html.replace(...)` and throw a TypeError, aborting the whole import
+      // over one oddly-shaped field. `computeSpellActions` already guards this correctly;
+      // this mirrors it.
+      const rawDesc = typeof item.snippet === 'string' && item.snippet.trim() ? item.snippet : item.description;
+      const desc = stripDdbHtml(typeof rawDesc === 'string' ? rawDesc : '');
       // A missing/unrecognized abilityModifierStatId, or a governing ability score that
       // isn't in `stats`, must NOT fall back to a modifier of 0 — that would present a
       // GUESSED to-hit as a confident, resolvable number (and the summary would never flag
@@ -800,7 +820,20 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
         attackBonus = null;
         savingThrow = null;
       }
-      out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, source ?? 'action', 'dnd5e'));
+      // A fourth "can't confidently represent this" case (review finding on PR #1950 round
+      // 12): a limited-use resource pool this importer has no mapping for. Force text-only
+      // rather than presenting the feature as freely, unlimitedly resolvable.
+      if (hasUnmappedLimitedUse(item)) {
+        attackBonus = null;
+        savingThrow = null;
+      }
+      out.push(
+        expandRawStatblockAction(
+          { name, desc, attackBonus, damage, savingThrow, noSaveInference: savingThrow === null },
+          source ?? 'action',
+          'dnd5e',
+        ),
+      );
     }
   }
   return out;
@@ -843,7 +876,11 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
     // round 8). When the level can't be confirmed, omit `spec` entirely instead — the spell
     // still imports (name + notes, always visible in the summary), just without spellLevel
     // usage tracking, consistent with every other "can't confirm it -> text-only" case here.
-    const level = typeof rawLevel === 'number' && rawLevel >= 0 && rawLevel <= 9 ? rawLevel : null;
+    // `spellLevel`'s schema is also `.int()` (review finding on PR #1950 round 12) — a
+    // fractional level like `1.5` passed the range check above but failed Zod's integer
+    // constraint inside `CharacterAction.parse`, throwing an uncaught ZodError that aborted
+    // the whole import instead of degrading just this spell to text-only as intended.
+    const level = typeof rawLevel === 'number' && Number.isInteger(rawLevel) && rawLevel >= 0 && rawLevel <= 9 ? rawLevel : null;
     const desc = stripDdbHtml(typeof def?.description === 'string' ? def.description : '');
     const tags = [def?.ritual ? 'Ritual.' : '', def?.concentration ? 'Concentration.' : ''].filter(Boolean);
     const notes = [...tags, desc].join(' ').trim().slice(0, 500);

@@ -216,18 +216,25 @@ function rechargeFromUsage(raw: unknown): string {
 }
 
 function savingThrowFrom(item: Record<string, unknown>, desc: string): { dc: number; ability: string } | null {
-  // Explicit `null` (as opposed to simply omitting the field) means the caller has already
-  // determined there is no confidently-resolvable save for this entry and does NOT want the
-  // free-text `desc` scanned for a "DC N Ability" phrase either (issue #1903 review, PR #1950
-  // round 10) — DDB feature/spell descriptions very commonly contain exactly that phrasing
-  // ("...must make a DC 13 Dexterity saving throw..."), so without this escape hatch a
-  // caller's deliberate "leave this text-only" decision (e.g. an unresolvable save ability,
-  // or an activation type with no representable action-economy slot) could be silently
-  // overridden by the desc-regex fallback below, resolving the entry against the wrong
-  // resource anyway. A caller that simply omits the field (undefined) still gets the normal
-  // inference chain, so compendium-monster statblocks — which often only have the save
-  // described in prose, no structured field — are unaffected.
-  if (item.savingThrow === null || item.saving_throw === null) return null;
+  // A dedicated, explicit opt-out signal (issue #1903 review, PR #1950 round 12 — replacing
+  // round 10's overloading of `savingThrow: null`) means the caller has already determined
+  // there is no confidently-resolvable save for this entry and does NOT want the free-text
+  // `desc` scanned for a "DC N Ability" phrase either — DDB feature/spell descriptions very
+  // commonly contain exactly that phrasing ("...must make a DC 13 Dexterity saving
+  // throw..."), so without this escape hatch a caller's deliberate "leave this text-only"
+  // decision (e.g. an unresolvable save ability, or an activation type with no representable
+  // action-economy slot) could be silently overridden by the desc-regex fallback below,
+  // resolving the entry against the wrong resource anyway.
+  //
+  // round 10 originally implemented this by treating an explicit `null` on `savingThrow` OR
+  // `saving_throw` as the opt-out. That was too broad: those two keys are shared with OTHER
+  // callers (open5e/pf2e importers spread raw statblock data verbatim into `dataJson`) that
+  // may legitimately set one of them to `null` as "we didn't find a structured value here"
+  // while still wanting `save_dc`/`dc` or the desc-regex fallback to run — round 10's guard
+  // bailed on that case too, silently losing resolvability for compendium monster actions
+  // whose only save-DC signal is in prose. A dedicated field name avoids colliding with
+  // `savingThrow`/`saving_throw`'s existing, wider-audience semantics entirely.
+  if (item.noSaveInference === true) return null;
   const direct = asRecord(item.savingThrow ?? item.saving_throw);
   if (direct) {
     const dc = numberOrNull(direct.dc);
