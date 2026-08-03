@@ -188,6 +188,15 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   const frames = new Set<number>();
   let timeout = 0;
   let settled = false;
+  // True only when `settled` was reached via the "give up on the h1" fallback (focusing
+  // `main` itself), never when a real h1 was found. A slow async page (e.g. the Dashboard,
+  // which renders nothing — no h1 — until its campaign summary fetch resolves) can lose the
+  // ~2-animation-frame race below on a loaded/slow runner even though its real h1 arrives
+  // only a little later: the observer used to stop mattering the instant it settled on the
+  // fallback, so focus stayed on `main` forever even after the real h1 showed up (issue #591
+  // regression — the h1 element itself was present and stable, just never focused). This
+  // flag keeps the fallback recoverable instead of permanent.
+  let settledOnMainFallback = false;
 
   const cancelFrames = () => {
     for (const id of frames) window.cancelAnimationFrame(id);
@@ -208,12 +217,13 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     opts.onPageTitle?.(page);
   };
 
-  const settleOnTarget = (target: HTMLElement) => {
+  const settleOnTarget = (target: HTMLElement, isFallback = false) => {
     if (settled) {
       publishTitle();
       return;
     }
     settled = true;
+    settledOnMainFallback = isFallback;
     publishTitle();
     if (moveFocus) {
       scheduleFrame(() => {
@@ -221,8 +231,12 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
         focusProgrammatically(target);
       });
     }
-    observer?.disconnect();
-    if (timeout) window.clearTimeout(timeout);
+    // A fallback settle keeps the observer/timeout alive so a real h1 that arrives shortly
+    // afterward can still take over focus below — see `settledOnMainFallback`'s doc comment.
+    if (!isFallback) {
+      observer?.disconnect();
+      if (timeout) window.clearTimeout(timeout);
+    }
   };
 
   const tryFocusHeading = (): boolean => {
@@ -232,10 +246,35 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     return true;
   };
 
+  // If the fallback already settled on `main`, upgrade to the real h1 the instant one
+  // appears — but only while focus is still exactly where the fallback left it. Anything
+  // else (the user tabbed away, a dialog opened and took focus, a page control claimed it)
+  // must not be overridden, matching `shouldPreserveFocusInsideMain`'s existing contract.
+  const upgradeFromFallback = (): boolean => {
+    if (!settledOnMainFallback) return false;
+    const h1 = main.querySelector('h1');
+    if (!(h1 instanceof HTMLElement)) return false;
+    settledOnMainFallback = false;
+    observer?.disconnect();
+    if (timeout) window.clearTimeout(timeout);
+    if (moveFocus) {
+      scheduleFrame(() => {
+        if (document.activeElement !== main) return;
+        if (shouldPreserveFocusInsideMain(main, document)) return;
+        focusProgrammatically(h1);
+      });
+    }
+    return true;
+  };
+
   // Always observe: an immediate empty h1 may gain text after async data loads.
   observer = new MutationObserver(() => {
     publishTitle();
-    if (!settled) void tryFocusHeading();
+    if (!settled) {
+      void tryFocusHeading();
+    } else {
+      upgradeFromFallback();
+    }
   });
   observer.observe(main, { childList: true, subtree: true, characterData: true });
 
@@ -245,7 +284,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
       if (moveFocus) {
         scheduleFrame(() => {
           if (shouldPreserveFocusInsideMain(main, document)) return;
-          if (!main.querySelector('h1')) settleOnTarget(main);
+          if (!main.querySelector('h1')) settleOnTarget(main, true);
         });
         return;
       }
@@ -263,7 +302,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
         tryFocusHeading();
         return;
       }
-      settleOnTarget(main);
+      settleOnTarget(main, true);
     }, 10_000);
   }
 
