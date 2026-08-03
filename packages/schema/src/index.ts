@@ -1448,6 +1448,7 @@ export const ScheduledSession = z.object({
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
+  prepNotes: z.string().max(20_000).default(''),
   status: z.enum(['scheduled', 'cancelled', 'completed']).default('scheduled'),
   cancelledAt: IsoDateTime.nullable().default(null),
   cancelledBy: z.string().max(120).nullable().default(null),
@@ -1515,6 +1516,7 @@ export const ScheduledSessionUpdate = z.object({
   title: z.string().max(200).optional(),
   location: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
+  prepNotes: z.string().max(20_000).optional(),
 });
 // `timezone` is deliberately absent (#588), so a one-off's zone is set at creation
 // and never corrected here. On a one-off the INSTANT is authoritative and the zone

@@ -109,7 +109,7 @@ export class CatchUpService {
       this.quests.changesSince(campaignId, since, role),
       this.sessions.listForCampaign(campaignId, role),
       this.timeline.listEvents(campaignId, role),
-      this.scheduling.listForCampaign(campaignId),
+      this.scheduling.listForCampaign(campaignId, role),
     ]);
 
     const quests: CatchUpQuestItem[] = questChanges.quests.map((quest) => {

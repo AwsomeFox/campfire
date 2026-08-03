@@ -28,6 +28,7 @@ import { sanitizeFieldPrefix } from '../../components/Field';
 import { LabeledField } from '../../components/LabeledField';
 import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
+import { MarkdownEditor } from '../../components/MarkdownEditor';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
@@ -639,6 +640,8 @@ function ScheduleItem({
         </div>
         {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} /> {schedule.location}</p>}
         {schedule.notes && <Markdown className="!text-sm !text-[color:var(--color-text)]">{schedule.notes}</Markdown>}
+        
+        {isDm && <PrepNotesEditor schedule={schedule} onChange={onChange} />}
 
         {canMemberWrite && (
         <>
@@ -1382,4 +1385,48 @@ function formatDuration(minutes: number): string {
   const m = minutes % 60;
   if (h === 0) return `${m}min`;
   return m === 0 ? `${h}h` : `${h}h ${m}min`;
+}
+
+function PrepNotesEditor({ schedule, onChange }: { schedule: ScheduledSessionWithRsvps; onChange: () => void }) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState(schedule.prepNotes ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dirty = draft !== (schedule.prepNotes ?? '');
+
+  async function save() {
+    if (!dirty) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.patch(`${API}/schedule/${schedule.id}`, { prepNotes: draft });
+      onChange();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' }) || 'Failed to save prep notes');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 pt-3 border-t border-[var(--color-neutral-700)]">
+      <label className="text-[11px] font-bold text-secondary uppercase tracking-wide block mb-1">
+        DM Prep Notes (Private)
+      </label>
+      <MarkdownEditor
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        disabled={saving}
+        className="input w-full min-h-[80px] !text-sm mt-1"
+        placeholder="Hidden from players..."
+      />
+      {error && <p className="text-danger text-xs mt-1">{error}</p>}
+      {dirty && (
+        <div className="flex justify-end gap-2 mt-2">
+          <Btn ghost density="xs" onClick={() => setDraft(schedule.prepNotes ?? '')} disabled={saving}>Cancel</Btn>
+          <Btn density="xs" onClick={() => void save()} busy={saving}>Save</Btn>
+        </div>
+      )}
+    </div>
+  );
 }

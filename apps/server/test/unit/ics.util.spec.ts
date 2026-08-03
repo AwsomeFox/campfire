@@ -52,6 +52,7 @@ function schedule(overrides: Partial<ScheduledSession> = {}): ScheduledSession {
     title: 'A short title',
     location: '',
     notes: '',
+    prepNotes: '',
     status: 'scheduled',
     cancelledAt: null,
     cancelledBy: null,

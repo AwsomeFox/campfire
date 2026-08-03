@@ -337,7 +337,7 @@ export class ExportService {
       // Issue #436: planned game nights (with RSVPs) and per-session attendance.
       // Raw rows on purpose (#504): an archive records what the DB holds, so a recap
       // sitting in the trash at export time must not downgrade a completed night.
-      this.scheduling.listForExport(campaignId),
+      this.scheduling.listForExport(campaignId, role),
       this.sessions.listAttendanceForCampaign(campaignId),
       // Issue #673: shared dice log (including physical/manual entries) travels with export.
       this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
@@ -931,7 +931,7 @@ export class ExportService {
       this.supportPreferences.getOwn(campaignId, user.id),
       this.audit.listForCampaignExport(campaignId),
       this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
-      this.scheduling.listForExport(campaignId),
+      this.scheduling.listForExport(campaignId, role),
       this.revisions.listForCampaign(campaignId),
     ]);
 

@@ -2010,8 +2010,8 @@ export class McpToolsService {
         'Distinct from get_session_recaps, which is the log of sessions that already happened.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.scheduling.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.listForCampaign(campaignId as number, role);
       },
     );
 
@@ -2022,8 +2022,8 @@ export class McpToolsService {
         'nothing is planned. Requires membership.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.scheduling.nextForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.nextForCampaign(campaignId as number, role);
       },
     );
 

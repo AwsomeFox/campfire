@@ -3826,7 +3826,7 @@ export class CampaignsService {
         this.inventory.countForCampaign(id),
         this.comments.countForCampaign(id, role),
         // Issue #818: keep the in-progress game night separate from the later upcoming one.
-        this.scheduling.currentAndNextForCampaign(id),
+        this.scheduling.currentAndNextForCampaign(id, role),
       ]);
 
     const currentLocation = campaign.currentLocationId

@@ -623,6 +623,7 @@ CREATE TABLE IF NOT EXISTS scheduled_sessions (
   title TEXT NOT NULL DEFAULT '',
   location TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
+  prep_notes TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'scheduled',
   cancelled_at TEXT,
   cancelled_by TEXT,

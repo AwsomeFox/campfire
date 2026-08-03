@@ -98,7 +98,7 @@ describe('Sessions and Scheduling Service unit coverage tests', () => {
     );
     expect(scheduled.title).toBe('Session 1 Planning');
 
-    const next = await schedulingService.nextForCampaign(campaignId);
+    const next = await schedulingService.nextForCampaign(campaignId, 'dm');
     expect(next?.id).toBe(scheduled.id);
 
     const rsvp = await schedulingService.setRsvp(
@@ -109,7 +109,7 @@ describe('Sessions and Scheduling Service unit coverage tests', () => {
     );
     expect(rsvp).toBeDefined();
 
-    const list = await schedulingService.listForCampaign(campaignId);
+    const list = await schedulingService.listForCampaign(campaignId, 'dm');
     expect(list.length).toBe(1);
 
     const cancelled = await schedulingService.remove(

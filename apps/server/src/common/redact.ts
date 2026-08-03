@@ -11,6 +11,17 @@ export function redactSecrets<T extends { dmSecret?: string }>(entities: T[], ro
   return entities.map((e) => redactSecret(e, role));
 }
 
+/** Strips prepNotes from a scheduled session unless role is 'dm'. */
+export function redactPrepNotes<T extends { prepNotes?: string }>(entity: T, role: Role): T {
+  if (role === 'dm') return entity;
+  const { prepNotes: _prepNotes, ...rest } = entity;
+  return { ...rest, prepNotes: '' } as T;
+}
+
+export function redactPrepNotesArray<T extends { prepNotes?: string }>(entities: T[], role: Role): T[] {
+  return entities.map((e) => redactPrepNotes(e, role));
+}
+
 /**
  * Entity-level secrecy (issue #42): whether an entity carrying a `hidden` flag is
  * visible to the given role. dmSecret only strips ONE field; `hidden` gates the
