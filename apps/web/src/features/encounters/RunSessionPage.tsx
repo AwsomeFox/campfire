@@ -3508,8 +3508,40 @@ export default function RunSessionPage() {
           gridScale={encounter.gridScale}
           onRollDeathSave={rollDeathSave}
           onUpdateSpellSlot={
-            currentCombatant?.characterId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
-              ? (level, delta) => updateSpellSlot.mutate({ characterId: currentCombatant.characterId!, level, delta })
+            // Review fix: derive the actor from turnWorkspace.current (the SAME data the
+            // Spellbook itself renders), not the separately-fetched `currentCombatant` — the
+            // encounter and /turn queries refetch independently, so right after a turn
+            // advance one can briefly hold the new actor while the other still holds the
+            // previous one. Binding to `currentCombatant.characterId` in that window could
+            // debit a different character's slots than the one on screen. `canDmWrite`
+            // (not just `isDm`) also gates the DM branch — an archived/ended campaign must
+            // disable the control, not just have the server reject the write.
+            turnWorkspace?.current?.characterId != null &&
+            ((isDm && canDmWrite) || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+              ? (level, delta, castContext) => {
+                  const actor = turnWorkspace.current!;
+                  const characterId = actor.characterId!;
+                  // Review fix (P1): a descriptive-but-leveled spec has no resolver path, so
+                  // this direct slot-patch is the ONLY write for it — it must also apply the
+                  // action-economy cost and concentration the resolve/apply flow would have,
+                  // or the same spell can be re-cast for free and stale concentration lingers.
+                  // Sequenced BEFORE the slot spend: if the action-economy slot is already
+                  // spent this turn, `combatantTurnState` 400s and the spell slot is never
+                  // touched (no charge for a cast that didn't actually happen).
+                  if (delta > 0 && castContext) {
+                    const patch: Record<string, unknown> = {};
+                    if (castContext.costSlot) patch.useSlot = castContext.costSlot;
+                    if (castContext.concentrationName !== undefined) patch.concentration = castContext.concentrationName;
+                    if (Object.keys(patch).length > 0) {
+                      combatantTurnState.mutate(
+                        { combatantId: actor.combatantId, patch },
+                        { onSuccess: () => updateSpellSlot.mutate({ characterId, level, delta }) },
+                      );
+                      return;
+                    }
+                  }
+                  updateSpellSlot.mutate({ characterId, level, delta });
+                }
               : undefined
           }
           onUseSuggestedAction={

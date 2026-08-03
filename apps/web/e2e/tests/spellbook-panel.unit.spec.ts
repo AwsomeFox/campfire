@@ -8,6 +8,7 @@ import {
   groupSpellsByLevel,
   isResolvableSpell,
   hasSpellbookContent,
+  buildSpellCastContext,
   type SpellItem,
 } from '../../src/features/encounters/SpellbookPanel';
 import { deriveTurnSpells, TurnWorkspace as TurnWorkspaceSchema, type TurnSuggestedAction, type ActionSpec } from '@campfire/schema';
@@ -327,5 +328,52 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
     const src = readFileSync(TURN_WORKSPACE_PATH, 'utf8');
     expect(src).toContain('hasSpellbookContent(spellItems, spellSlotsMap)');
     expect(src).not.toContain('Object.keys(spellSlotsMap).length > 0');
+  });
+
+  // Review fix (P1, chatgpt-codex-connector on PR #1952): a descriptive-but-structured spec
+  // never reaches the resolve/apply flow, so its action-economy cost and concentration have
+  // no other write path than this direct slot-patch branch. `buildSpellCastContext` must
+  // source both fields from the spec itself — never invent a cost/concentration the spec
+  // doesn't declare — and return `undefined` for a genuinely spec-less row.
+  test('buildSpellCastContext derives cost slot / concentration only from real spec data', () => {
+    const descriptiveConcentration = spec({ spellLevel: 2, concentration: true, slot: 'action' });
+    expect(buildSpellCastContext({ spec: descriptiveConcentration, isConcentration: true, name: 'Bane' })).toEqual({
+      costSlot: 'action',
+      concentrationName: 'Bane',
+    });
+
+    const descriptiveNoConcentration = spec({ spellLevel: 1, slot: 'bonus' });
+    expect(buildSpellCastContext({ spec: descriptiveNoConcentration, isConcentration: false, name: 'Guidance' })).toEqual({
+      costSlot: 'bonus',
+      concentrationName: undefined,
+    });
+
+    // Spec-less row: nothing to derive, nothing invented.
+    expect(buildSpellCastContext({ spec: null, isConcentration: false, name: 'Whatever' })).toBeUndefined();
+    expect(buildSpellCastContext({ isConcentration: false, name: 'Whatever' })).toBeUndefined();
+  });
+
+  // Review fix (P2 codex + devin on PR #1952, treated as one bug): the encounter and /turn
+  // queries refetch independently, so right after a turn advance one can briefly hold the
+  // new actor while the other still holds the previous one. Binding the spell-slot write to
+  // `currentCombatant` (the encounter query) instead of `turnWorkspace.current` (the SAME
+  // data the Spellbook renders) could debit a different character's slots than the one on
+  // screen. Also folds in the archived-campaign gate: `canDmWrite`, not just `isDm`.
+  test('RunSessionPage.tsx binds spell-slot writes to turnWorkspace.current, gated on canDmWrite', () => {
+    const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    const onUpdateSpellSlotSrc = src.slice(src.indexOf('onUpdateSpellSlot={'), src.indexOf('onUpdateSpellSlot={') + 2400);
+
+    // Bound to the SAME data the panel renders, not the separately-fetched encounter query.
+    expect(onUpdateSpellSlotSrc).toContain('turnWorkspace?.current?.characterId');
+    expect(onUpdateSpellSlotSrc).not.toContain('currentCombatant?.characterId != null');
+    expect(onUpdateSpellSlotSrc).not.toContain('currentCombatant.characterId!');
+
+    // Archived-campaign gate: the DM branch checks canDmWrite, not just isDm.
+    expect(onUpdateSpellSlotSrc).toMatch(/isDm\s*&&\s*canDmWrite/);
+
+    // The action-economy / concentration patch is sequenced BEFORE the slot spend (P1 fix),
+    // via the per-call onSuccess callback — not fired in parallel with the slot mutation.
+    expect(onUpdateSpellSlotSrc).toContain('combatantTurnState.mutate(');
+    expect(onUpdateSpellSlotSrc).toContain('onSuccess: () => updateSpellSlot.mutate(');
   });
 });

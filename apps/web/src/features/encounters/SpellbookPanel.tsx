@@ -32,12 +32,25 @@ export interface SpellSlotMap {
   [level: string]: { max: number; used: number };
 }
 
+/**
+ * Encounter-state side effects a DESCRIPTIVE (non-resolver) cast still needs to apply
+ * (review fix on issue #1900): the resolve/apply flow normally consumes the action-economy
+ * slot and sets concentration, but a spec that isn't resolver-eligible never reaches that
+ * flow — the direct slot-patch is its only write. Only ever populated from real spec data
+ * (never invented): `costSlot` is `spec.cost.slot` when present, `concentrationName` is the
+ * spell's own name only when `spec.uses.concentration` is true.
+ */
+export interface SpellCastContext {
+  costSlot?: string;
+  concentrationName?: string | null;
+}
+
 export interface SpellbookPanelProps {
   combatantName?: string;
   spells: SpellItem[];
   spellSlots?: SpellSlotMap;
   activeConcentration?: string | null;
-  onUpdateSlot?: (level: number, delta: number) => void;
+  onUpdateSlot?: (level: number, delta: number, castContext?: SpellCastContext) => void;
   onUseActionRequested?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   disabled?: boolean;
 }
@@ -111,6 +124,21 @@ export function hasSpellbookContent(spells: readonly SpellItem[], spellSlots?: S
   return Object.values(spellSlots).some((pool) => pool.max > 0);
 }
 
+/**
+ * Derives the encounter-state side effects a DIRECT slot-patch cast must also apply
+ * (review fix, P1): a descriptive-but-structured spec never reaches the resolve/apply
+ * flow, so its action-economy cost and concentration have no other write path. Returns
+ * `undefined` when the spell carries no spec at all — nothing to derive, and nothing
+ * invented. Exported so the derivation is independently regression-tested.
+ */
+export function buildSpellCastContext(spell: Pick<SpellItem, 'spec' | 'isConcentration' | 'name'>): SpellCastContext | undefined {
+  if (!spell.spec) return undefined;
+  return {
+    costSlot: spell.spec.cost?.slot || undefined,
+    concentrationName: spell.isConcentration ? spell.name : undefined,
+  };
+}
+
 export function SpellbookPanel({
   combatantName,
   spells,
@@ -171,7 +199,13 @@ export function SpellbookPanel({
     }
     const levelToSpend = castLevel ?? (spell.level > 0 ? spell.level : undefined);
     if (levelToSpend && onUpdateSlot) {
-      onUpdateSlot(levelToSpend, 1);
+      // Review fix (P1): a descriptive-but-structured spec (e.g. mode:'none' with a real
+      // cost.slot and/or uses.concentration) never reaches the resolver, so THIS is the only
+      // place its action-economy cost and concentration can be applied — see
+      // `buildSpellCastContext`. The parent sequences these before the slot spend so a cast
+      // that can't actually consume its action (e.g. already used this turn) doesn't charge
+      // a slot either.
+      onUpdateSlot(levelToSpend, 1, buildSpellCastContext(spell));
     }
   };
 
