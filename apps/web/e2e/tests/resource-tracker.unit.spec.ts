@@ -397,7 +397,29 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
     expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
-    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) return;/);
+    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) \{\s*\n\s*stuckKeysRef\.current\.add\(key\);\s*\n\s*return;\s*\n\s*\}/);
+  });
+
+  // Sixteenth-round finding (codex P2 + devin, same root cause): staying pending on a failed
+  // reconciliation (round 14) had NO escape hatch — nothing ever re-evaluated the query
+  // states afterward, so a control could stay disabled for the rest of the page's life after
+  // one transient refetch failure, even once the network/server recovered. Worse for
+  // `statblockMutation` specifically, since it forces this path on every success too, not
+  // just on an error. A query-cache subscription must release every stuck key the moment the
+  // relevant queries actually recover, without a bounded retry loop or a new UI affordance.
+  test('ResourceTrackerPanel automatically releases a stuck-pending control once the relevant queries actually recover', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/import \{ useEffect, useRef, useState \} from 'react';/);
+    expect(src).toMatch(/const stuckKeysRef = useRef<Set<string>>\(new Set\(\)\);/);
+    expect(src).toMatch(/const unsubscribe = queryClient\.getQueryCache\(\)\.subscribe\(\(\) => \{/);
+    expect(src).toMatch(/const encounterFresh = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status === 'success';/);
+    expect(src).toMatch(/const charactersFresh = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status === 'success';/);
+    expect(src).toMatch(/if \(!encounterFresh \|\| !charactersFresh\) return;/);
+    // The subscription actually releases the stuck keys from pendingKeys, not just clears
+    // its own bookkeeping.
+    expect(src).toMatch(/for \(const key of releasing\) next = removePendingKey\(next, key\);/);
+    // Cleans up the subscription on unmount.
+    expect(src).toMatch(/return unsubscribe;/);
   });
 
   // Fourteenth-round finding (codex P1 + devin, same root cause): `statblockMutation`'s CAS

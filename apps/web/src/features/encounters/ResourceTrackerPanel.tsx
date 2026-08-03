@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -127,6 +127,36 @@ export function ResourceTrackerPanel({
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set());
   const beginPending = (key: string) => setPendingKeys((prev) => addPendingKey(prev, key));
   const endPending = (key: string) => setPendingKeys((prev) => removePendingKey(prev, key));
+  // Issue #1902 rework (round 16, codex P2 + devin): a key that couldn't be confirmed
+  // reconciled (see `endPendingAfterReconciling` below) must not stay disabled FOREVER —
+  // nothing else ever re-evaluated the query states to release it, so a control could stay
+  // greyed out for the rest of the page's life after one transient refetch failure, even
+  // once the network/server recovered. Tracked in a ref (not state) since it's mutated from
+  // inside a query-cache subscription callback, not a render; `stuckKeysVersion` exists only
+  // to force a re-render when the ref's contents actually change the set of stuck keys.
+  const stuckKeysRef = useRef<Set<string>>(new Set());
+  const [, setStuckKeysVersion] = useState(0);
+  useEffect(() => {
+    // Whenever EITHER query this panel's CAS tokens/rendered values depend on transitions
+    // to a genuinely fresh, successful state, release every control that was stuck waiting
+    // for exactly that — the normal poll/SSE-triggered refetch already does this the
+    // instant connectivity recovers, with no bounded-retry loop or new UI state needed.
+    const unsubscribe = queryClient.getQueryCache().subscribe(() => {
+      if (stuckKeysRef.current.size === 0) return;
+      const encounterFresh = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status === 'success';
+      const charactersFresh = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status === 'success';
+      if (!encounterFresh || !charactersFresh) return;
+      const releasing = stuckKeysRef.current;
+      stuckKeysRef.current = new Set();
+      setStuckKeysVersion((v) => v + 1);
+      setPendingKeys((prev) => {
+        let next = prev;
+        for (const key of releasing) next = removePendingKey(next, key);
+        return next;
+      });
+    });
+    return unsubscribe;
+  }, [queryClient, encounterId, campaignId]);
   // Issue #1902 rework (round 9, widened round 12 P2): an AMBIGUOUS mutation outcome (the
   // write's response was lost — a timeout, a network drop — so the client cannot tell
   // whether it landed server-side) must NOT release the control the instant the promise
@@ -168,9 +198,16 @@ export function ResourceTrackerPanel({
       // Only release once the queries this panel's CAS tokens and rendered values depend
       // on are confirmed NOT in an error state; otherwise stay pending rather than guess —
       // the control staying disabled is the safe failure mode, not a silent double-spend.
+      // Issue #1902 rework (round 16): staying pending is not staying pending FOREVER —
+      // `key` is tracked as "stuck" so the query-cache subscription above releases it the
+      // moment either query actually recovers, rather than requiring this exact promise
+      // chain to resolve again (it never will) or the panel to remount.
       const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
       const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
-      if (!encounterOk || !charactersOk) return;
+      if (!encounterOk || !charactersOk) {
+        stuckKeysRef.current.add(key);
+        return;
+      }
     }
     endPending(key);
   };
