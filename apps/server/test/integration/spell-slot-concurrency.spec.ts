@@ -416,14 +416,20 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
    * collision — the same way `condition-columns-single-writer.spec.ts` mechanically
    * enforces its own invariant rather than relying on incidental behavioral coverage.
    */
-  it('#1902 rework (round 13): both breakConcentration sheet mirrors advance the CAS token per-character, not from one shared stamp', () => {
+  it('#1902 rework (round 13, corrected round 18): both breakConcentration sheet mirrors advance the CAS token per-character, not from one shared stamp', () => {
     const actionResolverSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/action-resolver.service.ts'), 'utf8');
     const encountersSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/encounters.service.ts'), 'utf8');
     for (const src of [actionResolverSrc, encountersSrc]) {
       // Reads the row fresh, inside the same transaction, right before using it —
       // not a pre-loop snapshot shared across every affected character.
       expect(src).toMatch(/const currentChar = tx\.select\(\{ updatedAt: characters\.updatedAt \}\)\.from\(characters\)\.where\(eq\(characters\.id, row\.characterId\)\)\.get\(\);/);
-      expect(src).toMatch(/updatedAt: nextUpdatedAt\(currentChar\?\.updatedAt \?\? now\)/);
+      expect(src).toMatch(/sheetToken = nextUpdatedAt\(currentChar\?\.updatedAt \?\? now\);/);
+      // Round 18 (codex P2): the combatant's `sheetSyncedUpdatedAt` must be stamped with
+      // the EXACT SAME token as the character's own `updatedAt`, not the shared `now` —
+      // round 13 fixed the character side but left the combatant mismatched, breaking the
+      // invariant `canWriteBackHp`/`endEncounter`'s CAS predicate both depend on.
+      expect(src).toMatch(/Object\.assign\(write, \{ sheetSyncedUpdatedAt: sheetToken \}\);/);
+      expect(src).toMatch(/updatedAt: sheetToken!/);
     }
   });
 });

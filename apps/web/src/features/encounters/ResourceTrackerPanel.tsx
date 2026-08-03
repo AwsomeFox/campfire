@@ -137,25 +137,36 @@ export function ResourceTrackerPanel({
   const stuckKeysRef = useRef<Set<string>>(new Set());
   const [, setStuckKeysVersion] = useState(0);
   useEffect(() => {
-    // Whenever EITHER query this panel's CAS tokens/rendered values depend on transitions
-    // to a genuinely fresh, successful state, release every control that was stuck waiting
-    // for exactly that — the normal poll/SSE-triggered refetch already does this the
-    // instant connectivity recovers, with no bounded-retry loop or new UI state needed.
-    const unsubscribe = queryClient.getQueryCache().subscribe(() => {
+    // Issue #1902 rework (round 18, codex P2 — corrected from round 16's passive design):
+    // watching the query CACHE for an ambient 'success' status is unsound — a DIFFERENT
+    // character's mutation calling `reconcileCharacter`/`setQueryData` on this SAME
+    // `campaignCharacters` key flips its overall status to 'success' too, even though the
+    // STUCK character's own row was never actually refetched from the server. That would
+    // release every stuck key off the back of someone else's unrelated write, letting the
+    // original action retry against genuinely still-stale RP/slot data. An ACTIVE,
+    // interval-driven `refetchQueries` call has no such ambiguity: it is always a real
+    // network round-trip, never a local cache write, so only ITS OWN resolution is
+    // trusted — a query going 'success' any other way does not count.
+    const interval = setInterval(() => {
       if (stuckKeysRef.current.size === 0) return;
-      const encounterFresh = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status === 'success';
-      const charactersFresh = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status === 'success';
-      if (!encounterFresh || !charactersFresh) return;
-      const releasing = stuckKeysRef.current;
-      stuckKeysRef.current = new Set();
-      setStuckKeysVersion((v) => v + 1);
-      setPendingKeys((prev) => {
-        let next = prev;
-        for (const key of releasing) next = removePendingKey(next, key);
-        return next;
+      void Promise.allSettled([
+        queryClient.refetchQueries({ queryKey: queryKeys.encounter(encounterId) }),
+        campaignId != null ? queryClient.refetchQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }) : Promise.resolve(),
+      ]).then(() => {
+        const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
+        const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
+        if (!encounterOk || !charactersOk) return;
+        const releasing = stuckKeysRef.current;
+        stuckKeysRef.current = new Set();
+        setStuckKeysVersion((v) => v + 1);
+        setPendingKeys((prev) => {
+          let next = prev;
+          for (const key of releasing) next = removePendingKey(next, key);
+          return next;
+        });
       });
-    });
-    return unsubscribe;
+    }, 5000);
+    return () => clearInterval(interval);
   }, [queryClient, encounterId, campaignId]);
   // Issue #1902 rework (round 9, widened round 12 P2): an AMBIGUOUS mutation outcome (the
   // write's response was lost — a timeout, a network drop — so the client cannot tell

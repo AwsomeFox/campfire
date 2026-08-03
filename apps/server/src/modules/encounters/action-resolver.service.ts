@@ -2384,21 +2384,25 @@ export class ActionResolverService {
       const row = withInstances.find((row2) => row2.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — `sheetSyncedUpdatedAt` on the
+      // combatant is defined as "the sheet's `updatedAt` at the moment of sync"
+      // (`CharactersService.syncActiveCombatants`/`updateCombatant`'s mirror both write
+      // one shared value to both rows), and `canWriteBackHp`/`endEncounter`'s CAS
+      // predicate compare it directly against the sheet's ACTUAL `updatedAt`. Round 13
+      // advanced the character's token per-character but still stamped the combatant
+      // with the shared `now` — the identical mismatch class already fixed for
+      // `endEncounter` (round 15) and `applyPartyRecovery`/`undoPartyRecovery` (round 17).
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
-        // Issue #1902 rework (round 13, codex P2): `nextUpdatedAt`, keyed off THIS
-        // character's own current row — not the shared `now` above (a `sheetSyncedUpdatedAt`
-        // stamp on the combatant, fine to share) — for the same reason every other
-        // `characters` table writer in this rework was: `updatedAt` is the CAS token
-        // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every
-        // write, and a shared/`nowIso()` stamp here could roll it BACKWARD relative to a
-        // concurrent spell-slot spend already applied to this same character.
-        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: nextUpdatedAt(currentChar?.updatedAt ?? now) })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
       }

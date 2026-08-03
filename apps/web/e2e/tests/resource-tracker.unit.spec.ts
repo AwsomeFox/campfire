@@ -411,15 +411,25 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ useEffect, useRef, useState \} from 'react';/);
     expect(src).toMatch(/const stuckKeysRef = useRef<Set<string>>\(new Set\(\)\);/);
-    expect(src).toMatch(/const unsubscribe = queryClient\.getQueryCache\(\)\.subscribe\(\(\) => \{/);
-    expect(src).toMatch(/const encounterFresh = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status === 'success';/);
-    expect(src).toMatch(/const charactersFresh = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status === 'success';/);
-    expect(src).toMatch(/if \(!encounterFresh \|\| !charactersFresh\) return;/);
-    // The subscription actually releases the stuck keys from pendingKeys, not just clears
-    // its own bookkeeping.
+    // Eighteenth-round finding (codex P2): a PASSIVE query-cache subscription (round 16)
+    // is unsound — an UNRELATED character's mutation calling `setQueryData` on the SAME
+    // `campaignCharacters` key flips its overall status to 'success' too, even though the
+    // STUCK character's own row was never actually refetched from the server. Releasing
+    // every stuck key off the back of someone else's optimistic write lets the original
+    // action retry against genuinely still-stale data. An ACTIVE, interval-driven
+    // `refetchQueries` call is unambiguous — always a real network round-trip, never a
+    // local cache write — so only ITS OWN resolution may be trusted.
+    expect(src).toMatch(/const interval = setInterval\(\(\) => \{/);
+    expect(src).toMatch(/queryClient\.refetchQueries\(\{ queryKey: queryKeys\.encounter\(encounterId\) \}\)/);
+    expect(src).toMatch(/campaignId != null \? queryClient\.refetchQueries\(\{ queryKey: queryKeys\.campaignCharacters\(campaignId\) \}\)/);
+    expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
+    expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
+    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) return;/);
+    // The interval actually releases the stuck keys from pendingKeys, not just clears its
+    // own bookkeeping.
     expect(src).toMatch(/for \(const key of releasing\) next = removePendingKey\(next, key\);/);
-    // Cleans up the subscription on unmount.
-    expect(src).toMatch(/return unsubscribe;/);
+    // Cleans up the interval on unmount.
+    expect(src).toMatch(/return \(\) => clearInterval\(interval\);/);
   });
 
   // Fourteenth-round finding (codex P1 + devin, same root cause): `statblockMutation`'s CAS

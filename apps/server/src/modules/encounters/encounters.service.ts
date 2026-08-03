@@ -8232,17 +8232,21 @@ export class EncountersService {
       const row = withInstances.find((r) => r.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — see the matching fix (and its
+      // fuller doc comment) in `action-resolver.service.ts`'s `breakConcentration` for why
+      // the combatant's `sheetSyncedUpdatedAt` and the character's own `updatedAt` must be
+      // the EXACT same value.
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
-        // Issue #1902 rework (round 13, codex P2): `nextUpdatedAt`, keyed off THIS
-        // character's own current row — see the matching fix (and its fuller doc comment)
-        // in `action-resolver.service.ts`'s `breakConcentration`.
-        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: nextUpdatedAt(currentChar?.updatedAt ?? now) })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
       }
