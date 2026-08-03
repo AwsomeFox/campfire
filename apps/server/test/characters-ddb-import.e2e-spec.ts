@@ -458,6 +458,46 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summary.textOnly).toContain('Mystery Breath');
   });
 
+  // Regression for a PR #1950 review finding: `expandRawStatblockAction` (via
+  // `savingThrowFrom` in packages/schema/src/combatant-statblock.ts) falls back to scanning
+  // the free-text description for a "DC N Ability" phrase when no explicit save is given —
+  // and DDB feature descriptions very commonly contain exactly that phrasing. Without an
+  // explicit "do not infer" signal, a feature this importer had already decided must be
+  // text-only (unresolvable save ability, or an activation type with no representable
+  // action-economy slot) could still come back with a resolvable save spec derived purely
+  // from prose, silently resolving against the wrong turn resource and never appearing in
+  // `summary.textOnly` (since `isResolvableSpec` would be true).
+  it('a DC phrase in the description does not resurrect a save spec for an entry forced text-only', () => {
+    const dcPhraseDesc = 'Each creature in the area must make a DC 13 Dexterity saving throw or take damage.';
+    // Case 1: fixedSaveDc present but saveStatId missing/unresolvable.
+    const unresolvableAbility = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Mystery Breath With Prose', fixedSaveDc: 15, description: dcPhraseDesc }] },
+    });
+    expect(unresolvableAbility.actions?.find((a) => a.name === 'Mystery Breath With Prose')?.spec).toBeUndefined();
+    expect(summarizeDdbImport(unresolvableAbility).textOnly).toContain('Mystery Breath With Prose');
+
+    // Case 2: attackTypeRange + resolvable ability, but an activation type with no
+    // representable action-economy slot (2 = no action).
+    const unmappedActivation = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [
+          {
+            name: 'No-Action Strike With Prose',
+            attackTypeRange: 5,
+            abilityModifierStatId: 1,
+            activation: { activationType: 2 },
+            description: dcPhraseDesc,
+          },
+        ],
+      },
+    });
+    expect(unmappedActivation.actions?.find((a) => a.name === 'No-Action Strike With Prose')?.spec).toBeUndefined();
+    expect(summarizeDdbImport(unmappedActivation).textOnly).toContain('No-Action Strike With Prose');
+  });
+
   // Regression for a PR #1950 review finding: an attack-shaped feature's `spec.cost.slot`
   // was hardcoded to 'action' regardless of the feature's real DDB activation type, so an
   // imported reaction or bonus-action feature would consume the actor's ACTION when

@@ -752,8 +752,18 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // Same principle for a save DC: a missing/unrecognized saveStatId must not default to
       // DEX — that's inventing which ability the target saves with, which resolution would
       // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
+      //
+      // The "no save" value here is explicit `null`, not `undefined` (review finding on PR
+      // #1950 round 10): `expandRawStatblockAction` -> `savingThrowFrom` falls back to
+      // scanning the free-text `desc` for a "DC N Ability" phrase when no explicit save is
+      // given, and DDB feature descriptions very commonly contain exactly that phrasing —
+      // "...must make a DC 13 Dexterity saving throw...". An `undefined` here would let that
+      // description-text scan silently resurrect a resolvable (and wrongly action-economy-
+      // costed) save spec for an entry this importer has deliberately decided is unresolvable.
+      // `savingThrowFrom` treats explicit `null` as "do not infer at all."
       const saveAbilityKey = item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined;
-      let savingThrow = typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : undefined;
+      let savingThrow: { dc: number; ability: string } | null =
+        typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : null;
       // Same principle a third time for action economy (review finding on PR #1950 round 8):
       // an activation type this importer can't map to a real action-economy slot (see
       // featureActionSource) must not silently spend the actor's ordinary action either —
@@ -761,7 +771,7 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       const source = featureActionSource(item);
       if (source === null) {
         attackBonus = null;
-        savingThrow = undefined;
+        savingThrow = null;
       }
       out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, source ?? 'action', 'dnd5e'));
     }
