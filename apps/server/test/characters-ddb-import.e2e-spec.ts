@@ -815,6 +815,65 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(fine.actions?.find((a) => a.name === 'Fine Value Strike')?.spec).toBeDefined();
   });
 
+  // Regression for a PR #1950 review finding: DDB's `dice` field for an attack-shaped
+  // feature does NOT include the governing ability modifier — the sheet renders e.g.
+  // "1d6+3" by combining `dice` with `abilityModifierStatId` separately, the same
+  // convention `computeWeaponActions` already accounts for. Without folding the modifier
+  // into the damage flat here too, an imported feature's to-hit was correct but its damage
+  // was short by the ability modifier.
+  it('an attack-shaped feature folds the ability modifier into its damage, not just its to-hit', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }], // STR 16 -> +3 modifier
+      actions: {
+        class: [{ name: 'Unarmed Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 1 } }],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Unarmed Strike');
+    expect(feature?.spec).toBeDefined();
+    expect(feature?.damage).toBe('1d6+3');
+  });
+
+  // Regression for a PR #1950 review finding: `DamagePart.formula` is a plain
+  // `z.string().max(60)` with no dice-notation validation, so a malformed die (e.g. "2d7" —
+  // a real-shaped but nonexistent die) passed through as a resolvable action, never flagged
+  // in `summary.textOnly`, and would only fail later at 400 when the resolver actually
+  // tried to roll it. Validated against the same grammar the resolver enforces.
+  it('an invalid die notation lands text-only instead of a spec that fails only when used', () => {
+    const attackShaped = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [{ name: 'Bad Die Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '2d7' }, activation: { activationType: 1 } }],
+      },
+    });
+    const attackFeature = attackShaped.actions?.find((a) => a.name === 'Bad Die Strike');
+    expect(attackFeature).toBeDefined();
+    expect(attackFeature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(attackShaped).textOnly).toContain('Bad Die Strike');
+
+    const saveShaped = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: {
+        class: [{ name: 'Bad Die Breath', fixedSaveDc: 15, saveStatId: 2, dice: { diceString: 'notadie' }, activation: { activationType: 1 } }],
+      },
+    });
+    const saveFeature = saveShaped.actions?.find((a) => a.name === 'Bad Die Breath');
+    expect(saveFeature).toBeDefined();
+    expect(saveFeature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(saveShaped).textOnly).toContain('Bad Die Breath');
+
+    // A confirmed, valid die is unaffected.
+    const fine = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [{ name: 'Fine Die Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d8' }, activation: { activationType: 1 } }],
+      },
+    });
+    expect(fine.actions?.find((a) => a.name === 'Fine Die Strike')?.spec).toBeDefined();
+  });
+
   // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.
   // A fractional `definition.level` like 1.5 passed the earlier range check and reached
   // `CharacterAction.parse` unvalidated, throwing an uncaught ZodError that aborted the

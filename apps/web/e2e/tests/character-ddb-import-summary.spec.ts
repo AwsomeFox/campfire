@@ -198,4 +198,67 @@ test.describe('D&D Beyond import summary stays visible until dismissed (issue #1
     await doneBtn.click();
     await expect(summaryPanel).toHaveCount(0);
   });
+
+  // Regression for a PR #1950 review finding: while a DDB import is in flight,
+  // `importSummary` is still null, so the manual-create form (Cancel + Create buttons)
+  // stays rendered underneath the "Importing…" state. Clicking Cancel there unmounts the
+  // component while the import's POST can still create a character server-side — the
+  // eventual `setImportSummary` call lands on an unmounted component, discarding the
+  // summary; submitting the manual form concurrently can create a second character. Both
+  // controls must be disabled while `importing` is true.
+  test('manual-create Cancel/Create controls are disabled while a DDB import is pending', async ({ page, baseURL }) => {
+    const campaignRes = await page.request.post('/api/v1/campaigns', {
+      data: { name: `1903 DDB Import Pending ${Date.now()}` },
+    });
+    expect(campaignRes.ok()).toBe(true);
+    const campaign = (await campaignRes.json()) as { id: number; [key: string]: unknown };
+    const campaignId = campaign.id;
+
+    const seedRes = await page.request.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Existing PC', className: 'Fighter', level: 1 },
+    });
+    expect(seedRes.ok()).toBe(true);
+
+    await page.route(`${baseURL}/api/v1/campaigns`, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const res = await route.fetch();
+      const list = (await res.json()) as Array<{ id: number; [key: string]: unknown }>;
+      const patched = list.map((c) => (c.id === campaignId ? { ...c, ruleSystem: 'open5e-srd' } : c));
+      await route.fulfill({ response: res, json: patched });
+    });
+
+    // Artificially slow the import response so the "importing" window is observable.
+    const importPath = `/api/v1/campaigns/${campaignId}/characters/import-ddb`;
+    await page.route(`${baseURL}${importPath}`, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          character: { id: 999999, name: 'Imported Hero', className: 'Fighter', level: 5, status: 'active' },
+          summary: { actionsImported: 0, spellsImported: 0, spellSlotsImported: false, textOnly: [] },
+        }),
+      });
+    });
+
+    await page.goto(`/c/${campaignId}/party?action=new`);
+
+    const ddbInput = page.getByLabel('D&D Beyond character id or URL');
+    await expect(ddbInput).toBeVisible();
+    await ddbInput.fill('123456');
+    await page.getByRole('button', { name: 'Import' }).click();
+
+    // While the import is in flight (the manual form is still rendered underneath), the
+    // manual Cancel and Create controls must both be disabled.
+    const cancelBtn = page.getByRole('button', { name: 'Cancel' });
+    await expect(cancelBtn).toBeVisible();
+    await expect(cancelBtn).toBeDisabled();
+    const createBtn = page.getByRole('button', { name: /^Create/ });
+    await expect(createBtn).toBeVisible();
+    await expect(createBtn).toBeDisabled();
+
+    // Once the import resolves, the manual form is replaced by the summary panel.
+    const summaryPanel = page.getByRole('status');
+    await expect(summaryPanel).toBeVisible();
+  });
 });

@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { z } from 'zod';
 import type { CharacterCreate, CharacterAction as CharacterActionType, DdbImportSummary } from '@campfire/schema';
 import { CharacterAction, expandRawStatblockAction, isResolvableSpec } from '@campfire/schema';
+import { parseDiceExpr } from '../../common/dice';
 
 /**
  * Unofficial, READ-ONLY importer for PUBLIC D&D Beyond character sheets (issue #18).
@@ -775,14 +776,41 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // GUESSED to-hit as a confident, resolvable number (and the summary would never flag
       // it, since it has a `spec`). Leave attackBonus null so it lands text-only instead.
       let attackBonus: number | null = null;
+      // Kept alongside attackBonus (review finding on PR #1950 round 14) — DDB's `dice`
+      // field for an attack-shaped feature (an unarmed strike, martial-arts strike, etc.)
+      // does NOT include the governing ability modifier; the sheet renders e.g. "1d6+3" by
+      // combining `dice` with `abilityModifierStatId` separately, the same convention
+      // `computeWeaponActions` already accounts for (its damage expression folds in
+      // `abilityModifier` explicitly). Without also folding it in here, an imported
+      // attack-shaped feature's to-hit was correct but its damage was short by the ability
+      // modifier.
+      let abilityModifier: number | null = null;
       if (item.attackTypeRange != null) {
         const abilityKey = item.abilityModifierStatId != null ? ABILITY_ID_TO_KEY[item.abilityModifierStatId] : undefined;
         const abilityScore = abilityKey ? stats[abilityKey] : undefined;
         if (typeof abilityScore === 'number') {
-          attackBonus = abilityMod(abilityScore) + proficiencyBonus;
+          abilityModifier = abilityMod(abilityScore);
+          attackBonus = abilityModifier + proficiencyBonus;
         }
       }
-      const diceString = item.dice && typeof item.dice.diceString === 'string' ? item.dice.diceString.trim() : '';
+      const rawDiceString = item.dice && typeof item.dice.diceString === 'string' ? item.dice.diceString.trim() : '';
+      // A malformed die notation (e.g. "2d7" — a real-shaped-but-nonexistent die, or
+      // arbitrary text) passes `DamagePart.formula`'s plain `z.string().max(60)` schema
+      // untouched, so the entry was still marked resolvable and never flagged in
+      // `summary.textOnly` — it only fails later at 400 when the resolver's `rollDice`
+      // actually tries to roll it (review finding on PR #1950 round 14). Validate against
+      // the SAME grammar the resolver enforces (`parseDiceExpr`, apps/server/src/common/
+      // dice.ts) rather than inventing a separate check that could drift from it.
+      let invalidDice = false;
+      let diceString = '';
+      if (rawDiceString) {
+        try {
+          parseDiceExpr(rawDiceString);
+          diceString = rawDiceString;
+        } catch {
+          invalidDice = true;
+        }
+      }
       // `DamagePart.flat` (packages/schema/src/action-resolver.ts) is
       // `z.number().int().min(-999).max(999)` — a sparse/malformed sheet's flat `value` of
       // e.g. 1000 would reach `ActionSpec.parse` unvalidated and throw an uncaught ZodError,
@@ -794,14 +822,14 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // silently embedding a broken formula.
       const rawFlat = item.value;
       const invalidFlat = typeof rawFlat === 'number' && (!Number.isInteger(rawFlat) || rawFlat < -999 || rawFlat > 999);
-      const flat = typeof rawFlat === 'number' && !invalidFlat ? rawFlat : 0;
+      const flat = (typeof rawFlat === 'number' && !invalidFlat ? rawFlat : 0) + (attackBonus !== null ? (abilityModifier ?? 0) : 0);
       // An attack-shaped feature with no representable outcome — no dice at all (e.g. a
-      // grapple/stun/control feature), or a flat value that failed validation above — would
-      // otherwise still get a resolvable spec with EMPTY outcomes: using it spends the action
-      // and rolls to-hit but applies nothing (review finding on PR #1950 round 13, the
-      // feature-level counterpart to round 11's weapon fix). Force text-only instead. A
-      // save-shaped feature with no damage is unaffected below — many conditions/effects
-      // legitimately have no damage component at all.
+      // grapple/stun/control feature), an invalid die notation, or a flat value that failed
+      // validation above — would otherwise still get a resolvable spec with EMPTY outcomes:
+      // using it spends the action and rolls to-hit but applies nothing (review finding on
+      // PR #1950 round 13, the feature-level counterpart to round 11's weapon fix). Force
+      // text-only instead. A save-shaped feature with no damage is unaffected below — many
+      // conditions/effects legitimately have no damage component at all.
       if (attackBonus !== null && (!diceString || invalidFlat)) {
         attackBonus = null;
       }
@@ -849,10 +877,12 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
         savingThrow = null;
       }
       // A save-shaped feature carrying a flat value that failed the DamagePart validation
-      // above (review finding on PR #1950 round 13) must not resolve either — a save spec
-      // paired with a damage expression built from an invalid flat would embed the same
-      // crash/broken-formula risk described above.
-      if (invalidFlat) {
+      // above (review finding on PR #1950 round 13), or an invalid die notation (round 14),
+      // must not resolve either — a save spec paired with a broken damage expression would
+      // embed the same crash/broken-formula risk described above. A save-shaped feature that
+      // simply never HAD dice (`invalidDice` stays false when `rawDiceString` was empty) is
+      // unaffected — many conditions/effects legitimately have no damage component.
+      if (invalidFlat || invalidDice) {
         savingThrow = null;
       }
       out.push(

@@ -106,6 +106,11 @@ export function NewCharacterForm({
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    // A DDB import already in flight must not race with a manual-create submit (review
+    // finding on PR #1950 round 14) — pressing Enter in a text field triggers the form's
+    // implicit submit regardless of the visible button's disabled state, so this guard is
+    // needed in addition to (not instead of) disabling the button below.
+    if (importing) return;
     if (!name.trim()) return;
     setSaving(true);
     setError(null);
@@ -331,11 +336,17 @@ export function NewCharacterForm({
 
         <div className="flex gap-2 justify-end">
           {onCancel && (
-            <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+            // `|| importing` (review finding on PR #1950 round 14): while a DDB import is in
+            // flight, `importSummary` is still null, so this manual-create form stays
+            // rendered underneath the "Importing…" state. Without this, Cancel unmounts the
+            // component while the import's POST can still create a character server-side —
+            // the eventual `setImportSummary` call lands on an unmounted component, and the
+            // summary is lost.
+            <Btn ghost type="button" onClick={onCancel} disabled={saving || importing}>
               Cancel
             </Btn>
           )}
-          <Btn type="submit" disabled={saving || !name.trim()}>
+          <Btn type="submit" disabled={saving || importing || !name.trim()}>
             {saving ? 'Creating…' : path === 'blank' ? 'Create blank draft' : 'Create from template'}
           </Btn>
         </div>
