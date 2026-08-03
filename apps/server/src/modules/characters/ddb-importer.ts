@@ -662,8 +662,27 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
     }
     const abilityKey = weaponAbilityKey(def, stats);
     const abilityScore = stats[abilityKey];
-    const diceString = def.damage && typeof def.damage.diceString === 'string' ? def.damage.diceString.trim() : '';
-    const damageType = typeof def.damageType === 'string' ? def.damageType.toLowerCase() : '';
+    const rawWeaponDiceString = def.damage && typeof def.damage.diceString === 'string' ? def.damage.diceString.trim() : '';
+    // Validated the same way as `computeFeatureActions`' dice string (review finding on PR
+    // #1950 round 15) — a non-standard/garbage `diceString` (e.g. "2d7") would otherwise still
+    // build a resolvable-looking attack whose formula only fails when the resolver actually
+    // rolls it, and an over-60-char string would make `ActionSpec.parse` throw an uncaught
+    // ZodError, aborting the whole import (`DamagePart.formula` is `z.string().max(60)`).
+    let diceString = '';
+    if (rawWeaponDiceString) {
+      try {
+        parseDiceExpr(rawWeaponDiceString);
+        diceString = rawWeaponDiceString;
+      } catch {
+        diceString = '';
+      }
+    }
+    // `DamagePart.type` is `z.string().max(24)` — an implausibly long `damageType` string
+    // would also throw at `ActionSpec.parse` (same review finding). Real DDB damage types are
+    // short English words ("Slashing", "Piercing", …), so this is a defensive bound rather
+    // than an expected real-world case.
+    const rawDamageType = typeof def.damageType === 'string' ? def.damageType.toLowerCase() : '';
+    const damageType = rawDamageType.length <= 24 ? rawDamageType : '';
     if (typeof abilityScore !== 'number') {
       // Same "never fabricate a resolvable spec" principle as the magic-weapon and
       // feature-action cases: a missing governing ability score must not silently default
@@ -697,10 +716,12 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
       // resolvable attack spec with an empty `outcomes` object: rolling it hits but applies no
       // damage, silently losing whatever non-damage effect the real weapon has (the net
       // restrains on a hit). Leave it text-only instead of presenting a to-hit-only action as
-      // a confident, complete resolution of the weapon's real effect.
+      // a confident, complete resolution of the weapon's real effect. An invalid die notation
+      // (round 15, `rawWeaponDiceString` was non-empty but failed `parseDiceExpr`) reaches
+      // this same branch (`diceString` is reset to `''` above), covering both cases.
       out.push(
         expandRawStatblockAction(
-          { name, desc: 'This weapon has no damage dice on the sheet — check its real effect (e.g. a net) and resolve manually.', attackBonus: null },
+          { name, desc: 'This weapon has no usable damage dice on the sheet — check its real effect and resolve manually.', attackBonus: null },
           'attack',
           'dnd5e',
         ),
@@ -828,8 +849,9 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // validation above — would otherwise still get a resolvable spec with EMPTY outcomes:
       // using it spends the action and rolls to-hit but applies nothing (review finding on
       // PR #1950 round 13, the feature-level counterpart to round 11's weapon fix). Force
-      // text-only instead. A save-shaped feature with no damage is unaffected below — many
-      // conditions/effects legitimately have no damage component at all.
+      // text-only instead. A save-shaped feature with the same gap is handled symmetrically
+      // below (round 15 — see that comment for why "many conditions have no damage" isn't a
+      // good enough reason to keep it resolvable).
       if (attackBonus !== null && (!diceString || invalidFlat)) {
         attackBonus = null;
       }
@@ -877,12 +899,17 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
         savingThrow = null;
       }
       // A save-shaped feature carrying a flat value that failed the DamagePart validation
-      // above (review finding on PR #1950 round 13), or an invalid die notation (round 14),
-      // must not resolve either — a save spec paired with a broken damage expression would
-      // embed the same crash/broken-formula risk described above. A save-shaped feature that
-      // simply never HAD dice (`invalidDice` stays false when `rawDiceString` was empty) is
-      // unaffected — many conditions/effects legitimately have no damage component.
-      if (invalidFlat || invalidDice) {
+      // above (review finding on PR #1950 round 13), an invalid die notation (round 14), or
+      // no damage dice at all (round 15 — CORRECTING round 13/14's own reasoning here, which
+      // argued a save-shaped feature with no damage should stay resolvable since "many
+      // conditions/effects legitimately have no damage component"; the flaw in that argument
+      // is that `expandRawStatblockAction`'s save branch has no way to encode a non-damage
+      // effect either — `outcomes` is simply `{}` when there's no damage — so the "resolvable"
+      // spec rolls the save and then does nothing, identical in kind to the outcome-free
+      // attack case round 13 already forces text-only) must not resolve — a save spec with no
+      // representable outcome, or one paired with a broken damage expression, would either
+      // silently under-deliver or embed the same crash/broken-formula risk described above.
+      if (invalidFlat || invalidDice || !diceString) {
         savingThrow = null;
       }
       out.push(

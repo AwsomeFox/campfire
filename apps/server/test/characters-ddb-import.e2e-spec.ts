@@ -725,10 +725,11 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       expect(summarizeDdbImport(c).textOnly).toContain('Bad DC Breath');
     }
     // A confirmed, in-range integer DC is unaffected (activationType:1 so the entry also
-    // clears the round-8 activation-economy gate and actually resolves).
+    // clears the round-8 activation-economy gate; `dice` so it also clears the round-15
+    // outcome-free-save gate and actually resolves).
     const fine = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
-      actions: { class: [{ name: 'Fine DC Breath', fixedSaveDc: 15, saveStatId: 2, activation: { activationType: 1 } }] },
+      actions: { class: [{ name: 'Fine DC Breath', fixedSaveDc: 15, saveStatId: 2, dice: { diceString: '2d6' }, activation: { activationType: 1 } }] },
     });
     expect(fine.actions?.find((a) => a.name === 'Fine DC Breath')?.spec).toBeDefined();
   });
@@ -872,6 +873,75 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       },
     });
     expect(fine.actions?.find((a) => a.name === 'Fine Die Strike')?.spec).toBeDefined();
+  });
+
+  // Regression for a PR #1950 review finding: a save-shaped feature with a valid DC and
+  // ability but NO damage dice (e.g. a Turn-Undead-shaped, condition-only feature) used to
+  // still get a resolvable save spec with EMPTY outcomes — using it spends the action and
+  // rolls the save, but nothing is automated afterward (no damage, no effect application),
+  // and the summary never flags it as needing a manual touch-up. Symmetric with round 13's
+  // identical fix for the attack-shaped case.
+  it('a save-shaped feature with no damage dice lands text-only instead of an outcome-free spec', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Turn Undead', fixedSaveDc: 15, saveStatId: 5, activation: { activationType: 1 } }] },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Turn Undead');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Turn Undead');
+  });
+
+  // Regression for a PR #1950 review finding: `computeWeaponActions` handed its dice string
+  // and damage type to `expandRawStatblockAction` verbatim, unlike `computeFeatureActions`
+  // (round 14), which validates its dice against the resolver's own grammar. An invalid
+  // weapon `diceString` (e.g. "2d7") built a resolvable-looking attack that only fails when
+  // actually rolled, and was never flagged in `summary.textOnly`.
+  it('a weapon with an invalid die notation lands text-only instead of a spec that fails only when used', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      inventory: [{ equipped: true, definition: { name: 'Bad Die Sword', filterType: 'Weapon', attackType: 1, damage: { diceString: '2d7' }, damageType: 'Slashing' } }],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Bad Die Sword');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Bad Die Sword');
+
+    // A confirmed, valid weapon die is unaffected.
+    const fine = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      inventory: [{ equipped: true, definition: { name: 'Fine Sword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' } }],
+    });
+    expect(fine.actions?.find((a) => a.name === 'Fine Sword')?.spec).toBeDefined();
+  });
+
+  // Regression for a PR #1950 review finding (Devin): `DamagePart.type` is `z.string().max(24)`.
+  // DDB's `damageType` is normally a short display string ("Slashing"), but an implausibly
+  // long value reaching `CharacterAction.parse` unguarded would throw a ZodError and abort
+  // the whole import rather than degrading just that weapon.
+  it('an implausibly long damage type does not crash the import', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      inventory: [
+        {
+          equipped: true,
+          definition: {
+            name: 'Verbose Sword',
+            filterType: 'Weapon',
+            attackType: 1,
+            damage: { diceString: '1d8' },
+            damageType: 'a'.repeat(40),
+          },
+        },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Verbose Sword');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeDefined();
+    expect(weapon?.spec?.outcomes?.hit?.damage?.[0]?.type).toBe('');
   });
 
   // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.
