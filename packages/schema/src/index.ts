@@ -740,10 +740,20 @@ export function isKnownCondition(vocab: readonly string[], name: string): boolea
   if (!needle) return false;
   return vocab.some((c) => c.toLowerCase() === needle);
 }
-/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+/**
+ * Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot
+ * maxima are edited via PATCH `spellSlots`. `expectedUpdatedAt` is the same optimistic-
+ * concurrency guard as {@link ExpectedUpdatedAt} everywhere else (issue #1902 rework): a
+ * `delta` is meaningless without knowing what it is relative to, so a caller that read
+ * `used` from a render and echoes back the character's `updatedAt` at that moment gets a
+ * 409 instead of a silently-misapplied delta if another client changed the sheet (this
+ * slot or otherwise) in between. Omitted => unconditional write, matching every other
+ * caller of this contract (AI DM/MCP tools included) exactly as before.
+ */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
 /**

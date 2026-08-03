@@ -14,6 +14,11 @@ import {
   spellSlotPatchBody,
   canEditCharacterResource,
   hasTrackedResources,
+  restPendingKey,
+  resourcePendingKey,
+  slotPendingKey,
+  pendingResourceKeys,
+  type PipOwnerScope,
 } from './resourceTrackerLogic';
 
 function Pips({
@@ -140,20 +145,28 @@ export function ResourceTrackerPanel({
       level,
       currentUsed,
       used,
+      expectedUpdatedAt,
     }: {
       characterId: number;
       level: number;
       currentUsed: number;
       used: number;
+      expectedUpdatedAt: string;
     }) =>
-      api.post<Character>(`${API}/characters/${characterId}/spell-slots`, spellSlotPatchBody(level, currentUsed, used)),
+      api.post<Character>(
+        `${API}/characters/${characterId}/spell-slots`,
+        spellSlotPatchBody(level, currentUsed, used, expectedUpdatedAt),
+      ),
     // Issue #1902 rework: `spellSlotPatchBody` sends a DELTA relative to the `used` value
-    // rendered on screen. If we waited for `invalidate()`'s background refetch to land
-    // before trusting `slot.used` again, a second click in that window would compute its
-    // delta against the stale pre-write value and over/under-shoot the server's true
-    // count. The POST response IS the fresh character (server-authoritative `spellSlots`),
-    // so write it into the cache synchronously, before the query has any chance to be read
-    // again — this closes the race without a debounce or a second round-trip.
+    // rendered on screen, protected by `expectedUpdatedAt` (a real server-side
+    // compare-and-set — see that function's doc comment; a click-timing guard alone
+    // cannot protect against an EXTERNAL write between render and request). If we waited
+    // for `invalidate()`'s background refetch to land before trusting `slot.used` again,
+    // a second click on THIS client in that window would also compute its delta against
+    // the stale pre-write value. The POST response IS the fresh character
+    // (server-authoritative `spellSlots`), so write it into the cache synchronously,
+    // before the query has any chance to be read again — this closes that second-order
+    // race too, without a debounce or a second round-trip.
     onSuccess: (updated) => {
       setError(null);
       if (campaignId != null) {
@@ -180,6 +193,10 @@ export function ResourceTrackerPanel({
       // statblock spell-slot pips. `kind` lets `onError` pick the fallback message that
       // matches which control actually failed, instead of always reporting "resource".
       kind: 'resource' | 'slot';
+      // Issue #1902 rework (round 4): the resource `key` or spell-slot `level` (as a
+      // string) this write targets, so `pendingResourceKeys` can scope the pending state
+      // to the one pip that's actually in flight rather than every pip on this combatant.
+      targetKey: string;
     }) => api.patch(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
     onSuccess: () => {
       setError(null);
@@ -193,8 +210,16 @@ export function ResourceTrackerPanel({
     },
   });
 
-  const isPending =
-    restMutation.isPending || resourceMutation.isPending || slotMutation.isPending || statblockMutation.isPending;
+  // Issue #1902 rework (round 4): scoped per-control pending state — see
+  // `pendingResourceKeys`'s doc comment for why a blanket OR of all four mutations'
+  // `isPending` was disabling every combatant's controls for the duration of any single
+  // in-flight write anywhere in the panel.
+  const pendingKeys = pendingResourceKeys({
+    rest: { isPending: restMutation.isPending, variables: restMutation.variables },
+    resource: { isPending: resourceMutation.isPending, variables: resourceMutation.variables },
+    slot: { isPending: slotMutation.isPending, variables: slotMutation.variables },
+    statblock: { isPending: statblockMutation.isPending, variables: statblockMutation.variables },
+  });
 
   const rows = combatants
     .map((c) => {
@@ -210,6 +235,12 @@ export function ResourceTrackerPanel({
       // `rpCurrent < 1` guard CharacterPage's RestControls already applies, so this
       // panel doesn't offer a rest button the server is guaranteed to reject.
       let rpCurrent: number | undefined;
+      // The character sheet's `updatedAt` at render time (issue #1902 rework, round 4) —
+      // echoed back as `expectedUpdatedAt` on a spell-slot write so the server can reject
+      // a delta computed against state another client has since changed. Statblock-only
+      // combatants have no sheet, so no CAS token; that write path isn't delta-based
+      // anyway (it PATCHes the whole statblock object).
+      let updatedAt: string | undefined;
 
       if (c.kind === 'character' && c.characterId) {
         const char = characters.find((ch) => ch.id === c.characterId);
@@ -217,6 +248,7 @@ export function ResourceTrackerPanel({
           resources = char.resources;
           spellSlots = char.spellSlots;
           rpCurrent = char.rpCurrent;
+          updatedAt = char.updatedAt;
         }
       } else if (c.statblock) {
         const sb = c.statblock as unknown as Record<string, unknown>;
@@ -232,7 +264,11 @@ export function ResourceTrackerPanel({
         encounterWritable,
       });
 
-      return { combatant: c, name, resources, spellSlots, canEdit, rpCurrent };
+      // Issue #1902 rework (round 4): which pending-key namespace this row's writes fall
+      // into — the character sheet if linked, else this statblock combatant itself.
+      const scope: PipOwnerScope = c.kind === 'character' && c.characterId != null ? { characterId: c.characterId } : { combatantId: c.id };
+
+      return { combatant: c, name, resources, spellSlots, canEdit, rpCurrent, updatedAt, scope };
     })
     .filter((row) => hasTrackedResources(row.resources, row.spellSlots));
 
@@ -254,7 +290,7 @@ export function ResourceTrackerPanel({
       )}
 
       <div className="space-y-4 max-h-96 overflow-y-auto">
-        {rows.map(({ combatant: c, name, resources, spellSlots, canEdit, rpCurrent }) => (
+        {rows.map(({ combatant: c, name, resources, spellSlots, canEdit, rpCurrent, updatedAt, scope }) => (
           <div key={c.id} className="border-t pt-2 mt-2 first:mt-0 first:border-0 first:pt-0">
             <div className="flex items-center justify-between mb-2 gap-2">
               <div className="font-medium">{name}</div>
@@ -264,7 +300,7 @@ export function ResourceTrackerPanel({
                     <Btn
                       key={opt.type}
                       density="compact"
-                      disabled={isPending || (opt.type === 'stamina' && rpCurrent != null && rpCurrent < 1)}
+                      disabled={pendingKeys.has(restPendingKey(c.characterId as number)) || (opt.type === 'stamina' && rpCurrent != null && rpCurrent < 1)}
                       title={opt.description}
                       onClick={() => {
                         if (!window.confirm(t('encounters.resourceTracker.confirmRest', { name, kind: opt.label, defaultValue: `${opt.label} for ${name}?` }))) return;
@@ -294,7 +330,7 @@ export function ResourceTrackerPanel({
                       <Pips
                         max={res.max}
                         used={res.used}
-                        disabled={!canEdit || isPending}
+                        disabled={!canEdit || pendingKeys.has(resourcePendingKey(scope, key))}
                         onChange={(val) => {
                           if (!canEdit) return;
                           if (c.kind === 'character' && c.characterId) {
@@ -305,6 +341,7 @@ export function ResourceTrackerPanel({
                               combatantId: c.id,
                               statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } },
                               kind: 'resource',
+                              targetKey: key,
                             });
                           }
                         }}
@@ -324,17 +361,26 @@ export function ResourceTrackerPanel({
                     <Pips
                       max={slot.max}
                       used={slot.used}
-                      disabled={!canEdit || isPending}
+                      disabled={!canEdit || pendingKeys.has(slotPendingKey(scope, Number(level)))}
                       onChange={(val) => {
                         if (!canEdit) return;
                         if (c.kind === 'character' && c.characterId) {
-                          slotMutation.mutate({ characterId: c.characterId, level: Number(level), currentUsed: slot.used, used: val });
+                          slotMutation.mutate({
+                            characterId: c.characterId,
+                            level: Number(level),
+                            currentUsed: slot.used,
+                            used: val,
+                            // Always set together with `spellSlots` from the same `char`
+                            // read in the row builder above — see that comment.
+                            expectedUpdatedAt: updatedAt as string,
+                          });
                         } else if (c.statblock) {
                           const sb = c.statblock as unknown as Record<string, unknown>;
                           statblockMutation.mutate({
                             combatantId: c.id,
                             statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } },
                             kind: 'slot',
+                            targetKey: level,
                           });
                         }
                       }}

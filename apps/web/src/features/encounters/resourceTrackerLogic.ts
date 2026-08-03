@@ -32,13 +32,30 @@ export function resourcePatchBody(key: string, nextUsed: number): Pick<ResourceP
 
 /**
  * Body for `POST /characters/:id/spell-slots` — `SpellSlotPatch.strict()` is
- * `{ level, delta }`, not `{ [level]: { used, max } }`. `delta` is relative to the
- * slot's current `used`, so the panel (which only knows the target `used`) must convert.
- * Typed against the shared `SpellSlotPatch` contract for the same reason as
- * {@link resourcePatchBody}.
+ * `{ level, delta, expectedUpdatedAt? }`, not `{ [level]: { used, max } }`. `delta` is
+ * relative to the slot's current `used`, so the panel (which only knows the target
+ * `used`) must convert. Typed against the shared `SpellSlotPatch` contract for the same
+ * reason as {@link resourcePatchBody}.
+ *
+ * `delta` alone is NOT enough to protect this write from a concurrent change (issue #1902
+ * rework, third review pass on this exact defect): if another client spends or restores
+ * this slot between when THIS client last rendered `currentUsed` and when this request
+ * arrives, the server would apply this delta on top of a value the caller never saw. The
+ * round-1 fix (reconciling the query cache from a mutation's own response) closes the gap
+ * between one client's OWN successive clicks, but cannot protect against an external
+ * write — there is no "own response" to reconcile from until AFTER the race has already
+ * either landed correctly or corrupted the count. `expectedUpdatedAt` (the character's
+ * `updatedAt` at the moment `currentUsed` was read) makes the server verify nothing else
+ * changed the sheet first: a mismatch is rejected with 409 `STALE_WRITE` instead of being
+ * silently mis-applied. This is a real compare-and-set, not a client-side mitigation.
  */
-export function spellSlotPatchBody(level: number, currentUsed: number, nextUsed: number): SpellSlotPatch {
-  const body: SpellSlotPatch = { level, delta: nextUsed - currentUsed };
+export function spellSlotPatchBody(
+  level: number,
+  currentUsed: number,
+  nextUsed: number,
+  expectedUpdatedAt: string,
+): SpellSlotPatch {
+  const body: SpellSlotPatch = { level, delta: nextUsed - currentUsed, expectedUpdatedAt };
   return body;
 }
 
@@ -76,4 +93,65 @@ export function hasTrackedResources(
   spellSlots: Record<string, unknown>,
 ): boolean {
   return Object.keys(resources).length > 0 || Object.keys(spellSlots).length > 0;
+}
+
+/** The character sheet or statblock combatant a resource/slot pip belongs to. */
+export type PipOwnerScope = { characterId: number } | { combatantId: number };
+
+/** Identity of ONE character-linked combatant's rest controls. */
+export function restPendingKey(characterId: number): string {
+  return `rest:${characterId}`;
+}
+
+/** Identity of ONE resource pip, scoped to its owning character sheet or statblock combatant. */
+export function resourcePendingKey(scope: PipOwnerScope, key: string): string {
+  return 'characterId' in scope ? `resource:char:${scope.characterId}:${key}` : `resource:combatant:${scope.combatantId}:${key}`;
+}
+
+/** Identity of ONE spell-slot pip, scoped the same way as {@link resourcePendingKey}. */
+export function slotPendingKey(scope: PipOwnerScope, level: number): string {
+  return 'characterId' in scope ? `slot:char:${scope.characterId}:${level}` : `slot:combatant:${scope.combatantId}:${level}`;
+}
+
+/**
+ * Derives which controls are currently in flight from each `useMutation` hook's own
+ * `isPending`/`variables` (issue #1902 rework, round 4). React Query's `isPending` is per
+ * MUTATION HOOK, not per write target, so the previous blanket
+ * `restMutation.isPending || resourceMutation.isPending || slotMutation.isPending ||
+ * statblockMutation.isPending` disabled every control for every combatant for the
+ * duration of ANY single in-flight write — a slow save for one character at a live table
+ * visibly locked out every other player's controls too. Each control instead disables
+ * only when ITS OWN identity ({@link restPendingKey} / {@link resourcePendingKey} /
+ * {@link slotPendingKey}) is in the returned set. Takes plain `{ isPending, variables }`
+ * descriptors rather than the real `UseMutationResult` objects so this stays a pure,
+ * render-independent function — the component passes each mutation's own two fields.
+ */
+export function pendingResourceKeys(mutations: {
+  rest?: { isPending: boolean; variables?: { characterId: number } };
+  resource?: { isPending: boolean; variables?: { characterId: number; key: string } };
+  slot?: { isPending: boolean; variables?: { characterId: number; level: number } };
+  statblock?: {
+    isPending: boolean;
+    variables?: { combatantId: number; kind: 'resource' | 'slot'; targetKey: string };
+  };
+}): ReadonlySet<string> {
+  const keys = new Set<string>();
+  if (mutations.rest?.isPending && mutations.rest.variables) {
+    keys.add(restPendingKey(mutations.rest.variables.characterId));
+  }
+  if (mutations.resource?.isPending && mutations.resource.variables) {
+    keys.add(resourcePendingKey({ characterId: mutations.resource.variables.characterId }, mutations.resource.variables.key));
+  }
+  if (mutations.slot?.isPending && mutations.slot.variables) {
+    keys.add(slotPendingKey({ characterId: mutations.slot.variables.characterId }, mutations.slot.variables.level));
+  }
+  if (mutations.statblock?.isPending && mutations.statblock.variables) {
+    const v = mutations.statblock.variables;
+    if (v.kind === 'resource') {
+      keys.add(resourcePendingKey({ combatantId: v.combatantId }, v.targetKey));
+    } else {
+      keys.add(slotPendingKey({ combatantId: v.combatantId }, Number(v.targetKey)));
+    }
+  }
+  return keys;
 }

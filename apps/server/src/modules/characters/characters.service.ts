@@ -1906,6 +1906,11 @@ export class CharactersService {
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
       if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+      // Issue #1902 rework: checked against the tx-scoped re-read (not the pre-transaction
+      // `existing`) for the same reason the delta itself is computed from `fresh` rather
+      // than `existing` — a caller's `expectedUpdatedAt` must be validated against the
+      // truth this transaction is about to write on top of.
+      this.revisions.assertNotStale(fresh, patch.expectedUpdatedAt);
 
       const slots = fromJsonText<Record<string, SpellSlotLevel>>(fresh.spellSlots, {});
       outcome = applySpellSlotDelta(slots, patch.level, patch.delta);
@@ -1993,7 +1998,12 @@ export class CharactersService {
       const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
       if (!fresh) throw new NotFoundException(`Character ${id} not found`);
 
-      const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(fresh.resources, {});
+      // Issue #1902 rework: typed against the shared `CharacterResource` contract (which
+      // also carries `source`), not a narrower server-local record missing it — the
+      // narrower type was WHY a resource's provenance silently vanished on its first pip
+      // write below (TypeScript let `resources[patch.key] = {...}` compile with `source`
+      // simply absent from the object literal).
+      const resources = fromJsonText<Record<string, CharacterResource>>(fresh.resources, {});
       const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
 
       const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
@@ -2009,11 +2019,19 @@ export class CharactersService {
         throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
       }
 
+      // Issue #1902 rework: spread `current` FIRST so any field this patch doesn't mention
+      // — `source` above all — survives a plain used-only write untouched, instead of
+      // being dropped by a from-scratch object literal that only ever named
+      // max/used/name/recharge. `source` IS a real `ResourcePatch` write field (like
+      // `name`/`recharge`), it was simply never read here — so an explicit
+      // `patch.source` still updates it, exactly like `patch.name`/`patch.recharge` do.
       resources[patch.key] = {
+        ...current,
         max,
         used,
         name: patch.name ?? current.name ?? patch.key,
         recharge: patch.recharge ?? current.recharge ?? 'long-rest',
+        ...(patch.source !== undefined ? { source: patch.source } : {}),
       };
 
       const [written] = tx

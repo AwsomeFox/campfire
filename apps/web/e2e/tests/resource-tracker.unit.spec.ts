@@ -13,6 +13,10 @@ import {
   resourcePatchBody,
   restRequestBody,
   spellSlotPatchBody,
+  restPendingKey,
+  resourcePendingKey,
+  slotPendingKey,
+  pendingResourceKeys,
 } from '../../src/features/encounters/resourceTrackerLogic';
 
 const PANEL = resolve(__dirname, '../../src/features/encounters/ResourceTrackerPanel.tsx');
@@ -40,11 +44,21 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(resourcePatchBody('kiPoints', 3)).toEqual({ key: 'kiPoints', used: 3 });
   });
 
-  test('spellSlotPatchBody sends { level, delta } relative to current used, not { [level]: {...} }', () => {
+  test('spellSlotPatchBody sends { level, delta, expectedUpdatedAt } relative to current used, not { [level]: {...} }', () => {
     // Spending one slot: used 1 -> 2 is delta +1.
-    expect(spellSlotPatchBody(3, 1, 2)).toEqual({ level: 3, delta: 1 });
+    expect(spellSlotPatchBody(3, 1, 2, '2026-01-01T00:00:00.000Z')).toEqual({ level: 3, delta: 1, expectedUpdatedAt: '2026-01-01T00:00:00.000Z' });
     // Restoring a slot: used 2 -> 0 is delta -2.
-    expect(spellSlotPatchBody(3, 2, 0)).toEqual({ level: 3, delta: -2 });
+    expect(spellSlotPatchBody(3, 2, 0, '2026-01-01T00:00:00.000Z')).toEqual({ level: 3, delta: -2, expectedUpdatedAt: '2026-01-01T00:00:00.000Z' });
+  });
+
+  // Third review pass on this exact defect (P1, codex): `delta` alone was still racy
+  // against an EXTERNAL write between render and request — the round-1 cache-
+  // reconciliation fix only protects THIS client's own successive clicks. This is a real
+  // compare-and-set: the server rejects the write with 409 STALE_WRITE when
+  // `expectedUpdatedAt` no longer matches the character's stored `updatedAt`.
+  test('spellSlotPatchBody carries expectedUpdatedAt as a real compare-and-set token, not a client-side mitigation', () => {
+    const body = spellSlotPatchBody(2, 0, 1, 'sheet-updated-at-token');
+    expect(body.expectedUpdatedAt).toBe('sheet-updated-at-token');
   });
 
   test('gating matrix: DM edits any character; owning player edits only their own; others read-only', () => {
@@ -133,7 +147,7 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   // so a click right after settle computes its delta against server-fresh state.
   test('ResourceTrackerPanel reconciles spell-slot cache from the mutation response before invalidating', () => {
     const src = readFileSync(PANEL, 'utf8');
-    expect(src).toMatch(/api\.post<Character>\(`\$\{API\}\/characters\/\$\{characterId\}\/spell-slots`/);
+    expect(src).toMatch(/api\.post<Character>\(\s*\n\s*`\$\{API\}\/characters\/\$\{characterId\}\/spell-slots`/);
     expect(src).toMatch(/queryClient\.setQueryData<Character\[\]>\(queryKeys\.campaignCharacters/);
   });
 
@@ -220,5 +234,90 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     // dialog wraps opt.label) — only the dead pair should be gone.
     expect(en.encounters.resourceTracker.partyRest).toBeDefined();
     expect(en.encounters.resourceTracker.confirmRest).toBeDefined();
+  });
+
+  // Fourth-round finding (devin, re-review of the round-3 push): a blanket `isPending`
+  // (OR of all four mutation hooks) disabled every combatant's controls whenever ANY
+  // single write anywhere in the panel was in flight — a slow save for one character
+  // visibly locked out every other player's controls at the table.
+  test('pendingResourceKeys scopes pending state per combatant/resource, not the whole panel', () => {
+    // Only Alice's (characterId 1) resource write is in flight — Bob's (characterId 2)
+    // rest button and slot pip must NOT be in the pending set.
+    const keys = pendingResourceKeys({
+      rest: { isPending: false },
+      resource: { isPending: true, variables: { characterId: 1, key: 'rage' } },
+      slot: { isPending: false },
+      statblock: { isPending: false },
+    });
+    expect(keys.has(resourcePendingKey({ characterId: 1 }, 'rage'))).toBe(true);
+    expect(keys.has(restPendingKey(2))).toBe(false);
+    expect(keys.has(slotPendingKey({ characterId: 2 }, 1))).toBe(false);
+    // A DIFFERENT resource on the SAME character (Alice's own hitDice, not rage) also
+    // stays enabled — pending is scoped per resource key, not just per character.
+    expect(keys.has(resourcePendingKey({ characterId: 1 }, 'hitDice'))).toBe(false);
+  });
+
+  test('pendingResourceKeys scopes a statblock combatant\'s resource pip separately from its spell-slot pip', () => {
+    const keys = pendingResourceKeys({
+      rest: { isPending: false },
+      resource: { isPending: false },
+      slot: { isPending: false },
+      statblock: { isPending: true, variables: { combatantId: 7, kind: 'resource', targetKey: 'legendaryActions' } },
+    });
+    expect(keys.has(resourcePendingKey({ combatantId: 7 }, 'legendaryActions'))).toBe(true);
+    // The SAME combatant's spell-slot pip is a different key — not blocked.
+    expect(keys.has(slotPendingKey({ combatantId: 7 }, 1))).toBe(false);
+    // A different combatant entirely is never touched.
+    expect(keys.has(resourcePendingKey({ combatantId: 8 }, 'legendaryActions'))).toBe(false);
+  });
+
+  test('pendingResourceKeys returns an empty set when nothing is pending', () => {
+    const keys = pendingResourceKeys({
+      rest: { isPending: false },
+      resource: { isPending: false },
+      slot: { isPending: false },
+      statblock: { isPending: false },
+    });
+    expect(keys.size).toBe(0);
+  });
+
+  test('ResourceTrackerPanel disables each control via its own scoped pendingKeys lookup, not a blanket isPending', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/pendingResourceKeys\(/);
+    expect(src).toMatch(/pendingKeys\.has\(restPendingKey\(/);
+    expect(src).toMatch(/pendingKeys\.has\(resourcePendingKey\(/);
+    expect(src).toMatch(/pendingKeys\.has\(slotPendingKey\(/);
+    // The blanket boolean is gone entirely — no `const isPending =` left to fall back to.
+    expect(src).not.toMatch(/const isPending =/);
+  });
+
+  // Fourth-round finding (codex P1, THIRD review pass on this exact defect): a
+  // disabled-while-pending guard never closed this — the stale window is between RENDER
+  // and REQUEST, not between click and response, so it can't be fixed by anything that
+  // only reacts after a mutation starts. Verifies the structural fix: the panel actually
+  // sends `expectedUpdatedAt` on every spell-slot write, sourced from the character's own
+  // `updatedAt` captured in the same row-builder pass that reads `spellSlots`.
+  test('ResourceTrackerPanel sends expectedUpdatedAt on every character spell-slot write — the real CAS fix, not another pending guard', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/expectedUpdatedAt: updatedAt as string/);
+    expect(src).toMatch(/let updatedAt: string \| undefined;/);
+    expect(src).toMatch(/updatedAt = char\.updatedAt;/);
+  });
+
+  // Fourth-round finding (codex P2): the first successful resource pip click discarded a
+  // tracked resource's `source` metadata by reconstructing the entry from only
+  // max/used/name/recharge. Server-side fix in CharactersService.adjustResource, verified
+  // here at the layer that owns the invariant.
+  test('CharactersService.adjustResource preserves existing resource metadata (source) instead of rebuilding the entry', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../../../apps/server/src/modules/characters/characters.service.ts'),
+      'utf8',
+    );
+    // Typed against the shared CharacterResource contract (which carries `source`), not a
+    // narrower server-local record that structurally can't hold it.
+    expect(src).toMatch(/fromJsonText<Record<string, CharacterResource>>\(fresh\.resources, \{\}\)/);
+    // The new entry starts from `...current` so an unmentioned field (source above all)
+    // survives a plain used-only write.
+    expect(src).toMatch(/resources\[patch\.key\] = \{\s*\n\s*\.\.\.current,/);
   });
 });

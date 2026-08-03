@@ -143,4 +143,57 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
     // land on 1 or 3 depending on which call happened to finish last.
     expect(usedAt(orm, id)).toBe(2);
   });
+
+  /**
+   * Issue #1902 rework, third review pass on the SAME defect the tests above already
+   * cover from the "two of MY OWN requests at once" angle: `delta` is meaningless without
+   * knowing what it's relative to, and neither the transaction's synchronous re-read NOR
+   * the web panel's round-1 cache-reconciliation fix protects a caller who computed its
+   * delta from a render that is now stale because a DIFFERENT actor wrote to the sheet in
+   * between — two SEQUENTIAL, non-overlapping calls (no interleaving needed to reproduce
+   * this one). `expectedUpdatedAt` (`ResourceTrackerPanel`'s `spellSlotPatchBody`, wired
+   * through `patchSpellSlots` -> `RevisionsService.assertNotStale`) is the fix: a stale
+   * token is rejected with 409 instead of the delta being silently applied on top of state
+   * the caller never saw.
+   */
+  it('expectedUpdatedAt rejects a spend whose token is stale — the real fix behind the "renders 1, commits 2" defect', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+    const staleToken = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0].updatedAt;
+
+    // A concurrent actor spends a slot — used: 0 -> 1 — and the character row's
+    // `updatedAt` moves. `staleToken` above is now stale.
+    await service.patchSpellSlots(id, { level: 1, delta: 1 }, dmUser, 'dm');
+    expect(usedAt(orm, id)).toBe(1);
+
+    // A caller who rendered BEFORE that write (and so still holds `staleToken`) tries to
+    // spend what it believes is the FIRST slot. Without the CAS check this delta would
+    // land on top of the fresh `used: 1`, silently becoming a second, unintended spend.
+    let caught: { status?: number; response?: { code?: string } } | undefined;
+    try {
+      await service.patchSpellSlots(id, { level: 1, delta: 1, expectedUpdatedAt: staleToken }, dmUser, 'dm');
+    } catch (err) {
+      caught = err as typeof caught;
+    }
+    expect(caught?.status).toBe(409);
+    expect(caught?.response?.code).toBe('STALE_WRITE');
+    // The rejected write applied NOTHING — still 1, not 2.
+    expect(usedAt(orm, id)).toBe(1);
+  });
+
+  it('expectedUpdatedAt succeeds against a fresh token, and omitting it stays unconditional (every other caller unaffected)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+    const freshToken = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0].updatedAt;
+
+    await service.patchSpellSlots(id, { level: 1, delta: 1, expectedUpdatedAt: freshToken }, dmUser, 'dm');
+    expect(usedAt(orm, id)).toBe(1);
+
+    // Omitted => unconditional write, exactly like the AI DM / MCP tools and every other
+    // existing caller of this contract that never opts into the CAS token.
+    await service.patchSpellSlots(id, { level: 1, delta: 1 }, dmUser, 'dm');
+    expect(usedAt(orm, id)).toBe(2);
+  });
 });
