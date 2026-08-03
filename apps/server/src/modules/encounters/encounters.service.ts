@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -6804,8 +6804,14 @@ export class EncountersService {
         const { row: a, itemName } = rows[i];
         if (typeof a?.name !== 'string' || a.name.length === 0) continue;
         const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
-        const specParsed = zod.object({ spec: zod.unknown().optional() }).passthrough().safeParse(a);
-        const spec = specParsed.success ? specParsed.data.spec : undefined;
+        // Validate through the full ActionSpec schema (not a bare passthrough) — same as
+        // resolveSpec's `ActionSpec.safeParse(raw?.spec)` — so isResolvableSpec always sees
+        // a schema-defaulted spec (e.g. attack.bonus present as '' rather than absent) and
+        // this stays best-effort/defensive per the doc comment above rather than throwing on
+        // a spec shape that predates a field default or was never written through the
+        // validated character-upsert path.
+        const specParsed = ActionSpec.safeParse(a.spec);
+        const spec = specParsed.success ? specParsed.data : undefined;
         out.push({
           name: a.name.slice(0, 160),
           source: itemName ? `equipped: ${itemName}`.slice(0, 40) : typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
@@ -6813,8 +6819,8 @@ export class EncountersService {
           toHit: typeof a.toHit === 'string' ? a.toHit : '',
           damage: typeof a.damage === 'string' ? a.damage : '',
           actionIndex: i,
-          resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
-          spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
+          resolvable: isResolvableSpec(spec),
+          spec: spec ?? null,
         });
       }
       return out.slice(0, 100);

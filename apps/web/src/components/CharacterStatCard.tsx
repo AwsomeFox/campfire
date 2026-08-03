@@ -160,7 +160,13 @@ export function CharacterStatCard({
   // index space) for a live-encounter combatant. Gated on encounterId/combatantId alone —
   // NOT on `interactive` — so the card still shows equipped gear off-turn; only the roll/Use
   // controls stay gated by `interactive` below, same as they already are for sheet actions.
-  const actionsFetchEnabled = encounterId != null && combatantId != null;
+  // Also gated on `open` (review: devin-ai-integration on PR #1951) — `displayActions` only
+  // renders inside the `{open && ...}` disclosure body below, so fetching while collapsed
+  // bought nothing but one request per party member on every mount, repeated on every
+  // `character.updated`/`encounter.updated` invalidation (a DM's full-party view can have a
+  // dozen of these cards mounted at once). `staleTime` still lets a quick collapse/expand
+  // reuse a still-fresh cached response instead of re-fetching.
+  const actionsFetchEnabled = encounterId != null && combatantId != null && open;
   const { data: fetchedActions } = useQuery({
     queryKey: actionsFetchEnabled ? [...queryKeys.encounter(encounterId!), 'actions', combatantId!] : ['character-stat-card-actions-disabled'],
     queryFn: () => api.get<UsableAction[]>(`${API}/encounters/${encounterId}/combatants/${combatantId}/actions`),

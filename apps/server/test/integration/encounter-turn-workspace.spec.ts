@@ -1823,6 +1823,14 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       notes: '',
       spec: {
         mode: 'attack',
+        // Deliberately omits `attack.bonus` — a character.actions row written straight to
+        // SQLite (bypassing the CharacterUpsertRequest/CharacterAction validation layer
+        // that would otherwise default it to '') is exactly the "malformed source" this
+        // function's doc comment already promises to be defensive about. This regresses
+        // the rework-round bug where suggestedActionsForCombatant passed `spec` to
+        // isResolvableSpec via a bare passthrough instead of `ActionSpec.safeParse`,
+        // crashing `.trim()` on the missing field instead of defaulting it like
+        // resolveSpec already does (issue #1901 rework).
         attack: { ability: 'STR', proficient: true },
         cost: { slot: 'action', count: 1 },
         targets: { count: 1, allow: 'enemy' },

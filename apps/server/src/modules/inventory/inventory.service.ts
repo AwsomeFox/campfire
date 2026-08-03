@@ -792,6 +792,13 @@ export class InventoryService {
     // rather than a separate audit action — this is still one `item.update` write.
     const equipChanged = existing.equipped !== committed.equipped || existing.equipSlot !== committed.equipSlot;
     const hasDetail = qtyTouch || equipChanged;
+    // Issue #1901 rework (review: chatgpt-codex-connector P1 / devin-ai-integration on
+    // PR #1951): rewriting or clearing `equippedAction` on an item that stays equipped
+    // changes the character's merged combat-action list exactly like an equip/unequip
+    // does, but leaves `equipped`/`equipSlot` — and so `equipChanged` — untouched. Gate on
+    // `committed.equipped` so an edit to an unequipped item's dormant equippedAction
+    // (never part of the merge) doesn't trigger a needless invalidation.
+    const actionContentChanged = input.equippedAction !== undefined && committed.equipped;
 
     await this.audit.log({
       actor: auditActor(user),
@@ -824,12 +831,13 @@ export class InventoryService {
         : undefined,
     });
 
-    // Issue #1901: an equip/unequip (or a move that carries/drops equip state) changes which
-    // combat actions a character's encounter card and /turn payload show — signal it the same
-    // way a sheet edit does (`character.updated`) so RunSessionPage's existing SSE handler
-    // invalidates the cached action list without a new event type. Only characters that were
-    // (or are now) the EQUIPPED owner care; an unrelated move or a qty-only write emits nothing.
-    if (equipChanged || moved) {
+    // Issue #1901: an equip/unequip (or a move that carries/drops equip state), or a rewrite
+    // of an already-equipped item's granted action, changes which combat actions a character's
+    // encounter card and /turn payload show — signal it the same way a sheet edit does
+    // (`character.updated`) so RunSessionPage's existing SSE handler invalidates the cached
+    // action list without a new event type. Only characters that were (or are now) the
+    // EQUIPPED owner care; an unrelated move or a qty-only write emits nothing.
+    if (equipChanged || moved || actionContentChanged) {
       const affected = new Set<number>();
       if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped) {
         affected.add(existing.characterId);
@@ -893,6 +901,17 @@ export class InventoryService {
       campaignId: existing.campaignId,
       detail: JSON.stringify({ snapshot }),
     });
+
+    // Issue #1901 rework (review: devin-ai-integration on PR #1951): trashing an item that
+    // was equipped and carried a granted action drops that action from the owning
+    // character's merged combat-action list exactly like an explicit unequip does (the
+    // `.set()` above forces `equipped: false` on the tombstoned row) — signal it the same
+    // way `update()`'s equip/unequip path does so live encounter screens don't keep
+    // offering an action that was just deleted. Gate on `equippedAction != null` so
+    // deleting a plain (non-action) piece of gear stays silent, matching `update()`.
+    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped && existing.equippedAction != null) {
+      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
+    }
 
     return (await this.redactEquippedActions([domain], user, role))[0];
   }
