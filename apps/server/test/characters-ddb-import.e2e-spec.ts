@@ -306,6 +306,66 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summarizeDdbImport(c).entriesOmitted).toBe(0);
   });
 
+  // Regression for a PR #1950 review finding: an earlier version of computeDdbActionEntryCount
+  // reused the capped mapping functions, so a category with MORE raw entries than
+  // RAW_ENTRY_SAFETY_CAP (300) was itself undercounted by exactly the excess — the reported
+  // entriesOmitted was silently wrong past that point, contradicting the "always reported"
+  // promise. The dedicated counting pass must stay accurate well past that cap.
+  it('computeDdbActionEntryCount stays accurate past the mapping pass\'s 300-entry safety cap', () => {
+    const manyFeatures = Array.from({ length: 350 }, (_, i) => ({ name: `Feature ${i}` }));
+    const data = { actions: { feat: manyFeatures } };
+    expect(computeDdbActionEntryCount(data)).toBe(350);
+  });
+
+  // Regression for a PR #1950 review finding: an out-of-range numeric HTML entity (outside
+  // Unicode's 0..0x10FFFF) made String.fromCodePoint throw, aborting the entire import with
+  // an unhandled 500 over one bad character in a description.
+  it('an out-of-range numeric HTML entity does not crash the import', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Wizard' } }],
+      classSpells: [
+        {
+          spells: [{ definition: { name: 'Weird Spell', level: 0, description: 'Bad entity &#9999999; here.' }, prepared: true }],
+        },
+      ],
+    });
+    const spell = c.actions?.find((a) => a.name === 'Weird Spell');
+    expect(spell).toBeDefined();
+    expect(spell?.notes).toContain('Bad entity');
+    expect(spell?.notes).toContain('here.');
+  });
+
+  // Regression for a PR #1950 review finding: a feature with attackTypeRange set but no
+  // resolvable governing ability (missing/unknown abilityModifierStatId) used to default to
+  // a modifier of 0 and still be marked resolvable — a guessed to-hit presented as real, and
+  // never flagged in the summary. It must land text-only instead.
+  it('an attack-shaped feature with no resolvable ability lands text-only, not a guessed +0', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Mystery Strike', attackTypeRange: 5 }] },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Mystery Strike');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    const summary = summarizeDdbImport(c);
+    expect(summary.textOnly).toContain('Mystery Strike');
+  });
+
+  // Regression for a PR #1950 review finding: a fixedSaveDc feature with no resolvable
+  // saveStatId used to default to a DEX save and be marked resolvable — inventing which
+  // ability the target saves with. It must land text-only instead.
+  it('a save-shaped feature with no resolvable save ability lands text-only, not an invented DEX save', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: { class: [{ name: 'Mystery Breath', fixedSaveDc: 15 }] },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Mystery Breath');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    const summary = summarizeDdbImport(c);
+    expect(summary.textOnly).toContain('Mystery Breath');
+  });
+
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not
   // plain text, and the character sheet renders notes as plain text — so literal tags were
   // showing up on imported characters' sheets.

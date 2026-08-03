@@ -42,13 +42,18 @@ export const DDB_CHARACTER_SERVICE_BASE_URL = 'https://character-service.dndbeyo
 const FETCH_TIMEOUT_MS = 15_000;
 
 /**
- * Defensive per-category ceiling on raw entries read from a single DDB sheet section
- * (issue #1903 review) — NOT the real cap. The real cap is `Character.actions`'s schema
- * max(100), applied once at the end in `mapDdbCharacter` after combining all categories, so
- * a sheet with e.g. 45 features and 0 spells isn't truncated to 30 features when there was
- * room for all 45. This constant exists purely so a pathological/malformed payload (an
- * absurdly large array) can't make the importer do unbounded work — it is far above any
- * real character sheet's entry count in any category.
+ * Defensive per-category ceiling on raw entries the MAPPING pass
+ * (`computeWeaponActions`/`computeFeatureActions`/`computeSpellActions`) will build full
+ * `CharacterAction` objects for (issue #1903 review) — NOT the real cap. The real cap is
+ * `Character.actions`'s schema max(100), applied once at the end in `mapDdbCharacter` after
+ * combining all categories, so a sheet with e.g. 45 features and 0 spells isn't truncated to
+ * 30 features when there was room for all 45. This constant exists purely so a
+ * pathological/malformed payload (an absurdly large array) can't make the importer build an
+ * unbounded number of full action objects — it is far above any real character sheet's entry
+ * count in any category. It intentionally does NOT bound `computeDdbActionEntryCount`'s
+ * counting pass (see `COUNT_ENTRY_SAFETY_CAP` below) — an earlier version shared this cap
+ * with the count, which meant a category with more raw entries than this constant was
+ * undercounted by exactly the excess, contradicting the "always reported" overflow promise.
  */
 const RAW_ENTRY_SAFETY_CAP = 300;
 
@@ -432,7 +437,15 @@ function stripDdbHtml(html: string): string {
   const decoded = noTags.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, ref: string) => {
     if (ref[0] === '#') {
       const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+      // A malformed/out-of-range numeric reference (e.g. &#9999999;) is finite but outside
+      // Unicode's 0..0x10FFFF range, and String.fromCodePoint throws RangeError for that —
+      // which, uncaught, would abort the whole import with a 500 over one bad character in
+      // a description. A lone surrogate (0xD800-0xDFFF) is inside that range so
+      // fromCodePoint would NOT throw for it, but it would produce an unpaired surrogate —
+      // invalid UTF-16 that can break JSON/UTF-8 encoding downstream — so it's excluded too.
+      // Leave any of these as the original text instead of guessing at what was meant.
+      const isValidCodePoint = Number.isFinite(code) && code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+      return isValidCodePoint ? String.fromCodePoint(code) : match;
     }
     return DDB_HTML_ENTITIES[ref] ?? match;
   });
@@ -536,20 +549,26 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // `snippet` is DDB's short plain-text summary; the `description` fallback is full HTML
       // markup, so stripDdbHtml is a no-op on the former and a real fix on the latter.
       const desc = stripDdbHtml((typeof item.snippet === 'string' && item.snippet.trim() ? item.snippet : item.description) ?? '');
+      // A missing/unrecognized abilityModifierStatId, or a governing ability score that
+      // isn't in `stats`, must NOT fall back to a modifier of 0 — that would present a
+      // GUESSED to-hit as a confident, resolvable number (and the summary would never flag
+      // it, since it has a `spec`). Leave attackBonus null so it lands text-only instead.
       let attackBonus: number | null = null;
       if (item.attackTypeRange != null) {
         const abilityKey = item.abilityModifierStatId != null ? ABILITY_ID_TO_KEY[item.abilityModifierStatId] : undefined;
         const abilityScore = abilityKey ? stats[abilityKey] : undefined;
-        const abilityModifier = typeof abilityScore === 'number' ? abilityMod(abilityScore) : 0;
-        attackBonus = abilityModifier + proficiencyBonus;
+        if (typeof abilityScore === 'number') {
+          attackBonus = abilityMod(abilityScore) + proficiencyBonus;
+        }
       }
       const diceString = item.dice && typeof item.dice.diceString === 'string' ? item.dice.diceString.trim() : '';
       const flat = typeof item.value === 'number' ? item.value : 0;
       const damage = diceString ? [{ expression: `${diceString}${flatSuffix(flat)}`, type: '' }] : undefined;
-      const savingThrow =
-        typeof item.fixedSaveDc === 'number'
-          ? { dc: item.fixedSaveDc, ability: (item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined) ?? 'DEX' }
-          : undefined;
+      // Same principle for a save DC: a missing/unrecognized saveStatId must not default to
+      // DEX — that's inventing which ability the target saves with, which resolution would
+      // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
+      const saveAbilityKey = item.saveStatId != null ? ABILITY_ID_TO_KEY[item.saveStatId] : undefined;
+      const savingThrow = typeof item.fixedSaveDc === 'number' && saveAbilityKey ? { dc: item.fixedSaveDc, ability: saveAbilityKey } : undefined;
       out.push(expandRawStatblockAction({ name, desc, attackBonus, damage, savingThrow }, 'action', 'dnd5e'));
     }
   }
@@ -803,17 +822,83 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
 }
 
 /**
+ * Ceiling for the COUNTING-only pass below — deliberately much higher than
+ * `RAW_ENTRY_SAFETY_CAP` (which bounds the heavier MAPPING pass that builds full
+ * `CharacterAction`/attack-math objects). Counting is cheap (a handful of property reads
+ * per entry, no dice/attack computation), so it can afford to stay accurate far past any
+ * sheet size that could plausibly exist, while still bounding a truly pathological payload.
+ */
+const COUNT_ENTRY_SAFETY_CAP = 10_000;
+
+/**
  * Total attack/feature/spell entries a DDB sheet would produce BEFORE `mapDdbCharacter`
  * applies the `Character.actions` schema cap (100) — issue #1903 review: a sheet with more
- * raw entries than the cap must report the overflow (`DdbImportSummary.entriesOmitted`)
- * rather than trimming silently. Recomputes the same three category functions
- * `mapDdbCharacter` uses; the entry COUNT each produces does not depend on ability
- * scores/proficiency bonus (only the computed to-hit/damage numbers on each entry do), so
- * this is called with placeholder stats — cheap, and avoids recomputing the character's
- * full derived state just to get a count.
+ * raw entries than the cap must report the true overflow (`DdbImportSummary.entriesOmitted`)
+ * rather than trimming silently.
+ *
+ * Deliberately does NOT call `computeWeaponActions`/`computeFeatureActions`/
+ * `computeSpellActions` (review finding: an earlier version did, which meant a category with
+ * more than `RAW_ENTRY_SAFETY_CAP` raw entries was undercounted by exactly as much as the
+ * mapping pass trimmed, contradicting the "always reported" promise). These three helpers
+ * mirror each mapping function's INCLUSION filter only (what counts as a real entry — a
+ * named item, a known/prepared spell, deduped by name) without building the full
+ * `CharacterAction`/attack-math objects, so they can count accurately far past
+ * `RAW_ENTRY_SAFETY_CAP` cheaply.
  */
 export function computeDdbActionEntryCount(data: DdbCharacterData): number {
-  return computeWeaponActions(data, {}, 0).length + computeFeatureActions(data, {}, 0).length + computeSpellActions(data).length;
+  return countWeaponEntries(data) + countFeatureEntries(data) + countSpellEntries(data);
+}
+
+function countWeaponEntries(data: DdbCharacterData): number {
+  const items = Array.isArray(data.inventory) ? data.inventory : [];
+  let n = 0;
+  for (const item of items) {
+    if (n >= COUNT_ENTRY_SAFETY_CAP) break;
+    if (item?.equipped && isWeaponItem(item) && item.definition) n++;
+  }
+  return n;
+}
+
+function countFeatureEntries(data: DdbCharacterData): number {
+  const groups = data.actions;
+  if (!groups || typeof groups !== 'object') return 0;
+  let n = 0;
+  for (const section of ACTION_SECTIONS) {
+    const list = groups[section];
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (n >= COUNT_ENTRY_SAFETY_CAP) return n;
+      const item = raw ?? {};
+      const name = typeof item.name === 'string' ? item.name.trim() : '';
+      if (name) n++;
+    }
+  }
+  return n;
+}
+
+function countSpellEntries(data: DdbCharacterData): number {
+  const seen = new Set<string>();
+  let n = 0;
+  const consider = (entry: DdbSpellEntry | null | undefined) => {
+    if (!entry || n >= COUNT_ENTRY_SAFETY_CAP) return;
+    if (!isKnownOrPrepared(entry)) return;
+    const name = typeof entry.definition?.name === 'string' ? entry.definition.name.trim().slice(0, 120) : '';
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    n++;
+  };
+  for (const group of Array.isArray(data.classSpells) ? data.classSpells : []) {
+    for (const entry of Array.isArray(group?.spells) ? group.spells : []) consider(entry);
+  }
+  const granted = data.spells;
+  if (granted && typeof granted === 'object') {
+    for (const list of Object.values(granted)) {
+      if (Array.isArray(list)) for (const entry of list) consider(entry);
+    }
+  }
+  return n;
 }
 
 /**
