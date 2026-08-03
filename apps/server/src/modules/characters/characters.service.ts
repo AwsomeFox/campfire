@@ -2202,7 +2202,21 @@ export class CharactersService {
           });
         nextInstancesByCharacter.set(p.characterId, nextInstances);
         const conditionWriteSet = sheetConditionWriteSetFromInstances(nextInstances);
-        tx.update(characters)
+        const priorUpdatedAt = priorUpdatedAtByCharacter.get(p.characterId)!;
+        // Issue #1902 rework (round 10, codex P1): the PLAN (`p.spellSlotsAfter` etc.) was
+        // computed from `targets`, read BEFORE this transaction — and before the `await
+        // this.adapterForCampaign(...)` and dice-rolling above it. If another write (say,
+        // a CAS-protected `patchSpellSlots` spend) lands in that gap, this UPDATE would
+        // previously overwrite it unconditionally with the stale planned blob — `nowIso`/
+        // `nextUpdatedAt` only touches the TOKEN, not whether the plan itself is still
+        // valid. Gate the write on `updatedAt` still matching what the plan was computed
+        // from (the same WHERE-clause CAS `applyPartyRecovery` already uses below) so a
+        // race is REJECTED, not silently applied on top of a stale snapshot — and because
+        // this is inside the ATOMICITY transaction (one invalid character rejects the
+        // whole rest), any character's stale read fails the whole call rather than
+        // corrupting just that one sheet.
+        const result = tx
+          .update(characters)
           .set({
             hpCurrent: p.hpAfter,
             hpTemp: p.hpTempAfter,
@@ -2212,10 +2226,13 @@ export class CharactersService {
             ...conditionWriteSet,
             spellSlots: toJsonText(p.spellSlotsAfter),
             resources: toJsonText(p.resourcesAfter),
-            updatedAt: nextUpdatedAt(priorUpdatedAtByCharacter.get(p.characterId)!),
+            updatedAt: nextUpdatedAt(priorUpdatedAt),
           })
-          .where(eq(characters.id, p.characterId))
+          .where(and(eq(characters.id, p.characterId), eq(characters.updatedAt, priorUpdatedAt)))
           .run();
+        if (result.changes !== 1) {
+          throw new ConflictException(`${p.characterName} changed after this rest was planned — reload and rest again.`);
+        }
       }
     });
 

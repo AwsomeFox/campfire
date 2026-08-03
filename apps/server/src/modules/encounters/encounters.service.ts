@@ -7935,7 +7935,11 @@ export class EncountersService {
         }
         slot.used = nextUsed;
         slots[levelKey] = slot;
-        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
+        // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+        // EVERY spellSlots writer. `character` was read INSIDE this same transaction
+        // above, so there's no separate atomicity gap to guard here.
+        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
       } else if (patch.key) {
         const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
@@ -7946,7 +7950,7 @@ export class EncountersService {
         }
         res.used = nextUsed;
         resources[patch.key] = res;
-        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
       } else {
         throw new BadRequestException('Must supply either spellLevel or key to adjust');

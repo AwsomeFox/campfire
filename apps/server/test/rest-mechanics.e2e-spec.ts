@@ -387,6 +387,84 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(after.resources.rage.used).toBe(3);
   });
 
+  /**
+   * Issue #1902 rework, round 10 (codex P1) — `restParty`'s plan (`p.spellSlotsAfter`,
+   * computed from `targets`, read BEFORE this method's transaction — and before its own
+   * `await this.adapterForCampaign(...)` and dice rolling) used to be written back
+   * UNCONDITIONALLY. A short rest does not touch spell slots at all, so its plan's
+   * `spellSlotsAfter` is simply whatever `restParty` read at the very start — if a
+   * DIFFERENT concurrent spend (a normal `patchSpellSlots` call, itself correctly
+   * CAS-protected) commits in the gap between that read and `restParty`'s transaction,
+   * the old code would silently write the STALE pre-race blob back over it, erasing the
+   * completed spend without any error. The fix gates `restParty`'s write on `updatedAt`
+   * still matching what the plan was computed from (the same WHERE-clause CAS
+   * `applyPartyRecovery` already uses) — a race is REJECTED, not silently applied on top
+   * of a stale snapshot.
+   *
+   * This is deliberately NOT driven as two `Promise.allSettled`-raced real service calls:
+   * measured empirically (10/10 local runs), `restParty`'s own transaction consistently
+   * commits before a concurrently-started `patchSpellSlots` call reaches its transaction
+   * (it has more pre-transaction `await`s, but each resolves in strictly fewer ticks in
+   * practice than `patchSpellSlots`'s own chain does here) — so a naive race would pass
+   * identically whether or not the WHERE-clause CAS is even present, silently testing
+   * nothing. Confirmed directly: reverting the CAS to an unconditional `WHERE id` still
+   * left all 10 trials green. Instead, `planPartyRest` — the pure planner `restParty`
+   * calls SYNCHRONOUSLY between its snapshot read and its write transaction, with no
+   * `await` in between — is spied so the mock performs a raw, synchronous write standing
+   * in for a concurrent `patchSpellSlots` commit landing in exactly that gap, and the
+   * plan itself is left untouched (the real planner still runs). This makes the race
+   * deterministic instead of dependent on this machine's microtask timing.
+   */
+  it('#1902 rework: restParty rejects rather than overwrites when a concurrent spend lands between its snapshot read and its write', async () => {
+    const id = await batteredCharacter('Race condition caster');
+    // `batteredCharacter` always seeds level-1 slots at max:4/used:4 (fully spent) — reset
+    // to used:0 so the simulated concurrent spend below has room to land.
+    await db.update(charactersTable).set({ spellSlots: JSON.stringify({ '1': { max: 4, used: 0 } }) }).where(eq(charactersTable.id, id));
+
+    // Spying on the `@campfire/schema` INDEX re-export doesn't work — `index.ts`'s
+    // `export { planPartyRest, ... } from './rest'` compiles (via TypeScript's
+    // `__createBinding` helper) to an `Object.defineProperty` getter with no explicit
+    // `configurable: true`, which defaults to `false` (confirmed: `jest.spyOn` throws
+    // "Cannot redefine property"). `rest.ts` itself OWNS `export function
+    // planPartyRest(...)` as a genuine top-level declaration, compiling to a plain,
+    // writable `exports.planPartyRest = planPartyRest` assignment, which IS spyable —
+    // and the index's re-export getter reads through to this same module object
+    // dynamically at call time, so a mutation here is visible to
+    // `characters.service.ts`'s `import { planPartyRest } from '@campfire/schema'` too.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const restModule = require('../../../packages/schema/src/rest') as { planPartyRest: (...args: unknown[]) => unknown };
+    const originalPlanPartyRest = restModule.planPartyRest;
+    const spy = jest
+      .spyOn(restModule, 'planPartyRest')
+      .mockImplementation((...args: unknown[]) => {
+        // Simulate a concurrent `patchSpellSlots` commit landing in the gap between
+        // `restParty`'s pre-transaction snapshot (already captured — this planner call is
+        // the very next thing `restParty` does with it) and `restParty`'s own write
+        // transaction (which runs synchronously right after this returns). `.run()` (not
+        // `await db.update(...)`) forces synchronous execution so this lands inside that
+        // exact gap rather than on some later microtask tick.
+        db.update(charactersTable)
+          .set({ spellSlots: JSON.stringify({ '1': { max: 4, used: 1 } }), updatedAt: new Date(Date.now() + 5000).toISOString() })
+          .where(eq(charactersTable.id, id))
+          .run();
+        return originalPlanPartyRest(...args);
+      });
+
+    try {
+      // The concurrent write happened AFTER restParty's snapshot but BEFORE its transaction
+      // — restParty's plan is now stale and must reject with the same 409 CAS-conflict
+      // shape every other stale-write guard in this file uses, not silently overwrite.
+      await expect(characters.restParty(campaignId, 'short', [id], {}, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+
+      const final = (await read(id)).body;
+      // The concurrent spend must still be the stored truth — never reverted back to 0 by
+      // restParty's stale plan silently winning.
+      expect(final.spellSlots['1'].used).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reports every failure at once rather than one rejected call at a time', async () => {
     const noDice = await batteredCharacter('Tam');
     const corpse = await batteredCharacter('Dead Mo');

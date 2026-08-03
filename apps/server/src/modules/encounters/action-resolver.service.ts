@@ -76,6 +76,7 @@ import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromInstances, conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -1587,7 +1588,7 @@ export class ActionResolverService {
       // "damage landed" and "the cast turned out to be unpayable". Failing before any of that
       // is written keeps the transaction simple and gives the caller (frequently the AI
       // Driver) a clean retry — nothing here to undo.
-      let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
+      let spellSlotSpend: { characterId: number; slots: SpellSlotMap; priorUpdatedAt: string } | null = null;
       if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
         const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
@@ -1605,7 +1606,11 @@ export class ActionResolverService {
               max: outcome.max,
             });
           }
-          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots };
+          // `priorUpdatedAt` carried to the write site below (issue #1902 rework, round 10)
+          // so that write can advance the character's CAS token monotonically via
+          // `nextUpdatedAt`, matching `patchSpellSlots`/`restParty` — this read is already
+          // transaction-scoped (`tx.select`), so there's no separate re-read to add.
+          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots, priorUpdatedAt: character.updatedAt };
         }
       }
 
@@ -1866,7 +1871,7 @@ export class ActionResolverService {
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && liveEncounter.status !== 'ended') {
           const sheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
@@ -1882,7 +1887,10 @@ export class ActionResolverService {
               // The live condition name list is the combatant's; the structured instance
               // prior must come from the sheet itself or legacy rows will wipe sheet detail.
               ...sheetConditionWriteSetFromNames([...conditions], sheetRow?.conditionInstances ?? null),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the
+              // spell-slot spend write's comment below for why this token must advance on
+              // every characters-row writer.
+              updatedAt: nextUpdatedAt(sheetRow?.updatedAt ?? nowIso()),
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
@@ -1937,9 +1945,14 @@ export class ActionResolverService {
       }
       // The spend was already validated (and the replacement blob computed) at the top of
       // this transaction, before any consequence above was written — this is just the write.
+      // Issue #1902 rework (round 10): `nextUpdatedAt`, not `nowIso()` — `updatedAt` is a
+      // CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+      // EVERY spellSlots writer, not just itself. The prior value was read INSIDE this same
+      // transaction above (`character.updatedAt`), so — unlike `restParty`'s pre-transaction
+      // read — there's no separate atomicity gap to also guard against here.
       if (spellSlotSpend) {
         tx.update(characters)
-          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nowIso() })
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nextUpdatedAt(spellSlotSpend.priorUpdatedAt) })
           .where(eq(characters.id, spellSlotSpend.characterId))
           .run();
       }
@@ -2208,7 +2221,7 @@ export class ActionResolverService {
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
           const undoSheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
@@ -2229,7 +2242,10 @@ export class ActionResolverService {
               ...(conditionInstancesBefore
                 ? sheetConditionWriteSetFromInstances(conditionInstancesBefore)
                 : sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances)),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the apply-side
+              // spell-slot write's comment below for why this CAS token must advance on
+              // EVERY characters-row writer, not just patchSpellSlots.
+              updatedAt: nextUpdatedAt(undoSheetRow?.updatedAt ?? nowIso()),
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
@@ -2277,7 +2293,12 @@ export class ActionResolverService {
           const slot = slots[String(chain.spellLevelSpent)];
           if (slot) {
             slot.used = Math.max(0, (slot.used ?? 0) - 1);
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
+            // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a
+            // CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing
+            // on EVERY spellSlots writer. `character` was read INSIDE this same
+            // transaction just above, so there's no separate atomicity gap to guard here
+            // (unlike `restParty`'s pre-transaction plan).
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, actor.characterId)).run();
           }
         }
       }
