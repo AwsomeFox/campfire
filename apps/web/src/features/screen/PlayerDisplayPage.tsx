@@ -64,7 +64,7 @@ import {
   type SafeQuest,
 } from './playerSafe';
 import {
-  CastSafetyPollSequencer,
+  CastSafetyPoller,
   PlayerDisplayLoadSequencer,
   playerDisplaySyncMessage,
   playerDisplaySyncState,
@@ -362,22 +362,22 @@ export default function PlayerDisplayPage() {
    * the rest of this page — comfortably inside the 15s bound raising a hold must
    * blank the display within.
    *
-   * `runCastSafetyPoll`/`CastSafetyPollSequencer` (see that module's doc for
-   * the full history) starts a genuinely new request on every tick — never
-   * skipped, never aborting a still-running earlier one — so an outstanding
-   * request, however slow or stalled, can never delay a later tick from
-   * running and observing a freshly-raised hold. Ordering is handled
-   * separately: a response may only be applied if it is strictly newer than
-   * the last-applied poll, so a late, out-of-order response (a slow pre-hold
-   * `false` arriving after a fresh post-hold `true`) can never clear the
-   * curtain. Nothing about correctness or the 15s bound depends on
-   * `CAST_SAFETY_POLL_TIMEOUT_MS`'s value — it is a resource-hygiene cap on
-   * one request's lifetime, not a gate anything else waits on. Fail safe
-   * throughout: a stale/aborted tick and a genuine failure on the current
-   * request all leave the last-known hold state alone rather than guessing a
-   * new value — it can never clear an active curtain. The regular projection
-   * poll already surfaces a hard failure (expired/revoked token) for the page
-   * as a whole.
+   * `runCastSafetyPoll`/`CastSafetyPoller` (see that module's doc for the
+   * full history, including the nine-round comparison-based scheme this
+   * replaced) allows at most one request in flight at a time — a tick that
+   * fires while one is still outstanding is simply skipped. Because there is
+   * never a second, differently-ordered response to reconcile against,
+   * out-of-order application is structurally impossible rather than merely
+   * checked-for: whichever response arrives IS the most recent observation,
+   * unconditionally. The trade this accepts is explicit and bounded: a hung
+   * request now delays the NEXT observation, up to
+   * `CAST_SAFETY_POLL_TIMEOUT_MS`, which is sized (with the poll interval)
+   * to stay inside the 15s bound even in that worst case — see that
+   * constant's doc. Fail safe throughout: an ignored tick and a genuine
+   * failure on the current request all leave the last-known hold state
+   * alone rather than guessing a new value — it can never clear an active
+   * curtain. The regular projection poll already surfaces a hard failure
+   * (expired/revoked token) for the page as a whole.
    *
    * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
    * separately from the last-known `active` value: "no hold" and "never
@@ -404,29 +404,28 @@ export default function PlayerDisplayPage() {
    * screen.
    *
    * That still leaves a narrower window open on the COMMIT side: the render-
-   * time reset and `sequencer.invalidate()` (which runs in the OLD effect's
+   * time reset and `poller.invalidate()` (which runs in the OLD effect's
    * passive cleanup, strictly after commit) are not the same instant. If the
    * old identity's in-flight request resolves in between — after the render-
    * time reset has already committed the new identity's "unknown" state, but
-   * before `invalidate()` has aborted it or advanced the sequencer's
-   * watermark — `runCastSafetyPoll` has no way to know a component-level
-   * identity change is pending; it still sees an ordinary in-flight request
-   * and can legitimately resolve `ok`. Applying that result would use the
-   * OLD identity's value to set the NEW identity's state. The sequencer
-   * can't close this: it operates on generations within one identity, not
-   * across the identity boundary the component owns. So the commit site
-   * itself re-checks the identity this specific call was actually made for
-   * (captured once, at the top of `loadCastSafety`, before any `await`)
-   * against `castSafetyIdentityRef.current` — which by the time this promise
-   * resolves already reflects whatever the LATEST render committed — and
-   * only applies the result when they still match. A mismatch means some
-   * later identity change has already superseded this call; the result is
-   * silently dropped rather than applied, exactly like an ordinary stale or
-   * ignored poll result.
+   * before `invalidate()` has aborted it — `runCastSafetyPoll` has no way to
+   * know a component-level identity change is pending; it still sees an
+   * ordinary in-flight request and can legitimately resolve `ok`. Applying
+   * that result would use the OLD identity's value to set the NEW identity's
+   * state. No poller design closes this on its own: it operates within one
+   * identity, not across the identity boundary the component owns. So the
+   * commit site itself re-checks the identity this specific call was
+   * actually made for (captured once, at the top of `loadCastSafety`, before
+   * any `await`) against `castSafetyIdentityRef.current` — which by the time
+   * this promise resolves already reflects whatever the LATEST render
+   * committed — and only applies the result when they still match. A
+   * mismatch means some later identity change has already superseded this
+   * call; the result is silently dropped rather than applied, exactly like
+   * an ordinary ignored poll result.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const [castSafetyKnown, setCastSafetyKnown] = useState(false);
-  const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());
+  const castSafetyPollerRef = useRef(new CastSafetyPoller());
   const castSafetyIdentityRef = useRef<string | null>(null);
   const castSafetyIdentity = isCastMode && castToken ? castToken : null;
   if (castSafetyIdentityRef.current !== castSafetyIdentity) {
@@ -439,29 +438,31 @@ export default function PlayerDisplayPage() {
     // Capture the identity this call is FOR, before the `await` — the ref it
     // is compared against below can change while this request is in flight
     // (an SPA transition to a new cast token). See the doc above for why the
-    // sequencer's own generation/invalidate machinery cannot substitute for
+    // poller's own single-writer/invalidate machinery cannot substitute for
     // this check.
     const requestIdentity = castToken;
-    const result = await runCastSafetyPoll(castSafetySequencerRef.current, (signal) =>
+    const result = await runCastSafetyPoll(castSafetyPollerRef.current, (signal) =>
       castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
     );
     if (shouldApplyCastSafetyResult(result, requestIdentity, castSafetyIdentityRef.current)) {
       setCastSafetyActive(result.active);
       setCastSafetyKnown(true);
     }
-    // 'stale' (out-of-order), 'ignored' (aborted), a 'failed' (transient)
-    // result, or an 'ok' result whose captured identity no longer matches
-    // the live one (superseded by a later identity change) all leave
-    // castSafetyActive/castSafetyKnown untouched — see fail-safe note above.
+    // 'ignored' (skipped while busy, aborted, or unmount/identity-change) and
+    // a 'failed' (transient) result, or an 'ok' result whose captured
+    // identity no longer matches the live one (superseded by a later
+    // identity change), all leave castSafetyActive/castSafetyKnown untouched
+    // — see fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
-    const sequencer = castSafetySequencerRef.current;
+    const poller = castSafetyPollerRef.current;
     if (isCastMode) void loadCastSafety();
-    // Abort any in-flight poll on unmount or when the cast identity (token)
-    // changes, so a late response never calls setState past that point.
+    // Abort the in-flight poll (if any) on unmount or when the cast identity
+    // (token) changes, so a late response never calls setState past that
+    // point.
     return () => {
-      sequencer.invalidate();
+      poller.invalidate();
     };
   }, [isCastMode, loadCastSafety]);
 

@@ -210,9 +210,10 @@ export class PlayerDisplayLoadSequencer {
  * Cast-token X-Card safety poll sequencing (issue #1908 rework).
  *
  * The safety poll is a single anonymous `GET /cast/:token/safety` on the same
- * visible-tab cadence as the rest of this page. This mechanism went through
- * several shapes, each closing one failure mode and (because it coupled
- * "when the next tick may run" to "when this one finishes") opening another:
+ * visible-tab cadence as the rest of this page. This mechanism first went
+ * through nine rounds of a comparison-based scheme — bump a generation
+ * counter per poll, compare generations to decide whether a response may
+ * apply — each round closing one failure mode and opening another:
  *
  *  1. Abort whichever poll was in flight on every new tick, apply whatever
  *     comes back: an out-of-order stale response can resolve after a fresher
@@ -229,330 +230,207 @@ export class PlayerDisplayLoadSequencer {
  *     (4s, "comfortably under the 5s interval") was itself wrong — an
  *     endpoint healthily responding in 4–5s would have every request
  *     aborted before completion, so the poll could never resolve `ok` at
- *     all. Widening the deadline (30s) fixes that, but reopens (3) in a
- *     bounded form: coupling "next tick may run" to "this request settled"
- *     means a single hang can still delay observing a freshly-raised hold by
- *     up to the deadline — incompatible with the 15s acceptance bound this
- *     feature is built around, however generous the deadline's own value.
+ *     all.
  *  5. Fix (4) by decoupling ticking from completion (every tick starts a
  *     genuinely new, never-aborted request), gated only by a generation
- *     watermark that advances on SUCCESS: closes (4), but a poll succeeding
- *     is not the only way it can conclude. If a newer poll fails or is
- *     aborted (never calling the success-only watermark update) while an
- *     OLDER poll is still outstanding, the older one's late — and by then
- *     possibly stale — success can still land after the newer attempt
- *     already gave up inconclusively, clearing the curtain with out-of-date
- *     data even though a fresher check was already attempted.
- *  6. Fix (5) by advancing the watermark on every conclusion — success,
- *     failure, or abort alike (`settle()`). Closes (5), but applying that
- *     same freshest-settled gate uniformly to BOTH `true` and `false`
- *     results is itself too strict: if a slow poll (generation N) is on its
- *     way to a correct `active: true`, and a poll that started AFTER it
- *     (generation N+1) fails quickly, generation N's true observation
- *     arrives to find the watermark already past it and gets discarded as
- *     "stale" — even though it is the only response that ever actually
- *     confirmed the hold. If failures keep winning that race, the curtain
- *     can stay down indefinitely despite a real, repeatedly-confirmed hold.
+ *     watermark that advances on SUCCESS: a poll succeeding is not the only
+ *     way it can conclude, so a newer poll that fails or aborts (never
+ *     advancing a success-only watermark) lets an OLDER poll's late success
+ *     land after it, clearing the curtain with out-of-date data.
+ *  6. Fix (5) by advancing the watermark on every conclusion regardless of
+ *     outcome: applying that SAME gate uniformly to both `true` and `false`
+ *     lets a newer poll merely failing FASTER discard an older but genuinely
+ *     confirmed `true` as "stale" — the curtain can then stay down
+ *     indefinitely despite a real, repeatedly-confirmed hold.
  *  7. Fix (6) by exempting `active: true` from the freshest-settled gate
- *     entirely: closes (6), but the exemption was unconditional. If
- *     `invalidate()` (unmount / cast-token change) explicitly abandoned a
- *     request and the fetcher ignores its abort signal and resolves anyway,
- *     that `active: true` belongs to an identity this sequencer has already
- *     moved on from — applying it raises the WRONG campaign's curtain, and
- *     unlike ordinary staleness it is not guaranteed to self-correct (the
- *     new identity's own polls could keep succeeding with `false` and never
- *     revisit it).
- *  9. Fix (8) closed the identity-abandonment case, but exempting
- *     `active: true` from staleness ALSO needs one narrower carve-out within
- *     the SAME identity: a slow pre-release poll (generation N) can still be
- *     outstanding when a newer poll (generation N+1) resolves `active: false`
- *     first and applies it (a confirmed release). Generation N's `true`
- *     arriving afterward is not "raising the curtain late" — the release it
- *     predates has already been confirmed by a strictly newer, successful
- *     observation, so applying it re-raises a curtain over a resumed game
- *     that is now stuck until the NEXT poll happens to succeed. This is
- *     narrower than (6)'s mistake: (6) was newer poll merely CONCLUDING
- *     (any outcome, including an inconclusive failure) being allowed to
- *     suppress an older `true`, which is wrong; this is a newer poll
- *     actually CONFIRMING release being allowed to supersede an older
- *     `true`, which is correct and must not be lost by (7)'s blanket
- *     exemption. Fix: track a second, independent watermark that only
- *     advances when an `active: false` is actually applied (not merely
- *     attempted or failed) — `confirmedFalseGeneration`. An `active: true`
- *     is superseded only if its own generation predates that watermark, so a
- *     newer FAILURE still cannot suppress it (keeping (7)'s fix intact) but
- *     a newer CONFIRMED RELEASE can.
+ *     entirely: but the exemption was unconditional, so a request explicitly
+ *     abandoned by `invalidate()` (identity change) whose fetcher ignores
+ *     the abort and resolves anyway raises the WRONG campaign's curtain.
+ *  8. Fix (7) by checking the request's own abort signal before either
+ *     value branch — closes the identity-abandonment case specifically.
+ *  9. Even within the SAME identity, unconditionally exempting `active:
+ *     true` is still too broad: a slow pre-release poll can still be
+ *     outstanding when a strictly newer poll actually applies a confirmed
+ *     `active: false` first, and the older `true` landing afterward
+ *     re-raises a curtain over a game newer evidence already confirmed
+ *     resumed. Fix: a second watermark, advanced only on an applied
+ *     `false`, distinct from a newer poll merely failing (6)'s mistake.
+ * 10. And then a FOURTH distinct ordering defect surfaced on this same
+ *     scheme: `generation` is assigned at REQUEST-START order, but HTTP
+ *     responses can be serviced out of start order. Generation 1 (older
+ *     start) can be the one that actually reflects the more recent server
+ *     state if generation 2's response — despite starting later — reaches
+ *     the server and returns *first*, before the hold in generation 1's
+ *     window even changes. No comparison built on "which generation started
+ *     first" can be correct here, because generation number was never a
+ *     proxy for observation time to begin with — it only ever recorded
+ *     request-issue order, and (1) through (9) all, in different ways,
+ *     conflated the two.
  *
- * The fix is to stop coupling ticking to completion, advance the ordering
- * watermark on every conclusion (not only successful ones), AND stop gating
- * `active: true` on that watermark at all except when a strictly newer
- * confirmed release has already superseded it. Every visible-tab tick starts
- * a genuinely NEW request — never skipped, never aborted just because a new
- * tick fired — so an outstanding request (however slow, however hung) can
- * never block a later one from running. Ordering is handled separately, by a
- * monotonic generation: each poll gets a generation number, and `settle()`
- * records that a generation has concluded — with ANY outcome, success,
- * failure, or abort — returning whether that generation is still the
- * freshest to have concluded. A confirmed `active: true` applies regardless
- * of that freshness check UNLESS its own signal was explicitly aborted
- * (invalidate() — unmount / identity change), in which case it is `ignored`
- * regardless of value, OR a strictly newer generation has already applied a
- * confirmed `active: false`, in which case it is `stale`. Raising the
- * curtain late from an ordinary overlapping poll (no newer confirmed release
- * exists yet) is never the dangerous mistake — worst case it stays up one
- * poll longer than strictly needed, self-correcting on the next tick — but a
- * response whose OWN identity has already been abandoned, or whose value a
- * strictly newer successful check has already superseded, is a different
- * kind of stale that would not self-correct. `active: false` from a
- * still-current identity is gated on being the freshest-settled generation,
- * since clearing the curtain out of order is the direction that actually
- * matters to block there. This keeps the out-of-order guarantee from (1)/(2)
- * for the case that needs it — a late, low-numbered `false` can never
- * overwrite a `true` a higher-numbered one already applied — closes (5) by
- * no longer letting a response's own success be the only thing that can
- * supersede it, closes (6) by never letting an inconclusive newer attempt
- * suppress an older but genuine `true`, closes (7) by never letting an
- * abandoned identity's buffered `true` raise the wrong curtain, closes (9)
- * by letting a genuinely newer CONFIRMED release (not merely a newer
- * attempt) supersede an older, now-out-of-date `true`, and keeps (2)'s and
- * (3)'s starvation modes structurally impossible: no tick is ever skipped,
- * and no in-flight request is ever aborted by a newer tick starting.
+ * That last finding is not "one more patch": the whole class of defect —
+ * four distinct ordering bugs across nine rounds, each locally correct and
+ * each revealing the next seam — says the comparison-based MODEL is wrong,
+ * not that one more comparison was missing. `generation`, `settledGeneration`,
+ * and `confirmedFalseGeneration` are gone. In their place:
  *
- * `CAST_SAFETY_POLL_TIMEOUT_MS` still exists, but its job changed: it is no
- * longer a correctness deadline (nothing depends on it to keep polling
- * alive), only a resource-hygiene cap so a connection that hangs forever
- * doesn't accumulate open requests indefinitely. Because nothing depends on
- * its exact value for correctness anymore, it can be — and is — set
- * generously, with no tension against the 15s bound: a freshly-raised hold
- * is observed by the next scheduled tick (at most one 5s poll interval away)
- * succeeding on its own, entirely independent of whatever a prior hung
- * request is still doing.
+ * **Single-writer poll.** `CastSafetyPoller` allows at most one request in
+ * flight at a time. A `poll()` call while one is already outstanding is a
+ * no-op (`{ kind: 'ignored' }`) rather than a second concurrent request to
+ * reconcile against later. Because only one request can ever be in flight,
+ * there is no second, differently-ordered response for any observation to
+ * be compared against — whichever response arrives IS unconditionally the
+ * most recent observation, every time, by construction rather than by
+ * checking. Ordering is not RESOLVED here; it is UNREPRESENTABLE: the type
+ * that would carry two outstanding requests' generations to compare against
+ * each other simply does not exist in this design.
+ *
+ * The trade this accepts, explicitly: a hung request now DOES delay the
+ * next observation (rounds 1-3's exact tension), bounded by
+ * `CAST_SAFETY_POLL_TIMEOUT_MS` rather than the sequencing being free of it.
+ * That constant is therefore back to being load-bearing for correctness —
+ * unlike the generation scheme's version, which (rounds 4-9) explicitly
+ * carried none — and is sized so `timeoutMs + one poll interval` still stays
+ * within the feature's 15s acceptance bound even in the worst case: a hang
+ * that happens to start the instant a hold is raised delays observing it by
+ * at most one full timeout, then at most one more scheduled tick. See the
+ * constant's own doc for the exact bound.
+ *
+ * Cancellation on an identity change (unmount / cast-token change) is just
+ * "abort the one possible in-flight request" (`invalidate()`) — no
+ * generation bump, no watermark to fast-forward, because there is only ever
+ * one thing to cancel. The identity-BOUNDARY guard
+ * (`shouldApplyCastSafetyResult`, below) is unrelated to any of this and is
+ * unchanged by this redesign: it protects the react-state commit site
+ * against an old identity's in-flight request resolving after a NEWER
+ * identity's render has already committed, which is a component-level
+ * concern the poller (whichever shape it takes) cannot see or fix.
  */
 export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState>;
 
-/** Resource-hygiene cap on a single safety poll request — NOT a correctness
- * deadline. No poll's ability to run or to be applied depends on this value;
- * it only bounds how long a connection that never settles on its own stays
- * open before being cleaned up. See the module doc above. */
-export const CAST_SAFETY_POLL_TIMEOUT_MS = 30_000;
+/**
+ * Bounds one safety poll request's lifetime. Unlike the generation scheme
+ * this replaced (where nothing depended on this value for correctness), the
+ * single-writer poller COUPLES "how long can a hang delay the next
+ * observation" to this value, so it is chosen, not just generous:
+ * `CAST_SAFETY_POLL_TIMEOUT_MS + POLL_MS (5s)` must stay at or under the
+ * feature's 15s acceptance bound (issue #1908) even in the worst case (a
+ * hang starting the instant a hold is raised) — 10s leaves a full 5s of
+ * margin under that ceiling while still being comfortably larger than the
+ * 5s poll interval itself (avoiding round 4's mistake of a deadline so
+ * tight it aborts ordinary, healthy-but-not-instant responses).
+ */
+export const CAST_SAFETY_POLL_TIMEOUT_MS = 10_000;
 
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }
-  /** This response arrived, but a newer generation was already applied —
-   * out-of-order, correctly ignored. */
-  | { kind: 'stale' }
-  /** Aborted (unmount / identity change, or the hygiene timeout). */
+  /** Skipped (a poll was already in flight — single-writer), or aborted
+   * (unmount / identity change, or the hygiene timeout). Either way, no
+   * value: the caller does nothing. */
   | { kind: 'ignored' }
   /** Real (non-abort) failure. Callers must fail safe: leave the last-known
    * hold state untouched rather than clearing an active curtain or guessing
    * a new value. */
   | { kind: 'failed' };
 
-export class CastSafetyPollSequencer {
-  private generation = 0;
-  private settledGeneration = 0;
-  private confirmedFalseGeneration = 0;
-  private inFlight = new Map<number, AbortController>();
+/**
+ * Single-writer cast-safety poller. At most one request is ever in flight;
+ * see the module doc above for why this makes out-of-order application
+ * structurally impossible rather than merely checked-for.
+ */
+export class CastSafetyPoller {
+  private controller: AbortController | null = null;
+  private busy = false;
 
-  /** Start a new poll. Always succeeds — never blocked or superseded by a
-   * prior poll that hasn't settled yet, so an outstanding request (slow,
-   * stalled, or otherwise) can never prevent this one from running. */
-  begin(): { generation: number; controller: AbortController } {
-    this.generation += 1;
-    const generation = this.generation;
+  /** True while a request is in flight. Exposed for tests/observability —
+   * `poll()` already consults this itself. */
+  get isBusy(): boolean {
+    return this.busy;
+  }
+
+  /**
+   * Run one poll tick. If a previous call on this instance is still
+   * in flight, this is a no-op: single-writer means never more than one
+   * request outstanding at a time, so a tick arriving while busy is simply
+   * skipped rather than started as a second thing to reconcile later.
+   */
+  async poll(fetchSafety: CastSafetyFetcher, options: { timeoutMs?: number } = {}): Promise<CastSafetyPollResult> {
+    if (this.busy) return { kind: 'ignored' };
+    this.busy = true;
     const controller = new AbortController();
-    this.inFlight.set(generation, controller);
-    return { generation, controller };
-  }
-
-  /** Stop tracking a settled poll (success, failure, or abort) so it no
-   * longer counts toward in-flight bookkeeping / `invalidate()`'s abort set. */
-  end(generation: number): void {
-    this.inFlight.delete(generation);
-  }
-
-  /**
-   * Record that `generation` has settled — with ANY outcome: a successful
-   * response, a genuine failure, or an abort. Returns whether `generation`'s
-   * own value (if it succeeded) may still be trusted: true only if no NEWER
-   * generation had already settled by the time this one finished.
-   *
-   * Settling is tracked for every outcome, not just successes: if it only
-   * advanced on success, a newer poll that itself fails, times out, or is
-   * aborted would never raise the watermark, and a slower OLDER poll's late
-   * (and by then possibly stale) success could still land after it —
-   * clearing the curtain with out-of-date data even though a fresher check
-   * was already attempted and came back inconclusive. Once any newer attempt
-   * has concluded, an older one is stale regardless of how it concludes: the
-   * fail-safe stance is to keep the last-known state rather than trust a
-   * result real-world time has already moved past.
-   */
-  settle(generation: number): boolean {
-    const isFreshest = generation > this.settledGeneration;
-    if (isFreshest) this.settledGeneration = generation;
-    return isFreshest;
+    this.controller = controller;
+    const { signal } = controller;
+    const timeoutMs = options.timeoutMs ?? CAST_SAFETY_POLL_TIMEOUT_MS;
+    const deadline = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const state = await fetchSafety(signal);
+      // An explicit abort (invalidate() / the timeout) can still let a
+      // fetcher that ignores its signal resolve anyway — reject its value
+      // outright regardless of what it carries, exactly like every prior
+      // round's identity/abort backstop.
+      if (signal.aborted) return { kind: 'ignored' };
+      return { kind: 'ok', active: state.active };
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted) return { kind: 'ignored' };
+      return { kind: 'failed' };
+    } finally {
+      clearTimeout(deadline);
+      this.busy = false;
+      if (this.controller === controller) this.controller = null;
+    }
   }
 
   /**
-   * Record that `generation`'s `active: false` was actually APPLIED (i.e. it
-   * already passed `settle()`'s freshest-settled gate) — a confirmed
-   * release, not merely an attempted or failed one. Only an applied `false`
-   * may advance this watermark: a newer generation that merely fails or is
-   * aborted must not supersede an older, still-genuine `true` (that
-   * regression was fixed in round 6/7 — see the module doc's round 9 entry
-   * for why this watermark has to stay independent of `settle()`'s).
-   */
-  confirmFalse(generation: number): void {
-    if (generation > this.confirmedFalseGeneration) this.confirmedFalseGeneration = generation;
-  }
-
-  /**
-   * True when `generation` predates the most recently CONFIRMED release —
-   * i.e. a strictly newer poll has already applied `active: false` since
-   * `generation` started, so `generation`'s own `active: true` is out of
-   * date and must not re-raise the curtain over a game that newer evidence
-   * has already confirmed resumed.
-   */
-  isSupersededByConfirmedRelease(generation: number): boolean {
-    return generation < this.confirmedFalseGeneration;
-  }
-
-  /**
-   * Abort every currently in-flight poll. Call on unmount / cast identity
-   * (token) change so a response arriving after that point cannot commit.
-   * Also raises the settled watermark to the current generation, so even a
-   * request that ignores its abort signal and "completes" later can never
-   * apply — the same backstop-beyond-cancellation property `settle()` gives
-   * every other case. Future `begin()` calls (e.g. cast mode re-entered) are
-   * unaffected — this is a one-time flush, not a permanent shutdown.
+   * Abort the in-flight request, if any. Call on unmount / cast identity
+   * change. A later `poll()` call (e.g. cast mode re-entered) is unaffected
+   * — this is a one-time flush, not a permanent shutdown, and `busy` is
+   * always cleared by the aborted call's own `finally`, not by this method.
    */
   invalidate(): void {
-    for (const controller of this.inFlight.values()) controller.abort();
-    this.inFlight.clear();
-    this.settledGeneration = this.generation;
+    this.controller?.abort();
   }
 }
 
 /**
- * Run one cast-safety poll tick. Always starts a fresh request — never
- * skipped, never aborts a still-running earlier poll — so an outstanding
- * request can never block this or any later tick. A confirmed `active: true`
- * resolves `{ kind: 'ok', active: true }` regardless of ordinary generation
- * ordering — raising the curtain late is never the mistake that matters to
- * prevent — UNLESS either: this specific request's own signal was
- * explicitly aborted (`invalidate()`: unmount / cast-token change), in which
- * case even a buffered `true` that ignored the abort resolves `ignored` (it
- * belongs to an identity this sequencer has already moved on from, and
- * applying it would raise the WRONG campaign's curtain with no guarantee of
- * self-correction); or a strictly newer generation has already applied a
- * CONFIRMED `active: false`, in which case this `true` resolves `stale` (a
- * newer successful check has already established the game resumed, so this
- * older value is out of date — not merely superseded by another attempt,
- * which must not be enough, see round 6/7). A confirmed `active: false` from
- * a still-current identity only resolves `ok` when its generation is still
- * the freshest SETTLED one; an out-of-order `false` (including one
- * superseded by a newer poll that itself failed or aborted) resolves `stale`
- * instead. A genuine failure resolves `failed`, so the caller can fail safe
- * (keep last-known state) instead of guessing a value. `timeoutMs` bounds
- * this one request's own lifetime purely for resource hygiene — see
- * `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no correctness
- * weight here.
+ * Run one cast-safety poll tick against `poller`. A thin wrapper — kept as
+ * a free function (rather than requiring callers to hold and call the
+ * class method directly) to match this module's existing
+ * `run*`-function-plus-sequencer-object shape and minimize call-site churn.
  */
 export async function runCastSafetyPoll(
-  sequencer: CastSafetyPollSequencer,
+  poller: CastSafetyPoller,
   fetchSafety: CastSafetyFetcher,
   options: { timeoutMs?: number } = {},
 ): Promise<CastSafetyPollResult> {
-  const { generation, controller } = sequencer.begin();
-  const { signal } = controller;
-  const timeoutMs = options.timeoutMs ?? CAST_SAFETY_POLL_TIMEOUT_MS;
-  const deadline = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const state = await fetchSafety(signal);
-    const isFreshest = sequencer.settle(generation);
-    // A confirmed ACTIVE hold always applies, even out of order: raising the
-    // curtain late is never the dangerous mistake — the worst case is it
-    // stays up one poll longer than strictly necessary, which self-corrects
-    // on the next tick. Only a confirmed INACTIVE result needs the strict
-    // freshest-settled gate, since clearing the curtain out of order (e.g. a
-    // slow pre-hold `false` landing after a newer poll already failed and
-    // could not confirm anything fresher) is the direction that actually
-    // matters to block. Without this asymmetry, a legitimate but slow
-    // `active: true` observation could be discarded as "stale" merely
-    // because a LATER-started poll happened to fail FASTER — fresh evidence
-    // that gating success on `settle()`'s freshest check applied uniformly
-    // to both values was itself too strict.
-    //
-    // That leniency is itself scoped to ordinary staleness, not identity: if
-    // `invalidate()` explicitly aborted THIS request (unmount / cast-token
-    // change) and the fetcher ignored the signal and resolved anyway, its
-    // `active: true` belongs to a campaign this sequencer has already moved
-    // on from — applying it would raise the WRONG campaign's curtain, and
-    // unlike ordinary staleness that isn't guaranteed to self-correct on the
-    // next tick (the new identity's own polls could keep succeeding with
-    // `false` and never revisit it). `signal.aborted` at this point can only
-    // mean an explicit abort (invalidate() or the hygiene timeout) — the
-    // fetch already resolved, so ordinary out-of-order arrival never sets it.
-    if (signal.aborted) return { kind: 'ignored' };
-    if (state.active) {
-      // A strictly newer generation has already applied a CONFIRMED release
-      // — not merely attempted or failed one — so this `true` predates
-      // evidence that has already superseded it. Unlike the ordinary
-      // freshest-settled gate below, this checks a SEPARATE watermark that
-      // only advances on an actually-applied `false`, so a newer poll that
-      // merely fails or aborts still cannot suppress this value (round 7).
-      if (sequencer.isSupersededByConfirmedRelease(generation)) return { kind: 'stale' };
-      return { kind: 'ok', active: true };
-    }
-    if (!isFreshest) return { kind: 'stale' };
-    // This `false` is about to apply — record it on the confirmed-release
-    // watermark so a still-outstanding OLDER `true` cannot re-raise the
-    // curtain over a game this newer, successful check already confirmed
-    // resumed (round 9).
-    sequencer.confirmFalse(generation);
-    return { kind: 'ok', active: false };
-  } catch (error) {
-    // Settle even on failure/abort — a later-arriving OLDER response must
-    // see this generation as having concluded, regardless of how it
-    // concluded. See `settle()`'s doc for why this is the fix, not an
-    // incidental detail.
-    sequencer.settle(generation);
-    if (isAbortError(error) || signal.aborted) {
-      return { kind: 'ignored' };
-    }
-    return { kind: 'failed' };
-  } finally {
-    clearTimeout(deadline);
-    sequencer.end(generation);
-  }
+  return poller.poll(fetchSafety, options);
 }
 
 /**
  * Commit-site guard for the cast-safety poll's identity boundary (issue
- * #1908 rework, round 10 — a P1 finding distinct from rounds 1-9 above,
- * which are all WITHIN one identity).
+ * #1908 rework — orthogonal to, and unaffected by, the single-writer
+ * redesign above: this is a component-level concern, not a poll-ordering
+ * one).
  *
- * `CastSafetyPollSequencer` only orders polls WITHIN a single cast identity
+ * The poller above only guarantees ordering WITHIN one cast identity
  * (token); it has no notion of the identity itself changing. On an SPA
  * transition between two cast tokens, `PlayerDisplayPage` resets its
  * `castSafetyActive`/`castSafetyKnown` state to "unknown" DURING RENDER (see
- * that component's doc), but `sequencer.invalidate()` — which aborts the old
- * identity's in-flight poll and folds it into the sequencer's own
- * bookkeeping — only runs afterward, in the OLD effect's passive cleanup.
- * Between those two points, the old identity's poll is, as far as the
- * sequencer is concerned, an entirely ordinary in-flight request; if it
- * resolves in that window, `runCastSafetyPoll` has no way to know a
+ * that component's doc), but `poller.invalidate()` — which aborts the old
+ * identity's in-flight poll — only runs afterward, in the OLD effect's
+ * passive cleanup. Between those two points, the old identity's poll is, as
+ * far as the poller is concerned, an entirely ordinary in-flight request;
+ * if it resolves in that window, `runCastSafetyPoll` has no way to know a
  * component-level identity change is pending and can legitimately resolve
  * `ok`. Applying that result would use the OLD identity's value to set the
- * NEW identity's state — the sequencer's generation/abort machinery cannot
- * close this gap because it operates entirely within one identity.
+ * NEW identity's state — no poller design, however it orders requests
+ * WITHIN an identity, can close this gap on its own, because it operates
+ * entirely within one identity and never sees the boundary.
  *
  * The fix lives at the call site, not as another sequencing/abort layer:
  * capture the identity a call was actually made FOR before its `await`, and
  * before applying an `ok` result, check that capture against whatever the
  * page's identity ref holds by the time the promise resolves. A mismatch
  * means a later identity change has already superseded this call, and the
- * result must be dropped exactly like an ordinary stale/ignored one.
+ * result must be dropped exactly like an ordinary ignored one.
  */
 export function shouldApplyCastSafetyResult(
   result: CastSafetyPollResult,

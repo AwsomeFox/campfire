@@ -1,13 +1,10 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Eight review
- * findings on the same code, each closing one failure mode and (because
- * earlier shapes coupled "when the next tick may run" to "when this one
- * finishes", coupled ordering to success alone, applied that ordering gate
- * uniformly regardless of which way it was protecting, or exempted a value
- * from that gate unconditionally rather than only for ordinary staleness)
- * opening another:
+ * `GET /cast/:token/safety` is polled on a fixed interval. This module first
+ * went through nine rounds of a comparison-based scheme (bump a generation
+ * counter per poll, compare generations to decide whether a response may
+ * apply), each closing one failure mode and opening another:
  *
  *  1. Overlapping polls can complete out of order — a slow pre-hold `false`
  *     resolving after a fresh post-hold `true` must not clear the curtain.
@@ -20,58 +17,73 @@
  *  4. A deadline that releases the gate closes (3), but the wrong *value*
  *     (tight against the poll interval) aborts every normally-slow-but-
  *     healthy response too, so the poll can never resolve `ok` at all.
- *     Widening the deadline fixes that, but reopens (3) in bounded form —
- *     coupling "next tick may run" to "this one settled" means a single
- *     hang can still delay observing a freshly-raised hold by up to
- *     whatever the deadline is, in tension with the 15s acceptance bound
- *     no matter how the deadline is tuned.
  *  5. Fix: stop coupling ticking to completion. Every tick starts a
  *     genuinely new request — never skipped, never aborted by a later
- *     tick — so an outstanding request (however slow or hung) can never
- *     block a later one. Ordering is handled separately by a monotonic
- *     generation watermark that (in this shape) only advances on SUCCESS.
- *  6. That watermark-on-success-only is itself incomplete: if a NEWER poll
- *     fails or is aborted (never advancing it) while an OLDER poll is still
- *     outstanding, the older one's late success can still land after the
- *     newer attempt already gave up inconclusively — clearing the curtain
- *     with stale data even though a fresher check was already attempted.
- *     Fix: advance the watermark on every settled generation, success or
- *     not (`settle()`), so an older response is stale once ANY newer one has
- *     concluded, regardless of how.
+ *     tick. Ordering is handled separately by a monotonic generation
+ *     watermark that (in this shape) only advances on SUCCESS.
+ *  6. That watermark-on-success-only is itself incomplete: a newer poll
+ *     failing or aborting (never advancing it) lets an older poll's late
+ *     success land after it, clearing the curtain with stale data.
  *  7. Applying that same freshest-settled gate to BOTH `true` and `false`
- *     results is itself too strict: a slow poll genuinely confirming an
- *     ACTIVE hold can be discarded as "stale" merely because a later-started
- *     poll happened to fail faster. Fix: only `active: false` is gated on
- *     being the freshest-settled generation; `active: true` always applies —
- *     raising the curtain late is never the mistake that matters to prevent.
+ *     is itself too strict: a slow poll genuinely confirming an ACTIVE hold
+ *     can be discarded as "stale" merely because a later-started poll
+ *     happened to fail faster. Fix: only `active: false` is gated on being
+ *     freshest-settled; `active: true` always applies.
  *  8. Exempting `active: true` UNCONDITIONALLY reopens a narrower problem:
- *     if `invalidate()` (a cast-identity change) explicitly abandoned a
- *     request and its fetcher ignores the abort and resolves anyway, that
- *     `true` belongs to a campaign this sequencer has already moved on
- *     from — applying it raises the WRONG campaign's curtain, with no
- *     guarantee the new identity's own polls will ever revisit it (unlike
- *     ordinary staleness, which self-corrects on the next tick). Fix: check
- *     `signal.aborted` before either value branch, so an explicitly
- *     invalidated request is `ignored` regardless of what it resolves with.
+ *     an identity-abandoned request whose fetcher ignores the abort and
+ *     resolves anyway raises the WRONG campaign's curtain. Fix: check
+ *     `signal.aborted` before either value branch.
  *  9. Even within the SAME identity, exempting `active: true` from ordinary
  *     staleness is too broad in one case: a slow pre-release poll can still
- *     be outstanding when a strictly newer poll resolves `active: false`
- *     first and actually applies it (a CONFIRMED release, not merely a
- *     newer attempt or failure). The older `true` landing afterward would
- *     re-raise a curtain over a game newer evidence already confirmed
- *     resumed. Fix: a second, independent watermark that advances only when
- *     a `false` is actually applied; an older `true` is `stale` only against
- *     THAT watermark, so a newer failure (round 7) still cannot suppress it.
+ *     be outstanding when a strictly newer poll actually applies `active:
+ *     false` first (a CONFIRMED release). Fix: a second watermark that
+ *     advances only on an applied `false`.
  *
- * These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free)
- * against all nine, mirroring `player-display-load.unit.spec.ts`'s
- * deferred-promise technique.
+ * And then a FOURTH distinct ordering defect surfaced on the same scheme:
+ * `generation` reflects request-START order, not completion/observation
+ * order, so a comparison built on generation number can still accept an
+ * observation that is actually older than one already applied when HTTP
+ * responses are serviced out of start order. That finding was the signal
+ * that the whole MODEL — comparing generation numbers at all — was wrong,
+ * not that one more comparison was missing after nine rounds of them. See
+ * `playerDisplayLoad.ts`'s module doc for the full reasoning.
+ *
+ * The fix replaces the entire generation/watermark scheme with a
+ * single-writer poller (`CastSafetyPoller`): at most one request is ever in
+ * flight, so there is no second, differently-ordered response for any
+ * observation to be compared against. Out-of-order application becomes
+ * structurally impossible rather than merely checked-for — there is no
+ * `generation` field left to get the comparison wrong on.
+ *
+ * Consequently, several of the ORIGINAL rounds' specific scenarios (6, 7, 8,
+ * 9 — all about comparing generation numbers against each other) are not
+ * merely re-tested here, they are RETIRED: the objects those tests
+ * manipulated (`begin()`, `settle()`, `confirmFalse()`, `generation` itself)
+ * no longer exist, and the races they guarded against cannot occur in a
+ * design with only one request in flight at a time. This file intentionally
+ * documents that rather than silently dropping coverage. What DOES carry
+ * forward, adapted to the new shape:
+ *
+ *  - out-of-order application (1): now trivial — a second concurrent call is
+ *    skipped outright, never started, so there is nothing to apply out of
+ *    order;
+ *  - starvation (2)/(3): the single-writer model deliberately reintroduces a
+ *    BOUNDED version of this trade (a hung request delays the next tick),
+ *    which rounds 1-9 spent their effort trying to avoid entirely. This is
+ *    an intentional, reviewed trade-off (see `playerDisplayLoad.ts`), not a
+ *    regression, and is tested below as the new model's documented behavior;
+ *  - the deadline value (4): re-derived against the single-writer model's
+ *    actual constraint (`timeoutMs + one poll interval <= 15s`), not
+ *    against "comfortably under the interval" — tested as its own guard;
+ *  - a slow-but-healthy response still landing: unaffected, still tested;
+ *  - the identity-boundary guard (`shouldApplyCastSafetyResult`): unrelated
+ *    to any of this and entirely unchanged — see its own describe block.
  */
 import { expect, test } from '@playwright/test';
 import type { CastSafetyState } from '@campfire/schema';
 import {
   CAST_SAFETY_POLL_TIMEOUT_MS,
-  CastSafetyPollSequencer,
+  CastSafetyPoller,
   runCastSafetyPoll,
   shouldApplyCastSafetyResult,
   type CastSafetyFetcher,
@@ -114,128 +126,99 @@ function trackAbort<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
   });
 }
 
-test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () => {
-  test('the P1 race: a stale out-of-order response cannot clear a curtain a fresher one raised', async () => {
-    const sequencer = new CastSafetyPollSequencer();
-    const stalePoll = deferred<CastSafetyState>();
-    let calls = 0;
-
-    // Deliberately does NOT consult `signal` — this fetcher can genuinely
-    // "complete" even though nothing ever aborted it, proving the generation
-    // watermark (not cancellation) is what blocks the stale value.
-    const fetchSafety: CastSafetyFetcher = async () => {
-      calls += 1;
-      if (calls === 1) return stalePoll.promise; // pre-hold: outruns the interval, resolves late
-      return { active: true }; // post-hold: resolves promptly, first
+test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-writer model)', () => {
+  test('out-of-order application is structurally impossible: a second concurrent call is skipped, not started', async () => {
+    // This replaces the original "P1 race" test. Under the old
+    // generation-comparison scheme, both calls actually ran and the test
+    // proved the LATER one's value won regardless of completion order.
+    // Under the single-writer model there is nothing to compare: the
+    // second call never starts a request at all.
+    const poller = new CastSafetyPoller();
+    const first = deferred<CastSafetyState>();
+    let fetchCalls = 0;
+    const fetchSafety: CastSafetyFetcher = () => {
+      fetchCalls += 1;
+      return first.promise;
     };
 
-    const stale = runCastSafetyPoll(sequencer, fetchSafety);
-    const fresh = runCastSafetyPoll(sequencer, fetchSafety);
+    const inFlight = runCastSafetyPoll(poller, fetchSafety);
+    expect(poller.isBusy).toBe(true);
 
-    const freshResult = await fresh;
-    expect(freshResult).toMatchObject({ kind: 'ok', active: true });
+    // A second tick while the first is still outstanding is a no-op — it
+    // never calls the fetcher, so there is no second response to ever be
+    // "out of order" relative to the first.
+    const skipped = await runCastSafetyPoll(poller, fetchSafety);
+    expect(skipped).toEqual({ kind: 'ignored' });
+    expect(fetchCalls).toBe(1);
 
-    // Late stale response (pre-hold, inactive) resolves AFTER the fresh
-    // post-hold response already raised the curtain — must not win.
-    stalePoll.resolve({ active: false });
-    const staleResult = await stale;
-    expect(staleResult.kind).toBe('stale');
-
-    // Caller contract: only 'ok' results are ever applied, so simulating the
-    // page's reducer here proves the curtain stays raised.
-    let castSafetyActive = false;
-    for (const result of [freshResult, staleResult]) {
-      if (result.kind === 'ok') castSafetyActive = result.active;
-    }
-    expect(castSafetyActive).toBe(true);
+    first.resolve({ active: true });
+    const result = await inFlight;
+    expect(result).toMatchObject({ kind: 'ok', active: true });
+    expect(poller.isBusy).toBe(false);
   });
 
-  test('regression (round 5): a hung request can never block a later tick from running and applying', async () => {
-    // This is the exact failure every prior "serialize/skip" shape reopened
-    // in some form: an in-flight request that never settles must not gate
-    // whether the NEXT scheduled tick can even start. Ticks fire on a fixed
-    // interval regardless of outstanding work — a fresh request always gets
-    // to run.
-    const sequencer = new CastSafetyPollSequencer();
+  test('a genuinely raised hold is observed by the very next tick once the poller is free again', async () => {
+    const poller = new CastSafetyPoller();
+
+    const noHold = await runCastSafetyPoll(poller, async () => ({ active: false }));
+    expect(noHold).toMatchObject({ kind: 'ok', active: false });
+
+    const raised = await runCastSafetyPoll(poller, async () => ({ active: true }));
+    expect(raised).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('an intentional, bounded trade-off: a hung request delays (does not lose) the next observation', async () => {
+    // Rounds 1-9 spent nine iterations trying to avoid ANY coupling between
+    // "is a request still outstanding" and "can the next tick run". The
+    // single-writer redesign deliberately accepts a BOUNDED version of that
+    // coupling in exchange for making ordering unrepresentable: while one
+    // request is in flight, a new tick is skipped outright rather than
+    // started. This is not silent data loss — the outstanding request still
+    // settles and its value still applies — it is a bounded delay, capped
+    // by `CAST_SAFETY_POLL_TIMEOUT_MS`.
+    const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     const hungFetch: CastSafetyFetcher = (signal) => trackAbort(signal, hung.promise);
 
-    const stuck = runCastSafetyPoll(sequencer, hungFetch, { timeoutMs: 10_000 });
+    const stuck = runCastSafetyPoll(poller, hungFetch, { timeoutMs: 10_000 });
 
-    // Several more ticks fire while the first is still outstanding — every
-    // one of them must actually run (not be skipped) and may apply.
-    for (let i = 0; i < 3; i += 1) {
-      const tick = await runCastSafetyPoll(sequencer, async () => ({ active: true }), {
-        timeoutMs: 10_000,
-      });
-      expect(tick).toMatchObject({ kind: 'ok', active: true });
-    }
+    // Ticks that fire while the hung request is outstanding are skipped, not
+    // queued and not separately started.
+    const skippedTick = await runCastSafetyPoll(poller, async () => ({ active: true }), { timeoutMs: 10_000 });
+    expect(skippedTick).toEqual({ kind: 'ignored' });
 
-    // The hung request settling later (or never) has no bearing on the
-    // display having already observed the active hold promptly.
-    hung.resolve({ active: false });
+    // Once the hung request finally settles, the poller frees up and the
+    // NEXT tick runs and applies normally — nothing was permanently lost.
+    hung.resolve({ active: true });
     const stuckResult = await stuck;
-    expect(stuckResult.kind).toBe('stale'); // superseded by the newer applied generations
+    expect(stuckResult).toMatchObject({ kind: 'ok', active: true });
+
+    const nextTick = await runCastSafetyPoll(poller, async () => ({ active: true }), { timeoutMs: 10_000 });
+    expect(nextTick).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('regression (round 6): a newer poll that fails must still block an older, now-stale success', async () => {
-    // The watermark-on-success-only shape passed every test above but missed
-    // this: tick 1 (pre-hold) hangs; the hold is raised; tick 2 (post-hold)
-    // is attempted but itself fails outright before tick 1 resolves — so
-    // nothing had advanced the watermark yet under that shape. Tick 1's
-    // late, stale success must still be rejected once tick 2 has concluded,
-    // even though tick 2's own conclusion carried no value of its own to
-    // apply (fail safe: keep last-known state, don't adopt known-older data).
-    const sequencer = new CastSafetyPollSequencer();
-    const stalePreHold = deferred<CastSafetyState>();
-
-    const stale = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, stalePreHold.promise));
-
-    const failing = await runCastSafetyPoll(sequencer, async () => {
-      throw new TypeError('network down');
-    });
-    expect(failing.kind).toBe('failed');
-
-    // The older pre-hold request finally resolves successfully — but a
-    // newer attempt already concluded (even though it failed), so this must
-    // not be trusted.
-    stalePreHold.resolve({ active: false });
-    const staleResult = await stale;
-    expect(staleResult.kind).toBe('stale');
-  });
-
-  test('regression (round 7): a newer poll that fails must NOT suppress an older, still-genuine active observation', async () => {
-    // Applying round 6's fix uniformly to both values was itself too strict:
-    // generation 1 is slowly confirming an ACTUAL active hold; generation 2
-    // starts after it and fails quickly, advancing the settled watermark
-    // past generation 1 before it resolves. Generation 1's `true` is not
-    // stale data to be distrusted the way a `false` would be — raising the
-    // curtain late is never the dangerous mistake, so it must still apply.
-    const sequencer = new CastSafetyPollSequencer();
-    const slowTrue = deferred<CastSafetyState>();
-
-    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowTrue.promise));
-
-    const failing = await runCastSafetyPoll(sequencer, async () => {
-      throw new TypeError('network down');
-    });
-    expect(failing.kind).toBe('failed');
-
-    // The older request's genuine positive observation must still land.
-    slowTrue.resolve({ active: true });
-    const olderResult = await older;
-    expect(olderResult).toMatchObject({ kind: 'ok', active: true });
+  test('the hygiene timeout is now load-bearing for correctness, and is sized to stay inside the 15s acceptance bound', () => {
+    // Unlike the retired generation scheme (where nothing depended on this
+    // value for correctness — it was pure resource hygiene), the
+    // single-writer model's worst-case observation delay for a freshly
+    // raised hold is `timeoutMs` (waiting out a hang) plus up to one more
+    // poll interval (5s) for the next tick to fire. That sum must not
+    // exceed the feature's 15s acceptance bound (issue #1908).
+    const POLL_INTERVAL_MS = 5_000;
+    const ACCEPTANCE_BOUND_MS = 15_000;
+    expect(CAST_SAFETY_POLL_TIMEOUT_MS + POLL_INTERVAL_MS).toBeLessThanOrEqual(ACCEPTANCE_BOUND_MS);
+    // And still comfortably larger than the interval itself — round 4's
+    // mistake was a deadline so tight it aborted ordinary, healthy-but-not-
+    // instant responses.
+    expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeGreaterThan(POLL_INTERVAL_MS);
   });
 
   test('a slow-but-healthy response still lands: no deadline is tight enough to reject it', async () => {
-    // Round 4's bug in a different shape: the hygiene timeout must never be
-    // what determines whether a normal (if slow) response can apply. A
-    // response landing well inside even a short hygiene cap must succeed.
-    const sequencer = new CastSafetyPollSequencer();
+    const poller = new CastSafetyPoller();
     const slowButHealthy = deferred<CastSafetyState>();
     const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, slowButHealthy.promise);
 
-    const pending = runCastSafetyPoll(sequencer, fetchSafety, { timeoutMs: 200 });
+    const pending = runCastSafetyPoll(poller, fetchSafety, { timeoutMs: 200 });
     await new Promise((resolve) => setTimeout(resolve, 40));
     slowButHealthy.resolve({ active: true });
 
@@ -243,188 +226,96 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(result).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('the hygiene cap is generous — not tuned against the poll interval', () => {
-    // A regression guard on the constant's role: since no poll's ability to
-    // run depends on this value anymore, there is no reason for it to be
-    // tight, and a future accidental narrowing back toward "under one
-    // interval" should fail a test, not just cause a production incident.
-    expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeGreaterThanOrEqual(20_000);
-  });
-
   test('the hygiene timeout still eventually aborts a truly hung request (resource cleanup)', async () => {
-    const sequencer = new CastSafetyPollSequencer();
+    const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     const fetchSafety: CastSafetyFetcher = (signal) => trackAbort(signal, hung.promise);
 
-    const result = await runCastSafetyPoll(sequencer, fetchSafety, { timeoutMs: 20 });
+    const result = await runCastSafetyPoll(poller, fetchSafety, { timeoutMs: 20 });
     expect(result.kind).toBe('ignored');
+    expect(poller.isBusy).toBe(false); // the poller frees up, ready for the next tick
   });
 
   test('a genuine failure fails safe and does not block subsequent polls', async () => {
-    const sequencer = new CastSafetyPollSequencer();
+    const poller = new CastSafetyPoller();
     const failing: CastSafetyFetcher = async () => {
       throw new TypeError('network down');
     };
 
-    const result = await runCastSafetyPoll(sequencer, failing);
+    const result = await runCastSafetyPoll(poller, failing);
     expect(result.kind).toBe('failed');
     // The caller only calls setCastSafetyActive on 'ok' — a 'failed' result
     // carries no value, so it can never strand an unsafe false.
 
-    const next = await runCastSafetyPoll(sequencer, async () => ({ active: true }));
+    const next = await runCastSafetyPoll(poller, async () => ({ active: true }));
     expect(next).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test("invalidate() aborts outstanding polls, and even a late 'completion' that ignores the abort cannot clear the curtain", async () => {
-    const sequencer = new CastSafetyPollSequencer();
+  test("invalidate() aborts an outstanding poll, and even a late 'completion' that ignores the abort cannot clear the curtain", async () => {
+    const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     // Deliberately ignores `signal` — some transports/mocks resolve a
     // buffered response regardless of abort — so this proves an explicit
     // abort, not just cancellation, is the backstop.
     const ignoresAbort: CastSafetyFetcher = async () => hung.promise;
 
-    const inFlight = runCastSafetyPoll(sequencer, ignoresAbort);
-    sequencer.invalidate(); // unmount / cast token change
+    const inFlight = runCastSafetyPoll(poller, ignoresAbort);
+    poller.invalidate(); // unmount / cast token change
 
     hung.resolve({ active: false });
     const result = await inFlight;
-    // 'ignored', not 'stale': `signal.aborted` is checked before the
-    // freshness gate, so an explicitly-invalidated request's late value is
-    // rejected outright regardless of which value it carries — see the
-    // round-8 regression below for why `active: true` needs this too, not
-    // just `false`.
     expect(result.kind).toBe('ignored');
+    expect(poller.isBusy).toBe(false);
   });
 
-  test('regression (round 8): invalidate() must reject a buffered active:true too, not only false', async () => {
-    // Round 7 exempted `active: true` from the staleness gate for the
-    // ORDINARY overlapping-poll case (a slow poll superseded by a faster
-    // newer one), where the worst case is a harmless, self-correcting extra
-    // frame of curtain. But a request explicitly abandoned by invalidate()
-    // (a cast-identity change) is a different kind of stale: its `true`
-    // belongs to a campaign this sequencer has already moved on from, and
-    // applying it would raise the WRONG campaign's curtain with no
-    // guarantee the new identity's own polls will ever revisit it.
-    const sequencer = new CastSafetyPollSequencer();
+  test('invalidate() rejects a buffered active:true too, not only false', async () => {
+    const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     const ignoresAbort: CastSafetyFetcher = async () => hung.promise;
 
-    const inFlight = runCastSafetyPoll(sequencer, ignoresAbort);
-    sequencer.invalidate(); // cast-token change to a new campaign
+    const inFlight = runCastSafetyPoll(poller, ignoresAbort);
+    poller.invalidate(); // cast-token change to a new campaign
 
     hung.resolve({ active: true }); // campaign A's stale hold, arriving after B has taken over
     const result = await inFlight;
     expect(result.kind).toBe('ignored');
   });
 
-  test('regression (round 9): a confirmed newer release supersedes a still-outstanding older true', async () => {
-    // Generation 1 is a slow pre-release poll, still outstanding. Generation
-    // 2 starts after it, resolves promptly, and confirms `active: false`
-    // (applies — nothing fresher has settled yet). Generation 1's `true`
-    // arriving afterward predates evidence that has already established the
-    // game resumed; applying it would re-raise a curtain stuck there until
-    // the next poll happens to succeed.
-    const sequencer = new CastSafetyPollSequencer();
-    const slowPreRelease = deferred<CastSafetyState>();
-
-    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowPreRelease.promise));
-
-    const newer = await runCastSafetyPoll(sequencer, async () => ({ active: false }));
-    expect(newer).toMatchObject({ kind: 'ok', active: false });
-
-    slowPreRelease.resolve({ active: true });
-    const olderResult = await older;
-    expect(olderResult.kind).toBe('stale');
-  });
-
-  test('regression (round 9): a newer FAILURE still cannot suppress an older true (round 7 stays intact)', async () => {
-    // The round 9 fix must not regress round 7: a newer poll that merely
-    // fails (never actually applying a confirmed `false`) must not advance
-    // the confirmed-release watermark, so an older, still-genuine `true`
-    // must still apply.
-    const sequencer = new CastSafetyPollSequencer();
-    const slowTrue = deferred<CastSafetyState>();
-
-    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowTrue.promise));
-
-    const failing = await runCastSafetyPoll(sequencer, async () => {
-      throw new TypeError('network down');
-    });
-    expect(failing.kind).toBe('failed');
-
-    slowTrue.resolve({ active: true });
-    const olderResult = await older;
-    expect(olderResult).toMatchObject({ kind: 'ok', active: true });
-  });
-
-  test('regression (round 9): a true generation NEWER than the confirmed release still applies (hold raised after release)', async () => {
-    const sequencer = new CastSafetyPollSequencer();
-
-    const released = await runCastSafetyPoll(sequencer, async () => ({ active: false }));
-    expect(released).toMatchObject({ kind: 'ok', active: false });
-
-    const raisedAgain = await runCastSafetyPoll(sequencer, async () => ({ active: true }));
-    expect(raisedAgain).toMatchObject({ kind: 'ok', active: true });
-  });
-
   test('invalidate() does not block future polls — cast mode re-entered works normally', async () => {
-    const sequencer = new CastSafetyPollSequencer();
-    sequencer.invalidate();
+    const poller = new CastSafetyPoller();
+    poller.invalidate();
 
-    const after = await runCastSafetyPoll(sequencer, async () => ({ active: true }));
+    const after = await runCastSafetyPoll(poller, async () => ({ active: true }));
     expect(after).toMatchObject({ kind: 'ok', active: true });
   });
 
   test('successful in-order polls commit active state changes both ways', async () => {
-    const sequencer = new CastSafetyPollSequencer();
+    const poller = new CastSafetyPoller();
     let active = false;
     const fetchSafety: CastSafetyFetcher = async () => ({ active });
 
     active = true;
-    const raised = await runCastSafetyPoll(sequencer, fetchSafety);
+    const raised = await runCastSafetyPoll(poller, fetchSafety);
     expect(raised).toMatchObject({ kind: 'ok', active: true });
 
     active = false;
-    const released = await runCastSafetyPoll(sequencer, fetchSafety);
+    const released = await runCastSafetyPoll(poller, fetchSafety);
     expect(released).toMatchObject({ kind: 'ok', active: false });
-  });
-
-  test('begin()/settle(): the generation watermark never regresses, and advances regardless of outcome', () => {
-    const sequencer = new CastSafetyPollSequencer();
-    const first = sequencer.begin();
-    const second = sequencer.begin();
-
-    expect(sequencer.settle(second.generation)).toBe(true); // freshest so far — may apply
-    expect(sequencer.settle(second.generation)).toBe(false); // already settled, no double-apply
-    expect(sequencer.settle(first.generation)).toBe(false); // older than the watermark
-
-    const third = sequencer.begin();
-    expect(sequencer.settle(third.generation)).toBe(true); // newer than the watermark
-  });
-
-  test('begin() never blocks — every call gets its own generation and controller', () => {
-    const sequencer = new CastSafetyPollSequencer();
-    const a = sequencer.begin();
-    const b = sequencer.begin();
-    const c = sequencer.begin();
-    expect(new Set([a.generation, b.generation, c.generation]).size).toBe(3);
-    expect(a.controller.signal.aborted).toBe(false);
-    expect(b.controller.signal.aborted).toBe(false);
-    expect(c.controller.signal.aborted).toBe(false);
   });
 });
 
-test.describe('shouldApplyCastSafetyResult (#1908 rework, round 10 — the identity-boundary P1 finding)', () => {
-  // `CastSafetyPollSequencer` only orders polls WITHIN one cast identity; it
-  // has no notion of the identity itself changing mid-flight. On an SPA
-  // transition between two cast tokens, the page's render-time state reset
-  // and `sequencer.invalidate()` (which runs later, in the OLD effect's
-  // passive cleanup) are not the same instant — in that gap, the OLD
-  // identity's in-flight poll is an entirely ordinary request as far as the
-  // sequencer is concerned, and can legitimately resolve `ok`. This is the
-  // commit-site guard that closes that gap: it does not touch the sequencer
-  // at all, it just refuses to apply an otherwise-valid `ok` result whose
-  // captured identity no longer matches the page's current one.
+test.describe('shouldApplyCastSafetyResult (#1908 rework — the identity-boundary P1 finding)', () => {
+  // The poller above only orders polls WITHIN one cast identity; it has no
+  // notion of the identity itself changing mid-flight. On an SPA transition
+  // between two cast tokens, the page's render-time state reset and
+  // `poller.invalidate()` (which runs later, in the OLD effect's passive
+  // cleanup) are not the same instant — in that gap, the OLD identity's
+  // in-flight poll is an entirely ordinary request as far as the poller is
+  // concerned, and can legitimately resolve `ok`. This is the commit-site
+  // guard that closes that gap: it does not touch the poller at all, it
+  // just refuses to apply an otherwise-valid `ok` result whose captured
+  // identity no longer matches the page's current one. Unaffected by the
+  // single-writer redesign above — this concern is orthogonal to it.
   test('applies an ok result when the captured identity still matches the current one', () => {
     expect(shouldApplyCastSafetyResult({ kind: 'ok', active: true }, 'token-a', 'token-a')).toBe(true);
     expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', 'token-a')).toBe(true);
@@ -442,8 +333,7 @@ test.describe('shouldApplyCastSafetyResult (#1908 rework, round 10 — the ident
     expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', null)).toBe(false);
   });
 
-  test('non-ok results (stale/ignored/failed) are never applied, identity aside', () => {
-    expect(shouldApplyCastSafetyResult({ kind: 'stale' }, 'token-a', 'token-a')).toBe(false);
+  test('non-ok results (ignored/failed) are never applied, identity aside', () => {
     expect(shouldApplyCastSafetyResult({ kind: 'ignored' }, 'token-a', 'token-a')).toBe(false);
     expect(shouldApplyCastSafetyResult({ kind: 'failed' }, 'token-a', 'token-a')).toBe(false);
   });
