@@ -365,6 +365,16 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   // cannot distinguish it from the fallback state (review finding: P2 codex).
   const upgradeFromFallback = (): boolean => {
     if (!settledOnMainFallback) return false;
+    // A dialog opening moves focus itself — it is not a user "takeover" under
+    // `handleUserTookOver`'s predicate, but it is just as much a reason to stop: a heading
+    // arriving after a dialog has already taken over the page is no longer a case worth
+    // acting on, and the app-owned focus destination inside that dialog must never be
+    // preempted (review finding: coordinator, following on P2 codex's grace-window widening —
+    // a longer window makes this reachable in practice, not just in theory).
+    if (isModalDialogOpen(document)) {
+      teardownFallbackWatch();
+      return true;
+    }
     const h1 = main.querySelector('h1');
     if (!(h1 instanceof HTMLElement)) return false;
     if (!moveFocus) {
@@ -385,6 +395,10 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
       teardownFallbackWatch();
       if (document.activeElement !== main) return;
       if (shouldPreserveFocusInsideMain(main, document)) return;
+      // Re-checked here, not only at entry: a dialog can open in the gap between this
+      // frame being scheduled and it actually running, and that must cancel the transfer
+      // just as reliably as a dialog that was already open when the mutation fired.
+      if (isModalDialogOpen(document)) return;
       focusOwned(h1);
     });
     return true;

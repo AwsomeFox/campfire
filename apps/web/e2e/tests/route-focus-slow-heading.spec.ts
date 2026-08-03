@@ -170,6 +170,56 @@ test('a late heading does not claw focus away after a non-focus-moving key press
   await expect(main).toBeFocused();
 });
 
+test('a late heading does not steal focus from an open dialog (#591)', async ({ page }) => {
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  // The fallback settles on <main> first, same as the tests above.
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Open a real modal dialog (the shared notification panel) while the fallback is still
+  // untouched and the recovery window is open. A dialog opening is not a "user takeover"
+  // under `handleUserTookOver`'s predicate — it moves focus itself, the app didn't ask the
+  // user to do anything — so this exercises the separate modal guard in `upgradeFromFallback`
+  // rather than the focusin-based takeover tracking covered by the tests above.
+  const bell = page.getByRole('button', { name: 'Notifications', exact: true });
+  await bell.click();
+  const dialog = page.getByRole('dialog', { name: 'Notifications' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute('aria-modal', 'true');
+  await expect(dialog.locator(':focus')).toHaveCount(1);
+
+  // Now let the real heading arrive. It must not steal focus away from the open dialog.
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(':focus')).toHaveCount(1);
+});
+
 test('a heading arriving after the recovery grace window does not claw focus away (#591)', async ({ page }) => {
   // FALLBACK_UPGRADE_GRACE_MS is now API_READ_BUDGET.overallMs (30s), so waiting it out plus
   // margin needs more than the default 30s Playwright test timeout.
