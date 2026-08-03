@@ -6,6 +6,8 @@ import {
   formatLevelName,
   filterSpells,
   groupSpellsByLevel,
+  isResolvableSpell,
+  hasSpellbookContent,
   type SpellItem,
 } from '../../src/features/encounters/SpellbookPanel';
 import { deriveTurnSpells, TurnWorkspace as TurnWorkspaceSchema, type TurnSuggestedAction, type ActionSpec } from '@campfire/schema';
@@ -126,6 +128,29 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
     // a forced 4xx/5xx shows a toast and the pip state reverts).
     expect(src).toContain('context?.previous');
     expect(src).toContain("fallbackKey: 'encounters.errors.spellSlot'");
+  });
+
+  // Review fix: a REMOTE client's Spellbook (spells/slots sourced exclusively from the /turn
+  // cache) must also refresh on a `character.updated` SSE frame, not just the campaign
+  // character read. Without this, another open tab shows stale slot pips until an unrelated
+  // encounter event happens to invalidate the turn workspace.
+  test('RunSessionPage.tsx invalidates the turn workspace on character.updated, reconnect, and stream recovery', () => {
+    const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    const characterUpdatedBranch = src.slice(
+      src.indexOf('if (shouldInvalidateInlineCharacters(event))'),
+      src.indexOf('if (shouldInvalidateInlineCharacters(event))') + 900,
+    );
+    expect(characterUpdatedBranch).toContain("event.type === 'character.updated'");
+    expect(characterUpdatedBranch).toContain('queryKeys.encounterTurn(eid)');
+
+    const onReconnectBranch = src.slice(src.indexOf('onReconnect: useCallback'), src.indexOf('onReconnect: useCallback') + 600);
+    expect(onReconnectBranch).toContain('queryKeys.encounterTurn(eid)');
+
+    const onStreamRecoveryBranch = src.slice(
+      src.indexOf('onStreamRecovery: useCallback'),
+      src.indexOf('onStreamRecovery: useCallback') + 500,
+    );
+    expect(onStreamRecoveryBranch).toContain('queryKeys.encounterTurn(eid)');
   });
 
   test('formatCastingTime converts verbose strings to standard abbreviations', () => {
@@ -266,5 +291,41 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
     // A level with no configured pool is left alone (nothing to estimate).
     expect(applyOptimisticSpellSlotDelta(slots, 9, 1)).toBe(slots);
     expect(applyOptimisticSpellSlotDelta(null, 1, 1)).toBeNull();
+  });
+
+  // Review fix (copilot + devin threads on PR #1952): a spec can exist but be purely
+  // descriptive — no attack bonus/ability, no DC source — and must NOT be treated as
+  // resolver-eligible, or the Cast button either errors or silently spends nothing while the
+  // upcast picker for its real spell level stays permanently unreachable dead code.
+  test('isResolvableSpell distinguishes a resolvable spec from a descriptive/spec-less one', () => {
+    const attackResolvable = spec({ spellLevel: 2 });
+    attackResolvable.mode = 'attack';
+    attackResolvable.attack = { bonus: '+5', ability: '', proficient: true, vs: 'ac' };
+    expect(isResolvableSpell({ spec: attackResolvable })).toBe(true);
+
+    const saveDescriptive = spec({ spellLevel: 3 });
+    saveDescriptive.mode = 'save';
+    saveDescriptive.save = { ability: 'wis', dc: { kind: 'none', dc: 10, ability: '', proficient: true, bonus: 0, base: 8 } };
+    expect(isResolvableSpell({ spec: saveDescriptive })).toBe(false);
+
+    expect(isResolvableSpell({ spec: null })).toBe(false);
+    expect(isResolvableSpell({})).toBe(false);
+  });
+
+  // Review fix: a persisted slots map can legitimately hold a level entry with `max: 0`
+  // (a slot tier the character hasn't reached yet) — that must not count as "has slots" for
+  // the Spellbook toggle-visibility acceptance criterion.
+  test('hasSpellbookContent ignores zero-max slot pools and requires either a spell or a usable pool', () => {
+    expect(hasSpellbookContent([], undefined)).toBe(false);
+    expect(hasSpellbookContent([], {})).toBe(false);
+    expect(hasSpellbookContent([], { '1': { max: 0, used: 0 }, '2': { max: 0, used: 0 } })).toBe(false);
+    expect(hasSpellbookContent([], { '1': { max: 2, used: 0 } })).toBe(true);
+    expect(hasSpellbookContent([{ id: '1', name: 'Fire Bolt', level: 0 }], undefined)).toBe(true);
+  });
+
+  test('TurnWorkspace.tsx computes the toggle from hasSpellbookContent, not a raw key check', () => {
+    const src = readFileSync(TURN_WORKSPACE_PATH, 'utf8');
+    expect(src).toContain('hasSpellbookContent(spellItems, spellSlotsMap)');
+    expect(src).not.toContain('Object.keys(spellSlotsMap).length > 0');
   });
 });

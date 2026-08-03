@@ -1642,6 +1642,15 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
+          // Issue #1900 review: character.updated is also the only signal a REMOTE
+          // client gets for a slot/spell edit — the Spellbook now reads exclusively
+          // from the /turn cache (queryKeys.encounterTurn), not the character read
+          // just invalidated above. Without this, another open run-session tab keeps
+          // showing stale slot pips / spell rows until an unrelated encounter event
+          // happens to invalidate the turn workspace.
+          if (event.type === 'character.updated' && Number.isFinite(eid)) {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+          }
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
@@ -1671,6 +1680,10 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      // Same staleness the character.updated SSE branch above fixes (issue #1900
+      // review): a dropped-then-recovered stream must not leave the Spellbook's
+      // /turn-sourced slots/spells stale either.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1678,6 +1691,7 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });

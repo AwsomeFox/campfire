@@ -25,7 +25,7 @@ import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
-import { SpellbookPanel, type SpellItem, type SpellSlotMap } from './SpellbookPanel';
+import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
 
@@ -250,7 +250,11 @@ export function TurnWorkspace({
     [turn?.spells],
   );
   const spellSlotsMap: SpellSlotMap | undefined = turn?.spellSlots ?? undefined;
-  const hasSpellbookData = spellItems.length > 0 || Boolean(spellSlotsMap && Object.keys(spellSlotsMap).length > 0);
+  // Review fix: a persisted slots map can legitimately contain a level entry with `max: 0`
+  // (e.g. a class that hasn't reached that slot tier yet) — that pool has nothing to spend,
+  // so it must not count as "has slots" for the toggle-visibility acceptance criterion
+  // (hidden when the actor has no spells and no *usable* slots). See `hasSpellbookContent`.
+  const hasSpellbookData = hasSpellbookContent(spellItems, spellSlotsMap);
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurnBusy || turnState.isPending;

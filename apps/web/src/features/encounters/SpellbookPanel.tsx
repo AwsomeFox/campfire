@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec } from '@campfire/schema';
+import { isResolvableSpec, type ActionSpec } from '@campfire/schema';
 import { Card } from '../../components/ui';
 
 /**
@@ -86,6 +86,31 @@ export function groupSpellsByLevel(spells: SpellItem[]): Map<number, SpellItem[]
   return grouped;
 }
 
+/**
+ * Whether a spell's structured spec is resolver-eligible (review fix on issue #1900). A spec
+ * can exist but be purely descriptive — an attack with no bonus/ability, or a save/check with
+ * no DC source (`isResolvableSpec` from `@campfire/schema`, the same predicate the server uses
+ * to set `TurnSpellEntry.resolvable`). Routing a non-resolvable spec through the resolve/apply
+ * Use flow either errors or silently spends nothing; gating on this instead of bare `spec`
+ * truthiness is what makes both the Cast button and the upcast picker correct for it. Exported
+ * so the branch is independently regression-tested without rendering the panel.
+ */
+export function isResolvableSpell(spell: Pick<SpellItem, 'spec'>): boolean {
+  return Boolean(spell.spec && isResolvableSpec(spell.spec));
+}
+
+/**
+ * Whether the actor has any Spellbook-worthy data (issue #1900): a spell row, or a slot pool
+ * that is actually usable. A persisted `spellSlots` entry with `max: 0` (e.g. a slot tier the
+ * character hasn't reached yet) must NOT count — review fix on the "toggle hidden when the
+ * actor has no spells and no slots" acceptance criterion, which means no *usable* slots.
+ */
+export function hasSpellbookContent(spells: readonly SpellItem[], spellSlots?: SpellSlotMap): boolean {
+  if (spells.length > 0) return true;
+  if (!spellSlots) return false;
+  return Object.values(spellSlots).some((pool) => pool.max > 0);
+}
+
 export function SpellbookPanel({
   combatantName,
   spells,
@@ -135,12 +160,12 @@ export function SpellbookPanel({
 
   // Issue #1900: no client-side slot decrement here anymore — that used to fire ALONGSIDE
   // the resolver's own server-side spend for a spec-bearing spell, double-spending the same
-  // cast. A resolvable spell now routes through the resolve/apply flow exclusively, which
-  // spends the spec's own declared slot level transactionally (undo-refundable). A
-  // spec-less leveled spell has no resolver path at all, so its ONLY spend event is the
-  // direct slot patch below — still exactly once.
+  // cast. A RESOLVABLE spell now routes through the resolve/apply flow exclusively, which
+  // spends the spec's own declared slot level transactionally (undo-refundable). A spec-less
+  // OR non-resolvable leveled spell (see `isResolvableSpell` — review fix) has no resolver
+  // path, so its ONLY spend event is the direct slot patch below — still exactly once.
   const executeCast = (spell: SpellItem, castLevel?: number) => {
-    if (spell.spec && onUseActionRequested && spell.actionIndex != null) {
+    if (isResolvableSpell(spell) && onUseActionRequested && spell.actionIndex != null && spell.spec) {
       onUseActionRequested(spell.actionIndex, spell.name, spell.spec);
       return;
     }
@@ -258,12 +283,15 @@ export function SpellbookPanel({
                     <p className="text-xs text-muted italic m-0 p-2">No {formatLevelName(lvl).toLowerCase()} prepared.</p>
                   ) : (
                     levelSpells.map((spell) => {
-                      // Upcasting a resolvable spell isn't offered: the resolve/apply flow
+                      // Upcasting a RESOLVABLE spell isn't offered: the resolve/apply flow
                       // spends the spec's OWN declared slot level, so a chosen upcast level
-                      // would silently not be honored server-side. Only a spec-less leveled
-                      // spell (no resolver path) gets the upcast picker, which spends the
-                      // chosen level directly and exclusively (issue #1900).
-                      const isUpcastable = !spell.spec && (spell.isUpcastable ?? (lvl >= 1 && lvl < 9));
+                      // would silently not be honored server-side. A spec-less OR
+                      // non-resolvable-spec leveled spell (no resolver path either way, see
+                      // `isResolvableSpell`) gets the upcast picker, which spends the chosen
+                      // level directly and exclusively via executeCast's slot-patch branch
+                      // above (issue #1900; review fix — a descriptive spec with a real spell
+                      // level must still be upcastable, not just a spec-less one).
+                      const isUpcastable = !isResolvableSpell(spell) && (spell.isUpcastable ?? (lvl >= 1 && lvl < 9));
                       const hasSlotRemaining = lvl === 0 || remainingSlots > 0;
                       const canCastBase = hasSlotRemaining && !disabled;
 
