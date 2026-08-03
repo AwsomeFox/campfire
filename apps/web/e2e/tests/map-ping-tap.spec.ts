@@ -76,18 +76,25 @@ async function settleNoPing(page: Page, pings: MapPing[], expectedCount: number)
 async function waitForStableBounds(locator: Locator): Promise<void> {
   let last: { x: number; y: number; width: number; height: number } | null = null;
   await expect
-    .poll(async () => {
-      const box = await locator.boundingBox();
-      if (!box) return false;
-      const stable =
-        last != null &&
-        Math.abs(box.x - last.x) < 0.1 &&
-        Math.abs(box.y - last.y) < 0.1 &&
-        Math.abs(box.width - last.width) < 0.1 &&
-        Math.abs(box.height - last.height) < 0.1;
-      last = box;
-      return stable;
-    })
+    .poll(
+      async () => {
+        const box = await locator.boundingBox();
+        if (!box) return false;
+        const stable =
+          last != null &&
+          Math.abs(box.x - last.x) < 0.1 &&
+          Math.abs(box.y - last.y) < 0.1 &&
+          Math.abs(box.width - last.width) < 0.1 &&
+          Math.abs(box.height - last.height) < 0.1;
+        last = box;
+        return stable;
+      },
+      // Explicit, not the library default (issue #1954 review): two reads
+      // must land a real beat apart for "stable" to mean anything, and that
+      // must not silently change out from under this test on a Playwright
+      // upgrade.
+      { timeout: 10_000, intervals: [100, 250, 500, 1000] },
+    )
     .toBeTruthy();
 }
 
@@ -247,13 +254,17 @@ test.describe('battle-map ping tap completion', () => {
     await dispatchPointer(surface, 'lostpointercapture', mouseSpot, mouse);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await expect.poll(() => pings.length).toBe(1);
-    // Sanity check: the fixture's 16:9 map fills the whole surface, so the
-    // rect-derived expectation should land close to the intended aim ratio.
-    // This guards the derived value itself against a broken fixture, while
-    // the assertions below tie the published ping to that same geometry
-    // rather than to a hardcoded number that can drift (issue #1954).
-    expect(mouseExpected.x).toBeCloseTo(30, 0);
-    expect(mouseExpected.y).toBeCloseTo(40, 0);
+    // Independent oracle (issue #1954 review): deriving the expectation from
+    // the same geometry used to aim the tap made the test self-consistent —
+    // a systematic offset in the rendered map layer would shift the derived
+    // value and the published ping together, so a `toBeCloseTo(..., 0)` check
+    // (±0.5) could still pass at up to ~0.49pp of real drift. The fixture's
+    // 16:9 map fills the whole surface with no letterbox, so the derived
+    // value must land within the same precision-1 tolerance as the
+    // ping-vs-derived comparison below, or a genuine geometry regression
+    // would slip through undetected.
+    expect(mouseExpected.x).toBeCloseTo(30, 1);
+    expect(mouseExpected.y).toBeCloseTo(40, 1);
     expect(pings[0].x).toBeCloseTo(mouseExpected.x, 1);
     expect(pings[0].y).toBeCloseTo(mouseExpected.y, 1);
 
@@ -267,8 +278,9 @@ test.describe('battle-map ping tap completion', () => {
     const touchExpected = await dispatchArmingPointerDown(surface, touchSpot, touch);
     await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
     await expect.poll(() => pings.length).toBe(2);
-    expect(touchExpected.x).toBeCloseTo(70, 0);
-    expect(touchExpected.y).toBeCloseTo(55, 0);
+    // Same independent-oracle reasoning as the mouse tap above.
+    expect(touchExpected.x).toBeCloseTo(70, 1);
+    expect(touchExpected.y).toBeCloseTo(55, 1);
     expect(pings[1].x).toBeCloseTo(touchExpected.x, 1);
     expect(pings[1].y).toBeCloseTo(touchExpected.y, 1);
   });
