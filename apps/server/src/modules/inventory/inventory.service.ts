@@ -94,6 +94,16 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
     rest.equipSlot = input.equipSlot ?? null;
     rest.equippedAction = input.equippedAction ?? null;
   }
+  // Issue #1901 rework (review: chatgpt-codex-connector P2): `displaceEquipped` changes
+  // what a combined qty+equip write is AUTHORIZED to do (unequip another item) without
+  // changing qty/equip/equipSlot/equippedAction themselves, so it must be part of the
+  // fingerprint too — otherwise replaying the same idempotencyKey with the same
+  // quantity/equip values but a flipped `displaceEquipped` would silently return the
+  // earlier response instead of raising IDEMPOTENCY_KEY_REUSE for a payload that
+  // authorizes something the original request did not.
+  if (input.displaceEquipped !== undefined) {
+    rest.displaceEquipped = input.displaceEquipped;
+  }
   const restPart = JSON.stringify(rest);
   return `${qtyPart}|${restPart}`;
 }

@@ -389,6 +389,42 @@ describe('inventory & treasury (e2e)', () => {
       expect(live.body.name).toBe('Torch bundle');
     });
 
+    it('issue #1901 rework: qty idempotency fingerprint covers displaceEquipped (review: chatgpt-codex-connector P2)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Hired Guard Buckler', ownerType: 'character', characterId: dmCharacterId, qty: 1 });
+      const id = created.body.id;
+      const key = 'displace-fingerprint-1901';
+      const slot = 'idempotency-displace-slot-1901';
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: false });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Same key, same qtyDelta, same equip/equipSlot — but a FLIPPED displaceEquipped. This
+      // payload authorizes something the original one did not (unequipping whatever else
+      // occupies the slot), so it must 409 rather than silently replay the first response.
+      const flipped = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true });
+      expect(flipped.status).toBe(409);
+      expect(flipped.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The identical request, replayed, is still a clean idempotent no-op.
+      const replay = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: false });
+      expect(replay.status).toBe(200);
+      expect(replay.body.qty).toBe(2);
+    });
+
     it('prunes expired inventory_qty_idempotency rows on the next qty write (#782)', async () => {
       const server = ctx.app.getHttpServer();
       const created = await request(server)
@@ -730,6 +766,12 @@ describe('inventory & treasury (e2e)', () => {
     it('issue #1901 rework: displaceEquipped resolves a slot conflict atomically — one request, no half-applied state', async () => {
       const server = ctx.app.getHttpServer();
 
+      // Unique slot string (see the "review fix" test above): this describe block shares
+      // ownCharacterId across earlier tests in this file and never unequips between them,
+      // so a common name like 'main-hand' would collide with THEIR leftover equipped item
+      // (the prior 409-conflict test above leaves 'main-hand' occupied) rather than
+      // exercising a clean slot conflict for THIS test.
+      const slot = 'atomic-swap-slot-1901';
       const sword = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/inventory`)
         .set(player)
@@ -742,14 +784,14 @@ describe('inventory & treasury (e2e)', () => {
       const first = await request(server)
         .patch(`/api/v1/inventory/${sword.body.id}`)
         .set(player)
-        .send({ equipped: true, equipSlot: 'main-hand' });
+        .send({ equipped: true, equipSlot: slot });
       expect(first.status).toBe(200);
 
       // Without displaceEquipped, still a plain 409 (existing behavior unchanged).
       const stillConflicts = await request(server)
         .patch(`/api/v1/inventory/${dagger.body.id}`)
         .set(player)
-        .send({ equipped: true, equipSlot: 'main-hand' });
+        .send({ equipped: true, equipSlot: slot });
       expect(stillConflicts.status).toBe(409);
 
       // ONE request, with displaceEquipped: true, atomically unequips the incumbent and
@@ -758,10 +800,10 @@ describe('inventory & treasury (e2e)', () => {
       const swap = await request(server)
         .patch(`/api/v1/inventory/${dagger.body.id}`)
         .set(player)
-        .send({ equipped: true, equipSlot: 'main-hand', displaceEquipped: true });
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true });
       expect(swap.status).toBe(200);
       expect(swap.body.equipped).toBe(true);
-      expect(swap.body.equipSlot).toBe('main-hand');
+      expect(swap.body.equipSlot).toBe(slot);
 
       const incumbentAfter = await request(server).get(`/api/v1/inventory/${sword.body.id}`).set(player);
       expect(incumbentAfter.body.equipped).toBe(false);
@@ -770,7 +812,7 @@ describe('inventory & treasury (e2e)', () => {
       // Exactly one item holds the slot afterward.
       const list = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(player);
       const inSlot = (list.body as Array<{ id: number; equipped: boolean; equipSlot: string | null }>).filter(
-        (it) => (it.id === sword.body.id || it.id === dagger.body.id) && it.equipped && it.equipSlot === 'main-hand',
+        (it) => (it.id === sword.body.id || it.id === dagger.body.id) && it.equipped && it.equipSlot === slot,
       );
       expect(inSlot).toHaveLength(1);
       expect(inSlot[0].id).toBe(dagger.body.id);
@@ -779,6 +821,8 @@ describe('inventory & treasury (e2e)', () => {
     it('issue #1901 rework: displaceEquipped is a no-op flag when there is no conflict', async () => {
       const server = ctx.app.getHttpServer();
 
+      // Unique slot string — see the note in the atomic-swap test above.
+      const slot = 'no-conflict-slot-1901';
       const item = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/inventory`)
         .set(player)
@@ -787,10 +831,10 @@ describe('inventory & treasury (e2e)', () => {
       const res = await request(server)
         .patch(`/api/v1/inventory/${item.body.id}`)
         .set(player)
-        .send({ equipped: true, equipSlot: 'off-hand', displaceEquipped: true });
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true });
       expect(res.status).toBe(200);
       expect(res.body.equipped).toBe(true);
-      expect(res.body.equipSlot).toBe('off-hand');
+      expect(res.body.equipSlot).toBe(slot);
     });
 
     it('moving an equipped character item to the party stash auto-unequips it', async () => {

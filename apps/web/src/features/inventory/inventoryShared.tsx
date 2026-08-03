@@ -164,20 +164,24 @@ export function ItemRow({
    * controls could stay disabled forever with no error shown. One request removes both the
    * race and the swallowed-failure path entirely; there's no intermediate committed state to
    * roll back because the server never applies the unequip half without the equip half.
+   *
+   * Rework round 3 (review: devin-ai-integration): the button reads "Replace <incumbent>"
+   * and the warning above it names `slotConflict.itemName`/`.slot` — that is the
+   * confirmation the player is acting on, so the request below MUST target that exact
+   * slot. It deliberately ignores the separate slot-text-input state, which stays open and
+   * editable while this warning is shown — reading it here would let a player edit that box
+   * after seeing the conflict and have "Replace X" silently displace whatever now occupies
+   * the freshly typed slot instead of X. The plain equip button (`submitEquip`) is the path
+   * for trying a different slot.
    */
   async function swapEquip() {
     if (!slotConflict) return;
-    const trimmed = (slotDraft.trim() || slotConflict.slot).trim();
-    if (!trimmed) {
-      setEquipError(t('inventory.equip.slotRequired'));
-      return;
-    }
     setEquipBusy(true);
     setEquipError(null);
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, {
         equipped: true,
-        equipSlot: trimmed,
+        equipSlot: slotConflict.slot,
         displaceEquipped: true,
       });
       setCommitted(updated);

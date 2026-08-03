@@ -100,6 +100,13 @@ export function ActionUsePanel({
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
+        // Issue #1901 rework (review: chatgpt-codex-connector P1): bind the resolve request
+        // to the action the panel actually opened for, not just its index. If an equipped
+        // item's action is removed/unequipped/reordered while this panel is open, a later
+        // action can shift into `actionIndex` — resolveSpec's own index/name cross-check
+        // (see ActionResolverService) rejects that mismatch with a clean 400 instead of
+        // silently resolving whatever now sits at that index.
+        actionName,
         targetIds,
         commit: false,
         rollMode,
