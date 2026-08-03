@@ -1,7 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { z } from 'zod';
 import type { CharacterCreate, CharacterAction as CharacterActionType, DdbImportSummary } from '@campfire/schema';
-import { CharacterAction, expandRawStatblockAction } from '@campfire/schema';
+import { CharacterAction, expandRawStatblockAction, isResolvableSpec } from '@campfire/schema';
 
 /**
  * Unofficial, READ-ONLY importer for PUBLIC D&D Beyond character sheets (issue #18).
@@ -540,11 +540,16 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
   return out;
 }
 
-type CasterProgression = 'full' | 'half' | 'pact' | 'third';
+type CasterProgression = 'full' | 'half' | 'halfRoundUp' | 'pact' | 'third';
 const FULL_CASTER_CLASSES = new Set(['bard', 'cleric', 'druid', 'sorcerer', 'wizard']);
-// Artificer's official slot table (Tasha's) tracks the same ceil(level/2) curve as a
-// solo Paladin/Ranger — see computeSpellSlots below — so it belongs in the same bucket.
-const HALF_CASTER_CLASSES = new Set(['paladin', 'ranger', 'artificer']);
+const HALF_CASTER_CLASSES = new Set(['paladin', 'ranger']);
+// Artificer (Tasha's) tracks the same ceil(level/2) curve as a solo Paladin/Ranger when it
+// is the character's only caster class, BUT — unlike Paladin/Ranger — it ALSO rounds up
+// (not down) when combined with another spellcasting class: Sage Advice/Tasha's errata is
+// explicit that Artificer multiclass levels are "half your Artificer level, rounded up",
+// the opposite of the Paladin/Ranger multiclass rule. So it gets its own progression tag
+// rather than sharing HALF_CASTER_CLASSES — see the solo-vs-multiclass branch below.
+const HALF_CASTER_ROUND_UP_CLASSES = new Set(['artificer']);
 const PACT_CASTER_CLASSES = new Set(['warlock']);
 // The only two core-rules 1/3-caster archetypes; identified by subclass, not base class,
 // since Fighter/Rogue themselves are non-casters.
@@ -554,6 +559,7 @@ function casterProgressionForClass(name: string, subclassName?: string | null): 
   const key = name.trim().toLowerCase();
   if (FULL_CASTER_CLASSES.has(key)) return 'full';
   if (HALF_CASTER_CLASSES.has(key)) return 'half';
+  if (HALF_CASTER_ROUND_UP_CLASSES.has(key)) return 'halfRoundUp';
   if (PACT_CASTER_CLASSES.has(key)) return 'pact';
   const sub = subclassName?.trim().toLowerCase();
   if (sub && THIRD_CASTER_SUBCLASSES.has(sub)) return 'third';
@@ -563,18 +569,20 @@ function casterProgressionForClass(name: string, subclassName?: string | null): 
 /**
  * PHB multiclass spellcaster slot table (index = combined effective caster level 0-20,
  * columns = spell levels 1-9). When COMBINING two or more caster classes, full casters
- * contribute their whole level, half casters (Paladin/Ranger/Artificer) floor(level/2),
- * and third casters (Eldritch Knight/Arcane Trickster) floor(level/3) — standard 5e
- * multiclassing math (PHB p.165).
+ * contribute their whole level, half casters (Paladin/Ranger) floor(level/2), and third
+ * casters (Eldritch Knight/Arcane Trickster) floor(level/3) — standard 5e multiclassing
+ * math (PHB p.165). Artificer is the one exception to "half caster floors when combined":
+ * per Tasha's/Sage Advice it rounds UP (ceil(level/2)) whether solo or multiclassed — see
+ * HALF_CASTER_ROUND_UP_CLASSES.
  *
  * A character with exactly ONE caster class (Warlock's separate Pact Magic aside — see
- * {@link PACT_SLOT_TABLE}) does not use that combining formula: their own class table
- * applies, which for a half caster is equivalent to this full-caster table read at
- * ceil(level/2), and for a third caster at ceil(level/3) (verified against the PHB
- * Paladin/Ranger tables and the Eldritch Knight/Arcane Trickster tables respectively —
- * e.g. a level-5 solo Paladin gets 4 first + 2 second, not the multiclass floor(5/2)=2
- * row's 3 first only). {@link computeSpellSlots} picks floor vs. ceil based on whether
- * more than one non-Warlock caster class is present.
+ * {@link PACT_SLOT_TABLE}) does not use the combining formula for Paladin/Ranger/third
+ * casters: their own class table applies, which for a half caster is equivalent to this
+ * full-caster table read at ceil(level/2), and for a third caster at ceil(level/3)
+ * (verified against the PHB Paladin/Ranger tables and the Eldritch Knight/Arcane Trickster
+ * tables respectively — e.g. a level-5 solo Paladin gets 4 first + 2 second, not the
+ * multiclass floor(5/2)=2 row's 3 first only). {@link computeSpellSlots} picks floor vs.
+ * ceil based on whether more than one non-Warlock caster class is present.
  */
 const FULL_CASTER_SLOT_TABLE: readonly (readonly number[])[] = [
   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -638,7 +646,7 @@ export function computeSpellSlots(classes: DdbClass[] | null | undefined): Chara
   // Pact Magic is a fully separate resource from the regular spell-slot table and its levels
   // never count toward the multiclass "combined caster level" below (PHB p.165 sidebar), so
   // Warlock is tracked independently and excluded from the full/half/third combination.
-  const casterEntries: { progression: 'full' | 'half' | 'third'; level: number }[] = [];
+  const casterEntries: { progression: 'full' | 'half' | 'halfRoundUp' | 'third'; level: number }[] = [];
   let pactLevel = 0;
   for (const cls of classes) {
     const name = cls.definition?.name ?? '';
@@ -663,6 +671,9 @@ export function computeSpellSlots(classes: DdbClass[] | null | undefined): Chara
       fullEquivalentLevel += entry.level;
     } else if (entry.progression === 'half') {
       fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 2) : Math.floor(entry.level / 2);
+    } else if (entry.progression === 'halfRoundUp') {
+      // Artificer rounds up whether solo or multiclassed — see HALF_CASTER_ROUND_UP_CLASSES.
+      fullEquivalentLevel += Math.ceil(entry.level / 2);
     } else {
       fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 3) : Math.floor(entry.level / 3);
     }
@@ -739,12 +750,22 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
  * Build the import summary (issue #1903) for a mapped character: counts of what imported
  * with a resolvable `spec` vs. what landed text-only, so REST/MCP callers can show the DM
  * what needs a manual touch-up rather than discovering it only inside the sheet.
+ *
+ * "Needs touch-up" is `!isResolvableSpec(a.spec)`, not merely `!a.spec` — every imported
+ * spell (`computeSpellActions`) carries a real `spec` object (`{uses:{spellLevel,...}}`,
+ * needed so slot-tracking sees the right level) but deliberately never gets a `mode`, since
+ * DDB's target-save-ability fields for a spell aren't reliably shaped (see the comment on
+ * `computeSpellActions`). `isResolvableSpec` returns false for `mode:'none'`, matching the
+ * encounter UI's own Use-button gate (`CharacterStatCard`'s `canUse`) and the server's
+ * action-resolver 400 ("no resolvable structured spec") — so every imported spell is
+ * exactly the class of thing this summary exists to flag: present, but not yet actionable
+ * without the DM adding an attack/save mode by hand.
  */
 export function summarizeDdbImport(create: CharacterCreateInput): DdbImportSummary {
   const actions = create.actions ?? [];
   const spells = actions.filter((a) => a.kind === 'spell');
   const nonSpells = actions.filter((a) => a.kind !== 'spell');
-  const textOnly = actions.filter((a) => !a.spec).map((a) => a.name);
+  const textOnly = actions.filter((a) => !isResolvableSpec(a.spec ?? null)).map((a) => a.name);
   return {
     actionsImported: nonSpells.length,
     spellsImported: spells.length,

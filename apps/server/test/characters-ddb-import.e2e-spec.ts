@@ -91,6 +91,19 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(summary.textOnly).not.toContain('Longsword');
   });
 
+  // Regression for a PR #1950 review finding: every imported spell carries a `spec` object
+  // (`{uses:{spellLevel}}`, needed for slot tracking) but is never given an attack/save
+  // `mode` (DDB's target-save-ability fields aren't reliably shaped), so `isResolvableSpec`
+  // is false for all of them — matching the encounter UI's own Use-button gate. `textOnly`
+  // must flag them by resolvability, not by mere `spec` presence, or the DM is never told
+  // these need a manual attack/save mode before they can be cast via the Use flow.
+  it('summarizeDdbImport flags every imported spell as needing touch-up (not auto-resolvable)', () => {
+    const c = mapDdbCharacter(CASTER_DDB_CHARACTER);
+    const summary = summarizeDdbImport(c);
+    expect(summary.spellsImported).toBe(3);
+    expect(summary.textOnly).toEqual(expect.arrayContaining(['Find Familiar', 'Fire Bolt', 'Magic Missile']));
+  });
+
   // Issue #1903 — spells / spell slots.
   it('maps class + feat-granted spells into kind:"spell" actions with spec.uses.spellLevel set', () => {
     const c = mapDdbCharacter(CASTER_DDB_CHARACTER);
@@ -172,6 +185,21 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(slots).toEqual({
       '1': { max: 4, used: 0 },
       '2': { max: 2, used: 0 },
+    });
+  });
+
+  // Regression for a PR #1950 review finding: Artificer rounds UP when multiclassed
+  // (Tasha's/Sage Advice), unlike Paladin/Ranger which round DOWN when combined.
+  it('Artificer rounds up (not down) when multiclassed with another caster', () => {
+    const slots = computeSpellSlots([
+      { level: 3, definition: { name: 'Artificer' } },
+      { level: 2, definition: { name: 'Wizard' } },
+    ]);
+    // ceil(3/2)=2 (Artificer, rounds up even combined) + 2 (Wizard) = effective level 4 ->
+    // row4 = 4 first, 3 second. The Paladin/Ranger (floor) rule would give effective level 3.
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 3, used: 0 },
     });
   });
 
