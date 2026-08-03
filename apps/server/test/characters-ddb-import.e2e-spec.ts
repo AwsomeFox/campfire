@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER, PUBLIC_DDB_CHARACTER_ID, CASTER_DDB_CHARACTER, CASTER_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
-import { mapDdbCharacter, summarizeDdbImport, computeSpellSlots, parseDdbId } from '../src/modules/characters/ddb-importer';
+import { mapDdbCharacter, summarizeDdbImport, computeSpellSlots, computeDdbActionEntryCount, parseDdbId } from '../src/modules/characters/ddb-importer';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { rulePacks } from '../src/db/schema';
 
@@ -130,22 +130,48 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
   });
 
-  it('computeSpellSlots merges half-caster and pact-magic multiclass progressions', () => {
+  it('computeSpellSlots: Warlock alongside another caster contributes only its own table, no Pact Magic', () => {
     // Level 6 Paladin (half caster, solo alongside a Warlock -> Pact Magic is excluded from
     // this combination per PHB p.165, so Paladin uses its own table: ceil(6/2) = 3).
     const slots = computeSpellSlots([
       { level: 6, definition: { name: 'Paladin' } },
       { level: 3, definition: { name: 'Warlock' } },
     ]);
-    // Effective full-caster level 3 -> 4 level-1 / 2 level-2 slots (PHB multiclass table),
-    // plus Warlock level 3 pact magic -> 2 level-2 slots, merged into the same level-2 pool.
-    expect(slots?.['1']).toEqual({ max: 4, used: 0 });
-    expect(slots?.['2']).toEqual({ max: 4, used: 0 });
+    // Effective full-caster level 3 -> 4 level-1 / 2 level-2 slots (PHB multiclass table).
+    // No Pact Magic entries are added on top — see the regression test below.
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
+  // Regression for a PR #1950 review finding: Pact Magic slots have a different recovery
+  // cadence (short rest) than ordinary spell slots (long rest only — see
+  // resetSpellSlotsForRest in packages/schema/src/rest.ts), so merging them into the same
+  // pool would silently mismodel a Warlock's recovery. Not imported until #1039 gives Pact
+  // Magic its own representation.
+  it('a solo Warlock gets no spell slots imported (Pact Magic is not modeled here yet)', () => {
+    expect(computeSpellSlots([{ level: 5, definition: { name: 'Warlock' } }])).toEqual({});
+    expect(computeSpellSlots([{ level: 20, definition: { name: 'Warlock' } }])).toEqual({});
   });
 
   it('computeSpellSlots returns {} for a non-caster class', () => {
     expect(computeSpellSlots([{ level: 5, definition: { name: 'Fighter' } }])).toEqual({});
     expect(computeSpellSlots(null)).toEqual({});
+  });
+
+  // Regression for a PR #1950 review finding: the solo half-caster ceil(level/2) fix
+  // (above) incorrectly granted a level-1 Paladin/Ranger 2 first-level slots — those
+  // classes get no Spellcasting at all until level 2 (PHB).
+  it('a level-1 solo Paladin/Ranger gets no spell slots (Spellcasting starts at level 2)', () => {
+    expect(computeSpellSlots([{ level: 1, definition: { name: 'Paladin' } }])).toEqual({});
+    expect(computeSpellSlots([{ level: 1, definition: { name: 'Ranger' } }])).toEqual({});
+  });
+
+  it('a level-1 Artificer DOES get its first spell slot (unlike Paladin/Ranger)', () => {
+    expect(computeSpellSlots([{ level: 1, definition: { name: 'Artificer' } }])).toEqual({
+      '1': { max: 2, used: 0 },
+    });
   });
 
   // Regression for a PR #1950 review finding: a solo half-caster used the multiclass
@@ -230,6 +256,82 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(spell).toBeDefined();
     expect(spell?.name).toBe('A'.repeat(120));
     expect(spell?.name.length).toBe(120);
+  });
+
+  // Regression for a PR #1950 review finding: a magic (+1/+2/+3) weapon was rolled as
+  // mundane — the enchantment bonus was never read (the simplified item shape here has no
+  // reliable numeric field for it), so the reported attack/damage silently under-counted.
+  it('a magic weapon lands text-only instead of being rolled as mundane', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Fighter' } }],
+      inventory: [
+        {
+          equipped: true,
+          definition: {
+            name: 'Longsword +1',
+            filterType: 'Weapon',
+            attackType: 1,
+            damage: { diceString: '1d8' },
+            damageType: 'Slashing',
+            magic: true,
+          },
+        },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Longsword +1');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    expect(weapon?.notes).toContain('enchantment bonus');
+    const summary = summarizeDdbImport(c);
+    expect(summary.textOnly).toContain('Longsword +1');
+  });
+
+  // Regression for a PR #1950 review finding: entries beyond the internal per-category
+  // caps used to be silently discarded even when there was room under the schema's
+  // Character.actions max(100). computeDdbActionEntryCount + summarizeDdbImport's
+  // entriesOmitted must report the true overflow honestly instead.
+  it('reports entriesOmitted honestly when raw entries exceed the 100-action schema cap', () => {
+    const manyFeatures = Array.from({ length: 130 }, (_, i) => ({ name: `Feature ${i}` }));
+    const data = { actions: { feat: manyFeatures } };
+    const c = mapDdbCharacter(data);
+    expect(c.actions?.length).toBe(100);
+    const rawCount = computeDdbActionEntryCount(data);
+    expect(rawCount).toBe(130);
+    const summary = summarizeDdbImport(c, Math.max(0, rawCount - 100));
+    expect(summary.entriesOmitted).toBe(30);
+  });
+
+  it('summarizeDdbImport defaults entriesOmitted to 0 when not given a raw count', () => {
+    const c = mapDdbCharacter(PUBLIC_DDB_CHARACTER);
+    expect(summarizeDdbImport(c).entriesOmitted).toBe(0);
+  });
+
+  // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not
+  // plain text, and the character sheet renders notes as plain text — so literal tags were
+  // showing up on imported characters' sheets.
+  it('strips HTML markup from spell and feature descriptions', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Wizard' } }],
+      classSpells: [
+        {
+          spells: [
+            {
+              definition: { name: 'Fire Bolt', level: 0, description: '<p>Hurl a mote of fire at <strong>a creature</strong>.</p>' },
+              prepared: true,
+            },
+          ],
+        },
+      ],
+      actions: {
+        feat: [{ name: 'Toughness', description: '<p>You gain 2 extra hit points &amp; more.</p>' }],
+      },
+    });
+    const spell = c.actions?.find((a) => a.name === 'Fire Bolt');
+    expect(spell?.notes).not.toMatch(/<[^>]+>/);
+    expect(spell?.notes).toContain('Hurl a mote of fire at a creature.');
+    const feature = c.actions?.find((a) => a.name === 'Toughness');
+    expect(feature?.notes).not.toMatch(/<[^>]+>/);
+    expect(feature?.notes).toContain('You gain 2 extra hit points & more.');
   });
 
   it('tolerates a sparse sheet without throwing', () => {

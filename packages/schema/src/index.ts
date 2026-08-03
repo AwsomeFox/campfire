@@ -680,6 +680,10 @@ export const DdbImportSummary = z.object({
   // Names of imported actions/spells that came in as text-only (no resolvable spec) —
   // never a silent drop, always visible to the importer's caller.
   textOnly: z.array(z.string().max(120)).max(200).default([]),
+  // Count of raw sheet entries trimmed by Character.actions' schema cap (issue #1903
+  // review) — 0 for the overwhelming majority of sheets (well under the cap); reported
+  // rather than silently dropped when a sheet is large enough to exceed it.
+  entriesOmitted: z.number().int().min(0).default(0),
 });
 export type DdbImportSummary = z.infer<typeof DdbImportSummary>;
 

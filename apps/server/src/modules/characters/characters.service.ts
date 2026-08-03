@@ -90,7 +90,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, summarizeDdbImport, type DdbFetch } from './ddb-importer';
+import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, summarizeDdbImport, computeDdbActionEntryCount, type DdbFetch } from './ddb-importer';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
@@ -970,7 +970,8 @@ export class CharactersService {
     // source id we actually fetched so the stored ddbId is authoritative even if the sheet's
     // own `data.id` was absent.
     create.ddbId = ddbId;
-    const summary = summarizeDdbImport(create);
+    const entriesOmitted = Math.max(0, computeDdbActionEntryCount(data) - 100);
+    const summary = summarizeDdbImport(create, entriesOmitted);
     const character = await this.create(campaignId, create, user, role);
     return { character, summary };
   }

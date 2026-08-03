@@ -147,6 +147,9 @@ export function NewCharacterForm({
               </ul>
             </div>
           )}
+          {importSummary.entriesOmitted > 0 && (
+            <p className="text-xs text-amber-300">{t('characters.ddbImport.entriesOmitted', { count: importSummary.entriesOmitted })}</p>
+          )}
           <div className="flex justify-end">
             <Btn type="button" onClick={finishDdbImport}>
               {t('characters.ddbImport.done')}

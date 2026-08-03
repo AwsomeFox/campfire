@@ -22,6 +22,8 @@
       "spellsCount_other": "{{count}} spells imported",
       "spellSlotsSet": "Spell slots set from class and level.",
       "textOnlyIntro": "These came in as text-only — check them on the sheet:",
+      "entriesOmitted_one": "{{count}} additional entry didn't fit and was not imported — add it on the sheet.",
+      "entriesOmitted_other": "{{count}} additional entries didn't fit and were not imported — add them on the sheet.",
       "done": "Done"
     }
   }

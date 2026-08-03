@@ -41,6 +41,17 @@ import { CharacterAction, expandRawStatblockAction, isResolvableSpec } from '@ca
 export const DDB_CHARACTER_SERVICE_BASE_URL = 'https://character-service.dndbeyond.com/character/v5/character';
 const FETCH_TIMEOUT_MS = 15_000;
 
+/**
+ * Defensive per-category ceiling on raw entries read from a single DDB sheet section
+ * (issue #1903 review) — NOT the real cap. The real cap is `Character.actions`'s schema
+ * max(100), applied once at the end in `mapDdbCharacter` after combining all categories, so
+ * a sheet with e.g. 45 features and 0 spells isn't truncated to 30 features when there was
+ * room for all 45. This constant exists purely so a pathological/malformed payload (an
+ * absurdly large array) can't make the importer do unbounded work — it is far above any
+ * real character sheet's entry count in any category.
+ */
+const RAW_ENTRY_SAFETY_CAP = 300;
+
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 
 /** DDB ability id (1..6) -> Campfire canonical ability key. */
@@ -396,6 +407,44 @@ function flatSuffix(flat: number): string {
   return flat > 0 ? `+${flat}` : String(flat);
 }
 
+/** The handful of HTML entities that actually turn up in DDB description text. */
+const DDB_HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+/**
+ * Strip HTML markup from a DDB spell/feature description (issue #1903 review) — DDB's
+ * public payload returns these as rendered HTML (`<p>…</p>`, `<strong>`, etc.), not plain
+ * text, and the character sheet renders `notes` as a plain-text React node, so leaving the
+ * markup in place shows literal tags to the DM/player. This is a small, targeted strip (not
+ * a full HTML parser): drop tags, decode the common entities above (falling back to a
+ * numeric `&#NN;`/`&#xNN;` reference when present), and collapse runs of whitespace left
+ * behind by block-level tags — sufficient for the plain-prose descriptions DDB returns,
+ * without pulling in an HTML-parsing dependency for it.
+ */
+function stripDdbHtml(html: string): string {
+  const noTags = html.replace(/<[^>]*>/g, ' ');
+  const decoded = noTags.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, ref: string) => {
+    if (ref[0] === '#') {
+      const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    return DDB_HTML_ENTITIES[ref] ?? match;
+  });
+  // Collapse whitespace, then drop a space a closing inline tag leaves immediately before
+  // punctuation ("creature</strong>." -> "creature ." -> "creature.") — cosmetic, but this
+  // pattern ("<strong>word</strong>.") is common enough in DDB's markup to be worth it.
+  return decoded
+    .replace(/\s+/g, ' ')
+    .replace(/ ([.,;:!?])/g, '$1')
+    .trim();
+}
+
 function isWeaponItem(item: DdbInventoryItem): boolean {
   const def = item.definition;
   if (!def) return false;
@@ -423,16 +472,34 @@ function weaponAbilityKey(def: NonNullable<DdbInventoryItem['definition']>, stat
  * proficiency with); a DM can correct the rare exception on the sheet afterward. Reuses
  * `expandRawStatblockAction` for the attack/damage inference, mirroring how a compendium
  * monster's weapon attacks are expanded.
+ *
+ * A `magic:true` weapon (a +1/+2/+3 item, or one with a rarer nonstandard bonus) is
+ * deliberately excluded from this to-hit/damage math: the simplified item shape read here
+ * carries no reliable numeric bonus field (unlike `magic`'s boolean, DDB does not expose a
+ * flat "+N" anywhere consistently shaped across sheets), so computing mundane numbers for
+ * it would silently under-report a magic weapon's real bonus — the exact "silent fallback
+ * math" this importer avoids elsewhere. It lands as a text-only action instead (never
+ * dropped, flagged in the summary) so the DM adds the enchantment bonus by hand.
  */
 function computeWeaponActions(data: DdbCharacterData, stats: Record<string, number>, proficiencyBonus: number): CharacterActionType[] {
   const items = Array.isArray(data.inventory) ? data.inventory : [];
   const out: CharacterActionType[] = [];
   for (const item of items) {
-    if (out.length >= 20) break;
+    if (out.length >= RAW_ENTRY_SAFETY_CAP) break;
     if (!item?.equipped || !isWeaponItem(item)) continue;
     const def = item.definition;
     if (!def) continue;
     const name = typeof def.name === 'string' && def.name.trim() ? def.name.trim() : 'Weapon';
+    if (def.magic === true) {
+      out.push(
+        expandRawStatblockAction(
+          { name, desc: 'Magic weapon — add its enchantment bonus to attack and damage manually; not inferred from the import.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
     const abilityKey = weaponAbilityKey(def, stats);
     const abilityScore = stats[abilityKey];
     const abilityModifier = typeof abilityScore === 'number' ? abilityMod(abilityScore) : 0;
@@ -462,11 +529,13 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
     const list = groups[section];
     if (!Array.isArray(list)) continue;
     for (const raw of list) {
-      if (out.length >= 30) return out;
+      if (out.length >= RAW_ENTRY_SAFETY_CAP) return out;
       const item = raw ?? {};
       const name = typeof item.name === 'string' ? item.name.trim() : '';
       if (!name) continue;
-      const desc = (typeof item.snippet === 'string' && item.snippet.trim() ? item.snippet : item.description) ?? '';
+      // `snippet` is DDB's short plain-text summary; the `description` fallback is full HTML
+      // markup, so stripDdbHtml is a no-op on the former and a real fix on the latter.
+      const desc = stripDdbHtml((typeof item.snippet === 'string' && item.snippet.trim() ? item.snippet : item.description) ?? '');
       let attackBonus: number | null = null;
       if (item.attackTypeRange != null) {
         const abilityKey = item.abilityModifierStatId != null ? ABILITY_ID_TO_KEY[item.abilityModifierStatId] : undefined;
@@ -504,7 +573,7 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
   const out: CharacterActionType[] = [];
   const seen = new Set<string>();
   const pushEntry = (entry: DdbSpellEntry | null | undefined) => {
-    if (!entry || out.length >= 60) return;
+    if (!entry || out.length >= RAW_ENTRY_SAFETY_CAP) return;
     if (!isKnownOrPrepared(entry)) return;
     const def = entry.definition;
     // Clamp to CharacterAction's 120-char name cap (mirrors expandRawStatblockAction) so an
@@ -516,7 +585,7 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
     seen.add(key);
     const rawLevel = def?.level;
     const level = typeof rawLevel === 'number' && rawLevel >= 0 && rawLevel <= 9 ? rawLevel : 0;
-    const desc = typeof def?.description === 'string' ? def.description : '';
+    const desc = stripDdbHtml(typeof def?.description === 'string' ? def.description : '');
     const tags = [def?.ritual ? 'Ritual.' : '', def?.concentration ? 'Concentration.' : ''].filter(Boolean);
     const notes = [...tags, desc].join(' ').trim().slice(0, 500);
     out.push(
@@ -575,8 +644,9 @@ function casterProgressionForClass(name: string, subclassName?: string | null): 
  * per Tasha's/Sage Advice it rounds UP (ceil(level/2)) whether solo or multiclassed — see
  * HALF_CASTER_ROUND_UP_CLASSES.
  *
- * A character with exactly ONE caster class (Warlock's separate Pact Magic aside — see
- * {@link PACT_SLOT_TABLE}) does not use the combining formula for Paladin/Ranger/third
+ * A character with exactly ONE caster class in this table (Warlock/Pact Magic is not
+ * modeled by this table at all — see the doc comment on {@link computeSpellSlots}) does not
+ * use the combining formula for Paladin/Ranger/third
  * casters: their own class table applies, which for a half caster is equivalent to this
  * full-caster table read at ceil(level/2), and for a third caster at ceil(level/3)
  * (verified against the PHB Paladin/Ranger tables and the Eldritch Knight/Arcane Trickster
@@ -608,58 +678,40 @@ const FULL_CASTER_SLOT_TABLE: readonly (readonly number[])[] = [
   [0, 4, 3, 3, 3, 3, 2, 2, 1, 1],
 ];
 
-/** Warlock Pact Magic: class level (1-20) -> { level: slot level, count: slots }. */
-const PACT_SLOT_TABLE: readonly { level: number; count: number }[] = [
-  { level: 1, count: 1 },
-  { level: 1, count: 2 },
-  { level: 2, count: 2 },
-  { level: 2, count: 2 },
-  { level: 3, count: 2 },
-  { level: 3, count: 2 },
-  { level: 4, count: 2 },
-  { level: 4, count: 2 },
-  { level: 5, count: 2 },
-  { level: 5, count: 2 },
-  { level: 5, count: 3 },
-  { level: 5, count: 3 },
-  { level: 5, count: 3 },
-  { level: 5, count: 3 },
-  { level: 5, count: 3 },
-  { level: 5, count: 3 },
-  { level: 5, count: 4 },
-  { level: 5, count: 4 },
-  { level: 5, count: 4 },
-  { level: 5, count: 4 },
-];
-
 /**
  * Spell slots (issue #1903) — a DDB sheet's slot maxima are not reliably present as a flat
  * field on the public payload, so this always derives them from the standard 5e class/level
  * table (the "falling back to the full-caster table" the issue calls for is really the ONLY
  * source here, which keeps the numbers correct for every sheet rather than only the ones
- * that happen to carry an as-yet-unobserved slot field). Non-casters get `{}`. Warlock Pact
- * Magic slots are merged into the same per-level pool as normal slots — Campfire's schema
- * keeps one pool per level rather than a separate pact pool.
+ * that happen to carry an as-yet-unobserved slot field). Non-casters get `{}`.
+ *
+ * Warlock Pact Magic is deliberately NOT imported here (review finding on this PR):
+ * Campfire's `Character.spellSlots` is one flat per-level pool with a single recovery rule
+ * — `resetSpellSlotsForRest` (packages/schema/src/rest.ts) only refills slots on a LONG
+ * rest, and its own comment states real Pact Magic short-rest recovery is "#1039's
+ * problem," i.e. a tracked, not-yet-built cross-cutting change (schema + rest planning +
+ * encounter resolver + UI). Writing Pact Magic slots into the ordinary pool here would
+ * silently mismodel their recovery cadence (a Warlock told to take a long rest to get back
+ * slots that should refresh every short rest) and, for a Warlock/other-caster multiclass,
+ * merge two resources 5e keeps separate into one spendable pool. Until #1039 gives Pact
+ * Magic its own representation, a DM importing a Warlock sets its slots up by hand — no
+ * slots is honest; wrong-cadence slots is not.
  */
 export function computeSpellSlots(classes: DdbClass[] | null | undefined): CharacterCreateInput['spellSlots'] {
   if (!Array.isArray(classes) || classes.length === 0) return {};
-  // Pact Magic is a fully separate resource from the regular spell-slot table and its levels
-  // never count toward the multiclass "combined caster level" below (PHB p.165 sidebar), so
-  // Warlock is tracked independently and excluded from the full/half/third combination.
   const casterEntries: { progression: 'full' | 'half' | 'halfRoundUp' | 'third'; level: number }[] = [];
-  let pactLevel = 0;
   for (const cls of classes) {
     const name = cls.definition?.name ?? '';
     const level = typeof cls.level === 'number' && cls.level > 0 ? cls.level : 0;
     if (!name || level <= 0) continue;
+    // 'pact' (Warlock) is recognized by casterProgressionForClass but intentionally not
+    // collected here — see the doc comment above.
     const progression = casterProgressionForClass(name, cls.subclassDefinition?.name);
-    if (progression === 'pact') {
-      pactLevel += level;
-    } else if (progression) {
+    if (progression && progression !== 'pact') {
       casterEntries.push({ progression, level });
     }
   }
-  if (casterEntries.length === 0 && pactLevel === 0) return {};
+  if (casterEntries.length === 0) return {};
 
   // Exactly one non-Warlock caster class -> use that class's own table (ceil), not the
   // multiclass combining formula (floor), which only applies when genuinely combining two
@@ -670,12 +722,19 @@ export function computeSpellSlots(classes: DdbClass[] | null | undefined): Chara
     if (entry.progression === 'full') {
       fullEquivalentLevel += entry.level;
     } else if (entry.progression === 'half') {
-      fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 2) : Math.floor(entry.level / 2);
+      // A solo Paladin/Ranger gets no Spellcasting at all until class level 2 (PHB) — the
+      // ceil(level/2) read of the full-caster table is only equivalent to their own class
+      // table from level 2 up; at level 1 it would wrongly read row 1 (2 first-level slots).
+      // The multiclass floor(level/2) branch doesn't need this guard: floor(1/2) is already 0.
+      fullEquivalentLevel += entry === solo ? (entry.level < 2 ? 0 : Math.ceil(entry.level / 2)) : Math.floor(entry.level / 2);
     } else if (entry.progression === 'halfRoundUp') {
-      // Artificer rounds up whether solo or multiclassed — see HALF_CASTER_ROUND_UP_CLASSES.
+      // Artificer rounds up whether solo or multiclassed, AND (unlike Paladin/Ranger) does
+      // get its first slots at level 1 — see HALF_CASTER_ROUND_UP_CLASSES.
       fullEquivalentLevel += Math.ceil(entry.level / 2);
     } else {
-      fullEquivalentLevel += entry === solo ? Math.ceil(entry.level / 3) : Math.floor(entry.level / 3);
+      // Same level-floor guard as the half-caster case: Eldritch Knight/Arcane Trickster
+      // spellcasting doesn't begin before class level 3.
+      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.ceil(entry.level / 3)) : Math.floor(entry.level / 3);
     }
   }
 
@@ -689,10 +748,6 @@ export function computeSpellSlots(classes: DdbClass[] | null | undefined): Chara
   const clampedFull = Math.max(0, Math.min(20, fullEquivalentLevel));
   const fullRow = FULL_CASTER_SLOT_TABLE[clampedFull];
   if (fullRow) for (let lvl = 1; lvl <= 9; lvl++) addSlots(lvl, fullRow[lvl] ?? 0);
-
-  const clampedPact = Math.max(0, Math.min(20, pactLevel));
-  const pact = clampedPact > 0 ? PACT_SLOT_TABLE[clampedPact - 1] : undefined;
-  if (pact) addSlots(pact.level, pact.count);
 
   return slots;
 }
@@ -717,11 +772,12 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
 
   // Issue #1903: attacks/spells so an imported PC arrives ready to take a turn — the
   // encounter Actions card and the /turn payload consume `actions`/`spellSlots` as-is, no
-  // new fields, no new endpoints.
-  const actions = [...computeWeaponActions(data, stats, proficiencyBonus), ...computeFeatureActions(data, stats, proficiencyBonus), ...computeSpellActions(data)].slice(
-    0,
-    100, // Character.actions cap
-  );
+  // new fields, no new endpoints. The 100-entry cap is `Character.actions`'s real schema
+  // limit — the ONLY intentional truncation point (see RAW_ENTRY_SAFETY_CAP above); any
+  // overflow past it is reported via `computeDdbActionEntryCount`/`summarizeDdbImport`
+  // rather than silently dropped.
+  const rawActions = [...computeWeaponActions(data, stats, proficiencyBonus), ...computeFeatureActions(data, stats, proficiencyBonus), ...computeSpellActions(data)];
+  const actions = rawActions.slice(0, 100);
   const spellSlots = computeSpellSlots(data.classes);
 
   const created: CharacterCreateInput = {
@@ -747,6 +803,20 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
 }
 
 /**
+ * Total attack/feature/spell entries a DDB sheet would produce BEFORE `mapDdbCharacter`
+ * applies the `Character.actions` schema cap (100) — issue #1903 review: a sheet with more
+ * raw entries than the cap must report the overflow (`DdbImportSummary.entriesOmitted`)
+ * rather than trimming silently. Recomputes the same three category functions
+ * `mapDdbCharacter` uses; the entry COUNT each produces does not depend on ability
+ * scores/proficiency bonus (only the computed to-hit/damage numbers on each entry do), so
+ * this is called with placeholder stats — cheap, and avoids recomputing the character's
+ * full derived state just to get a count.
+ */
+export function computeDdbActionEntryCount(data: DdbCharacterData): number {
+  return computeWeaponActions(data, {}, 0).length + computeFeatureActions(data, {}, 0).length + computeSpellActions(data).length;
+}
+
+/**
  * Build the import summary (issue #1903) for a mapped character: counts of what imported
  * with a resolvable `spec` vs. what landed text-only, so REST/MCP callers can show the DM
  * what needs a manual touch-up rather than discovering it only inside the sheet.
@@ -760,8 +830,12 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
  * action-resolver 400 ("no resolvable structured spec") — so every imported spell is
  * exactly the class of thing this summary exists to flag: present, but not yet actionable
  * without the DM adding an attack/save mode by hand.
+ *
+ * `entriesOmitted` (default 0, for callers that only have the already-mapped character) is
+ * the count trimmed by the `Character.actions` schema cap — see
+ * `computeDdbActionEntryCount`. Reported rather than silently dropped.
  */
-export function summarizeDdbImport(create: CharacterCreateInput): DdbImportSummary {
+export function summarizeDdbImport(create: CharacterCreateInput, entriesOmitted = 0): DdbImportSummary {
   const actions = create.actions ?? [];
   const spells = actions.filter((a) => a.kind === 'spell');
   const nonSpells = actions.filter((a) => a.kind !== 'spell');
@@ -771,6 +845,7 @@ export function summarizeDdbImport(create: CharacterCreateInput): DdbImportSumma
     spellsImported: spells.length,
     spellSlotsImported: Object.keys(create.spellSlots ?? {}).length > 0,
     textOnly: textOnly.slice(0, 200),
+    entriesOmitted: Math.max(0, entriesOmitted),
   };
 }
 
