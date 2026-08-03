@@ -4392,6 +4392,13 @@ export class EncountersService {
         }
       : null;
     let replayedCombatant: Combatant | null = null;
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): read after the
+    // transaction commits, at this method's own `emitEncounterEvent` call below — see
+    // `ActionResolverService.apply()`'s `sheetMirrored` doc comment for the general
+    // rationale. `mirrorSheet` itself is computed from the transaction-local encounter
+    // row (line ~4426), so it can't be read at that emission point directly; mirrored
+    // here into an outer-scope flag the same way.
+    let combatantSheetMirrored = false;
 
     try {
       this.db.transaction((tx) => {
@@ -4424,6 +4431,7 @@ export class EncountersService {
         // The sheet mirror has the same lifecycle boundary: derive it from the
         // transaction-local encounter row, never the stale preflight snapshot.
         const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
+        combatantSheetMirrored = mirrorSheet;
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
         if (!fresh || fresh.encounterId !== encounterId) {
           throw new NotFoundException(`Combatant ${combatantId} not found`);
@@ -4986,7 +4994,12 @@ export class EncountersService {
         .where(eq(encounters.id, encounterId));
     }
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): tag this frame the same
+    // way `apply()`/`undo()`/`adjustCombatantResource` do (see `sheetMirrored`'s schema doc
+    // comment) — a combatant HP/condition/death-state PATCH mirrors onto a linked character
+    // sheet whenever `combatantSheetMirrored` is true, so the client's `campaignCharacters`
+    // invalidation needs to fire for THIS write too, not just the other three.
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden, { sheetMirrored: combatantSheetMirrored });
 
     if (row.kind === 'character' && row.characterId) {
       if (beforeDeath !== 'dead' && afterDeath === 'dead') {
