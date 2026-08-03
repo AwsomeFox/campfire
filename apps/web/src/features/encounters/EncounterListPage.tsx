@@ -226,7 +226,7 @@ export default function EncounterListPage() {
               <Btn type="button" className="cf-page-header__action" ghost onClick={handleQuickFight} disabled={quickFightLoading} data-testid="quick-fight-button">
                 {quickFightLoading ? 'Creating…' : t('encounters.quickFight', 'Quick fight')}
               </Btn>
-              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)} disabled={quickFightLoading}>
+              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)} disabled={quickFightLoading} data-testid="new-encounter-button">
                 {t('encounters.newEncounter')}
               </Btn>
             </div>
