@@ -99,7 +99,10 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
       await expect(endBtn).toBeVisible();
       await endBtn.click();
       const dialog = page.getByRole('dialog', { name: 'End this encounter?' });
-      await dialog.getByRole('button', { name: 'End encounter' }).click();
+      await expect(dialog).toBeVisible();
+      const confirmBtn = dialog.getByRole('button', { name: 'End encounter' });
+      await expect(confirmBtn).toBeVisible();
+      await confirmBtn.click();
       await started;
       await expectBusyConfirm(page, 'End this encounter?', 'Ending encounter…', 'End encounter', release, true);
     } finally {
@@ -121,7 +124,10 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     await expect(deleteBtn).toBeVisible();
     await deleteBtn.click();
     const dialog = page.getByRole('dialog', { name: 'Delete this encounter?' });
-    await dialog.getByRole('button', { name: 'Delete encounter' }).click();
+    await expect(dialog).toBeVisible();
+    const confirmBtn = dialog.getByRole('button', { name: 'Delete encounter' });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
     await started;
     await expectBusyConfirm(
       page,
@@ -145,7 +151,10 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     await expect(reopenBtn).toBeVisible();
     await reopenBtn.click();
     const dialog = page.getByRole('dialog', { name: 'Reopen this encounter?' });
-    await dialog.getByRole('button', { name: 'Reopen encounter' }).click();
+    await expect(dialog).toBeVisible();
+    const confirmBtn = dialog.getByRole('button', { name: 'Reopen encounter' });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
     await started;
     await expectBusyConfirm(
       page,
