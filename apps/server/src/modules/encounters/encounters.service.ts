@@ -30,6 +30,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
   advanceEncounterTurn,
@@ -756,6 +757,16 @@ export class EncountersService {
     @Optional() @Inject(forwardRef(() => StorylinesService)) private readonly storylinesService?: StorylinesService,
     @Optional() @Inject(forwardRef(() => TimelineService)) private readonly timelineService?: TimelineService,
     @Optional() @Inject(forwardRef(() => CampaignsService)) private readonly campaignsService?: CampaignsService,
+    /**
+     * Issue #1901 — shares ActionResolverService's character-action merge (sheet actions +
+     * equipped-item actions, ONE index space) so `/turn` `suggestedActions.actionIndex` means
+     * the same action `listUsableActions`/`resolveSpec` do. No circular dependency (this
+     * service is not one of ActionResolverService's own dependencies), so this is a plain
+     * optional dependency, not a `forwardRef`. Optional + last so the many hand-constructed
+     * test doubles for this service (`test/**`) that predate #1901 keep compiling; absent, the
+     * character branch below falls back to its pre-#1901 sheet-only behavior.
+     */
+    @Optional() private readonly actionResolver?: ActionResolverService,
   ) {}
 
   /**
@@ -6774,17 +6785,30 @@ export class EncountersService {
       }
     };
     if (c.kind === 'character' && c.characterId !== null) {
-      const [character] = await this.db.select({ actions: characters.actions }).from(characters).where(eq(characters.id, c.characterId)).limit(1);
-      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown }>>(character?.actions ?? null, []);
-      for (let i = 0; i < actions.length; i++) {
-        const a = actions[i];
+      const [character] = await this.db
+        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions })
+        .from(characters)
+        .where(eq(characters.id, c.characterId))
+        .limit(1);
+      if (!character) return out;
+      // Issue #1901: sheet actions + equipped-item actions, in the SAME merged index space
+      // ActionResolverService's listUsableActions/resolveSpec use — actionIndex N on this
+      // payload means the same action N on those. Falls back to sheet-only (pre-#1901
+      // behavior) when this service was constructed without the optional dependency (some
+      // hand-rolled test doubles predate it).
+      type ActionRow = { name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown };
+      const rows: Array<{ row: ActionRow; itemName: string | null }> = this.actionResolver
+        ? (this.actionResolver.characterUsableActionRows(character) as Array<{ row: ActionRow; itemName: string | null }>)
+        : fromJsonText<ActionRow[]>(character.actions, []).map((row) => ({ row, itemName: null }));
+      for (let i = 0; i < rows.length; i++) {
+        const { row: a, itemName } = rows[i];
         if (typeof a?.name !== 'string' || a.name.length === 0) continue;
         const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
         const specParsed = zod.object({ spec: zod.unknown().optional() }).passthrough().safeParse(a);
         const spec = specParsed.success ? specParsed.data.spec : undefined;
         out.push({
           name: a.name.slice(0, 160),
-          source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
           summary: bits.join(' · ').slice(0, 600),
           toHit: typeof a.toHit === 'string' ? a.toHit : '',
           damage: typeof a.damage === 'string' ? a.damage : '',

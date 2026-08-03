@@ -711,6 +711,11 @@ describe('inventory & treasury (e2e)', () => {
         .send({ equipped: true, equipSlot: 'main-hand' });
       expect(conflict.status).toBe(409);
       expect(conflict.body.code).toBe('INVENTORY_SLOT_CONFLICT');
+      // Issue #1901: the incumbent's id/name + the contested slot ride along so the web
+      // one-tap swap can unequip the incumbent and retry without parsing the message string.
+      expect(conflict.body.conflictingItemId).toBe(sword.body.id);
+      expect(conflict.body.conflictingItemName).toBe('Rapier');
+      expect(conflict.body.equipSlot).toBe('main-hand');
 
       // Unequipping the incumbent frees the slot for the second item.
       const freed = await request(server).patch(`/api/v1/inventory/${sword.body.id}`).set(player).send({ equipped: false });

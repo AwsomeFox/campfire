@@ -761,6 +761,12 @@ export const UsableAction = z.object({
   // the caller must fall back to the inline statblock rather than invent numbers.
   resolvable: z.boolean(),
   spec: ActionSpec.nullable().default(null),
+  /**
+   * Issue #1901: for a character's equipped-item action, "equipped: <item name>" — empty for
+   * a hand-authored sheet action or a monster/NPC statblock action. Lets the UI tag which
+   * combat action came from gear vs. the sheet without a second lookup.
+   */
+  source: z.string().max(40).default(''),
 });
 export type UsableAction = z.infer<typeof UsableAction>;
 

@@ -679,6 +679,12 @@ export class InventoryService {
               throw new ConflictException({
                 code: 'INVENTORY_SLOT_CONFLICT',
                 message: `Slot "${nextEquipSlot}" is already occupied by "${conflict[0].name}" on this character — unequip it first.`,
+                // Issue #1901: the incumbent's id + name + the contested slot, additive to the
+                // existing {code, message} shape, so the web one-tap swap can unequip the
+                // incumbent and retry without re-parsing the human message string.
+                conflictingItemId: conflict[0].id,
+                conflictingItemName: conflict[0].name,
+                equipSlot: nextEquipSlot,
               });
             }
           }
@@ -817,6 +823,24 @@ export class InventoryService {
           })
         : undefined,
     });
+
+    // Issue #1901: an equip/unequip (or a move that carries/drops equip state) changes which
+    // combat actions a character's encounter card and /turn payload show — signal it the same
+    // way a sheet edit does (`character.updated`) so RunSessionPage's existing SSE handler
+    // invalidates the cached action list without a new event type. Only characters that were
+    // (or are now) the EQUIPPED owner care; an unrelated move or a qty-only write emits nothing.
+    if (equipChanged || moved) {
+      const affected = new Set<number>();
+      if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped) {
+        affected.add(existing.characterId);
+      }
+      if (committed.ownerType === 'character' && committed.characterId != null && committed.equipped) {
+        affected.add(committed.characterId);
+      }
+      for (const characterId of affected) {
+        this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId, userId: user.id });
+      }
+    }
     return committed;
   }
 

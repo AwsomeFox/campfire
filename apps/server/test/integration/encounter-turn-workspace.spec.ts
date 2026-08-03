@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { ActionSpec, ConditionInstance } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -43,8 +43,29 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
     const actions = new ActionResolverService(orm, events, audit);
+    // Issue #1901: wire ActionResolverService in (the last, optional constructor param) so
+    // suggestedActionsForCombatant's character branch merges equipped-item actions the same
+    // way listUsableActions/resolveSpec do. Harmless for every OTHER test in this file — with
+    // no equipped items the merge is a no-op, identical to the pre-#1901 sheet-only list.
+    const service = new EncountersService(
+      orm,
+      audit,
+      events,
+      rolls,
+      revisions,
+      attachments,
+      campaignLibrary,
+      { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any,
+      undefined, // safety
+      undefined, // charactersService
+      undefined, // inventoryService
+      undefined, // questsService
+      undefined, // storylinesService
+      undefined, // timelineService
+      undefined, // campaignsService
+      actions,
+    );
     return { orm, service, actions };
   }
 
@@ -1786,6 +1807,111 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       const [target2] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).all();
       expect(JSON.parse(target1.conditionInstances ?? '[]')).toEqual([]);
       expect(JSON.parse(target2.conditionInstances ?? '[]')).toEqual([]);
+    });
+  });
+
+  // Issue #1901: /turn's suggestedActions for a character actor merge equipped-item actions
+  // AFTER sheet actions, through ActionResolverService's shared characterUsableActionRows —
+  // the exact same merge listUsableActions/resolveSpec use — so actionIndex N on this payload
+  // is the same action as index N on those.
+  describe('/turn suggestedActions include equipped-item actions (issue #1901)', () => {
+    const greatsword = {
+      name: 'Greatsword',
+      kind: 'melee',
+      toHit: '+7',
+      damage: '2d6+4 slashing',
+      notes: '',
+      spec: {
+        mode: 'attack',
+        attack: { ability: 'STR', proficient: true },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: { hit: { damage: [{ formula: '2d6', flat: 4, type: 'slashing' }] } },
+      },
+    };
+    const dagger = {
+      name: 'Dagger',
+      kind: 'melee',
+      toHit: '+5',
+      damage: '1d4+2 piercing',
+      notes: '',
+      spec: {
+        mode: 'attack',
+        attack: { ability: 'DEX', proficient: true },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: { hit: { damage: [{ formula: '1d4', flat: 2, type: 'piercing' }] } },
+      },
+    };
+
+    it("appends the equipped item's action after sheet actions, tagged with its item name, and agrees with listUsableActions on the index", async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service, actions } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([greatsword]) }).where(eq(characters.id, characterId)).run();
+      const ts = new Date().toISOString();
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Rusty Dagger',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(2);
+      expect(workspace.suggestedActions[0].name).toBe('Greatsword');
+      expect(workspace.suggestedActions[0].actionIndex).toBe(0);
+      const equippedRow = workspace.suggestedActions[1];
+      expect(equippedRow.name).toBe('Dagger');
+      expect(equippedRow.actionIndex).toBe(1);
+      expect(equippedRow.source).toBe('equipped: Rusty Dagger');
+
+      // Same actor, same index space: listUsableActions index 1 must be the SAME action.
+      const usable = actions.listUsableActions(encounterId, c1, player1, 'player');
+      expect(usable[1].name).toBe('Dagger');
+      expect(usable[1].index).toBe(equippedRow.actionIndex);
+    });
+
+    it('unequipping removes the item action from suggestedActions', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, campaignId } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      const ts = new Date().toISOString();
+      const [item] = orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Rusty Dagger',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+
+      expect((await service.getTurnWorkspace(encounterId, player1, 'player')).suggestedActions).toHaveLength(1);
+
+      orm.update(inventoryItems).set({ equipped: false, equipSlot: null }).where(eq(inventoryItems.id, item.id)).run();
+
+      expect((await service.getTurnWorkspace(encounterId, player1, 'player')).suggestedActions).toHaveLength(0);
     });
   });
 });

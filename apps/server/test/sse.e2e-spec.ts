@@ -316,6 +316,56 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('issue #1901: equipping/unequipping an inventory item emits character.updated so the encounter action list refetches', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Equip Tick PC', ownerUserId: 'dev:dm-1' })
+    ).body.id as number;
+
+    const itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Longsword', ownerType: 'character', characterId })
+    ).body.id as number;
+
+    const seenBeforeEquip = conn.events.length;
+    const equipRes = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equipped: true, equipSlot: 'main-hand' });
+    expect(equipRes.status).toBe(200);
+    const equipTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeEquip,
+    );
+    expect(equipTick.campaignId).toBe(campaignId);
+
+    // A qty-only write (no equip change) emits no additional character.updated tick.
+    const seenBeforeQty = conn.events.length;
+    const qtyRes = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ qtyDelta: 1, idempotencyKey: `qty-only-${itemId}` });
+    expect(qtyRes.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(conn.events.slice(seenBeforeQty).some((e) => (e as { type?: string }).type === 'character.updated')).toBe(false);
+
+    const seenBeforeUnequip = conn.events.length;
+    const unequipRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    expect(unequipRes.status).toBe(200);
+    const unequipTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeUnequip,
+    );
+    expect(unequipTick.campaignId).toBe(campaignId);
+
+    conn.close();
+  });
+
   it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);

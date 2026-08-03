@@ -362,11 +362,13 @@ export class ActionResolverService {
    * issue). Ordered by item id so the index space is stable across calls, which
    * matters because {@link listUsableActions} and {@link resolveSpec} both append
    * these AFTER the character's manually-authored `character.actions`, and the apply
-   * path resolves an action purely by that combined index/name.
+   * path resolves an action purely by that combined index/name. Each row carries the
+   * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
+   * without a second inventory lookup.
    */
-  private equippedItemActions(characterId: number, campaignId: number): CharacterAction[] {
+  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ equippedAction: inventoryItems.equippedAction })
+      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
       .from(inventoryItems)
       .where(
         and(
@@ -378,25 +380,39 @@ export class ActionResolverService {
       )
       .orderBy(inventoryItems.id)
       .all();
-    const actions: CharacterAction[] = [];
+    const actions: Array<{ action: CharacterAction; itemName: string }> = [];
     for (const row of rows) {
       if (!row.equippedAction) continue;
       const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push(parsed.data);
+      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
     }
     return actions;
   }
 
   /**
-   * A character's full usable-action list (issue #1326): hand-authored sheet actions
-   * FIRST, then equipped-item actions appended — merged, never replacing, and in one
-   * stable index space so `resolveSpec`'s actionIndex lookup and `listUsableActions`
-   * agree on what index N means for this character right now.
+   * A character's full usable-action list (issue #1326, #1901): hand-authored sheet actions
+   * FIRST, then equipped-item actions appended — merged, never replacing, and in one stable
+   * index space so `resolveSpec`'s actionIndex lookup, `listUsableActions`, AND the `/turn`
+   * `suggestedActions` payload (via {@link EncountersService}) all agree on what index N means
+   * for this character right now. `itemName` is `null` for a sheet action, the equipping
+   * item's name for an equipped-item action — the ONE thing that distinguishes the two halves
+   * of the merge for a caller that wants to label the source (issue #1901).
    */
-  private characterActionRows(character: typeof characters.$inferSelect): Array<Record<string, unknown>> {
+  characterUsableActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActions(character.id, character.campaignId) as unknown as Array<Record<string, unknown>>;
-    return [...manual, ...equipped];
+    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    return [
+      ...manual.map((row) => ({ row, itemName: null as string | null })),
+      ...equipped.map(({ action, itemName }) => ({ row: action as unknown as Record<string, unknown>, itemName })),
+    ];
+  }
+
+  private characterActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<Record<string, unknown>> {
+    return this.characterUsableActionRows(character).map((x) => x.row);
   }
 
   private actionToUsable(a: CharacterAction, index: number): UsableAction {
@@ -540,8 +556,8 @@ export class ActionResolverService {
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
-      const actions = this.characterActionRows(character);
-      return actions.map((a, index) => {
+      const rows = this.characterUsableActionRows(character);
+      return rows.map(({ row: a, itemName }, index) => {
         const parsed = ActionSpec.safeParse(a?.spec);
         const spec = parsed.success ? parsed.data : null;
         return UsableAction.parse({
@@ -554,6 +570,8 @@ export class ActionResolverService {
           notes: typeof a?.notes === 'string' ? a.notes : '',
           resolvable: isResolvableSpec(spec),
           spec,
+          // Issue #1901: tag which equipped item granted this action; empty for a sheet action.
+          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : '',
         });
       });
     }
