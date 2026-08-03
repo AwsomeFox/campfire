@@ -1274,6 +1274,19 @@ export class CharactersService {
     // so a non-dm write is silently ignored, same as ownerUserId above.
     if (input.dmSecret !== undefined && role === 'dm') update.dmSecret = input.dmSecret;
 
+    // Issue #1902 rework (round 12, codex P2): `existing.updatedAt` was captured before the
+    // awaited `assertProgressionAllowed`/`adapterForCampaign` checks above — a concurrent
+    // CAS-protected write (e.g. `patchSpellSlots`) can land in that gap. `nextUpdatedAt`
+    // computed from that now-stale snapshot could then publish the IDENTICAL token a
+    // concurrent same-millisecond writer already produced from the SAME stale root (`nextUpdatedAt`
+    // is a pure function of its input and the current instant), which a client holding that
+    // token as `expectedUpdatedAt` would incorrectly read as "still current" even though this
+    // PATCH's OWN fields (spellSlots included, when supplied) are newer than what that client
+    // last saw. Re-read right before the write, as close to it as this method's structure
+    // allows without restructuring every branch above into one transaction.
+    const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
+    update.updatedAt = nextUpdatedAt(freshUpdatedAt);
+
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
@@ -1730,6 +1743,13 @@ export class CharactersService {
       update.hpCurrent = clampHpCurrent(existing.hpCurrent + Math.max(0, gained), input.hpMax);
     }
 
+    // Issue #1902 rework (round 12, codex P2): `existing.updatedAt` predates the awaited
+    // `assertProgressionAllowed`/`adapterForCampaign` calls above — see `update()`'s matching
+    // fix and its doc comment for why a stale root here can publish a token colliding with a
+    // concurrent writer's. Re-read right before the write.
+    const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
+    update.updatedAt = nextUpdatedAt(freshUpdatedAt);
+
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     // A mid-session level-up that raises hpMax should reflect on the combat tracker too (issue #50).
@@ -2113,6 +2133,16 @@ export class CharactersService {
     if (characterIds.length === 0) {
       throw new BadRequestException('A rest needs at least one character.');
     }
+    // Issue #1902 rework (round 12, devin): de-duplicate BEFORE anything else derives from
+    // `characterIds` (`targets`, `states`, the plan, and — since round 10 — the per-character
+    // WHERE-clause CAS write below). A caller naming the same character twice (an AI Driver's
+    // `long_rest`/`short_rest` MCP tools accept an array with no uniqueness refinement) used to
+    // be harmless: both writes applied the identical planned values. Once the CAS write started
+    // gating on `updatedAt` still matching the PRE-transaction snapshot, the second write for
+    // that same row saw the token the first write (moments earlier, same transaction) had
+    // already advanced — a self-inflicted conflict that rejected the WHOLE rest, including every
+    // other participant, with a misleading "changed after this rest was planned" error.
+    characterIds = [...new Set(characterIds)];
     const adapter = (await this.adapterForCampaign(campaignId)) as unknown as RestAdapter;
 
     const rows = await this.db

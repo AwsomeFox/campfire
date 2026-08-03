@@ -77,4 +77,17 @@ test.describe('inline character cards refresh (issue #421)', () => {
     expect(source).toMatch(/character\.updated/);
     expect(source).toMatch(/characterId/);
   });
+
+  // Issue #1902 rework (round 12, devin): several in-combat writes mirror HP/conditions or a
+  // spell-slot/resource spend onto the linked character SHEET while emitting only
+  // `encounter.updated` (no `character.updated` frame), so `shouldInvalidateInlineCharacters`
+  // never fires for them and `campaignCharacters` is left stale. `ResourceTrackerPanel`'s
+  // cached `char.updatedAt` — the `expectedUpdatedAt` CAS token it sends on a spell-slot spend
+  // — goes stale too, so a player just healed or damaged mid-combat could get a spurious 409
+  // on their very next, otherwise-valid slot spend. `encounter.updated` must now ALSO
+  // invalidate campaignCharacters, piggybacking the same call `character.updated` already gets.
+  test('RunSessionPage also invalidates campaignCharacters on encounter.updated, not only character.updated', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(source).toMatch(/invalidateEncounter\(queryClient, eid\);\s*\n\s*\/\/ Issue #1902 rework \(round 12, devin\)[\s\S]*?invalidateCampaignCharacters\(queryClient, cid\);/);
+  });
 });

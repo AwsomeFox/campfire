@@ -537,6 +537,37 @@ describe('rest mechanics (#1041, e2e)', () => {
     }
   });
 
+  /**
+   * Issue #1902 rework, round 12 (devin) — a regression the round-10 WHERE-clause CAS
+   * introduced. `restParty` built `targets = characterIds.map(...)` with no
+   * de-duplication, so `characterIds: [id, id]` produced TWO plans for the SAME row.
+   * Before round 10 both writes applied the identical planned values and the call
+   * succeeded harmlessly. After round 10's CAS gate, the FIRST write for that row
+   * advances `updatedAt`, so the SECOND write's own predicate
+   * (`eq(characters.updatedAt, priorUpdatedAt)`) matches zero rows and throws
+   * `ConflictException` — a self-inflicted conflict that rolled back the WHOLE rest,
+   * including every OTHER participant, with a misleading "changed after this rest was
+   * planned" error. `long_rest`/`short_rest`'s MCP tools accept an id array with no
+   * uniqueness refinement, so an AI caller can readily trigger this. Fixed by
+   * de-duplicating `characterIds` at the very top of `restParty`, before anything
+   * derives from it.
+   */
+  it("#1902 rework: restParty tolerates a duplicate character id instead of self-conflicting and rolling back the whole rest", async () => {
+    const solo = await batteredCharacter('Repeated Rex');
+    const companion = await batteredCharacter('Innocent Bystander');
+
+    const result = await characters.restParty(campaignId, 'long', [solo, solo, companion], {}, dmUser, 'dm');
+
+    // Both distinct characters actually rested — the duplicate did not silently drop the
+    // OTHER participant, and did not roll back the whole call either.
+    expect(result.characters.map((c) => c.characterId).sort((a, b) => a - b)).toEqual([solo, companion].sort((a, b) => a - b));
+    const soloAfter = (await read(solo)).body;
+    expect(soloAfter.spellSlots['1'].used).toBe(0);
+    expect(soloAfter.resources.rage.used).toBe(0);
+    const companionAfter = (await read(companion)).body;
+    expect(companionAfter.spellSlots['1'].used).toBe(0);
+  });
+
   it('reports every failure at once rather than one rejected call at a time', async () => {
     const noDice = await batteredCharacter('Tam');
     const corpse = await batteredCharacter('Dead Mo');

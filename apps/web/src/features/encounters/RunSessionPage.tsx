@@ -1661,6 +1661,16 @@ export default function RunSessionPage() {
           return;
         }
         invalidateEncounter(queryClient, eid);
+        // Issue #1902 rework (round 12, devin): several in-combat writes mirror HP/conditions
+        // or a spell-slot/resource spend onto the linked character SHEET (action-resolver's
+        // apply path, `adjustCombatantResource`) while emitting only `encounter.updated` — no
+        // `character.updated` frame, so `shouldInvalidateInlineCharacters` above never fires
+        // for them. With `campaignCharacters` left stale, `ResourceTrackerPanel`'s cached
+        // `char.updatedAt` (the `expectedUpdatedAt` CAS token it sends on a spell-slot spend)
+        // goes stale too — a player just healed or damaged mid-combat could get a spurious
+        // 409 on their VERY NEXT, otherwise-valid slot spend, for up to the 10s poll interval.
+        // Piggyback the same invalidation `character.updated` already gets.
+        invalidateCampaignCharacters(queryClient, cid);
       },
       [eid, cid, navigate, queryClient, addPing],
     ),
@@ -3792,7 +3802,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 

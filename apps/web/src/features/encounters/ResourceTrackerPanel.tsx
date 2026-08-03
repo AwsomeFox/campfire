@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ruleSystemAdapter, restOptionsForAdapter } from '@campfire/schema';
 import type { Character, Combatant, CharacterResource, EncounterWithCombatants, RestOptionDef, SpellSlotLevel } from '@campfire/schema';
 import { Card, Btn, ErrorNote } from '../../components/ui';
-import { api, API, translateApiError, isAmbiguousMutation } from '../../lib/api';
+import { api, API, translateApiError, isAmbiguousMutation, isStaleWrite } from '../../lib/api';
 import { invalidateEncounter, invalidateCampaignCharacters, queryKeys } from '../../lib/query';
 import { useCampaign } from '../../app/CampaignContext';
 import {
@@ -62,6 +62,7 @@ export function ResourceTrackerPanel({
   canPlayerWrite,
   ownedCharacterIds,
   encounterWritable,
+  encounterUpdatedAt,
 }: {
   campaignId?: number;
   encounterId: number;
@@ -73,10 +74,25 @@ export function ResourceTrackerPanel({
   /** `encounter.status !== 'ended'` (issue #1902 rework, round 2) — see the doc comment on
    *  {@link canEditCharacterResource} for why this only affects statblock-only combatants. */
   encounterWritable: boolean;
+  /** The encounter's own `updatedAt` (issue #1902 rework, round 12, devin) — echoed back as
+   *  `expectedUpdatedAt` on a statblock pip write. `updateCombatant` validates this CAS token
+   *  against the ENCOUNTER row, not a per-combatant one (there is no per-combatant revision
+   *  field), so this is the same guard every other `expectedUpdatedAt`-bearing combatant PATCH
+   *  in the app already relies on. Without it, a whole-statblock PATCH built from a stale
+   *  cached combatant could silently overwrite another client's concurrent statblock edit. */
+  encounterUpdatedAt: string | undefined;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
+  // Issue #1902 rework (round 12, codex P2): keyed to the TARGET that raised it, not a bare
+  // string — otherwise an unrelated mutation's success (`setError(null)` for a DIFFERENT
+  // character/combatant) silently cleared a still-relevant failure the user has not acted on
+  // yet. A NEWER failure from any target still replaces whatever is shown (the most recent
+  // failure is the most actionable one); a success only clears the banner when it belongs to
+  // the SAME target currently displayed.
+  const [error, setError] = useState<{ key: string; message: string } | null>(null);
+  const clearErrorFor = (key: string) => setError((prev) => (prev?.key === key ? null : prev));
+  const setErrorFor = (key: string, message: string) => setError({ key, message });
 
   // Issue #1902 rework: the campaign's rule-system adapter drives which rests are on
   // offer, exactly like CharacterPage's RestControls — a Starfinder table gets its
@@ -111,19 +127,26 @@ export function ResourceTrackerPanel({
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set());
   const beginPending = (key: string) => setPendingKeys((prev) => addPendingKey(prev, key));
   const endPending = (key: string) => setPendingKeys((prev) => removePendingKey(prev, key));
-  // Issue #1902 rework (round 9): an AMBIGUOUS mutation outcome (the write's response was
-  // lost — a timeout, a network drop — so the client cannot tell whether it landed
-  // server-side) must NOT release the control the instant the promise settles the way an
-  // ordinary rejection does. A definite 400/403/409 is a reliable "did not apply" answer;
-  // an ambiguous one is not, and releasing the pip/button anyway invites exactly the retry
-  // the encounter workflow's own `isAmbiguousOutcome` reconciliation guard exists to
-  // prevent elsewhere on this page — for an irreplaceable resource (a Stamina Rest's RP, a
-  // spell slot, a hit die) a "harmless" retry after a lost response can silently spend it
-  // twice. On an ambiguous error, wait for a fresh read of BOTH caches this panel renders
-  // from before releasing the pending key, so the control's next render reflects
-  // server-truth (e.g. `rpCurrent` already at 0) rather than the pre-request snapshot.
+  // Issue #1902 rework (round 9, widened round 12 P2): an AMBIGUOUS mutation outcome (the
+  // write's response was lost — a timeout, a network drop — so the client cannot tell
+  // whether it landed server-side) must NOT release the control the instant the promise
+  // settles the way an ordinary rejection does. A definite 400/403 is a reliable "did not
+  // apply" answer; an ambiguous one is not, and releasing the pip/button anyway invites
+  // exactly the retry the encounter workflow's own `isAmbiguousOutcome` reconciliation
+  // guard exists to prevent elsewhere on this page — for an irreplaceable resource (a
+  // Stamina Rest's RP, a spell slot, a hit die) a "harmless" retry after a lost response
+  // can silently spend it twice.
+  //
+  // A definite 409 STALE_WRITE is NOT ambiguous (the write definitely did not apply), but
+  // it is not safe to release immediately either: the row DID change server-side, yet this
+  // render's local snapshot (the `used`/`updatedAt` the control still shows) is the OLD,
+  // now-rejected one. Releasing the control right away re-enables it with that same stale
+  // value and token, guaranteeing an immediate retry computes the identical delta and fails
+  // the identical way. Both cases therefore wait for a fresh read of BOTH caches this panel
+  // renders from before releasing the pending key, so the control's next render reflects
+  // server-truth rather than the pre-request snapshot.
   const endPendingAfterReconciling = async (key: string, error: unknown) => {
-    if (error && isAmbiguousMutation(error)) {
+    if (error && (isAmbiguousMutation(error) || isStaleWrite(error))) {
       await Promise.allSettled([
         queryClient.invalidateQueries({ queryKey: queryKeys.encounter(encounterId) }),
         campaignId != null ? queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }) : Promise.resolve(),
@@ -158,13 +181,13 @@ export function ResourceTrackerPanel({
       api.post<Character>(`${API}/characters/${characterId}/rest`, restRequestBody(kind)),
     onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
     onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ characterId: vars.characterId }), error),
-    onSuccess: (updated) => {
-      setError(null);
+    onSuccess: (updated, vars) => {
+      clearErrorFor(pendingTargetKey({ characterId: vars.characterId }));
       reconcileCharacter(updated);
       invalidate();
     },
-    onError: (err) => {
-      setError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.restError' }));
+    onError: (err, vars) => {
+      setErrorFor(pendingTargetKey({ characterId: vars.characterId }), translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.restError' }));
       invalidate();
     },
   });
@@ -174,13 +197,13 @@ export function ResourceTrackerPanel({
       api.post<Character>(`${API}/characters/${characterId}/resources`, resourcePatchBody(key, used)),
     onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
     onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ characterId: vars.characterId }), error),
-    onSuccess: (updated) => {
-      setError(null);
+    onSuccess: (updated, vars) => {
+      clearErrorFor(pendingTargetKey({ characterId: vars.characterId }));
       reconcileCharacter(updated);
       invalidate();
     },
-    onError: (err) => {
-      setError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
+    onError: (err, vars) => {
+      setErrorFor(pendingTargetKey({ characterId: vars.characterId }), translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
       invalidate();
     },
   });
@@ -218,13 +241,13 @@ export function ResourceTrackerPanel({
     // race too, without a debounce or a second round-trip.
     onMutate: (vars) => beginPending(pendingTargetKey({ characterId: vars.characterId })),
     onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ characterId: vars.characterId }), error),
-    onSuccess: (updated) => {
-      setError(null);
+    onSuccess: (updated, vars) => {
+      clearErrorFor(pendingTargetKey({ characterId: vars.characterId }));
       reconcileCharacter(updated);
       invalidate();
     },
-    onError: (err) => {
-      setError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateSlotError' }));
+    onError: (err, vars) => {
+      setErrorFor(pendingTargetKey({ characterId: vars.characterId }), translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateSlotError' }));
       invalidate();
     },
   });
@@ -233,6 +256,7 @@ export function ResourceTrackerPanel({
     mutationFn: async ({
       combatantId,
       statblock,
+      expectedUpdatedAt,
     }: {
       combatantId: number;
       statblock: Record<string, unknown>;
@@ -240,18 +264,22 @@ export function ResourceTrackerPanel({
       // statblock spell-slot pips. `kind` lets `onError` pick the fallback message that
       // matches which control actually failed, instead of always reporting "resource".
       kind: 'resource' | 'slot';
-    }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock }),
+      // Issue #1902 rework (round 12, devin): the encounter's `updatedAt` as last read —
+      // see the doc comment on the `encounterUpdatedAt` prop. A whole-statblock PATCH built
+      // from a stale cached combatant must not silently clobber a concurrent statblock edit.
+      expectedUpdatedAt: string | undefined;
+    }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock, expectedUpdatedAt }),
     onMutate: (vars) => beginPending(pendingTargetKey({ combatantId: vars.combatantId })),
     onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error),
-    onSuccess: (updated) => {
-      setError(null);
+    onSuccess: (updated, vars) => {
+      clearErrorFor(pendingTargetKey({ combatantId: vars.combatantId }));
       reconcileCombatant(updated);
       invalidate();
     },
     onError: (err, variables) => {
       const fallbackKey =
         variables.kind === 'slot' ? 'encounters.resourceTracker.updateSlotError' : 'encounters.resourceTracker.updateResourceError';
-      setError(translateApiError(err, t, { fallbackKey }));
+      setErrorFor(pendingTargetKey({ combatantId: variables.combatantId }), translateApiError(err, t, { fallbackKey }));
       invalidate();
     },
   });
@@ -335,7 +363,7 @@ export function ResourceTrackerPanel({
       </div>
 
       {error && (
-        <ErrorNote message={error} onDismiss={() => setError(null)} />
+        <ErrorNote message={error.message} onDismiss={() => setError(null)} />
       )}
 
       <div className="space-y-4 max-h-96 overflow-y-auto">
@@ -398,6 +426,7 @@ export function ResourceTrackerPanel({
                               combatantId: c.id,
                               statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } },
                               kind: 'resource',
+                              expectedUpdatedAt: encounterUpdatedAt,
                             });
                           }
                         }}
@@ -443,6 +472,7 @@ export function ResourceTrackerPanel({
                             combatantId: c.id,
                             statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } },
                             kind: 'slot',
+                            expectedUpdatedAt: encounterUpdatedAt,
                           });
                         }
                       }}

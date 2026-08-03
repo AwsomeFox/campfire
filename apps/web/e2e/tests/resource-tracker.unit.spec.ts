@@ -379,11 +379,62 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ .*isAmbiguousMutation.* \} from '\.\.\/\.\.\/lib\/api'/);
     expect(src).toMatch(/const endPendingAfterReconciling = async \(key: string, error: unknown\) => \{/);
-    expect(src).toMatch(/if \(error && isAmbiguousMutation\(error\)\)/);
+    expect(src).toMatch(/if \(error && \(isAmbiguousMutation\(error\) \|\| isStaleWrite\(error\)\)\)/);
     // All four mutations route their onSettled through the reconciling variant, not the
     // bare endPending (which would release the control before confirming true state).
     const endPendingAfterReconcilingCalls = src.match(/endPendingAfterReconciling\(pendingTargetKey/g) ?? [];
     expect(endPendingAfterReconcilingCalls.length).toBe(4);
+  });
+
+  // Twelfth-round finding (codex P2): a definite 409 STALE_WRITE is not ambiguous (the write
+  // definitely did not apply), but releasing the control immediately re-enables it holding the
+  // SAME stale `used`/token the rejected request already used — guaranteeing an identical,
+  // immediately-repeated failure on retry. `endPendingAfterReconciling` must treat a stale-write
+  // conflict as reconciliation-required too, not just a genuinely ambiguous outcome.
+  test('ResourceTrackerPanel also reconciles (does not just release) on a definite 409 STALE_WRITE conflict, not only an ambiguous outcome', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/import \{ .*isStaleWrite.* \} from '\.\.\/\.\.\/lib\/api'/);
+    expect(src).toMatch(/isAmbiguousMutation\(error\) \|\| isStaleWrite\(error\)/);
+  });
+
+  // Twelfth-round finding (codex P2): a global single `error` string meant one mutation's
+  // SUCCESS could silently clear a DIFFERENT, still-unresolved target's failure the user has
+  // not acted on yet — the panel deliberately keeps different targets' pending state
+  // independent (`pendingTargetKey`), but errors were not. Errors are now keyed to the target
+  // that raised them; a success only clears the banner when it belongs to the SAME target.
+  test('ResourceTrackerPanel scopes its error banner to the target that raised it, so an unrelated success cannot silently clear it', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/useState<\{ key: string; message: string \} \| null>\(null\)/);
+    expect(src).toMatch(/const clearErrorFor = \(key: string\) => setError\(\(prev\) => \(prev\?\.key === key \? null : prev\)\)/);
+    expect(src).toMatch(/const setErrorFor = \(key: string, message: string\) => setError\(\{ key, message \}\)/);
+    // Every onSuccess clears by target key, not unconditionally; every onError sets by target key.
+    expect(src).toMatch(/clearErrorFor\(pendingTargetKey\(\{ characterId: vars\.characterId \}\)\)/);
+    expect(src).toMatch(/clearErrorFor\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\)\)/);
+    expect(src).toMatch(/setErrorFor\(pendingTargetKey\(\{ characterId: vars\.characterId \}\), translateApiError/);
+    expect(src).toMatch(/setErrorFor\(pendingTargetKey\(\{ combatantId: variables\.combatantId \}\), translateApiError/);
+    // The render reads .message off the scoped error object, not the (now-removed) bare string.
+    expect(src).toMatch(/<ErrorNote message=\{error\.message\} onDismiss=\{\(\) => setError\(null\)\}/);
+  });
+
+  // Twelfth-round finding (P1, devin): a whole-statblock PATCH (spent on a monster's resource
+  // or spell-slot pip) sent no CAS token at all, so a stale cached combatant snapshot could
+  // silently clobber another client's concurrent edit to the SAME statblock. `updateCombatant`
+  // already validates `expectedUpdatedAt` against the ENCOUNTER row (there is no per-combatant
+  // revision field) — thread the encounter's own `updatedAt` through, matching every other
+  // `expectedUpdatedAt`-bearing combatant PATCH in the app.
+  test('ResourceTrackerPanel sends expectedUpdatedAt (the encounter revision) on every statblock pip write', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/encounterUpdatedAt: string \| undefined;/);
+    expect(src).toMatch(/expectedUpdatedAt,\s*\n\s*\}: \{\s*\n\s*combatantId: number;/);
+    expect(src).toMatch(/\{ statblock, expectedUpdatedAt \}/);
+    // Both call sites (resource pip and spell-slot pip) actually pass it — advertising the
+    // field on the mutation without every call site supplying it would silently degrade back
+    // to the unconditional write for whichever site forgot.
+    const statblockMutateCalls = src.match(/statblockMutation\.mutate\(\{[\s\S]*?\}\);/g) ?? [];
+    expect(statblockMutateCalls.length).toBe(2);
+    for (const call of statblockMutateCalls) {
+      expect(call).toMatch(/expectedUpdatedAt: encounterUpdatedAt/);
+    }
   });
 
   // Fourth-round finding (codex P1, THIRD review pass on this exact defect): a

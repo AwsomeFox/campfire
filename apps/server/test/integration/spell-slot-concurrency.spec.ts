@@ -11,6 +11,7 @@ import { CharactersService } from '../../src/modules/characters/characters.servi
 import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
 import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
 import { fromJsonText } from '../../src/common/json';
+import { nextUpdatedAt } from '../../src/common/stale-write';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
 
@@ -288,6 +289,65 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
       expect(afterHp.hpCurrent).toBe(3);
     } finally {
       jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Issue #1902 rework, round 12 (codex P2) — round 9's sweep made `update()` STAMP its
+   * write with `nextUpdatedAt`, but the ROOT it advanced from (`existing.updatedAt`) was
+   * still captured before this method's own awaited `assertProgressionAllowed` /
+   * `adapterForCampaign` checks (only reached when the PATCH touches `xp`/`level`). If a
+   * DIFFERENT, CAS-protected writer (e.g. `patchSpellSlots`) commits in that gap,
+   * `existing.updatedAt` is now stale relative to the row — and because `nextUpdatedAt` is
+   * a PURE function of its input token and the current instant, `update()`'s own write,
+   * still computed from that stale root, can publish the IDENTICAL token the concurrent
+   * writer already produced (rather than one strictly after it) when both land in the same
+   * millisecond. A client holding that colliding token as a LATER `expectedUpdatedAt` would
+   * incorrectly read it as "still current" even though `update()`'s own fields are newer.
+   * Fixed by re-reading the row's actual current `updatedAt` immediately before the write.
+   * `levelUp` had the identical structural defect (its own awaited progression/adapter
+   * checks before computing the token) and received the same fix.
+   */
+  it('#1902 rework (round 12): update() re-reads the token instead of publishing one that collides with a concurrent writer', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const id = seed(orm, 4);
+
+    const frozen = new Date('2026-02-02T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    // Spy on the awaited progression check `update()` only reaches when the PATCH touches
+    // xp/level — the exact seam a concurrent writer's commit needs to land in for this bug
+    // to manifest. The mock performs a raw, synchronous write standing in for that
+    // concurrent commit (this suite's own established technique — see the class doc
+    // comment above — for a deterministic stand-in rather than a real, unreliable race).
+    const spy = jest
+      .spyOn(service as unknown as { assertProgressionAllowed: (...args: unknown[]) => Promise<void> }, 'assertProgressionAllowed')
+      .mockImplementation(async () => {
+        const current = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+        orm.update(characters).set({ updatedAt: nextUpdatedAt(current.updatedAt) }).where(eq(characters.id, id)).run();
+      });
+    try {
+      orm.update(characters).set({ updatedAt: frozen.toISOString() }).where(eq(characters.id, id)).run();
+      const before = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      expect(before.updatedAt).toBe(frozen.toISOString());
+
+      // `xp` alone (no `level`) is enough to reach the awaited progression check.
+      await service.update(id, { xp: 100 }, dmUser, 'dm');
+
+      // What the concurrent writer (the spy) actually produced.
+      const concurrentWriterToken = nextUpdatedAt(before.updatedAt);
+      const after = orm.select().from(characters).where(eq(characters.id, id)).limit(1).all()[0];
+      // The defect this guards against: `update()`'s own write, computed from the STALE
+      // pre-await `existing.updatedAt`, would ALSO evaluate to `nextUpdatedAt(before.updatedAt)`
+      // under a frozen clock — the IDENTICAL token the concurrent writer already produced —
+      // silently colliding rather than advancing past it.
+      expect(after.updatedAt).not.toBe(concurrentWriterToken);
+      expect(Date.parse(after.updatedAt)).toBeGreaterThan(Date.parse(concurrentWriterToken));
+      expect(after.xp).toBe(100);
+    } finally {
+      jest.useRealTimers();
+      spy.mockRestore();
     }
   });
 });
