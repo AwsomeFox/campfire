@@ -474,6 +474,24 @@ export class ActionResolverService {
     return role === 'dm' || (encounter.status === 'running' && encounter.turnPhase === 'combatant' && encounter.currentCombatantId === actor.id);
   }
 
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P1): reject a lookup-by-index/name whose
+   * result doesn't match the caller's `expectedSpec` — closes the gap the plain name check
+   * in {@link resolveSpec} leaves open when two rows in the SAME merged list share a name
+   * (character sheet actions and equipped-item actions are both free-named, and the service
+   * already knows names aren't unique — that's exactly why `actionFingerprint` exists for the
+   * apply-time check below). Content is compared via the SAME canonicalized-hash approach as
+   * `actionFingerprint`, but applied to the PARSED `ActionSpec` on both sides — never the raw
+   * sheet-JSON row — so an unrelated extra key on the stored row can't produce a false
+   * mismatch against a client that only ever sees the normalized `ActionSpec` shape.
+   */
+  private assertExpectedSpecMatches(req: ActionResolveRequest, name: string, spec: ActionSpec): void {
+    if (req.expectedSpec === undefined) return;
+    if (actionFingerprint(spec) !== actionFingerprint(ActionSpec.parse(req.expectedSpec))) {
+      throw new BadRequestException(`Action "${name}" changed or moved before it could be applied.`);
+    }
+  }
+
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
   private resolveSpec(
     actor: typeof combatants.$inferSelect,
@@ -510,6 +528,7 @@ export class ActionResolverService {
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
+      this.assertExpectedSpecMatches(req, name, parsed.data);
       return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
     }
     const statActions = this.combatantActions(actor, campaignId);
@@ -533,6 +552,7 @@ export class ActionResolverService {
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
+    this.assertExpectedSpecMatches(req, action.name, parsed.data);
     return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
   }
 

@@ -173,6 +173,15 @@ export function ItemRow({
    * after seeing the conflict and have "Replace X" silently displace whatever now occupies
    * the freshly typed slot instead of X. The plain equip button (`submitEquip`) is the path
    * for trying a different slot.
+   *
+   * Rework round (review: chatgpt-codex-connector P2): also sends `expectedConflictingItemId`
+   * so the server rejects (with a FRESH 409) rather than silently displacing a DIFFERENT item
+   * than the one confirmed, if another writer swapped who occupies the slot between the
+   * original 409 and this request — e.g. unequipping the named incumbent and equipping a
+   * third item into the same slot while this warning was on screen. On that fresh 409 the
+   * catch below re-arms `slotConflict` with the new incumbent, same as `submitEquip`'s own
+   * conflict handling, so the player re-confirms against current reality instead of the
+   * request just failing opaquely or silently displacing the wrong item.
    */
   async function swapEquip() {
     if (!slotConflict) return;
@@ -183,13 +192,18 @@ export function ItemRow({
         equipped: true,
         equipSlot: slotConflict.slot,
         displaceEquipped: true,
+        expectedConflictingItemId: slotConflict.itemId,
       });
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
       onChanged();
     } catch (err) {
-      setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+      if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
+        setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });
+      } else {
+        setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+      }
     } finally {
       setEquipBusy(false);
     }

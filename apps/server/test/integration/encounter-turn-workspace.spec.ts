@@ -1852,7 +1852,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       },
     };
 
-    it("appends the equipped item's action after sheet actions, tagged with its item name, and agrees with listUsableActions on the index", async () => {
+    it("appends the equipped item's action after sheet actions, tagged with its item name via equippedItemName, and agrees with listUsableActions on the index", async () => {
       dataDir = makeTempDataDir();
       const { orm, service, actions } = build();
       const { campaignId, encounterId, c1 } = seed(orm);
@@ -1883,12 +1883,73 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       const equippedRow = workspace.suggestedActions[1];
       expect(equippedRow.name).toBe('Dagger');
       expect(equippedRow.actionIndex).toBe(1);
-      expect(equippedRow.source).toBe('equipped: Rusty Dagger');
+      // Issue #1901 review (devin-ai-integration): `source` must stay the action-economy/kind
+      // hint the web turn workspace buckets tabs and detects spells from — never a display
+      // label — so it reads the dagger's own `kind` ('melee'), exactly like a sheet action
+      // would. The equipping item's name is carried separately.
+      expect(equippedRow.source).toBe('melee');
+      expect(equippedRow.equippedItemName).toBe('Rusty Dagger');
 
       // Same actor, same index space: listUsableActions index 1 must be the SAME action.
       const usable = actions.listUsableActions(encounterId, c1, player1, 'player');
       expect(usable[1].name).toBe('Dagger');
       expect(usable[1].index).toBe(equippedRow.actionIndex);
+    });
+
+    // Issue #1901 review (devin-ai-integration): before this fix, `source` was
+    // `equipped: <item name>` for every equipped-item row, so a gear-granted bonus action or
+    // reaction — one with no `spec.cost.slot` to fall back on, e.g. a passive trinket's
+    // triggered ability — could only be bucketed via TurnWorkspace's `source` comparison,
+    // which no longer matched 'bonus'/'reaction' once overwritten with the item label. It
+    // fell into "Other / Limited Use" instead of the tab the player expects it in.
+    it('a gear-granted bonus action keeps its kind as source, not the equipping item label, so the turn workspace can bucket it correctly', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([]) }).where(eq(characters.id, characterId)).run();
+      const ts = new Date().toISOString();
+      const trinketAction = {
+        name: 'Flurry Strike',
+        kind: 'bonus',
+        toHit: '+3',
+        damage: '1d4 force',
+        notes: 'A quick follow-up strike.',
+        spec: {
+          mode: 'attack',
+          attack: { ability: 'DEX', proficient: true },
+          // Deliberately NO cost.slot of 'bonus' — TurnWorkspace's bucketing must not
+          // depend on spec.cost.slot alone; `source` itself has to carry the kind.
+          cost: { slot: '', count: 1 },
+          targets: { count: 1, allow: 'enemy' },
+          outcomes: { hit: { damage: [{ formula: '1d4', type: 'force' }] } },
+        },
+      };
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Spell Focus Trinket',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'trinket',
+          equippedAction: JSON.stringify(trinketAction),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(1);
+      const row = workspace.suggestedActions[0];
+      expect(row.source).toBe('bonus');
+      expect(row.equippedItemName).toBe('Spell Focus Trinket');
+      // The item's name contains "spell" — confirms `source` (what the web fallback
+      // spell-list filter checks) is NOT contaminated with the item label.
+      expect(row.source.toLowerCase()).not.toContain('spell');
     });
 
     it('unequipping removes the item action from suggestedActions', async () => {

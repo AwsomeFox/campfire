@@ -10490,7 +10490,22 @@ export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
 export const TurnSuggestedAction = z.object({
   name: z.string().min(1).max(160),
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  // ALWAYS the action-economy/kind hint, never a display label — the web client keys BOTH
+  // the Action/Bonus/Reaction/Other tab bucketing and the fallback spell-list detection off
+  // this string (see TurnWorkspace.tsx), so overloading it with something else (e.g. an
+  // equipping item's name) breaks both for any equipped item whose economy slot isn't
+  // explicit in `spec.cost.slot` — or, worse, silently renders a mundane item as a
+  // fabricated spell entry the moment its name happens to contain "spell" (issue #1901
+  // review: devin-ai-integration on PR #1951).
   source: z.string().max(40),
+  /**
+   * The equipping item's name (issue #1901), for a row contributed by a character's
+   * equipped-item action — `null` for a hand-authored sheet action or a monster/NPC
+   * statblock action. Kept SEPARATE from `source` (see above) precisely so the "equipped:
+   * <item>" label the web UI renders alongside an action never contaminates `source`'s
+   * economy-hint meaning.
+   */
+  equippedItemName: z.string().max(120).nullable().default(null),
   summary: z.string().max(600).default(''),
   toHit: z.string().default(''),
   damage: z.string().default(''),
@@ -10769,6 +10784,15 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
    * this write isn't an equip transition at all.
    */
   displaceEquipped: z.boolean().optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P2): an optional CAS-style guard for
+   * `displaceEquipped` — the id of the incumbent item the caller is confirming displacement
+   * of (from an earlier 409 INVENTORY_SLOT_CONFLICT body). If another writer has since
+   * changed who occupies the target slot, the server rejects with a FRESH 409 naming the new
+   * incumbent instead of silently displacing whichever item happens to be there when this
+   * request lands.
+   */
+  expectedConflictingItemId: Id.optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).

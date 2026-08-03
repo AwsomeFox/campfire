@@ -837,6 +837,67 @@ describe('inventory & treasury (e2e)', () => {
       expect(res.body.equipSlot).toBe(slot);
     });
 
+    // Issue #1901 review (chatgpt-codex-connector P2): the web one-tap swap shows "Replace
+    // <incumbent>" naming the item from an earlier 409, then re-sends the same slot with
+    // displaceEquipped: true. If a DIFFERENT client unequips that named incumbent and equips a
+    // third item into the same slot before the swap lands, the swap must reject — not silently
+    // displace the third item under a confirmation that named someone else.
+    it('issue #1901 review (chatgpt-codex-connector P2): expectedConflictingItemId rejects a swap once the confirmed incumbent no longer holds the slot', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const slot = 'cas-swap-slot-1901';
+      const swordA = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword A', ownerType: 'character', characterId: ownCharacterId });
+      const swordB = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword B', ownerType: 'character', characterId: ownCharacterId });
+      const swordC = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword C', ownerType: 'character', characterId: ownCharacterId });
+
+      // Sword A holds the slot; confirm the 409 names it as the incumbent.
+      await request(server).patch(`/api/v1/inventory/${swordA.body.id}`).set(player).send({ equipped: true, equipSlot: slot });
+      const conflict = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.conflictingItemId).toBe(swordA.body.id);
+
+      // Another client races ahead: unequips Sword A, equips Sword C into the same slot.
+      await request(server).patch(`/api/v1/inventory/${swordA.body.id}`).set(player).send({ equipped: false });
+      await request(server)
+        .patch(`/api/v1/inventory/${swordC.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+
+      // The stale confirmation (still naming Sword A) must be rejected with a FRESH 409
+      // naming Sword C — not silently displace Sword C under a confirmation for Sword A.
+      const staleSwap = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: swordA.body.id });
+      expect(staleSwap.status).toBe(409);
+      expect(staleSwap.body.conflictingItemId).toBe(swordC.body.id);
+
+      const cUntouched = await request(server).get(`/api/v1/inventory/${swordC.body.id}`).set(player);
+      expect(cUntouched.body.equipped).toBe(true);
+      expect(cUntouched.body.equipSlot).toBe(slot);
+
+      // Re-confirming against the FRESH incumbent succeeds and displaces Sword C, not A.
+      const freshSwap = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: swordC.body.id });
+      expect(freshSwap.status).toBe(200);
+      const cAfter = await request(server).get(`/api/v1/inventory/${swordC.body.id}`).set(player);
+      expect(cAfter.body.equipped).toBe(false);
+    });
+
     it('moving an equipped character item to the party stash auto-unequips it', async () => {
       const server = ctx.app.getHttpServer();
 

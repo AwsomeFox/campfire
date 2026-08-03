@@ -94,7 +94,7 @@ test.describe('inventory equip/unequip UI (#1901)', () => {
   // server transaction, so there is no intermediate state to land in or roll back.
   test('the swap is ONE atomic PATCH (displaceEquipped), not an unequip-then-equip sequence', () => {
     expect(inventoryShared).toMatch(
-      /inventory\/\$\{committed\.id\}`,\s*\{\s*equipped:\s*true,\s*equipSlot:\s*slotConflict\.slot,\s*displaceEquipped:\s*true,\s*\}/,
+      /inventory\/\$\{committed\.id\}`,\s*\{\s*equipped:\s*true,\s*equipSlot:\s*slotConflict\.slot,\s*displaceEquipped:\s*true,\s*expectedConflictingItemId:\s*slotConflict\.itemId,\s*\}/,
     );
     // No separate PATCH against the incumbent (slotConflict.itemId) inside swapEquip —
     // the server displaces it as part of the equip write above.
@@ -159,5 +159,45 @@ test.describe('ActionUsePanel binds resolve to the selected action name (#1901)'
     expect(iActor).toBeGreaterThan(-1);
     expect(iIndex).toBeGreaterThan(iActor);
     expect(iName).toBeGreaterThan(iIndex);
+  });
+
+  // Rework (review: chatgpt-codex-connector P1, PR #1951): actionName alone is not a unique
+  // action identity — two merged (sheet + equipped-item) rows can share a display name, so a
+  // same-named replacement shifting into `actionIndex` between panel-open and submit would
+  // still pass the plain name check. `expectedSpec` carries the exact content this panel
+  // already fetched, so the server can reject a content mismatch instead of resolving
+  // whatever now sits at that index/name.
+  test('the resolve-preview request also includes expectedSpec, bound to the exact fetched spec', () => {
+    const mutationStart = actionUseFlow.indexOf('const resolvePreview = useMutation({');
+    const mutationEnd = actionUseFlow.indexOf('const commit = useMutation({', mutationStart);
+    const resolvePreviewSource = actionUseFlow.slice(mutationStart, mutationEnd);
+    expect(resolvePreviewSource).toMatch(/expectedSpec:\s*spec,/);
+    // After actionName, alongside the rest of the identity-binding fields.
+    const iName = resolvePreviewSource.indexOf('actionName,');
+    const iExpected = resolvePreviewSource.indexOf('expectedSpec:');
+    expect(iExpected).toBeGreaterThan(iName);
+  });
+});
+
+// Rework (review: chatgpt-codex-connector P2, PR #1951): after a 409 names an incumbent, a
+// DIFFERENT client can unequip it and equip a third item into the same slot before the
+// one-tap swap lands. The confirmed incumbent's id must ride along so the server can reject a
+// stale confirmation instead of silently displacing whichever item now occupies the slot.
+test.describe('inventory swap binds to the confirmed incumbent, not just the slot (#1901)', () => {
+  test('swapEquip sends expectedConflictingItemId alongside displaceEquipped', () => {
+    const bodyIdx = inventoryShared.indexOf('async function swapEquip()');
+    expect(bodyIdx).toBeGreaterThan(-1);
+    const bodyEnd = inventoryShared.indexOf('\n  async function unequip()', bodyIdx);
+    expect(bodyEnd).toBeGreaterThan(bodyIdx);
+    const swapEquipCode = inventoryShared.slice(bodyIdx, bodyEnd);
+    expect(swapEquipCode).toMatch(/expectedConflictingItemId:\s*slotConflict\.itemId,/);
+  });
+
+  test('a fresh 409 on the swap re-arms slotConflict with the new incumbent instead of just showing an error', () => {
+    const bodyIdx = inventoryShared.indexOf('async function swapEquip()');
+    const bodyEnd = inventoryShared.indexOf('\n  async function unequip()', bodyIdx);
+    const swapEquipCode = inventoryShared.slice(bodyIdx, bodyEnd);
+    expect(swapEquipCode).toContain("err.code === 'INVENTORY_SLOT_CONFLICT'");
+    expect(swapEquipCode).toContain('setSlotConflict({');
   });
 });

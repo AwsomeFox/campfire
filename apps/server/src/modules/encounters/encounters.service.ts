@@ -6775,6 +6775,8 @@ export class EncountersService {
         out.push({
           name: a.name.slice(0, 160),
           source,
+          // Monster/NPC statblock actions are never equipped-item rows.
+          equippedItemName: null,
           summary: bits.join(' · ').slice(0, 600),
           toHit: a.toHit ?? '',
           damage: a.damage ?? '',
@@ -6814,7 +6816,14 @@ export class EncountersService {
         const spec = specParsed.success ? specParsed.data : undefined;
         out.push({
           name: a.name.slice(0, 160),
-          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          // Issue #1901 review (devin-ai-integration): `source` is the Actions/Bonus/
+          // Reactions tab bucketing key AND the fallback spell-list detector on the web side
+          // (TurnWorkspace.tsx) — it must stay the action's economy/kind hint for an
+          // equipped-item row exactly like a sheet action, never the equipping item's name.
+          // The item name is carried separately via `equippedItemName` below so the UI can
+          // still label it without corrupting `source`'s established meaning.
+          source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          equippedItemName: itemName,
           summary: bits.join(' · ').slice(0, 600),
           toHit: typeof a.toHit === 'string' ? a.toHit : '',
           damage: typeof a.damage === 'string' ? a.damage : '',

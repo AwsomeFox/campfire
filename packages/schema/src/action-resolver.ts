@@ -680,6 +680,18 @@ export const ActionResolveRequest = z.object({
   actionName: z.string().max(120).optional(),
   actionIndex: z.number().int().min(0).max(99).optional(),
   spec: ActionSpec.optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P1): an OPTIONAL identity check for an
+   * actionIndex/actionName lookup — NOT the same as `spec` above, which bypasses the lookup
+   * entirely as an inline ad-hoc action. Action names are not unique on a character sheet or
+   * merged equipped-item list (see ActionResolverService), so if two rows share a name and
+   * the caller's selected one is removed/unequipped while its panel was open, a later
+   * same-named row can shift into `actionIndex` — the plain actionIndex+actionName guard
+   * cannot tell the two apart because the name still matches. Passing the exact spec the
+   * caller already fetched for that row lets the server verify CONTENT, not just name, and
+   * reject a mismatch instead of silently resolving whatever now sits at that index/name.
+   */
+  expectedSpec: ActionSpec.optional(),
   targetIds: z.array(z.number().int()).max(50).default([]),
   commit: z.boolean().default(false),
   rollMode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).optional(),

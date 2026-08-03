@@ -705,6 +705,24 @@ export class InventoryService {
                   equipSlot: nextEquipSlot,
                 });
               }
+              // Issue #1901 review (chatgpt-codex-connector P2): the caller confirmed
+              // displacing a SPECIFIC incumbent (`slotConflict.itemId` on the web one-tap
+              // swap, captured from an earlier 409). If a different writer has since
+              // unequipped that item and equipped a THIRD item into this same slot, the
+              // freshly-read `conflict[0]` here is that third item, not the one the caller
+              // confirmed — reject with a fresh 409 (same shape, new incumbent) rather than
+              // silently displacing whichever item happens to occupy the slot right now. Read
+              // inside the same transaction as the conflict lookup above, so this can't itself
+              // race against a concurrent equip into the slot.
+              if (input.expectedConflictingItemId !== undefined && conflict[0].id !== input.expectedConflictingItemId) {
+                throw new ConflictException({
+                  code: 'INVENTORY_SLOT_CONFLICT',
+                  message: `Slot "${nextEquipSlot}" is now occupied by "${conflict[0].name}", not the item you confirmed replacing — review and retry.`,
+                  conflictingItemId: conflict[0].id,
+                  conflictingItemName: conflict[0].name,
+                  equipSlot: nextEquipSlot,
+                });
+              }
               // Issue #1901 rework (review: devin-ai-integration + chatgpt-codex-connector P2):
               // `displaceEquipped` turns the 409 into an atomic swap — the incumbent is
               // unequipped IN THIS SAME transaction rather than requiring the caller to issue

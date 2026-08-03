@@ -107,6 +107,13 @@ export function ActionUsePanel({
         // (see ActionResolverService) rejects that mismatch with a clean 400 instead of
         // silently resolving whatever now sits at that index.
         actionName,
+        // Round 2 of the same fix (review: chatgpt-codex-connector P1): action names are not
+        // unique on a sheet, so a name match alone can't tell two different actions apart if
+        // one was swapped in for another under the same name while this panel was open.
+        // `spec` is the exact content this panel already opened for (the fetched row) —
+        // sending it as `expectedSpec` makes the server verify content, not just name, and
+        // reject a mismatch instead of resolving whatever now sits at that index/name.
+        expectedSpec: spec,
         targetIds,
         commit: false,
         rollMode,
