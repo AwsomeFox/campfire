@@ -174,6 +174,36 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
   });
 
+  // Regression for a PR #1950 review finding: every synthesized slot pool was persisted
+  // with used:0, discarding the sheet's actual current expenditure and granting a free
+  // long rest on import.
+  it('computeSpellSlots preserves the sheet\'s current slot expenditure, clamped to max', () => {
+    // Level 5 Wizard: PHB max is 4/3/2 at levels 1/2/3 (see the fallback-table test above).
+    const slots = computeSpellSlots([{ level: 5, definition: { name: 'Wizard' } }], { '1': 2, '2': 1 });
+    expect(slots).toEqual({
+      '1': { max: 4, used: 2 },
+      '2': { max: 3, used: 1 },
+      '3': { max: 2, used: 0 },
+    });
+  });
+
+  it('computeSpellSlots clamps an implausible source used-count to the computed max', () => {
+    const slots = computeSpellSlots([{ level: 5, definition: { name: 'Wizard' } }], { '1': 999 });
+    expect(slots?.['1']).toEqual({ max: 4, used: 4 });
+  });
+
+  it('mapDdbCharacter reads used slots from data.spellSlots', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Wizard' } }],
+      spellSlots: [{ level: 1, used: 3 }, { level: 2, used: 1 }],
+    });
+    expect(c.spellSlots).toEqual({
+      '1': { max: 4, used: 3 },
+      '2': { max: 3, used: 1 },
+      '3': { max: 2, used: 0 },
+    });
+  });
+
   // Regression for a PR #1950 review finding: a solo half-caster used the multiclass
   // floor(level/2) formula, undercounting slots at every odd level.
   it('a solo level-5 Paladin gets its own class table (ceil), not the multiclass floor', () => {
@@ -364,6 +394,27 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(feature?.spec).toBeUndefined();
     const summary = summarizeDdbImport(c);
     expect(summary.textOnly).toContain('Mystery Breath');
+  });
+
+  // Regression for a PR #1950 review finding: same principle as the two feature-action
+  // cases above, applied to equipped weapons — a sparse/changed sheet that omits the
+  // governing STR/DEX score used to default to a modifier of 0 and stay resolvable.
+  it('an equipped weapon with no resolvable ability score lands text-only, not a guessed +0', () => {
+    const c = mapDdbCharacter({
+      // No `stats` at all -> computeAbilityScores omits every ability key entirely.
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      inventory: [
+        {
+          equipped: true,
+          definition: { name: 'Mystery Sword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing' },
+        },
+      ],
+    });
+    const weapon = c.actions?.find((a) => a.name === 'Mystery Sword');
+    expect(weapon).toBeDefined();
+    expect(weapon?.spec).toBeUndefined();
+    const summary = summarizeDdbImport(c);
+    expect(summary.textOnly).toContain('Mystery Sword');
   });
 
   // Regression for a PR #1950 review finding: DDB spell/feature descriptions are HTML, not

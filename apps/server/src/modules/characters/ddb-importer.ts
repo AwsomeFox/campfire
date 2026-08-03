@@ -183,6 +183,10 @@ export interface DdbCharacterData {
     item?: DdbSpellEntry[] | null;
     feat?: DdbSpellEntry[] | null;
   } | null;
+  // Current slot expenditure (issue #1903 review) — separate from the class/level table
+  // computeSpellSlots derives the MAX from; importing only the max and always zeroing
+  // `used` would silently grant every imported mid-adventure caster a free long rest.
+  spellSlots?: Array<{ level?: number | null; used?: number | null }> | null;
 }
 /** The `{ id, success, message, data }` envelope the character service returns. */
 export interface DdbCharacterResponse {
@@ -515,10 +519,23 @@ function computeWeaponActions(data: DdbCharacterData, stats: Record<string, numb
     }
     const abilityKey = weaponAbilityKey(def, stats);
     const abilityScore = stats[abilityKey];
-    const abilityModifier = typeof abilityScore === 'number' ? abilityMod(abilityScore) : 0;
-    const attackBonus = abilityModifier + proficiencyBonus;
     const diceString = def.damage && typeof def.damage.diceString === 'string' ? def.damage.diceString.trim() : '';
     const damageType = typeof def.damageType === 'string' ? def.damageType.toLowerCase() : '';
+    if (typeof abilityScore !== 'number') {
+      // Same "never fabricate a resolvable spec" principle as the magic-weapon and
+      // feature-action cases: a missing governing ability score must not silently default
+      // to modifier 0 and stay resolvable — that's a guessed to-hit presented as real.
+      out.push(
+        expandRawStatblockAction(
+          { name, desc: 'Missing ability score data — check attack bonus and damage manually.', attackBonus: null },
+          'attack',
+          'dnd5e',
+        ),
+      );
+      continue;
+    }
+    const abilityModifier = abilityMod(abilityScore);
+    const attackBonus = abilityModifier + proficiencyBonus;
     const damage = diceString ? [{ expression: `${diceString}${flatSuffix(abilityModifier)}`, type: damageType }] : undefined;
     out.push(expandRawStatblockAction({ name, desc: '', attackBonus, damage }, 'attack', 'dnd5e'));
   }
@@ -715,8 +732,16 @@ const FULL_CASTER_SLOT_TABLE: readonly (readonly number[])[] = [
  * merge two resources 5e keeps separate into one spendable pool. Until #1039 gives Pact
  * Magic its own representation, a DM importing a Warlock sets its slots up by hand — no
  * slots is honest; wrong-cadence slots is not.
+ *
+ * `usedByLevel` (issue #1903 review) carries the sheet's CURRENT expenditure — read from
+ * `data.spellSlots` at the call site — clamped against the computed max per level.
+ * Without this every imported caster arrived with every slot fresh regardless of how many
+ * the sheet showed already spent, silently granting a free long rest on import.
  */
-export function computeSpellSlots(classes: DdbClass[] | null | undefined): CharacterCreateInput['spellSlots'] {
+export function computeSpellSlots(
+  classes: DdbClass[] | null | undefined,
+  usedByLevel: Readonly<Record<string, number>> = {},
+): CharacterCreateInput['spellSlots'] {
   if (!Array.isArray(classes) || classes.length === 0) return {};
   const casterEntries: { progression: 'full' | 'half' | 'halfRoundUp' | 'third'; level: number }[] = [];
   for (const cls of classes) {
@@ -768,6 +793,13 @@ export function computeSpellSlots(classes: DdbClass[] | null | undefined): Chara
   const fullRow = FULL_CASTER_SLOT_TABLE[clampedFull];
   if (fullRow) for (let lvl = 1; lvl <= 9; lvl++) addSlots(lvl, fullRow[lvl] ?? 0);
 
+  // Apply the sheet's current expenditure, clamped to the computed max — never trust the
+  // source `used` to exceed what this level pool can actually hold.
+  for (const [level, slot] of Object.entries(slots)) {
+    const used = usedByLevel[level] ?? 0;
+    slot.used = Math.max(0, Math.min(slot.max, used));
+  }
+
   return slots;
 }
 
@@ -797,7 +829,19 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
   // rather than silently dropped.
   const rawActions = [...computeWeaponActions(data, stats, proficiencyBonus), ...computeFeatureActions(data, stats, proficiencyBonus), ...computeSpellActions(data)];
   const actions = rawActions.slice(0, 100);
-  const spellSlots = computeSpellSlots(data.classes);
+  // Current slot expenditure (issue #1903 review) — see the doc comment on computeSpellSlots.
+  const usedByLevel: Record<string, number> = {};
+  if (Array.isArray(data.spellSlots)) {
+    for (const entry of data.spellSlots) {
+      const lvl = typeof entry?.level === 'number' ? entry.level : null;
+      const used = typeof entry?.used === 'number' && entry.used > 0 ? entry.used : 0;
+      if (lvl !== null && lvl >= 1 && lvl <= 9 && used > 0) {
+        const key = String(lvl);
+        usedByLevel[key] = (usedByLevel[key] ?? 0) + used;
+      }
+    }
+  }
+  const spellSlots = computeSpellSlots(data.classes, usedByLevel);
 
   const created: CharacterCreateInput = {
     name: (data.name ?? '').trim() || 'Imported Character',

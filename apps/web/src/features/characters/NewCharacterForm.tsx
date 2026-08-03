@@ -21,12 +21,24 @@ export function NewCharacterForm({
   ddbAllowed,
   onCancel,
   onCreated,
+  onImportSucceeded,
 }: {
   campaignId: number;
   adapter: RuleSystemAdapter;
   ddbAllowed: boolean;
   onCancel?: () => void;
   onCreated: () => void;
+  /**
+   * Fired the instant a DDB import succeeds, before the summary is shown (issue #1903
+   * review). PartyPage's render guard for this form is `creating || party.length === 0` —
+   * when the form is open only because the party was empty (`creating` false), the reload
+   * this import triggers makes `party.length` become 1, flipping that guard false and
+   * unmounting the form (discarding the just-set summary) before the user can read it. The
+   * parent should treat this as "keep me open" independent of the party size (e.g. flip its
+   * own `creating` flag true) so the summary survives until `onCreated`/`onCancel` fire from
+   * the "Done" button.
+   */
+  onImportSucceeded?: () => void;
 }) {
   const templates = useMemo(() => starterTemplatesForAdapter(adapter, 1), [adapter]);
   const [path, setPath] = useState<CharacterCreationPath>('template');
@@ -66,6 +78,10 @@ export function NewCharacterForm({
       // unmount this form (the render guard is `creating || party.length === 0`, and both
       // closeCreating() and the reload's `loading=true` flip that guard false) before the
       // summary set on the next line ever gets a render — the panel would never be visible.
+      // onImportSucceeded fires first so the parent can pin itself open BEFORE that reload
+      // lands — needed for the party-was-empty case, where `creating` was never true to
+      // begin with (see the prop's own doc comment).
+      onImportSucceeded?.();
       setImportSummary(res.summary);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");

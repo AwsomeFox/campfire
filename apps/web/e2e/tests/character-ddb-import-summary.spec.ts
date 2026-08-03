@@ -107,4 +107,90 @@ test.describe('D&D Beyond import summary stays visible until dismissed (issue #1
     await expect(ddbInput).toHaveCount(0);
     await expect(page.getByRole('button', { name: '+ New character' })).toBeVisible();
   });
+
+  // Regression for a follow-up review finding: the fix above was only proven for a
+  // NON-empty party. When the form is showing purely because `party.length === 0` (no
+  // `?action=new`, `creating` still false), a successful import's roster reload flips
+  // `party.length` to 1 — which, on its own, satisfies neither half of PartyPage's OLD
+  // guard (`creating` is still false) — so the guard flips false and unmounts the form,
+  // discarding the summary before "Done" can be read. NewCharacterForm's new
+  // `onImportSucceeded` prop must pin PartyPage's `creating` flag true to prevent this.
+  test('summary panel survives the reload when the import happens on an initially-empty party', async ({ page, baseURL }) => {
+    const campaignRes = await page.request.post('/api/v1/campaigns', {
+      data: { name: `1903 DDB Import Empty Party ${Date.now()}` },
+    });
+    expect(campaignRes.ok()).toBe(true);
+    const campaign = (await campaignRes.json()) as { id: number; [key: string]: unknown };
+    const campaignId = campaign.id;
+
+    await page.route(`${baseURL}/api/v1/campaigns`, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const res = await route.fetch();
+      const list = (await res.json()) as Array<{ id: number; [key: string]: unknown }>;
+      const patched = list.map((c) => (c.id === campaignId ? { ...c, ruleSystem: 'open5e-srd' } : c));
+      await route.fulfill({ response: res, json: patched });
+    });
+
+    // The roster starts empty (real state), then flips to one entry after import — mirroring
+    // the real reload's effect once the character actually exists — without needing a real
+    // DDB-import round trip against the fake sheet fixture.
+    // A full PartyCharacter shape (RosterCharacterCard reads hpMax/hpCurrent/conditions
+    // unconditionally) — a sparser fixture renders fine right up until this exact scenario
+    // exercises the real roster-card render path, which a too-thin mock would crash.
+    const importedRosterEntry = {
+      id: 999999,
+      name: 'Imported Hero',
+      className: 'Fighter',
+      level: 5,
+      status: 'active',
+      portraitUrl: null,
+      hpMax: 10,
+      hpCurrent: 10,
+      conditions: [],
+    };
+    let imported = false;
+    await page.route(`${baseURL}/api/v1/campaigns/${campaignId}/characters/roster`, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const body = imported ? [importedRosterEntry] : [];
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+
+    const importPath = `/api/v1/campaigns/${campaignId}/characters/import-ddb`;
+    await page.route(`${baseURL}${importPath}`, async (route) => {
+      imported = true;
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          character: { id: 999999, name: 'Imported Hero', className: 'Fighter', level: 5, status: 'active' },
+          summary: { actionsImported: 1, spellsImported: 0, spellSlotsImported: false, textOnly: [] },
+        }),
+      });
+    });
+
+    // No ?action=new: the form shows purely because the (real, empty) party has no members.
+    await page.goto(`/c/${campaignId}/party`);
+
+    const ddbInput = page.getByLabel('D&D Beyond character id or URL');
+    await expect(ddbInput).toBeVisible();
+    await ddbInput.fill('123456');
+    await page.getByRole('button', { name: 'Import' }).click();
+
+    const summaryPanel = page.getByRole('status');
+    await expect(summaryPanel).toBeVisible();
+    await expect(summaryPanel.getByText('Imported from D&D Beyond')).toBeVisible();
+    const doneBtn = summaryPanel.getByRole('button', { name: 'Done' });
+    await expect(doneBtn).toBeVisible();
+
+    // PartyPage polls the roster every 5s (usePollWhileVisible) even with no explicit
+    // reload triggered yet — wait past one full cycle so the roster route above genuinely
+    // flips party.length from 0 to 1 during the test, giving the pre-fix guard
+    // (`creating || party.length === 0`) a real chance to go false and unmount the form.
+    await page.waitForTimeout(6000);
+    await expect(summaryPanel).toBeVisible();
+    await expect(doneBtn).toBeVisible();
+
+    await doneBtn.click();
+    await expect(summaryPanel).toHaveCount(0);
+  });
 });

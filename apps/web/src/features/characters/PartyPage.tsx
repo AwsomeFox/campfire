@@ -249,6 +249,12 @@ export default function PartyPage() {
             closeCreating();
             void load();
           }}
+          // Issue #1903 review: pin the form open via `creating` the instant a DDB import
+          // succeeds, independent of `party.length`. Without this, importing into an
+          // initially-EMPTY party (form open only because party.length === 0, not via
+          // `creating`) unmounts the form the moment the reload's `character.updated`
+          // brings party.length to 1 — discarding the import summary before it's read.
+          onImportSucceeded={() => setCreating(true)}
         />
       )}
 
