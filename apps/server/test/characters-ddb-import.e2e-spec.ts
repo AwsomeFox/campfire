@@ -204,6 +204,18 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
   });
 
+  // Regression for a PR #1950 review finding: `SpellSlotLevel.used`'s schema is an integer,
+  // but this DDB-import path builds `spellSlots` directly rather than through
+  // `CharacterCreate.parse`, so a fractional `used` (e.g. 0.5) would be persisted verbatim
+  // instead of being caught by validation, corrupting remaining-slot arithmetic.
+  it('a fractional slot-used value is ignored (treated as 0) instead of persisted', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Wizard' } }],
+      spellSlots: [{ level: 1, used: 0.5 }],
+    });
+    expect(c.spellSlots?.['1']).toEqual({ max: 4, used: 0 });
+  });
+
   // Regression for a PR #1950 review finding: a solo half-caster used the multiclass
   // floor(level/2) formula, undercounting slots at every odd level.
   it('a solo level-5 Paladin gets its own class table (ceil), not the multiclass floor', () => {
@@ -507,14 +519,17 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     const bonusFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Bonus Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 3 } }] },
+      // `dice` is required so the feature has a representable outcome (round-13 fix below) —
+      // an attack-shaped feature with no damage at all would land text-only regardless of
+      // activation type, which isn't what this test is exercising.
+      actions: { class: [{ name: 'Bonus Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 3 } }] },
     }).actions?.find((a) => a.name === 'Bonus Strike');
     expect(bonusFeature?.spec?.cost.slot).toBe('bonus');
 
     const reactionFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Reaction Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 4 } }] },
+      actions: { class: [{ name: 'Reaction Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 4 } }] },
     }).actions?.find((a) => a.name === 'Reaction Strike');
     expect(reactionFeature?.spec?.cost.slot).toBe('reaction');
 
@@ -522,7 +537,7 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     const actionFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 1 } }] },
+      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 1 } }] },
     }).actions?.find((a) => a.name === 'Plain Strike');
     expect(actionFeature?.spec?.cost.slot).toBe('action');
 
@@ -742,6 +757,62 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(feature).toBeDefined();
     expect(feature?.spec).toBeUndefined();
     expect(summarizeDdbImport(c).textOnly).toContain('Breath Weapon');
+  });
+
+  // Regression for a PR #1950 review finding: an attack-shaped feature with a resolved
+  // ability/activation but NO damage dice at all (e.g. a grapple, stun, or other control
+  // feature) used to still get a resolvable spec with empty outcomes — using it spends the
+  // action and rolls to-hit but applies nothing. It must land text-only instead, the
+  // feature-level counterpart to the round-11 weapon fix.
+  it('an attack-shaped feature with no damage dice lands text-only instead of an outcome-free spec', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: { class: [{ name: 'Grapple', attackTypeRange: 5, abilityModifierStatId: 1, activation: { activationType: 1 } }] },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Grapple');
+    expect(feature).toBeDefined();
+    expect(feature?.spec).toBeUndefined();
+    expect(summarizeDdbImport(c).textOnly).toContain('Grapple');
+  });
+
+  // Regression for a PR #1950 review finding: `DamagePart.flat` is
+  // `z.number().int().min(-999).max(999)`. A malformed flat `value` (out of range, or
+  // fractional) used to either crash `ActionSpec.parse` (out-of-range) or get silently
+  // embedded into the dice-expression STRING (fractional), failing only when the action is
+  // later used. Both cases must land text-only instead.
+  it('an out-of-range or fractional flat feature value lands text-only instead of crashing or embedding a broken formula', () => {
+    for (const badValue of [1000, -1000, 2.5]) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        stats: [{ id: 1, value: 16 }],
+        actions: {
+          class: [
+            {
+              name: 'Bad Value Strike',
+              attackTypeRange: 5,
+              abilityModifierStatId: 1,
+              dice: { diceString: '1d6' },
+              value: badValue,
+              activation: { activationType: 1 },
+            },
+          ],
+        },
+      });
+      const feature = c.actions?.find((a) => a.name === 'Bad Value Strike');
+      expect(feature).toBeDefined();
+      expect(feature?.spec).toBeUndefined();
+      expect(summarizeDdbImport(c).textOnly).toContain('Bad Value Strike');
+    }
+    // A confirmed, in-range integer value is unaffected.
+    const fine = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      stats: [{ id: 1, value: 16 }],
+      actions: {
+        class: [{ name: 'Fine Value Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, value: 3, activation: { activationType: 1 } }],
+      },
+    });
+    expect(fine.actions?.find((a) => a.name === 'Fine Value Strike')?.spec).toBeDefined();
   });
 
   // Regression for a PR #1950 review finding: `spec.uses.spellLevel`'s schema is `.int()`.

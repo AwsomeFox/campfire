@@ -783,8 +783,29 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
         }
       }
       const diceString = item.dice && typeof item.dice.diceString === 'string' ? item.dice.diceString.trim() : '';
-      const flat = typeof item.value === 'number' ? item.value : 0;
-      const damage = diceString ? [{ expression: `${diceString}${flatSuffix(flat)}`, type: '' }] : undefined;
+      // `DamagePart.flat` (packages/schema/src/action-resolver.ts) is
+      // `z.number().int().min(-999).max(999)` — a sparse/malformed sheet's flat `value` of
+      // e.g. 1000 would reach `ActionSpec.parse` unvalidated and throw an uncaught ZodError,
+      // aborting the whole import; a fractional value instead gets embedded into the dice
+      // EXPRESSION as an opaque string ("1d8+1.5"), which passes schema validation (formula
+      // is just a string) but fails only later when the action is actually used (review
+      // finding on PR #1950 round 13). Validate before using it — an out-of-range or
+      // non-integer value forces the whole entry text-only below rather than crashing or
+      // silently embedding a broken formula.
+      const rawFlat = item.value;
+      const invalidFlat = typeof rawFlat === 'number' && (!Number.isInteger(rawFlat) || rawFlat < -999 || rawFlat > 999);
+      const flat = typeof rawFlat === 'number' && !invalidFlat ? rawFlat : 0;
+      // An attack-shaped feature with no representable outcome — no dice at all (e.g. a
+      // grapple/stun/control feature), or a flat value that failed validation above — would
+      // otherwise still get a resolvable spec with EMPTY outcomes: using it spends the action
+      // and rolls to-hit but applies nothing (review finding on PR #1950 round 13, the
+      // feature-level counterpart to round 11's weapon fix). Force text-only instead. A
+      // save-shaped feature with no damage is unaffected below — many conditions/effects
+      // legitimately have no damage component at all.
+      if (attackBonus !== null && (!diceString || invalidFlat)) {
+        attackBonus = null;
+      }
+      const damage = diceString && !invalidFlat ? [{ expression: `${diceString}${flatSuffix(flat)}`, type: '' }] : undefined;
       // Same principle for a save DC: a missing/unrecognized saveStatId must not default to
       // DEX — that's inventing which ability the target saves with, which resolution would
       // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
@@ -825,6 +846,13 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // rather than presenting the feature as freely, unlimitedly resolvable.
       if (hasUnmappedLimitedUse(item)) {
         attackBonus = null;
+        savingThrow = null;
+      }
+      // A save-shaped feature carrying a flat value that failed the DamagePart validation
+      // above (review finding on PR #1950 round 13) must not resolve either — a save spec
+      // paired with a damage expression built from an invalid flat would embed the same
+      // crash/broken-formula risk described above.
+      if (invalidFlat) {
         savingThrow = null;
       }
       out.push(
@@ -1116,7 +1144,12 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
   if (Array.isArray(data.spellSlots)) {
     for (const entry of data.spellSlots) {
       const lvl = typeof entry?.level === 'number' ? entry.level : null;
-      const used = typeof entry?.used === 'number' && entry.used > 0 ? entry.used : 0;
+      // `SpellSlotLevel.used`'s schema is an integer. This DDB-import path builds `spellSlots`
+      // directly (not through `CharacterCreate.parse`), so a fractional `used` here (e.g.
+      // `0.5`) would be persisted verbatim instead of being caught by validation, corrupting
+      // remaining-slot arithmetic and risking a later schema-validated update rejecting the
+      // stored state (review finding on PR #1950 round 13). Require an integer.
+      const used = typeof entry?.used === 'number' && Number.isInteger(entry.used) && entry.used > 0 ? entry.used : 0;
       if (lvl !== null && lvl >= 1 && lvl <= 9 && used > 0) {
         const key = String(lvl);
         usedByLevel[key] = (usedByLevel[key] ?? 0) + used;
