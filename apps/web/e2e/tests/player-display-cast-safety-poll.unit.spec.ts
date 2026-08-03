@@ -53,9 +53,18 @@
  *     ordinary staleness, which self-corrects on the next tick). Fix: check
  *     `signal.aborted` before either value branch, so an explicitly
  *     invalidated request is `ignored` regardless of what it resolves with.
+ *  9. Even within the SAME identity, exempting `active: true` from ordinary
+ *     staleness is too broad in one case: a slow pre-release poll can still
+ *     be outstanding when a strictly newer poll resolves `active: false`
+ *     first and actually applies it (a CONFIRMED release, not merely a
+ *     newer attempt or failure). The older `true` landing afterward would
+ *     re-raise a curtain over a game newer evidence already confirmed
+ *     resumed. Fix: a second, independent watermark that advances only when
+ *     a `false` is actually applied; an older `true` is `stale` only against
+ *     THAT watermark, so a newer failure (round 7) still cannot suppress it.
  *
  * These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free)
- * against all eight, mirroring `player-display-load.unit.spec.ts`'s
+ * against all nine, mirroring `player-display-load.unit.spec.ts`'s
  * deferred-promise technique.
  */
 import { expect, test } from '@playwright/test';
@@ -64,6 +73,7 @@ import {
   CAST_SAFETY_POLL_TIMEOUT_MS,
   CastSafetyPollSequencer,
   runCastSafetyPoll,
+  shouldApplyCastSafetyResult,
   type CastSafetyFetcher,
 } from '../../src/features/screen/playerDisplayLoad';
 
@@ -307,6 +317,56 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(result.kind).toBe('ignored');
   });
 
+  test('regression (round 9): a confirmed newer release supersedes a still-outstanding older true', async () => {
+    // Generation 1 is a slow pre-release poll, still outstanding. Generation
+    // 2 starts after it, resolves promptly, and confirms `active: false`
+    // (applies — nothing fresher has settled yet). Generation 1's `true`
+    // arriving afterward predates evidence that has already established the
+    // game resumed; applying it would re-raise a curtain stuck there until
+    // the next poll happens to succeed.
+    const sequencer = new CastSafetyPollSequencer();
+    const slowPreRelease = deferred<CastSafetyState>();
+
+    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowPreRelease.promise));
+
+    const newer = await runCastSafetyPoll(sequencer, async () => ({ active: false }));
+    expect(newer).toMatchObject({ kind: 'ok', active: false });
+
+    slowPreRelease.resolve({ active: true });
+    const olderResult = await older;
+    expect(olderResult.kind).toBe('stale');
+  });
+
+  test('regression (round 9): a newer FAILURE still cannot suppress an older true (round 7 stays intact)', async () => {
+    // The round 9 fix must not regress round 7: a newer poll that merely
+    // fails (never actually applying a confirmed `false`) must not advance
+    // the confirmed-release watermark, so an older, still-genuine `true`
+    // must still apply.
+    const sequencer = new CastSafetyPollSequencer();
+    const slowTrue = deferred<CastSafetyState>();
+
+    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowTrue.promise));
+
+    const failing = await runCastSafetyPoll(sequencer, async () => {
+      throw new TypeError('network down');
+    });
+    expect(failing.kind).toBe('failed');
+
+    slowTrue.resolve({ active: true });
+    const olderResult = await older;
+    expect(olderResult).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('regression (round 9): a true generation NEWER than the confirmed release still applies (hold raised after release)', async () => {
+    const sequencer = new CastSafetyPollSequencer();
+
+    const released = await runCastSafetyPoll(sequencer, async () => ({ active: false }));
+    expect(released).toMatchObject({ kind: 'ok', active: false });
+
+    const raisedAgain = await runCastSafetyPoll(sequencer, async () => ({ active: true }));
+    expect(raisedAgain).toMatchObject({ kind: 'ok', active: true });
+  });
+
   test('invalidate() does not block future polls — cast mode re-entered works normally', async () => {
     const sequencer = new CastSafetyPollSequencer();
     sequencer.invalidate();
@@ -351,5 +411,40 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(a.controller.signal.aborted).toBe(false);
     expect(b.controller.signal.aborted).toBe(false);
     expect(c.controller.signal.aborted).toBe(false);
+  });
+});
+
+test.describe('shouldApplyCastSafetyResult (#1908 rework, round 10 — the identity-boundary P1 finding)', () => {
+  // `CastSafetyPollSequencer` only orders polls WITHIN one cast identity; it
+  // has no notion of the identity itself changing mid-flight. On an SPA
+  // transition between two cast tokens, the page's render-time state reset
+  // and `sequencer.invalidate()` (which runs later, in the OLD effect's
+  // passive cleanup) are not the same instant — in that gap, the OLD
+  // identity's in-flight poll is an entirely ordinary request as far as the
+  // sequencer is concerned, and can legitimately resolve `ok`. This is the
+  // commit-site guard that closes that gap: it does not touch the sequencer
+  // at all, it just refuses to apply an otherwise-valid `ok` result whose
+  // captured identity no longer matches the page's current one.
+  test('applies an ok result when the captured identity still matches the current one', () => {
+    expect(shouldApplyCastSafetyResult({ kind: 'ok', active: true }, 'token-a', 'token-a')).toBe(true);
+    expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', 'token-a')).toBe(true);
+  });
+
+  test('drops an ok result whose captured identity no longer matches — the P1 race', () => {
+    // A stale campaign-A response landing after the page has already moved
+    // on to campaign B must never set campaign B's state, regardless of
+    // whether the value it carries is true or false.
+    expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', 'token-b')).toBe(false);
+    expect(shouldApplyCastSafetyResult({ kind: 'ok', active: true }, 'token-a', 'token-b')).toBe(false);
+  });
+
+  test('drops an ok result when the page has moved out of cast mode entirely', () => {
+    expect(shouldApplyCastSafetyResult({ kind: 'ok', active: false }, 'token-a', null)).toBe(false);
+  });
+
+  test('non-ok results (stale/ignored/failed) are never applied, identity aside', () => {
+    expect(shouldApplyCastSafetyResult({ kind: 'stale' }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldApplyCastSafetyResult({ kind: 'ignored' }, 'token-a', 'token-a')).toBe(false);
+    expect(shouldApplyCastSafetyResult({ kind: 'failed' }, 'token-a', 'token-a')).toBe(false);
   });
 });

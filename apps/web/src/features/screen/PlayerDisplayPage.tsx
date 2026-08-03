@@ -71,6 +71,7 @@ import {
   projectionAfterLoadFailure,
   runCastSafetyPoll,
   runPlayerDisplayLoad,
+  shouldApplyCastSafetyResult,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
 } from './playerDisplayLoad';
@@ -401,6 +402,27 @@ export default function PlayerDisplayPage() {
    * identity, not every render) closes that window entirely: React re-runs
    * the component with the reset state before anything commits to the
    * screen.
+   *
+   * That still leaves a narrower window open on the COMMIT side: the render-
+   * time reset and `sequencer.invalidate()` (which runs in the OLD effect's
+   * passive cleanup, strictly after commit) are not the same instant. If the
+   * old identity's in-flight request resolves in between — after the render-
+   * time reset has already committed the new identity's "unknown" state, but
+   * before `invalidate()` has aborted it or advanced the sequencer's
+   * watermark — `runCastSafetyPoll` has no way to know a component-level
+   * identity change is pending; it still sees an ordinary in-flight request
+   * and can legitimately resolve `ok`. Applying that result would use the
+   * OLD identity's value to set the NEW identity's state. The sequencer
+   * can't close this: it operates on generations within one identity, not
+   * across the identity boundary the component owns. So the commit site
+   * itself re-checks the identity this specific call was actually made for
+   * (captured once, at the top of `loadCastSafety`, before any `await`)
+   * against `castSafetyIdentityRef.current` — which by the time this promise
+   * resolves already reflects whatever the LATEST render committed — and
+   * only applies the result when they still match. A mismatch means some
+   * later identity change has already superseded this call; the result is
+   * silently dropped rather than applied, exactly like an ordinary stale or
+   * ignored poll result.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const [castSafetyKnown, setCastSafetyKnown] = useState(false);
@@ -414,16 +436,23 @@ export default function PlayerDisplayPage() {
   }
   const loadCastSafety = useCallback(async () => {
     if (!isCastMode || !castToken) return;
+    // Capture the identity this call is FOR, before the `await` — the ref it
+    // is compared against below can change while this request is in flight
+    // (an SPA transition to a new cast token). See the doc above for why the
+    // sequencer's own generation/invalidate machinery cannot substitute for
+    // this check.
+    const requestIdentity = castToken;
     const result = await runCastSafetyPoll(castSafetySequencerRef.current, (signal) =>
       castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
     );
-    if (result.kind === 'ok') {
+    if (shouldApplyCastSafetyResult(result, requestIdentity, castSafetyIdentityRef.current)) {
       setCastSafetyActive(result.active);
       setCastSafetyKnown(true);
     }
-    // 'stale' (out-of-order), 'ignored' (aborted), and 'failed' (transient)
-    // all leave castSafetyActive/castSafetyKnown untouched — see fail-safe
-    // note above.
+    // 'stale' (out-of-order), 'ignored' (aborted), a 'failed' (transient)
+    // result, or an 'ok' result whose captured identity no longer matches
+    // the live one (superseded by a later identity change) all leave
+    // castSafetyActive/castSafetyKnown untouched — see fail-safe note above.
   }, [castToken, isCastMode]);
 
   useEffect(() => {
