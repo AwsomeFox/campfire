@@ -2374,7 +2374,15 @@ export class CharactersService {
       for (const item of plan.plans) {
         const snapshot = before.find((candidate) => candidate.id === item.characterId)!;
         const nextInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
-        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, ...sheetConditionWriteSetFromInstances(nextInstances), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, snapshot.updatedAt))).run();
+        // Issue #1902 rework (round 11, codex P2): PER CHARACTER, from that character's own
+        // pre-apply snapshot — not the shared `at` used for the batch/audit timestamps below.
+        // `updatedAt` is the same CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard
+        // checks; the WHERE clause here already protects THIS write's own atomicity, but a
+        // shared, non-monotonic `nowIso()` stamp could still coincide with a character's
+        // pre-recovery token if both land in the same millisecond, letting a stale
+        // `patchSpellSlots` call silently pass staleness the same class of bug `restParty`
+        // and the encounter writers were fixed for.
+        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, ...sheetConditionWriteSetFromInstances(nextInstances), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: nextUpdatedAt(snapshot.updatedAt) }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, snapshot.updatedAt))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed while recovery was applying.');
         for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.hpTempAfter, item.deathStateAfter, item.deathSaveSuccessesAfter, item.deathSaveFailuresAfter, nextInstances, at)) touchedEncounterIds.add(encounterId);
       }
@@ -2420,7 +2428,14 @@ export class CharactersService {
         const item = after.find((candidate) => candidate.characterId === snapshot.id);
         if (!item) throw new ConflictException('Recovery snapshot is incomplete.');
         const afterInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
-        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, ...sheetConditionWriteSetFromInstances(readConditionInstances(snapshot.conditionInstances, snapshot.conditions)), spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(afterInstances.map((instance) => instance.name))), eq(characters.conditionInstances, toJsonText(afterInstances)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
+        // Issue #1902 rework (round 11, codex P2): this WHERE clause already pins every
+        // OTHER column to its exact post-apply value, so reading `updatedAt` fresh here
+        // (rather than reusing the shared `at`) is safe — the row is provably the one this
+        // undo is reverting. Per-character `nextUpdatedAt`, not a shared stamp, for the same
+        // reason as `applyPartyRecovery` above: this is the CAS token `patchSpellSlots`'s
+        // `expectedUpdatedAt` guard checks.
+        const currentRow = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, snapshot.id)).get();
+        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, ...sheetConditionWriteSetFromInstances(readConditionInstances(snapshot.conditionInstances, snapshot.conditions)), spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: nextUpdatedAt(currentRow?.updatedAt ?? at) }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(afterInstances.map((instance) => instance.name))), eq(characters.conditionInstances, toJsonText(afterInstances)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
         for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.hpTemp, snapshot.deathState, snapshot.deathSaveSuccesses, snapshot.deathSaveFailures, readConditionInstances(snapshot.conditionInstances, snapshot.conditions), at)) touchedEncounterIds.add(encounterId);
       }

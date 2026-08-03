@@ -445,4 +445,27 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/import \{ nextUpdatedAt \} from '\.\.\/\.\.\/common\/stale-write';/);
     expect(src).toMatch(/spellSlots: toJsonText\(outcome\.slots\), updatedAt: nextUpdatedAt\(fresh\.updatedAt\)/);
   });
+
+  // Eleventh-round finding (devin): `.filter((row) => hasTrackedResources(...))` dropped
+  // the WHOLE row — name, rest buttons, everything — for a combatant with an empty
+  // resources/spellSlots map (a martial with no hit-dice entry seeded, or a character
+  // never written to). That silently made this PR's headline feature (rest buttons)
+  // unreachable for exactly that character, even though resting them is valid. The panel
+  // as a whole should still render nothing when NO combatant anywhere has resources or
+  // spell slots (the stated acceptance criterion), but a row that only qualifies via its
+  // rest buttons must not itself keep an otherwise-empty panel visible — the panel gate
+  // and the row filter are intentionally two separate checks.
+  test('ResourceTrackerPanel keeps a row (and its rest buttons) for an editable, character-linked combatant even with no tracked resources', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    // The panel-level "anything to track at all" gate is computed from the UNFILTERED
+    // row list, not the (now looser) `rows` the JSX renders — so it isn't accidentally
+    // satisfied by a rest-only row.
+    expect(src).toMatch(/const rowsAll = combatants/);
+    expect(src).toMatch(/if \(!rowsAll\.some\(\(row\) => hasTrackedResources\(row\.resources, row\.spellSlots\)\)\) return null;/);
+    // The row filter itself ORs in the rest-eligibility condition rather than checking
+    // hasTrackedResources alone.
+    expect(src).toMatch(
+      /const rows = rowsAll\.filter\(\s*\n\s*\(row\) => hasTrackedResources\(row\.resources, row\.spellSlots\) \|\| \(row\.combatant\.kind === 'character' && row\.combatant\.characterId != null && row\.canEdit && campaignResolved && restOptions\.length > 0\),/,
+    );
+  });
 });

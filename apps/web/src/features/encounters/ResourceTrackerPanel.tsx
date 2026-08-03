@@ -256,7 +256,7 @@ export function ResourceTrackerPanel({
     },
   });
 
-  const rows = combatants
+  const rowsAll = combatants
     .map((c) => {
       let resources: Record<string, CharacterResource> = {};
       let spellSlots: Record<string, SpellSlotLevel> = {};
@@ -304,10 +304,24 @@ export function ResourceTrackerPanel({
       const scope: PipOwnerScope = c.kind === 'character' && c.characterId != null ? { characterId: c.characterId } : { combatantId: c.id };
 
       return { combatant: c, name, resources, spellSlots, canEdit, rpCurrent, updatedAt, scope };
-    })
-    .filter((row) => hasTrackedResources(row.resources, row.spellSlots));
+    });
 
-  if (rows.length === 0) return null;
+  // Issue #1902 rework (round 11, devin): the PANEL-level gate is kept independent of the
+  // per-row filter below and still checks resources/spellSlots only, matching the
+  // acceptance criterion ("renders nothing when NO combatant has resources or spell
+  // slots") — a row kept below ONLY for its rest buttons must not, by itself, keep an
+  // otherwise-empty panel visible.
+  if (!rowsAll.some((row) => hasTrackedResources(row.resources, row.spellSlots))) return null;
+
+  // A row is worth showing either because it has Features/Spell Slots to display, OR
+  // because it's an editable character-linked combatant that CAN be rested — a martial
+  // with an empty resources/spellSlots map (no hit-dice entry seeded yet, or never
+  // written to) still needs its rest buttons to appear, since resting is valid for them
+  // too. Filtering by `hasTrackedResources` alone dropped the row (and, with it, the
+  // rest buttons this PR exists to wire up) for exactly that character.
+  const rows = rowsAll.filter(
+    (row) => hasTrackedResources(row.resources, row.spellSlots) || (row.combatant.kind === 'character' && row.combatant.characterId != null && row.canEdit && campaignResolved && restOptions.length > 0),
+  );
 
   return (
     <Card className="space-y-4">

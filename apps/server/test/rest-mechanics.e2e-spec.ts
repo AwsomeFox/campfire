@@ -465,6 +465,78 @@ describe('rest mechanics (#1041, e2e)', () => {
     }
   });
 
+  /**
+   * Issue #1902 rework, round 11 (codex P2) — `applyPartyRecovery` and `undoPartyRecovery`
+   * stamp `characters.updatedAt` with ONE shared `nowIso()` value (`at`) for every
+   * character in the batch, the same class of bug fixed for `restParty` in round 8: if
+   * that shared timestamp happens to equal a character's PRE-write token (two writes
+   * landing in the same millisecond), the CAS token `patchSpellSlots`'s
+   * `expectedUpdatedAt` guard depends on never visibly moves, even though the recovery
+   * DID change the sheet — a spell-slot request already in flight with that pre-recovery
+   * token would incorrectly pass staleness against a sheet the recovery just changed.
+   * Freezes the clock to reproduce the collision deterministically for both apply and
+   * undo, matching the round-7/8 `restParty` tests and `spell-slot-concurrency.spec.ts`'s
+   * equivalent test for `patchSpellSlots` itself.
+   */
+  it('#1902 rework: applyPartyRecovery advances the revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock recoveree');
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await db.update(charactersTable).set({ updatedAt: frozen.toISOString() }).where(eq(charactersTable.id, id));
+      const [beforeApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+      expect(beforeApply.updatedAt).toBe(frozen.toISOString());
+
+      const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+      await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'frozen-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+      const [afterApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `afterApply`'s
+      // token would be IDENTICAL to `beforeApply`'s — the recovery happened (spell slots
+      // reset), but the CAS token a concurrent request might be holding never visibly moved.
+      expect(afterApply.updatedAt).not.toBe(beforeApply.updatedAt);
+      expect(JSON.parse(afterApply.spellSlots)['1'].used).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Same defect, undo side — isolated from `applyPartyRecovery`'s own fix rather than
+   * chained after it, because chaining would let apply's OWN token advancement mask an
+   * unfixed undo (apply's `nextUpdatedAt` always moves the token strictly past the
+   * frozen instant, so undo's `nowIso()` — frozen at the SAME instant the whole test
+   * freezes to — would trivially differ from it regardless of whether undo's own fix is
+   * present). Applying with a REAL clock first, then freezing exactly at the resulting
+   * `updatedAt`, reproduces the collision `undoPartyRecovery`'s own write would need to
+   * land in.
+   */
+  it('#1902 rework: undoPartyRecovery advances the revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock undoer');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'real-clock-apply-then-frozen-undo', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const [beforeUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+    // Freeze exactly at the row's CURRENT token — the collision undoPartyRecovery's own
+    // `nowIso()` write would need to reproduce the bug.
+    const frozen = new Date(beforeUndo.updatedAt);
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await characters.undoPartyRecovery(campaignId, applied.batchId, 'frozen-undo', dmUser, 'dm');
+      const [afterUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `afterUndo`'s
+      // token would be IDENTICAL to `beforeUndo`'s — the undo happened (spell slots reverted
+      // to spent), but the CAS token a concurrent request might be holding never visibly moved.
+      expect(afterUndo.updatedAt).not.toBe(beforeUndo.updatedAt);
+      expect(JSON.parse(afterUndo.spellSlots)['1'].used).toBe(4);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('reports every failure at once rather than one rejected call at a time', async () => {
     const noDice = await batteredCharacter('Tam');
     const corpse = await batteredCharacter('Dead Mo');
