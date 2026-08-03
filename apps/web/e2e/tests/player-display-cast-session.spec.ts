@@ -366,6 +366,58 @@ test.describe('Player Display cast sessions', () => {
     await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
     await expect(page.getByTestId('safety-display-overlay')).toContainText('The table is paused.');
   });
+
+  /**
+   * Issue #1908 rework, round 7 — the safety curtain is now also this page's
+   * fail-safe DEFAULT (before the first `/safety` poll succeeds) and can
+   * persist indefinitely if that poll keeps failing. On the cast/kiosk route
+   * "Exit kiosk" is the ONLY affordance a touch-only shared TV has to leave
+   * kiosk mode — a curtain that visually and interactively outranks it would
+   * strand the device with no way out short of a second device. The button
+   * must stay clickable (and the PIN dialog it opens must stay usable) with
+   * the curtain up.
+   */
+  test('Exit kiosk stays clickable, and its PIN dialog stays usable, while the safety curtain is showing', async ({ page }) => {
+    let releaseSafety!: () => void;
+    const safetyGate = new Promise<void>((resolve) => {
+      releaseSafety = resolve;
+    });
+    let exitVerified = false;
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    // The safety poll never resolves in this test — the curtain stays up via
+    // the fail-safe default for the whole test, exactly like a persistently
+    // failing/slow safety endpoint in production.
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, async (route) => {
+      await safetyGate;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) });
+    });
+    await page.route(`**/api/v1/cast/${TOKEN}/exit`, (route) => {
+      expect(route.request().postDataJSON()).toEqual({ pin: '123456' });
+      exitVerified = true;
+      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // The Exit kiosk button must remain clickable with the curtain up.
+    await page.getByRole('button', { name: 'Exit kiosk' }).click();
+    const exitDialog = page.getByRole('dialog', { name: 'Exit kiosk mode?' });
+    await expect(exitDialog).toBeVisible();
+    await page.getByLabel('Exit PIN').fill('123456');
+    await page.getByRole('button', { name: 'Verify and sign in' }).click();
+    await expect.poll(() => exitVerified).toBe(true);
+
+    releaseSafety();
+  });
 });
 
 /** 1x1 transparent PNG — the map bytes' contents are irrelevant, only their source is. */

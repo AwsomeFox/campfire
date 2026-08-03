@@ -390,10 +390,28 @@ export default function PlayerDisplayPage() {
    * let a display that last confirmed "no hold" there render the NEW
    * campaign open, even if its hold is already active, until its own poll
    * happens to succeed.
+   *
+   * That reset happens DURING RENDER, not in a `useEffect` — React's
+   * documented pattern for resetting derived state when an identity changes
+   * ("adjusting state when a prop changes"), not a workaround. `useEffect`
+   * runs as a passive effect after the browser may already have painted, so
+   * an effect-based reset can let the OLD identity's last-known state paint
+   * for one real frame before the reset catches up. Comparing against a ref
+   * and calling the setters inline (guarded so it fires at most once per
+   * identity, not every render) closes that window entirely: React re-runs
+   * the component with the reset state before anything commits to the
+   * screen.
    */
   const [castSafetyActive, setCastSafetyActive] = useState(false);
   const [castSafetyKnown, setCastSafetyKnown] = useState(false);
   const castSafetySequencerRef = useRef(new CastSafetyPollSequencer());
+  const castSafetyIdentityRef = useRef<string | null>(null);
+  const castSafetyIdentity = isCastMode && castToken ? castToken : null;
+  if (castSafetyIdentityRef.current !== castSafetyIdentity) {
+    castSafetyIdentityRef.current = castSafetyIdentity;
+    setCastSafetyActive(false);
+    setCastSafetyKnown(false);
+  }
   const loadCastSafety = useCallback(async () => {
     if (!isCastMode || !castToken) return;
     const result = await runCastSafetyPoll(castSafetySequencerRef.current, (signal) =>
@@ -410,8 +428,6 @@ export default function PlayerDisplayPage() {
 
   useEffect(() => {
     const sequencer = castSafetySequencerRef.current;
-    setCastSafetyActive(false);
-    setCastSafetyKnown(false);
     if (isCastMode) void loadCastSafety();
     // Abort any in-flight poll on unmount or when the cast identity (token)
     // changes, so a late response never calls setState past that point.
@@ -1792,13 +1808,21 @@ const SCREEN_CSS = `
 }
 .cf-screen.centered { display: flex; align-items: center; justify-content: center; }
 
-/* Operator control stack (issue #595 wiring preserved verbatim). */
+/* Operator control stack (issue #595 wiring preserved verbatim). z-index sits
+   ABOVE --cf-layer-dialog (issue #1908): the safety curtain (.cf-safety-display,
+   same tier as every other dialog) is now also this page's fail-safe DEFAULT before
+   the first /safety poll succeeds, and can persist indefinitely if that poll keeps
+   failing. On the cast/kiosk route the "Exit kiosk" button here is the ONLY affordance
+   a touch-only shared TV has -- a curtain that outranks it would strand the device with
+   no way to leave kiosk mode without a second device. .cf-exit-pin (the PIN dialog
+   this stack opens) sits one tier higher still, so it in turn is never trapped under
+   this stack once open. */
 .cf-screen .cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
   width: min(460px, calc(100vw - 28px));
-  z-index: 20;
+  z-index: calc(var(--cf-layer-dialog, 50) + 1);
   opacity: 1;
   pointer-events: auto;
   transition: opacity 0.4s ease;
@@ -1916,7 +1940,10 @@ const SCREEN_CSS = `
 .cf-exit-pin {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* Above both the safety curtain (--cf-layer-dialog) and the control stack
+     that opens this dialog (issue #1908) — this dialog must never be
+     strandable under either, matching the control-stack comment above. */
+  z-index: calc(var(--cf-layer-dialog, 50) + 2);
   display: grid;
   place-items: center;
   padding: 24px;

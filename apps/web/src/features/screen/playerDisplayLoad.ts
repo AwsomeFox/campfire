@@ -243,23 +243,41 @@ export class PlayerDisplayLoadSequencer {
  *     possibly stale — success can still land after the newer attempt
  *     already gave up inconclusively, clearing the curtain with out-of-date
  *     data even though a fresher check was already attempted.
+ *  6. Fix (5) by advancing the watermark on every conclusion — success,
+ *     failure, or abort alike (`settle()`). Closes (5), but applying that
+ *     same freshest-settled gate uniformly to BOTH `true` and `false`
+ *     results is itself too strict: if a slow poll (generation N) is on its
+ *     way to a correct `active: true`, and a poll that started AFTER it
+ *     (generation N+1) fails quickly, generation N's true observation
+ *     arrives to find the watermark already past it and gets discarded as
+ *     "stale" — even though it is the only response that ever actually
+ *     confirmed the hold. If failures keep winning that race, the curtain
+ *     can stay down indefinitely despite a real, repeatedly-confirmed hold.
  *
- * The fix is to stop coupling ticking to completion, AND to advance the
- * ordering watermark on every conclusion, not only successful ones. Every
- * visible-tab tick starts a genuinely NEW request — never skipped, never
- * aborted just because a new tick fired — so an outstanding request
- * (however slow, however hung) can never block a later one from running.
- * Ordering is handled separately, by a monotonic generation: each poll gets
- * a generation number, and `settle()` records that a generation has
- * concluded — with ANY outcome, success, failure, or abort — returning
- * whether that generation is still the freshest to have concluded. Only a
- * still-freshest generation's success may ever be applied. This keeps the
- * out-of-order guarantee from (1)/(2) — a late, low-numbered response can
- * never overwrite a result a higher-numbered one already applied, even if it
- * "completes" without ever being aborted — closes (5) by no longer letting a
- * response's own success be the only thing that can supersede it, and keeps
- * (2)'s and (3)'s starvation modes structurally impossible: no tick is ever
- * skipped, and no in-flight request is ever aborted by a newer tick starting.
+ * The fix is to stop coupling ticking to completion, advance the ordering
+ * watermark on every conclusion (not only successful ones), AND stop gating
+ * `active: true` on that watermark at all. Every visible-tab tick starts a
+ * genuinely NEW request — never skipped, never aborted just because a new
+ * tick fired — so an outstanding request (however slow, however hung) can
+ * never block a later one from running. Ordering is handled separately, by a
+ * monotonic generation: each poll gets a generation number, and `settle()`
+ * records that a generation has concluded — with ANY outcome, success,
+ * failure, or abort — returning whether that generation is still the
+ * freshest to have concluded. A confirmed `active: true` always applies,
+ * regardless of that freshness check: raising the curtain late is never the
+ * dangerous mistake (worst case it stays up one poll longer than strictly
+ * needed, self-correcting on the next tick), so nothing should ever be
+ * allowed to suppress a genuine hold observation. Only `active: false` is
+ * gated on being the freshest-settled generation, since clearing the curtain
+ * out of order is the direction that actually matters to block. This keeps
+ * the out-of-order guarantee from (1)/(2) for the case that needs it — a
+ * late, low-numbered `false` can never overwrite a `true` a higher-numbered
+ * one already applied — closes (5) by no longer letting a response's own
+ * success be the only thing that can supersede it, closes (6) by never
+ * letting an inconclusive newer attempt suppress an older but genuine `true`,
+ * and keeps (2)'s and (3)'s starvation modes structurally impossible: no
+ * tick is ever skipped, and no in-flight request is ever aborted by a newer
+ * tick starting.
  *
  * `CAST_SAFETY_POLL_TIMEOUT_MS` still exists, but its job changed: it is no
  * longer a correctness deadline (nothing depends on it to keep polling
@@ -354,15 +372,18 @@ export class CastSafetyPollSequencer {
 /**
  * Run one cast-safety poll tick. Always starts a fresh request — never
  * skipped, never aborts a still-running earlier poll — so an outstanding
- * request can never block this or any later tick. Only a response whose
- * generation is still the freshest SETTLED one may ever be applied
- * (`kind: 'ok'`) — an out-of-order arrival (including one superseded by a
- * newer poll that itself failed or aborted) resolves `stale`, aborted work
- * resolves `ignored`, and a genuine failure resolves `failed`, so the caller
- * can fail safe (keep last-known state) instead of guessing a value.
- * `timeoutMs` bounds this one request's own lifetime purely for resource
- * hygiene — see `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no
- * correctness weight here.
+ * request can never block this or any later tick. A confirmed `active: true`
+ * always resolves `{ kind: 'ok', active: true }`, regardless of generation
+ * ordering — raising the curtain late is never the mistake that matters to
+ * prevent. A confirmed `active: false` only resolves `ok` when its
+ * generation is still the freshest SETTLED one; an out-of-order `false`
+ * (including one superseded by a newer poll that itself failed or aborted)
+ * resolves `stale` instead. Aborted work resolves `ignored`, and a genuine
+ * failure resolves `failed`, so the caller can fail safe (keep last-known
+ * state) instead of guessing a value. `timeoutMs` bounds this one request's
+ * own lifetime purely for resource hygiene — see
+ * `CAST_SAFETY_POLL_TIMEOUT_MS`'s doc for why it carries no correctness
+ * weight here.
  */
 export async function runCastSafetyPoll(
   sequencer: CastSafetyPollSequencer,
@@ -376,8 +397,21 @@ export async function runCastSafetyPoll(
   try {
     const state = await fetchSafety(signal);
     const isFreshest = sequencer.settle(generation);
+    // A confirmed ACTIVE hold always applies, even out of order: raising the
+    // curtain late is never the dangerous mistake — the worst case is it
+    // stays up one poll longer than strictly necessary, which self-corrects
+    // on the next tick. Only a confirmed INACTIVE result needs the strict
+    // freshest-settled gate, since clearing the curtain out of order (e.g. a
+    // slow pre-hold `false` landing after a newer poll already failed and
+    // could not confirm anything fresher) is the direction that actually
+    // matters to block. Without this asymmetry, a legitimate but slow
+    // `active: true` observation could be discarded as "stale" merely
+    // because a LATER-started poll happened to fail FASTER — fresh evidence
+    // that gating success on `settle()`'s freshest check applied uniformly
+    // to both values was itself too strict.
+    if (state.active) return { kind: 'ok', active: true };
     if (!isFreshest) return { kind: 'stale' };
-    return { kind: 'ok', active: state.active };
+    return { kind: 'ok', active: false };
   } catch (error) {
     // Settle even on failure/abort — a later-arriving OLDER response must
     // see this generation as having concluded, regardless of how it

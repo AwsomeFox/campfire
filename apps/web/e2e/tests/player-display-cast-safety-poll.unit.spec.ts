@@ -1,10 +1,11 @@
 /**
  * Issue #1908 rework — cast-token X-Card safety poll sequencing.
  *
- * `GET /cast/:token/safety` is polled on a fixed interval. Six review
+ * `GET /cast/:token/safety` is polled on a fixed interval. Seven review
  * findings on the same code, each closing one failure mode and (because
  * earlier shapes coupled "when the next tick may run" to "when this one
- * finishes", or coupled ordering to success alone) opening another:
+ * finishes", or coupled ordering to success alone, or applied that ordering
+ * gate uniformly regardless of which way it was protecting) opening another:
  *
  *  1. Overlapping polls can complete out of order — a slow pre-hold `false`
  *     resolving after a fresh post-hold `true` must not clear the curtain.
@@ -35,9 +36,15 @@
  *     Fix: advance the watermark on every settled generation, success or
  *     not (`settle()`), so an older response is stale once ANY newer one has
  *     concluded, regardless of how.
+ *  7. Applying that same freshest-settled gate to BOTH `true` and `false`
+ *     results is itself too strict: a slow poll genuinely confirming an
+ *     ACTIVE hold can be discarded as "stale" merely because a later-started
+ *     poll happened to fail faster. Fix: only `active: false` is gated on
+ *     being the freshest-settled generation; `active: true` always applies —
+ *     raising the curtain late is never the mistake that matters to prevent.
  *
  * These specs pin `CastSafetyPollSequencer` + `runCastSafetyPoll` (DOM-free)
- * against all six, mirroring `player-display-load.unit.spec.ts`'s
+ * against all seven, mirroring `player-display-load.unit.spec.ts`'s
  * deferred-promise technique.
  */
 import { expect, test } from '@playwright/test';
@@ -176,6 +183,29 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(staleResult.kind).toBe('stale');
   });
 
+  test('regression (round 7): a newer poll that fails must NOT suppress an older, still-genuine active observation', async () => {
+    // Applying round 6's fix uniformly to both values was itself too strict:
+    // generation 1 is slowly confirming an ACTUAL active hold; generation 2
+    // starts after it and fails quickly, advancing the settled watermark
+    // past generation 1 before it resolves. Generation 1's `true` is not
+    // stale data to be distrusted the way a `false` would be — raising the
+    // curtain late is never the dangerous mistake, so it must still apply.
+    const sequencer = new CastSafetyPollSequencer();
+    const slowTrue = deferred<CastSafetyState>();
+
+    const older = runCastSafetyPoll(sequencer, (signal) => trackAbort(signal, slowTrue.promise));
+
+    const failing = await runCastSafetyPoll(sequencer, async () => {
+      throw new TypeError('network down');
+    });
+    expect(failing.kind).toBe('failed');
+
+    // The older request's genuine positive observation must still land.
+    slowTrue.resolve({ active: true });
+    const olderResult = await older;
+    expect(olderResult).toMatchObject({ kind: 'ok', active: true });
+  });
+
   test('a slow-but-healthy response still lands: no deadline is tight enough to reject it', async () => {
     // Round 4's bug in a different shape: the hygiene timeout must never be
     // what determines whether a normal (if slow) response can apply. A
@@ -224,7 +254,13 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     expect(next).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test("invalidate() aborts outstanding polls, and even a late 'completion' that ignores the abort cannot apply", async () => {
+  test("invalidate() aborts outstanding polls, and even a late 'completion' that ignores the abort cannot clear the curtain", async () => {
+    // Uses `active: false` deliberately — per round 7, `active: true` always
+    // applies regardless of staleness (that's the point of the asymmetric
+    // fix, covered separately above), so the case that actually needs the
+    // watermark backstop here is the dangerous direction: a stale `false`
+    // must still be blocked after invalidate(), even from a fetch that
+    // ignores its own abort signal and resolves anyway.
     const sequencer = new CastSafetyPollSequencer();
     const hung = deferred<CastSafetyState>();
     // Deliberately ignores `signal` — some transports/mocks resolve a
@@ -235,7 +271,7 @@ test.describe('CastSafetyPollSequencer + runCastSafetyPoll (#1908 rework)', () =
     const inFlight = runCastSafetyPoll(sequencer, ignoresAbort);
     sequencer.invalidate(); // unmount / cast token change
 
-    hung.resolve({ active: true });
+    hung.resolve({ active: false });
     const result = await inFlight;
     expect(result.kind).toBe('stale');
   });
