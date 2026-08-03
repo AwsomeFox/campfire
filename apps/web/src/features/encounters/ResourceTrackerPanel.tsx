@@ -93,6 +93,17 @@ export function ResourceTrackerPanel({
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const clearErrorFor = (key: string) => setError((prev) => (prev?.key === key ? null : prev));
   const setErrorFor = (key: string, message: string) => setError({ key, message });
+  // Issue #1902 rework (round 22, codex P2): an AMBIGUOUS mutation's `onError` sets a
+  // definite-failure banner (e.g. the rest-error text) before we know the outcome — that
+  // response was merely lost, not necessarily rejected. Once `endPendingAfterReconciling`
+  // below confirms a fresh read of both caches, the write may well have landed; leaving the
+  // definite-failure wording in place would wrongly tell the user to retry an action that
+  // already succeeded, risking a real double-spend of an irreplaceable resource (RP, a spell
+  // slot, a hit die). Replace it with an explicit "outcome unresolved, check current values"
+  // message instead — but only if THIS key's banner is still the one showing (a newer failure
+  // from the same target, or the user dismissing it, must not be clobbered).
+  const setAmbiguousResolvedFor = (key: string) =>
+    setError((prev) => (prev?.key === key ? { key, message: t('encounters.resourceTracker.ambiguousResolved') } : prev));
 
   // Issue #1902 rework: the campaign's rule-system adapter drives which rests are on
   // offer, exactly like CharacterPage's RestControls — a Starfinder table gets its
@@ -134,7 +145,12 @@ export function ResourceTrackerPanel({
   // once the network/server recovered. Tracked in a ref (not state) since it's mutated from
   // inside a query-cache subscription callback, not a render; `stuckKeysVersion` exists only
   // to force a re-render when the ref's contents actually change the set of stuck keys.
-  const stuckKeysRef = useRef<Set<string>>(new Set());
+  // Issue #1902 rework (round 22, codex P2): the value is whether the outcome that got a
+  // key stuck was an AMBIGUOUS mutation (as opposed to a stale-write reconcile, or the
+  // encounter-CAS `forceReconcile` path with no error at all) — the auto-release below
+  // needs it to decide whether to also replace that key's failure banner, matching
+  // `endPendingAfterReconciling`'s own direct (non-stuck) reconciliation path.
+  const stuckKeysRef = useRef<Map<string, boolean>>(new Map());
   const [, setStuckKeysVersion] = useState(0);
   useEffect(() => {
     // Issue #1902 rework (round 18, codex P2 — corrected from round 16's passive design):
@@ -157,11 +173,12 @@ export function ResourceTrackerPanel({
         const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
         if (!encounterOk || !charactersOk) return;
         const releasing = stuckKeysRef.current;
-        stuckKeysRef.current = new Set();
+        stuckKeysRef.current = new Map();
         setStuckKeysVersion((v) => v + 1);
+        for (const [key, wasAmbiguous] of releasing) if (wasAmbiguous) setAmbiguousResolvedFor(key);
         setPendingKeys((prev) => {
           let next = prev;
-          for (const key of releasing) next = removePendingKey(next, key);
+          for (const key of releasing.keys()) next = removePendingKey(next, key);
           return next;
         });
       });
@@ -195,6 +212,11 @@ export function ResourceTrackerPanel({
   // second click resends the now-provably-stale encounter revision and 409s against its
   // own prior write.
   const endPendingAfterReconciling = async (key: string, error: unknown, forceReconcile = false) => {
+    // Issue #1902 rework (round 22, codex P2): an ambiguous (response-lost) outcome is the
+    // one case where the write may have actually landed despite `onError` already having
+    // shown a definite-failure banner — a stale-write 409 is a genuine, confirmed rejection
+    // of THIS request, so its banner stays accurate as-is.
+    const wasAmbiguous = error != null && isAmbiguousMutation(error) && !isStaleWrite(error);
     if (forceReconcile || (error && (isAmbiguousMutation(error) || isStaleWrite(error)))) {
       await Promise.allSettled([
         queryClient.invalidateQueries({ queryKey: queryKeys.encounter(encounterId) }),
@@ -216,9 +238,10 @@ export function ResourceTrackerPanel({
       const encounterOk = queryClient.getQueryState(queryKeys.encounter(encounterId))?.status !== 'error';
       const charactersOk = campaignId == null || queryClient.getQueryState(queryKeys.campaignCharacters(campaignId))?.status !== 'error';
       if (!encounterOk || !charactersOk) {
-        stuckKeysRef.current.add(key);
+        stuckKeysRef.current.set(key, wasAmbiguous);
         return;
       }
+      if (wasAmbiguous) setAmbiguousResolvedFor(key);
     }
     endPending(key);
   };

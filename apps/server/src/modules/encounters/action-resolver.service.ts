@@ -1775,7 +1775,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState);
+          // Issue #1902 rework (round 22, codex P2): a cascade off the actor's own
+          // concentration break can mirror a DIFFERENT character's sheet.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState)) sheetMirrored = true;
         }
         if (resolution.startsConcentration) {
           // Queued saves belong to the PRIOR effect and must never break the new one,
@@ -1937,7 +1939,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState);
+          // Issue #1902 rework (round 22, codex P2): same cascade-mirrors-a-third-sheet
+          // gap as the actor's own break above.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState)) sheetMirrored = true;
           tx.update(combatants).set({ turnState: toJsonText(nextTargetTurnState) }).where(eq(combatants.id, fresh.id)).run();
         }
 
@@ -2375,7 +2379,13 @@ export class ActionResolverService {
     round: number,
     caster: { id: number; name: string },
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] },
-  ): void {
+  ): boolean {
+    // Issue #1902 rework (round 22, codex P2): returns whether this cascade mirrored any
+    // character sheet, so both callers below can OR it into their own `sheetMirrored`
+    // flag — a caster/target dropping concentration can cascade a condition-removal write
+    // onto a THIRD, character-linked combatant that isn't the caster or the direct action
+    // target, which neither caller could see without this signal.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -2420,6 +2430,7 @@ export class ActionResolverService {
           .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     for (const r of removed) {
@@ -2445,5 +2456,6 @@ export class ActionResolverService {
     }
     turnState.concentration = null;
     turnState.pendingConcentrationChecks = [];
+    return sheetMirrored;
   }
 }

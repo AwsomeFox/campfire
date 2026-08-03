@@ -4640,7 +4640,11 @@ export class EncountersService {
           }
           const concentrationBroken = willBreakConcentration && isConcentrating;
           if (concentrationBroken) {
-            const { removed, casterInstances } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            // Issue #1902 rework (round 22, codex P2): a concentration cascade off this
+            // combatant's own HP change can mirror a DIFFERENT character's sheet — fold
+            // that into the flag this method's own `encounter.updated` emission reports.
+            const { removed, casterInstances, sheetMirrored: cascadeSheetMirrored } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            if (cascadeSheetMirrored) combatantSheetMirrored = true;
             concentrationCascades = removed;
             writeSet.turnState = toJsonText(turnState);
             if (conditionFieldsTouched) {
@@ -8223,7 +8227,16 @@ export class EncountersService {
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] } | null,
     casterExcluded: boolean,
     effectName?: string | null,
-  ): { removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[]; casterInstances?: ConditionInstance[] } {
+  ): {
+    removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[];
+    casterInstances?: ConditionInstance[];
+    sheetMirrored: boolean;
+  } {
+    // Issue #1902 rework (round 22, codex P2): report whether this cascade mirrored any
+    // character sheet, matching the same signal `action-resolver.service.ts`'s
+    // `breakConcentration` now returns — a cascade can touch a character-linked combatant
+    // other than the caster the caller already has in hand.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -8265,6 +8278,7 @@ export class EncountersService {
           .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     if (turnState) {
@@ -8280,6 +8294,7 @@ export class EncountersService {
         condition: r.condition,
       })),
       casterInstances,
+      sheetMirrored,
     };
   }
 }

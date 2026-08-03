@@ -446,9 +446,43 @@ describe('spell slot concurrency (real SQLite, service layer) — #1039', () => 
     // undo()'s own flag declaration, distinct from apply()'s.
     expect(src).toMatch(/undo\(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role\): \{ ok: true \} \{\s*\n\s*const encounter = this\.encounterRowOrThrow\(encounterId\);\s*\n[\s\S]*?let sheetMirrored = false;/);
     // Set at BOTH mirror sites (HP/condition restore, spell-slot refund) — same shape as
-    // apply()'s own tracking.
+    // apply()'s own tracking. Round 22 added 3 more (the two call sites' `if (...)
+    // sheetMirrored = true;` plus `breakConcentration`'s own cascade-loop assignment) — see
+    // the dedicated round-22 test below.
     const sheetMirroredAssignments = src.match(/sheetMirrored = true;/g) ?? [];
-    expect(sheetMirroredAssignments.length).toBe(4); // 2 in apply(), 2 in undo()
+    expect(sheetMirroredAssignments.length).toBe(7); // 2 apply() direct + 2 undo() + 3 round-22 cascade
     expect(src).toMatch(/this\.events\.emit\(\{ type: 'encounter\.updated', campaignId: encounter\.campaignId, encounterId: encounter\.id, sheetMirrored \}\);\s*\n\s*return \{ ok: true \};/);
+  });
+
+  /**
+   * Issue #1902 rework, round 22 (codex P2, reviewer-caught): breaking a caster's or a
+   * dropped target's concentration can CASCADE a condition-removal write onto a THIRD,
+   * character-linked combatant that is neither the caster nor the direct action target —
+   * `breakConcentration` writes that sheet but, before this round, its two callers in
+   * `apply()` had no way to see it, so the frame's `sheetMirrored` could read `false` even
+   * though a sheet genuinely changed. Fixed by having `breakConcentration` return whether it
+   * mirrored any sheet, and having both call sites OR that into their own flag. The
+   * matching `encounters.service.ts` `breakConcentration` (used by `updateCombatant`, a
+   * different method) got the identical treatment for the same reason.
+   */
+  it('#1902 rework (round 22): breakConcentration reports whether its cascade mirrored a sheet, and both callers OR it into their own sheetMirrored flag', () => {
+    const actionResolverSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/action-resolver.service.ts'), 'utf8');
+    // action-resolver.service.ts's breakConcentration now returns boolean, and sets it
+    // exactly where it performs the cascade's own character-sheet write.
+    expect(actionResolverSrc).toMatch(/private breakConcentration\(\s*\n[\s\S]*?\): boolean \{/);
+    expect(actionResolverSrc).toMatch(/return sheetMirrored;\s*\n\s*\}\s*\n\}/);
+    // Both call sites in apply() OR the return value into their own `sheetMirrored`.
+    expect(actionResolverSrc).toMatch(/if \(this\.breakConcentration\(tx, encounter\.id, encounter\.round, actor, turnState\)\) sheetMirrored = true;/);
+    expect(actionResolverSrc).toMatch(/if \(this\.breakConcentration\(tx, encounter\.id, encounter\.round, \{ id: fresh\.id, name: fresh\.name \}, nextTargetTurnState\)\) sheetMirrored = true;/);
+
+    const encountersSrc = readFileSync(resolve(__dirname, '../../src/modules/encounters/encounters.service.ts'), 'utf8');
+    // encounters.service.ts's breakConcentration (a distinct method, different signature)
+    // now also reports sheetMirrored on its return object.
+    expect(encountersSrc).toMatch(/sheetMirrored: boolean;\s*\n\s*\} \{/);
+    expect(encountersSrc).toMatch(/casterInstances,\s*\n\s*sheetMirrored,\s*\n\s*\};/);
+    // updateCombatant's own cascade call site ORs it into combatantSheetMirrored.
+    expect(encountersSrc).toMatch(
+      /const \{ removed, casterInstances, sheetMirrored: cascadeSheetMirrored \} = this\.breakConcentration\(tx, encounterId, combatantId, turnState, true\);\s*\n\s*if \(cascadeSheetMirrored\) combatantSheetMirrored = true;/,
+    );
   });
 });

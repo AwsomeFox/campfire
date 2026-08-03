@@ -397,7 +397,8 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/const encounterOk = queryClient\.getQueryState\(queryKeys\.encounter\(encounterId\)\)\?\.status !== 'error';/);
     expect(src).toMatch(/const charactersOk = campaignId == null \|\| queryClient\.getQueryState\(queryKeys\.campaignCharacters\(campaignId\)\)\?\.status !== 'error';/);
-    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) \{\s*\n\s*stuckKeysRef\.current\.add\(key\);\s*\n\s*return;\s*\n\s*\}/);
+    // Round 22: the stuck-set now stores whether the outcome was ambiguous, not just the key.
+    expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) \{\s*\n\s*stuckKeysRef\.current\.set\(key, wasAmbiguous\);\s*\n\s*return;\s*\n\s*\}/);
   });
 
   // Sixteenth-round finding (codex P2 + devin, same root cause): staying pending on a failed
@@ -410,7 +411,9 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('ResourceTrackerPanel automatically releases a stuck-pending control once the relevant queries actually recover', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/import \{ useEffect, useRef, useState \} from 'react';/);
-    expect(src).toMatch(/const stuckKeysRef = useRef<Set<string>>\(new Set\(\)\);/);
+    // Round 22: a Map (key -> wasAmbiguous), not a bare Set, so the release below can also
+    // decide whether to reclassify that key's failure banner.
+    expect(src).toMatch(/const stuckKeysRef = useRef<Map<string, boolean>>\(new Map\(\)\);/);
     // Eighteenth-round finding (codex P2): a PASSIVE query-cache subscription (round 16)
     // is unsound — an UNRELATED character's mutation calling `setQueryData` on the SAME
     // `campaignCharacters` key flips its overall status to 'success' too, even though the
@@ -427,9 +430,36 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/if \(!encounterOk \|\| !charactersOk\) return;/);
     // The interval actually releases the stuck keys from pendingKeys, not just clears its
     // own bookkeeping.
-    expect(src).toMatch(/for \(const key of releasing\) next = removePendingKey\(next, key\);/);
+    expect(src).toMatch(/for \(const key of releasing\.keys\(\)\) next = removePendingKey\(next, key\);/);
     // Cleans up the interval on unmount.
     expect(src).toMatch(/return \(\) => clearInterval\(interval\);/);
+  });
+
+  /**
+   * Issue #1902 rework, round 22 (codex P2, reviewer-caught) — an ambiguous mutation's
+   * `onError` sets a definite-failure banner before the outcome is actually known; if
+   * `endPendingAfterReconciling`'s reconciliation later confirms fresh state (whether
+   * immediately, or after a stuck-key auto-release), the write may well have landed, so the
+   * banner must be replaced with an outcome-unresolved message rather than left claiming a
+   * failure that invites a wasted (and potentially double-spending) retry. A stale-write 409
+   * is a genuine, confirmed rejection and is deliberately excluded — that banner stays as-is.
+   */
+  test('ResourceTrackerPanel reclassifies (does not just clear) a failure banner once an ambiguous mutation is confirmed reconciled', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    // A dedicated setter, keyed the same defensive way as clearErrorFor/setErrorFor — only
+    // replaces the banner if THIS key's failure is still the one showing.
+    expect(src).toMatch(
+      /const setAmbiguousResolvedFor = \(key: string\) =>\s*\n\s*setError\(\(prev\) => \(prev\?\.key === key \? \{ key, message: t\('encounters\.resourceTracker\.ambiguousResolved'\) \} : prev\)\);/,
+    );
+    // Computed once per reconciliation call, explicitly excluding stale-write (a genuine,
+    // confirmed rejection, not an unknown outcome).
+    expect(src).toMatch(
+      /const wasAmbiguous = error != null && isAmbiguousMutation\(error\) && !isStaleWrite\(error\);/,
+    );
+    // Direct (non-stuck) reconciliation path: fires right before releasing the key.
+    expect(src).toMatch(/if \(wasAmbiguous\) setAmbiguousResolvedFor\(key\);\s*\n\s*\}\s*\n\s*endPending\(key\);/);
+    // Stuck-key auto-release path: fires for every released key whose stored flag is true.
+    expect(src).toMatch(/for \(const \[key, wasAmbiguous\] of releasing\) if \(wasAmbiguous\) setAmbiguousResolvedFor\(key\);/);
   });
 
   // Fourteenth-round finding (codex P1 + devin, same root cause): `statblockMutation`'s CAS

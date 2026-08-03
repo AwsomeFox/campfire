@@ -118,6 +118,7 @@
       "restError": "Couldn't complete the rest.",
       "updateResourceError": "Couldn't update the resource.",
       "updateSlotError": "Couldn't update the spell slot.",
+      "ambiguousResolved": "We couldn't confirm that action completed at the time, but the values shown are now up to date — check them before retrying.",
       "setUsedTitle": "Set used to {{val}}"
     }
   }
