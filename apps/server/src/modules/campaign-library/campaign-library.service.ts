@@ -25,6 +25,7 @@ import { getRequestId } from '../../common/request-context';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { CampaignEventsService } from '../events/campaign-events.service';
 
 type LibraryTransaction = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type TemplateRef = { key: string; table: string; attachmentCommitted?: boolean };
@@ -54,6 +55,7 @@ export class CampaignLibraryService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CampaignLibraryMonster[]> {
@@ -218,6 +220,13 @@ export class CampaignLibraryService {
    * updated_at as a CAS fence so it never overwrites a subsequent editor's change. */
   private bulkEntityFields(campaignId: number, request: Exclude<LibraryBulkRequest, { taxonomyId: number }>, user: RequestUser, role: Role): LibraryBulkResult {
     const ts = nowIso();
+    // Issue #1901 review (chatgpt-codex-connector P2): a bulk move/archive that clears an
+    // equipped, action-granting item's equip state changes the owning character's merged
+    // usable-action list exactly like the single-item PATCH does (InventoryService.update),
+    // but this transactional path never emitted the invalidation — an already-open encounter
+    // card or /turn query stayed stale until an unrelated refetch. Collected here (escapes the
+    // synchronous transaction closure) and emitted once the transaction has committed.
+    const affectedCharacterIds = new Set<number>();
     const result = this.db.transaction((tx) => {
       const config = request.operation === 'set_visibility'
         ? { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'attachment']), field: 'hidden' }
@@ -313,6 +322,7 @@ export class CampaignLibraryService {
             .object({
               ownerType: z.string(),
               characterId: z.number().int().nullable(),
+              equipped: z.number().int().optional(),
             })
             .parse(snapshot.value);
           const moved = before.ownerType !== request.ownerType || before.characterId !== (request.characterId ?? null);
@@ -320,6 +330,13 @@ export class CampaignLibraryService {
             tx.run(
               sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
             );
+            // Issue #1901 review (chatgpt-codex-connector P2): the previous owner just lost
+            // this item's merged action (if any) — invalidate their cached actions/turn
+            // payload. The new owner never gains equip state through this path (always
+            // cleared above), so only the FORMER character owner needs the signal.
+            if (before.ownerType === 'character' && before.characterId != null && before.equipped === 1) {
+              affectedCharacterIds.add(before.characterId);
+            }
           } else {
             // No-op owner re-assignment: keep equip state intact, but bump updated_at so
             // the post-operation version fence still matches for undo.
@@ -331,16 +348,23 @@ export class CampaignLibraryService {
           // so a replacement can claim the slot, but equipped_action is inert while
           // equipped is false and should round-trip (the snapshot preserves it).
           const clearEquipOnArchive = request.operation === 'archive' && target.entityType === 'inventory_item';
-          const archiveClearAction = clearEquipOnArchive
-            ? (
-                z
-                  .object({
-                    ownerType: z.string(),
-                    characterId: z.number().int().nullable().optional(),
-                  })
-                  .parse(snapshots.find((s) => s.entityType === target.entityType && s.entityId === target.entityId)?.value).ownerType !== 'character'
-            )
-            : false;
+          const archiveSnapshot = clearEquipOnArchive
+            ? z
+                .object({
+                  ownerType: z.string(),
+                  characterId: z.number().int().nullable().optional(),
+                  equipped: z.number().int().optional(),
+                })
+                .parse(snapshots.find((s) => s.entityType === target.entityType && s.entityId === target.entityId)?.value)
+            : null;
+          const archiveClearAction = archiveSnapshot ? archiveSnapshot.ownerType !== 'character' : false;
+          // Issue #1901 review (chatgpt-codex-connector P2): archiving an equipped
+          // character-owned item drops it out of the merged action list the same way
+          // unequipping does (equippedItemActionRows only reads equipped=true rows) —
+          // invalidate the owner's cached actions/turn payload.
+          if (archiveSnapshot && archiveSnapshot.ownerType === 'character' && archiveSnapshot.characterId != null && archiveSnapshot.equipped === 1) {
+            affectedCharacterIds.add(archiveSnapshot.characterId);
+          }
           tx.run(
             sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
           );
@@ -355,12 +379,20 @@ export class CampaignLibraryService {
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk', entityType: 'campaign_library_bulk_operation', entityId: inserted.id, detail: request.operation, requestId: getRequestId() ?? null, createdAt: ts }).run();
       return inserted.id;
     });
+    for (const characterId of affectedCharacterIds) {
+      this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });
+    }
     return { operationId: result, applied: request.targets.length, undoAvailable: true };
   }
 
   async undoBulk(campaignId: number, operationId: number, user: RequestUser, role: Role) {
     const JournalRows = z.array(z.object({ id: z.number().int(), campaignId: z.number().int(), entityType: z.string(), entityId: z.number().int(), tagId: z.number().int().nullable(), collectionId: z.number().int().nullable(), createdAt: z.string() }).strict());
-    return this.db.transaction((tx) => {
+    // Issue #1901 review (chatgpt-codex-connector P2): undo can restore an equipped,
+    // action-granting item's equip state onto a character — same invalidation gap as
+    // bulkEntityFields above. Collected here so it escapes the transaction closure and is
+    // emitted once the transaction has committed.
+    const affectedCharacterIds = new Set<number>();
+    const result = this.db.transaction((tx) => {
       const operation = tx.select().from(campaignLibraryBulkOperations).where(and(eq(campaignLibraryBulkOperations.id, operationId), eq(campaignLibraryBulkOperations.campaignId, campaignId))).get();
       if (!operation) throw new NotFoundException(`Bulk operation ${operationId} not found`);
       // Claim before inverse writes; this gives concurrent callers exactly one winner.
@@ -437,6 +469,9 @@ export class CampaignLibraryService {
             tx.run(
               sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
+            // Issue #1901 review (chatgpt-codex-connector P2): the restored character gains
+            // this item's action back into their merged list — invalidate their cache.
+            if (canRestoreEquip) affectedCharacterIds.add(before.characterId!);
           } else {
             const scalar = z
               .object({
@@ -462,6 +497,11 @@ export class CampaignLibraryService {
                 .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
               const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
               tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              // Issue #1901 review (chatgpt-codex-connector P2): re-archiving may drop this
+              // item's action back out of the owner's merged list — invalidate their cache
+              // whenever the owner is a character (harmless extra invalidation if the item
+              // wasn't actually equipped going in; missing it is the real defect).
+              if (owner.ownerType === 'character' && owner.characterId != null) affectedCharacterIds.add(owner.characterId);
             } else if (row.entityType === 'inventory_item' && request.operation === 'archive') {
               // Undoing an ARCHIVE un-deletes the item AND restores its pre-archive equip
               // triple — subject to the same slot-safety check as the move-owner undo
@@ -479,6 +519,9 @@ export class CampaignLibraryService {
               tx.run(
                 sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
+              // Issue #1901 review (chatgpt-codex-connector P2): undoing the archive can
+              // restore this item's action into the owner's merged list.
+              if (canRestoreEquip && owner.characterId != null) affectedCharacterIds.add(owner.characterId);
             } else {
               tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
             }
@@ -528,6 +571,10 @@ export class CampaignLibraryService {
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: getRequestId() ?? null, createdAt: nowIso() }).run();
       return { operationId, undone: true, alreadyUndone: false };
     });
+    for (const characterId of affectedCharacterIds) {
+      this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });
+    }
+    return result;
   }
 
   /**

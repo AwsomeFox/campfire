@@ -81,6 +81,38 @@
         "label": "Notes",
         "help": "Optional short description or usage notes."
       }
+    },
+    "equip": {
+      "badge": "Equipped",
+      "equippedInSlot": "Equipped · {{slot}}",
+      "equipButton": "Equip",
+      "unequipButton": "Unequip",
+      "equipAria": "Equip {{name}}",
+      "unequipAria": "Unequip {{name}}",
+      "slotLabel": "Slot",
+      "slotPlaceholder": "Main hand, armor, ring…",
+      "slotHelp": "Where it's worn or wielded — any label works.",
+      "slotRequired": "A slot is required to equip an item.",
+      "grantsAction": "Grants combat action: {{name}}",
+      "conflictTitle": "Slot occupied",
+      "conflictBody": "\"{{incumbent}}\" is already equipped in \"{{slot}}\" on this character.",
+      "swapButton": "Replace {{incumbent}}",
+      "swapping": "Replacing…",
+      "slotSuggestions": {
+        "mainHand": "Main hand",
+        "offHand": "Off hand",
+        "twoHanded": "Two-handed",
+        "armor": "Armor",
+        "head": "Head",
+        "neck": "Neck",
+        "cloak": "Cloak",
+        "belt": "Belt",
+        "boots": "Boots",
+        "gloves": "Gloves",
+        "ring1": "Ring 1",
+        "ring2": "Ring 2",
+        "wondrous": "Wondrous item"
+      }
     }
   }
 }

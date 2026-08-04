@@ -614,6 +614,11 @@ export function TurnWorkspace({
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted flex-wrap mt-0.5">
                       <span className="tag tag-neutral">{a.source}</span>
+                      {/* Issue #1901 review (devin-ai-integration): the equipping item's name
+                          used to overwrite `source` itself, breaking tab bucketing and the
+                          spell-list heuristic above. It's carried in its own field now — still
+                          shown here, just no longer masquerading as the action-economy hint. */}
+                      {a.equippedItemName && <span className="tag tag-neutral">{`equipped: ${a.equippedItemName}`}</span>}
                       {rangeText && <span>{rangeText}</span>}
                       {targetText && <span>{targetText}</span>}
                     </div>

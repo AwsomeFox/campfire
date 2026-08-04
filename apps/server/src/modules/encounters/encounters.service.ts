@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -30,6 +30,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
   advanceEncounterTurn,
@@ -756,6 +757,16 @@ export class EncountersService {
     @Optional() @Inject(forwardRef(() => StorylinesService)) private readonly storylinesService?: StorylinesService,
     @Optional() @Inject(forwardRef(() => TimelineService)) private readonly timelineService?: TimelineService,
     @Optional() @Inject(forwardRef(() => CampaignsService)) private readonly campaignsService?: CampaignsService,
+    /**
+     * Issue #1901 — shares ActionResolverService's character-action merge (sheet actions +
+     * equipped-item actions, ONE index space) so `/turn` `suggestedActions.actionIndex` means
+     * the same action `listUsableActions`/`resolveSpec` do. No circular dependency (this
+     * service is not one of ActionResolverService's own dependencies), so this is a plain
+     * optional dependency, not a `forwardRef`. Optional + last so the many hand-constructed
+     * test doubles for this service (`test/**`) that predate #1901 keep compiling; absent, the
+     * character branch below falls back to its pre-#1901 sheet-only behavior.
+     */
+    @Optional() private readonly actionResolver?: ActionResolverService,
   ) {}
 
   /**
@@ -6764,6 +6775,8 @@ export class EncountersService {
         out.push({
           name: a.name.slice(0, 160),
           source,
+          // Monster/NPC statblock actions are never equipped-item rows.
+          equippedItemName: null,
           summary: bits.join(' · ').slice(0, 600),
           toHit: a.toHit ?? '',
           damage: a.damage ?? '',
@@ -6774,23 +6787,49 @@ export class EncountersService {
       }
     };
     if (c.kind === 'character' && c.characterId !== null) {
-      const [character] = await this.db.select({ actions: characters.actions }).from(characters).where(eq(characters.id, c.characterId)).limit(1);
-      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown }>>(character?.actions ?? null, []);
-      for (let i = 0; i < actions.length; i++) {
-        const a = actions[i];
+      const [character] = await this.db
+        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions })
+        .from(characters)
+        .where(eq(characters.id, c.characterId))
+        .limit(1);
+      if (!character) return out;
+      // Issue #1901: sheet actions + equipped-item actions, in the SAME merged index space
+      // ActionResolverService's listUsableActions/resolveSpec use — actionIndex N on this
+      // payload means the same action N on those. Falls back to sheet-only (pre-#1901
+      // behavior) when this service was constructed without the optional dependency (some
+      // hand-rolled test doubles predate it).
+      type ActionRow = { name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown };
+      const rows: Array<{ row: ActionRow; itemName: string | null }> = this.actionResolver
+        ? (this.actionResolver.characterUsableActionRows(character) as Array<{ row: ActionRow; itemName: string | null }>)
+        : fromJsonText<ActionRow[]>(character.actions, []).map((row) => ({ row, itemName: null }));
+      for (let i = 0; i < rows.length; i++) {
+        const { row: a, itemName } = rows[i];
         if (typeof a?.name !== 'string' || a.name.length === 0) continue;
         const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
-        const specParsed = zod.object({ spec: zod.unknown().optional() }).passthrough().safeParse(a);
-        const spec = specParsed.success ? specParsed.data.spec : undefined;
+        // Validate through the full ActionSpec schema (not a bare passthrough) — same as
+        // resolveSpec's `ActionSpec.safeParse(raw?.spec)` — so isResolvableSpec always sees
+        // a schema-defaulted spec (e.g. attack.bonus present as '' rather than absent) and
+        // this stays best-effort/defensive per the doc comment above rather than throwing on
+        // a spec shape that predates a field default or was never written through the
+        // validated character-upsert path.
+        const specParsed = ActionSpec.safeParse(a.spec);
+        const spec = specParsed.success ? specParsed.data : undefined;
         out.push({
           name: a.name.slice(0, 160),
+          // Issue #1901 review (devin-ai-integration): `source` is the Actions/Bonus/
+          // Reactions tab bucketing key AND the fallback spell-list detector on the web side
+          // (TurnWorkspace.tsx) — it must stay the action's economy/kind hint for an
+          // equipped-item row exactly like a sheet action, never the equipping item's name.
+          // The item name is carried separately via `equippedItemName` below so the UI can
+          // still label it without corrupting `source`'s established meaning.
           source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          equippedItemName: itemName,
           summary: bits.join(' · ').slice(0, 600),
           toHit: typeof a.toHit === 'string' ? a.toHit : '',
           damage: typeof a.damage === 'string' ? a.damage : '',
           actionIndex: i,
-          resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
-          spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
+          resolvable: isResolvableSpec(spec),
+          spec: spec ?? null,
         });
       }
       return out.slice(0, 100);
