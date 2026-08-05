@@ -2823,7 +2823,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const dmClient = await mcpClient(dmToken);
     const createResult = await dmClient.callTool({
       name: 'create_encounter',
-      arguments: { campaignId, name: 'MCP Vocab Fight' },
+      arguments: { campaignId, name: 'MCP Vocab Fight', hidden: false },
     });
     const encounter = parseResult(createResult) as {
       id: number;

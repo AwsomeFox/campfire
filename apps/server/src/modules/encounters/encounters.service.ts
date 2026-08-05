@@ -4628,7 +4628,14 @@ export class EncountersService {
     role: Role,
     options?: CombatantUpdateTransactionOptions,
   ): Promise<Combatant> {
-    const encounterRow = await this.getRowOrThrow(encounterId);
+    const encounterRow = await this.getRowOrThrow(encounterId, true);
+    // A hidden/prep encounter must be nonexistent for non-DMs (issue #262); otherwise a
+    // keyed replay's role-filtered fallback can 404 after the write already landed.
+    // Same-role, visible-encounter replays still replay the stored body; role-mismatched
+    // ones re-derive through `getWithCombatantsOrThrow` below.
+    if (!isVisibleTo({ hidden: encounterRow.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     // An operation key may name a result that already committed before the encounter
     // ended. Let the transaction check that claim first; fresh keyed writes still hit
     // the same guard inside the transaction below.
