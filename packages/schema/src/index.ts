@@ -12872,14 +12872,14 @@ export const CampaignLibraryTemplateInstantiate = z.object({ name: LibraryName.o
 export type CampaignLibraryTemplateInstantiate = z.infer<typeof CampaignLibraryTemplateInstantiate>;
 
 export const EncounterTemplateRosterEntry = z.object({
-  kind: CombatantKind,
+  kind: CombatantKind.exclude(['character']),
   name: z.string().min(1).max(120),
   statblock: CombatantStatblock.nullable().optional().default(null),
   hpMax: z.number().int().min(0),
   initMod: z.number().int().default(0),
   tokenSize: TokenSize.default('medium'),
   sortOrder: z.number().int().default(0),
-  count: z.number().int().min(1).max(100).default(1),
+  count: z.number().int().min(1).default(1),
 });
 export type EncounterTemplateRosterEntry = z.infer<typeof EncounterTemplateRosterEntry>;
 

@@ -852,7 +852,7 @@ export class CampaignLibraryService {
 
     const rosterEntries = groups.map((g) => ({
       kind: g.kind,
-      name: g.count > 1 ? g.baseName : (g.baseName || g.name),
+      name: g.count > 1 ? g.baseName : g.name,
       statblock: g.statblock,
       hpMax: g.hpMax,
       initMod: g.initMod,
@@ -922,14 +922,16 @@ export class CampaignLibraryService {
 
     if (type === 'encounter' && snapshot.roster !== undefined) {
       const parsedRoster = EncounterTemplateRoster.safeParse(snapshot.roster);
-      if (parsedRoster.success) {
-        let currentSortOrder = 0;
-        for (const entry of parsedRoster.data) {
-          const count = Math.max(1, entry.count ?? 1);
-          const names = count > 1 ? Array.from({ length: count }, (_, i) => `${entry.name} ${i + 1}`) : [entry.name];
-          const itemSortOrder = Math.max(currentSortOrder, entry.sortOrder ?? 0);
-          for (let i = 0; i < names.length; i++) {
-            const cName = names[i];
+      if (!parsedRoster.success) {
+        throw new BadRequestException(`Invalid encounter template roster: ${parsedRoster.error.message}`);
+      }
+      let currentSortOrder = 0;
+      for (const entry of parsedRoster.data) {
+        const count = Math.max(1, entry.count ?? 1);
+        const names = count > 1 ? Array.from({ length: count }, (_, i) => `${entry.name} ${i + 1}`) : [entry.name];
+        const itemSortOrder = Math.max(currentSortOrder, entry.sortOrder ?? 0);
+        for (let i = 0; i < names.length; i++) {
+          const cName = names[i];
             const statblockJson = entry.statblock
               ? toJsonText(entry.statblock)
               : entry.kind === 'monster'
@@ -956,7 +958,6 @@ export class CampaignLibraryService {
           currentSortOrder = itemSortOrder + names.length;
         }
       }
-    }
 
     return newId;
   }

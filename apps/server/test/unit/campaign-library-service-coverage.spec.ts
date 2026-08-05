@@ -7,7 +7,7 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import type { RequestUser } from '../../src/common/user.types';
-import { combatants, campaigns, characters, encounters, inventoryItems, npcs } from '../../src/db/schema';
+import { combatants, campaignLibraryTemplates, campaigns, characters, encounters, inventoryItems, npcs } from '../../src/db/schema';
 import { CombatantStatblock, EncounterTemplateRoster, EncounterTemplateRosterEntry } from '@campfire/schema';
 import { nowIso } from '../../src/common/time';
 
@@ -315,11 +315,49 @@ describe('CampaignLibraryService unit coverage tests', () => {
     const [enc] = await db.insert(encounters).values({ campaignId, name: 'Bare Encounter', createdAt: ts, updatedAt: ts }).returning();
     const template = await libraryService.saveTemplate(campaignId, { entityType: 'encounter', entityId: enc.id, name: 'Bare Template' }, dmActor, 'dm');
 
-    // Instantiate bare template
+    // Mutate stored snapshotJson to omit 'roster' completely to simulate legacy template
+    const [row] = await db.select().from(campaignLibraryTemplates).where(eq(campaignLibraryTemplates.id, template.id));
+    const rawSnapshot = JSON.parse(row.snapshotJson);
+    delete rawSnapshot.roster;
+    await db.update(campaignLibraryTemplates)
+      .set({ snapshotJson: JSON.stringify(rawSnapshot) })
+      .where(eq(campaignLibraryTemplates.id, template.id));
+
+    // Instantiate legacy bare template
     const instantiated = await libraryService.instantiateTemplate(campaignId, template.id, { name: 'Instantiated Bare' }, dmActor, 'dm');
     const newEncId = instantiated.entityId;
     const instantiatedCombatants = await db.select().from(combatants).where(eq(combatants.encounterId, newEncId));
     expect(instantiatedCombatants).toHaveLength(0);
+  });
+
+  it('preserves raw names for singleton entries and fails fast on invalid roster', async () => {
+    const ts = nowIso();
+    const [enc] = await db.insert(encounters).values({ campaignId, name: 'Boss Fight', createdAt: ts, updatedAt: ts }).returning();
+    await db.insert(combatants).values({
+      encounterId: enc.id,
+      kind: 'monster',
+      name: 'Goblin Boss 1',
+      hpMax: 30,
+      hpCurrent: 30,
+      initMod: 3,
+      sortOrder: 0,
+    });
+
+    const template = await libraryService.saveTemplate(campaignId, { entityType: 'encounter', entityId: enc.id, name: 'Boss Template' }, dmActor, 'dm');
+    const snapshot = template.snapshot as { roster?: Array<Record<string, unknown>> };
+    expect(snapshot.roster![0].name).toBe('Goblin Boss 1'); // Singleton raw name preserved!
+
+    const instantiated = await libraryService.instantiateTemplate(campaignId, template.id, { name: 'Instantiated Boss' }, dmActor, 'dm');
+    const instantiatedCombatants = await db.select().from(combatants).where(eq(combatants.encounterId, instantiated.entityId));
+    expect(instantiatedCombatants[0].name).toBe('Goblin Boss 1');
+
+    // Mutate stored snapshotJson to contain invalid roster
+    await db.update(campaignLibraryTemplates)
+      .set({ snapshotJson: JSON.stringify({ ...snapshot, roster: [{ invalidField: true }] }) })
+      .where(eq(campaignLibraryTemplates.id, template.id));
+
+    await expect(libraryService.instantiateTemplate(campaignId, template.id, { name: 'Fail' }, dmActor, 'dm'))
+      .rejects.toThrow();
   });
 });
 
