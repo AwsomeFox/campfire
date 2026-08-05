@@ -327,12 +327,22 @@ export interface OsrMigrationPreview {
  * campaign editing its own stored profile in place needs (there is no second slug to look up;
  * the "from" and "to" are the same slug's profile before/after the edit).
  */
+/**
+ * Element-wise list comparison. NOT `a.join() === b.join()`: a homebrew profile supplies its
+ * own `saves` / `conditions` vocabulary as free text (issue #1502), so `['poison,death']` and
+ * `['poison', 'death']` join to the same string and a real re-split of a save category would
+ * be reported as "no change" in the migration preview a DM reads before committing.
+ */
+function sameStringList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
 function diffMechanicsProfiles(from: OsrMechanicsProfile, to: OsrMechanicsProfile): string[] {
   const changes: string[] = [];
   if (from.abilityTable !== to.abilityTable) {
     changes.push(`Ability modifiers: ${from.abilityTable} (±${from.abilityCap}) → ${to.abilityTable} (±${to.abilityCap})`);
   }
-  if (from.saves.join() !== to.saves.join()) {
+  if (!sameStringList(from.saves, to.saves)) {
     changes.push(`Save categories: ${from.saves.length} (${from.saves.join(', ')}) → ${to.saves.length} (${to.saves.join(', ')})`);
   }
   if (from.acMode !== to.acMode || from.acAnchor !== to.acAnchor) {
@@ -348,7 +358,7 @@ function diffMechanicsProfiles(from: OsrMechanicsProfile, to: OsrMechanicsProfil
   }
   const fromConditions = from.conditions ?? OSR_CONDITIONS;
   const toConditions = to.conditions ?? OSR_CONDITIONS;
-  if (fromConditions.join() !== toConditions.join()) {
+  if (!sameStringList(fromConditions, toConditions)) {
     changes.push(`Conditions: ${fromConditions.length} (${fromConditions.join(', ')}) → ${toConditions.length} (${toConditions.join(', ')})`);
   }
   if (changes.length === 0) changes.push('No mechanics changes — profiles are identical.');

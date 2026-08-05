@@ -234,3 +234,39 @@ describe('Parity — a factory-produced homebrew adapter behaves like every othe
     expect(allAdapters).toContain(homebrewAdapter);
   });
 });
+
+describe('#1502 review — resolution and diff hardening', () => {
+  it('does not resolve an Object.prototype member as a rule-system adapter', () => {
+    // `ADAPTERS[ruleSystem]` truthiness walked the prototype chain, so a campaign whose
+    // ruleSystem happened to be 'constructor' / 'toString' / 'valueOf' resolved a builtin
+    // JS function as its combat adapter. Resolution now asks the same own-property predicate
+    // the server's homebrew-override guard asks.
+    for (const slug of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      expect(isRegisteredRuleSystemSlug(slug)).toBe(false);
+      expect(ruleSystemAdapter(slug)).toBe(Dnd5eAdapter);
+    }
+  });
+
+  it('still resolves a homebrew profile whose slug collides with an Object.prototype key', () => {
+    const profile: HomebrewMechanicsProfile = { ...validHomebrewProfile, slug: 'constructor' };
+    const adapter = ruleSystemAdapter('constructor', profile);
+    expect(adapter).not.toBe(Dnd5eAdapter);
+    expect(initiativeModelForAdapter(adapter).mode).toBe('group');
+  });
+
+  it('reports a re-split save list as a change instead of comparing joined strings', () => {
+    // `from.saves.join() !== to.saves.join()` cannot see this: both sides join to
+    // 'Grit,Sea Legs'. A homebrew author supplies `saves` as free text, so splitting one
+    // category into two is a real mechanics change a DM must see before committing.
+    const merged: HomebrewMechanicsProfile = { ...validHomebrewProfile, saves: ['Grit,Sea Legs'] };
+    const preview = previewMechanicsProfileMigration(merged, validHomebrewProfile);
+    expect(preview.changes.some((c) => c.includes('Save categories'))).toBe(true);
+    expect(preview.changes).not.toEqual(['No mechanics changes — profiles are identical.']);
+  });
+
+  it('reports a re-split condition list as a change too', () => {
+    const merged: HomebrewMechanicsProfile = { ...validHomebrewProfile, conditions: ['Soaked,Becalmed,Cursed'] };
+    const preview = previewMechanicsProfileMigration(merged, validHomebrewProfile);
+    expect(preview.changes.some((c) => c.includes('Conditions'))).toBe(true);
+  });
+});

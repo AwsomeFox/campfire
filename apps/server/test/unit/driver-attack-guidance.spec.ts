@@ -13,6 +13,7 @@ import {
   resolverImplementsSystemMath,
   rollBranchDamage,
   Sf2eAdapter,
+  type HomebrewMechanicsProfile,
   type OutcomeBranch,
 } from '@campfire/schema';
 
@@ -182,6 +183,62 @@ describe('attack / save guidance is gated on an adapter capability, and fails cl
 
   it('GROUNDING_PREAMBLE stays the 5e-shaped text, so existing callers are unchanged', () => {
     expect(GROUNDING_PREAMBLE).toBe(buildGroundingPreamble('dnd5e'));
+  });
+
+  // #1502 review. An unrecognized slug resolves to the 5e adapter, and that is honest: those
+  // campaigns really do get 5e maths. A slug BACKED BY A PERSISTED HOMEBREW PROFILE does not —
+  // it gets that profile's ability table, AC convention and initiative. Asking the gate with
+  // the slug alone kept answering "5e speaks this system" for exactly the campaigns that had
+  // just stopped being 5e, and this gate fails OPEN when it answers true: the model is told to
+  // resolve_action with commit:true and writes HP off arithmetic the table does not use.
+  it('withholds guidance from a campaign whose slug is backed by a homebrew mechanics profile', () => {
+    const profile: HomebrewMechanicsProfile = {
+      slug: 'my-pirate-hack',
+      label: 'Pirate Hack',
+      mechanicsSummary: 'A homebrew hack riding the OSR ability/save/AC/initiative shape.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit', 'Sea Legs'],
+      acMode: 'descending',
+      acAnchor: 9,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+    };
+
+    // Without the profile the slug is merely unrecognized, so it inherits 5e — the pre-#1502
+    // behaviour, deliberately unchanged.
+    expect(resolverSpeaksCampaignSystem('my-pirate-hack')).toBe(true);
+
+    // With it, the campaign's maths is the profile's, and the gate must close.
+    expect(resolverSpeaksCampaignSystem('my-pirate-hack', profile)).toBe(false);
+    const gated = buildGroundingPreamble('my-pirate-hack', profile);
+    expect(gated).not.toMatch(/To resolve an ATTACK, call resolve_action/);
+    expect(gated).not.toMatch(/call saving_throw with the character and the DC/);
+    expect(gated).not.toMatch(/commit\s*:\s*true/i);
+    expect(gated).toMatch(/let the human DM make the call/);
+  });
+
+  it('ignores a stale profile whose slug no longer matches the campaign, exactly as resolution does', () => {
+    // Resolution only honours an exact slug match, so a leftover profile must not be able to
+    // close the gate for an unrelated system either — the two must agree, or the prompt would
+    // describe a system the resolver is not actually using.
+    const stale: HomebrewMechanicsProfile = {
+      slug: 'some-other-hack',
+      label: 'Other',
+      mechanicsSummary: 'Stale.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'descending',
+      acAnchor: 9,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+    };
+    expect(resolverSpeaksCampaignSystem('my-pirate-hack', stale)).toBe(true);
   });
 });
 

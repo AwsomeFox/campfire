@@ -6073,7 +6073,12 @@ export function ruleSystemAdapter(
   ruleSystem?: string | null,
   customMechanicsProfile?: OsrMechanicsProfile | null,
 ): RuleSystemAdapter {
-  if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
+  // `isRegisteredRuleSystemSlug`, not `ADAPTERS[ruleSystem]` truthiness: bracket access walks
+  // the prototype chain, so a campaign whose slug is 'constructor' / 'toString' / 'valueOf'
+  // would resolve an Object.prototype member as its combat adapter. Using the same predicate
+  // the server's homebrew-override guard uses also keeps the two definitions of "this is a
+  // built-in system" from drifting apart.
+  if (ruleSystem && isRegisteredRuleSystemSlug(ruleSystem)) return ADAPTERS[ruleSystem];
   if (ruleSystem && customMechanicsProfile && customMechanicsProfile.slug === ruleSystem) {
     return createOsrVariantAdapter(customMechanicsProfile);
   }

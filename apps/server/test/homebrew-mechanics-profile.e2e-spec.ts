@@ -122,6 +122,46 @@ describe('campaign customMechanicsProfile (issue #1502, e2e)', () => {
     expect(patchRes.body.customMechanicsProfile).toBeNull();
   });
 
+  it('accepts a PATCH that re-sends the homebrew ruleSystem without re-sending the profile', async () => {
+    // #1502 review. `validateRuleSystem` demands an installed rule pack unless a profile backs
+    // the slug, and it was satisfied only by a profile in the SAME request. A homebrew campaign
+    // therefore became un-PATCHable the moment any request echoed its own ruleSystem — which a
+    // full-object update from the settings form does on every save — 400ing on a value it
+    // already held. The stored profile now counts as backing.
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Echo Campaign', ruleSystem: 'e2e-echo-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-echo-hack' } });
+    expect(createRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${createRes.body.id}`)
+      .set(dm)
+      .send({ name: 'Echo Campaign renamed', ruleSystem: 'e2e-echo-hack' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.name).toBe('Echo Campaign renamed');
+    // The profile is untouched, not re-derived or cleared.
+    expect(patchRes.body.customMechanicsProfile).toMatchObject({ slug: 'e2e-echo-hack', abilityTable: 'sw-banded' });
+  });
+
+  it('still rejects clearing the profile while keeping the now-unbacked homebrew ruleSystem', async () => {
+    // The relaxation above must not become "a homebrew slug is always fine". Explicitly
+    // removing the profile leaves the slug backed by nothing, which is the exact state
+    // validateRuleSystem exists to catch.
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Unback Campaign', ruleSystem: 'e2e-unback-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-unback-hack' } });
+    expect(createRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${createRes.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: 'e2e-unback-hack', customMechanicsProfile: null });
+    expect(patchRes.status).toBe(400);
+    expect(patchRes.body.message).toMatch(/does not match any installed rule pack/i);
+  });
+
   it('carries customMechanicsProfile over on campaign clone (otherwise a clone would silently fall back to 5e)', async () => {
     const createRes = await request(server)
       .post('/api/v1/campaigns')

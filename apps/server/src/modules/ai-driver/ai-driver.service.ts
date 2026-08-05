@@ -27,6 +27,7 @@ import {
   buildNarrationLanguageContract,
   DriverSessionProfile,
   DriverToolPolicyClass,
+  type HomebrewMechanicsProfile,
   resolveNarrationLanguage,
   resolverImplementsSystemMath,
   ruleSystemAdapter,
@@ -1209,12 +1210,24 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * Inverted, an unaudited system withholds guidance — the failure mode becomes "the AI was not
  * told resolve_action exists", not "the AI committed HP that never should have been lost".
  *
- * Today this is true for 5e alone, plus the unknown/empty/homebrew slugs `ruleSystemAdapter`
+ * Today this is true for 5e alone, plus the unknown/empty slugs `ruleSystemAdapter`
  * deliberately resolves to the 5e adapter (5e maths is genuinely what those campaigns get).
  * The adapter work that widens it is tracked in #1598 and #1599.
+ *
+ * **#1502 review:** `customMechanicsProfile` must be threaded through, not dropped. Once a
+ * campaign persists a homebrew profile, its slug no longer resolves to 5e — it resolves to
+ * that profile's own adapter, whose ability table, AC convention and initiative are the
+ * table's, not 5e's. Asking with the slug alone would keep answering "5e" for exactly the
+ * campaigns that just stopped being 5e, and this gate fails OPEN when it answers true: the
+ * model would be told to `resolve_action` with `commit:true` and write HP off arithmetic
+ * this table does not use. The profile-resolved adapter declares no `ResolverMathProfile`,
+ * so threading it makes the gate withhold guidance — the fail-safe direction.
  */
-export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolean {
-  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem));
+export function resolverSpeaksCampaignSystem(
+  ruleSystem?: string | null,
+  customMechanicsProfile?: HomebrewMechanicsProfile | null,
+): boolean {
+  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem, customMechanicsProfile));
 }
 
 /**
@@ -1227,7 +1240,10 @@ export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolea
  * model is told so plainly and told to defer to the human DM: less capable than the ungated
  * text, and strictly more correct.
  */
-export function buildGroundingPreamble(ruleSystem?: string | null): string {
+export function buildGroundingPreamble(
+  ruleSystem?: string | null,
+  customMechanicsProfile?: HomebrewMechanicsProfile | null,
+): string {
   return [
   'You are the AI Dungeon Master running a live tabletop scene. Narrate vividly but stay grounded:',
   '- Never invent rules — call lookup_rule / get_rule_entry and cite the rule you used.',
@@ -1271,7 +1287,7 @@ export function buildGroundingPreamble(ruleSystem?: string | null): string {
   // between a standalone save and an action-embedded one is only worth teaching to a table
   // whose rules that maths actually is.
   '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
-  ...(resolverSpeaksCampaignSystem(ruleSystem)
+  ...(resolverSpeaksCampaignSystem(ruleSystem, customMechanicsProfile)
     ? [
         '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage and applies that system’s own critical rule, applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call. Narrate the totals it returns — never recompute a crit yourself, and never assume one system’s crit maths applies at this table.',
         '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` (negative for a penalty: `1d8-1` is {"formula":"1d8","flat":-1}) — that split is what lets the server apply this system’s critical rule to the right half, so "1d8+3" as a formula gives wrong crit damage.',
@@ -7613,7 +7629,7 @@ export class AiDriverService {
     const campaign = await this.campaigns.getOrThrow(campaignId);
     const sessionForPrompt = session ?? this.ensureSession(campaignId);
     const parts: string[] = [
-      buildGroundingPreamble(campaign.ruleSystem),
+      buildGroundingPreamble(campaign.ruleSystem, campaign.customMechanicsProfile),
       GROUNDING_CITATION_CONTRACT,
       UNTRUSTED_INPUT_PREAMBLE,
     ];

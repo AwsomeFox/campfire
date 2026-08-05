@@ -691,11 +691,25 @@ export class CampaignsService {
         );
       }
     }
-    await this.validateRuleSystem(input.ruleSystem, customMechanicsProfileInput != null);
     // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
     // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
     // customMechanicsProfile write is validated against the slug it will actually pair with.
     const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
+    // the rule-pack requirement has to be satisfied by the profile the campaign will actually
+    // have after this write — not only by one re-sent in the same request. Without the second
+    // clause a homebrew campaign becomes un-PATCHable the moment any request echoes its own
+    // `ruleSystem` (a full-object PUT-style update from the settings form does exactly that):
+    // no rule pack carries that slug, so it 400s on a value it already holds.
+    // An explicit `customMechanicsProfile: null` deliberately does NOT satisfy it — that
+    // request is removing the profile, and leaving the slug unbacked is the error this check
+    // exists to catch.
+    const profileBacksEffectiveRuleSystem =
+      customMechanicsProfileInput != null ||
+      (customMechanicsProfileInput === undefined &&
+        existing.customMechanicsProfile != null &&
+        existing.customMechanicsProfile.slug === effectiveRuleSystem);
+    await this.validateRuleSystem(input.ruleSystem, profileBacksEffectiveRuleSystem);
     let nextCustomMechanicsProfile: string | null | undefined;
     if (customMechanicsProfileInput !== undefined) {
       // Explicitly set (or cleared with null) in this request.
