@@ -177,6 +177,7 @@ export class CampaignPlayerDisplayController {
   @Get('encounters/:encounterId/map')
   @CAST_MAP_THROTTLE
   @ApiOperation({ summary: 'Get a viewer-safe map for the authenticated Player Display preview', description: 'Requires campaign membership. Map bytes are always rendered as viewer, even when the authenticated caller is a DM.' })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
   @ApiResponse({ status: 200, description: 'Viewer-safe battle-map bytes.' })
   async map(
     @Param('campaignId', ParseIntPipe) campaignId: number,
