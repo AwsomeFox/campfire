@@ -387,4 +387,39 @@ describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
 
     await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
   });
+
+  // Issue #1898 review: rulesLookup() is a fourth internal caller of RulesService.search
+  // alongside REST /rules/search, REST /rules/entries/:id, and MCP lookup_rule — all three
+  // of which now scope to the campaign's homebrew. This call site had campaignId and user
+  // in scope on its own method signature already, so omitting them was the same defect,
+  // just not enumerated in the issue's list: a campaign's own homebrew ruling reported as
+  // "no entry" instead of being found.
+  it('finds a campaign homebrew entry the installed pack alone does not have (#1898)', async () => {
+    const dnd = await uploadPack(dndPack);
+    const campaignId = await h.createCampaign('Homebrew Rules Lookup');
+    await h.configureSeat(campaignId, seat);
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: dnd.slug });
+
+    const homebrew = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'shadow-grapple',
+        name: 'Shadow Grapple',
+        type: 'condition',
+        summary: '',
+        body: 'A shadow-bound creature cannot be moved by anything but its captor.',
+        rightsStatus: 'private_original',
+      });
+    expect(homebrew.status).toBe(201);
+
+    // Not in the installed D&D pack at all — before the fix this reported "no entry".
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'Shadow Grapple' }, player);
+    expect(res.status).toBe(201);
+    expect(res.body.result).not.toMatch(/no entry/i);
+    expect(res.body.result).toContain('Shadow Grapple');
+    expect(res.body.result).toContain('shadow-bound creature');
+
+    await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
+  });
 });

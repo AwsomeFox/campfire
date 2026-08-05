@@ -7192,7 +7192,13 @@ export class AiDriverService {
       return { query, result: renderNoRuleSystem(query) };
     }
 
-    const page = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    // Issue #1898 review: campaignId/user were already both in scope on this method's
+    // own signature — this is a fourth internal caller of the same read the issue's
+    // three other call sites (REST search, REST entry, MCP lookup_rule) now scope,
+    // not the MCP tokenContext case (which would have needed a novel ambient default).
+    // Without it, the AI-DM's rules lookup silently stayed pack-only and reported no
+    // match for a campaign's own homebrew rulings.
+    const page = await this.rules.search({ q: query, pack: pack.slug, campaignId }, 5, user);
     if (page.items.length === 0) {
       return { query, result: renderNoMatch(query, pack) };
     }
