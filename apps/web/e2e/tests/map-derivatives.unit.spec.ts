@@ -17,7 +17,7 @@ import { buildSrcSet, encounterMapSrcSet, planEncounterMapResponsive } from '../
 import { isSensitiveApiPathname, matchApiJsonCache, matchNetworkOnlyApi } from '../../src/lib/pwaCachePolicy';
 
 const REGION_MAP = resolve(__dirname, '../../src/features/dashboard/RegionMap.tsx');
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 /** A landscape map whose rungs have the real (non-square) widths the server reports. */
 function landscapeManifest(): AttachmentDerivativeManifest {
@@ -110,7 +110,7 @@ test.describe('map surfaces consume the ladder (issue #604)', () => {
   });
 
   test('the battle map renders srcSet and a derivative status row', () => {
-    const src = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const src = readFileSync(BATTLE_MAP, 'utf8');
     expect(src).toContain('encounterMapSrcSet');
     expect(src).toContain('srcSet={mapSrcSet}');
     expect(src).toContain('battle-map-derivative-status');

@@ -8,7 +8,7 @@ const GET_A_MAP_PANEL = resolve(ROOT, 'src/components/GetAMapPanel.tsx');
 const GENERATE_MAP_PANEL = resolve(ROOT, 'src/components/GenerateMapPanel.tsx');
 const EXTERNAL_GENERATOR_CARD = resolve(ROOT, 'src/components/ExternalGeneratorCard.tsx');
 const HANDOUTS_CARD = resolve(ROOT, 'src/features/dashboard/HandoutsCard.tsx');
-const RUN_SESSION_PAGE = resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(ROOT, 'src/features/encounters/map/BattleMap.tsx');
 const REGION_MAP = resolve(ROOT, 'src/features/dashboard/RegionMap.tsx');
 
 test.describe('maps onboarding concepts (issue #520)', () => {
@@ -40,7 +40,7 @@ test.describe('maps onboarding concepts (issue #520)', () => {
 
   test('region, encounter, and handout surfaces declare their saving purpose', () => {
     expect(readFileSync(REGION_MAP, 'utf8')).toContain('surfacePurpose="world"');
-    expect(readFileSync(RUN_SESSION_PAGE, 'utf8')).toContain('surfacePurpose="encounter"');
+    expect(readFileSync(BATTLE_MAP, 'utf8')).toContain('surfacePurpose="encounter"');
     expect(readFileSync(HANDOUTS_CARD, 'utf8')).toContain('purpose="handout"');
   });
 
@@ -54,7 +54,7 @@ test.describe('maps onboarding concepts (issue #520)', () => {
   });
 
   test('encounter map explains player-safe cast/fog preview', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toContain('map-player-preview-note');
     expect(source).toContain('map-fog-player-preview');
     expect(source).toContain('player-safe fog projection');

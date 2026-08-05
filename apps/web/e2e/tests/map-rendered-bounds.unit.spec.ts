@@ -18,7 +18,7 @@ import {
   snapMapPercent,
 } from '../../src/features/encounters/mapRenderedBounds';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const BOUNDS_MODULE = resolve(__dirname, '../../src/features/encounters/mapRenderedBounds.ts');
 
 /** Classic 16:9 surface used by the battle-map shell (836×470 ≈ the audit repro). */
@@ -188,8 +188,8 @@ test.describe('letterbox interaction rejection (issue #464)', () => {
 
 test.describe('RunSessionPage wires the shared transform (issue #464)', () => {
   test('imports mapRenderedBounds helpers instead of hard-coding surface width for cells', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/from ['"]\.\/mapRenderedBounds['"]/);
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    expect(source).toMatch(/from ['"]\.\.\/mapRenderedBounds['"]/);
     expect(source).toMatch(/computeContainedRect/);
     expect(source).toMatch(/pointerToMapPercent/);
     // Cell size now flows through the shared grid-calibration transform (#417) rather than a

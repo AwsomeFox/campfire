@@ -14,7 +14,7 @@ import {
   TOKEN_FOOTPRINT_CELLS,
 } from '../../src/features/encounters/tokenFootprint';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const FOOTPRINT_MODULE = resolve(__dirname, '../../src/features/encounters/tokenFootprint.ts');
 
 test.describe('tokenFootprintCells (issue #468)', () => {
@@ -70,8 +70,8 @@ test.describe('tokenDiameterPx scales with grid (issue #468)', () => {
 
 test.describe('RunSessionPage wires tokenFootprint (issue #468)', () => {
   test('derives token size from grid cells, not fixed BASE_TOKEN_PX', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/from ['"]\.\/tokenFootprint['"]/);
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    expect(source).toMatch(/from ['"]\.\.\/tokenFootprint['"]/);
     expect(source).toMatch(/tokenDiameterPx/);
     expect(source).not.toMatch(/BASE_TOKEN_PX/);
     expect(source).not.toMatch(/TOKEN_SIZE_SCALE/);
