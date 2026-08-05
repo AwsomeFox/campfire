@@ -4895,9 +4895,12 @@ export class EncountersService {
       const parsed = options?.replayCombatant
         ? options.replayCombatant(prior.response)
         : ((prior.response as Combatant | null) ?? null);
-      if (!parsed) return null;
-      if (prior.responseRole === role) return parsed;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      if (parsed && prior.responseRole === role) return parsed;
+      // A stored body may be missing or unparseable while the combatant still exists
+      // (race/winner wrote a null response). Fall back to a current, role-filtered
+      // projection — and tolerate a trashed encounter so an already-committed result
+      // can still be replayed (issue #1990).
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
       return snapshot.combatants.find((c) => c.id === combatantId) ?? null;
     };
 

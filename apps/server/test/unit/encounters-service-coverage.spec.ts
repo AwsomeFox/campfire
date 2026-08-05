@@ -12,7 +12,7 @@ import { CampaignLibraryService } from '../../src/modules/campaign-library/campa
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { eq } from 'drizzle-orm';
-import { campaigns, characters, npcs } from '../../src/db/schema';
+import { campaigns, characters, encounterOpIdempotency, npcs } from '../../src/db/schema';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
 
@@ -432,7 +432,44 @@ describe('EncountersService unit coverage tests', () => {
     );
 
     expect(playerResult.name).toBe('Redacted');
-    expect(spy).toHaveBeenCalledWith(enc.id, 'player');
+    expect(spy).toHaveBeenCalledWith(enc.id, 'player', undefined, true);
     spy.mockRestore();
+  });
+
+  it('replays a keyed updateCombatant from current state when the stored response body is missing', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Null Body Replay', hidden: false }, dmActor, 'dm');
+    const goblin = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Goblin', kind: 'monster', hpMax: 10 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+
+    const key = 'null-body-key';
+    const result = await encountersService.updateCombatant(
+      enc.id,
+      goblin.id,
+      { hpDelta: -3, idempotencyKey: key },
+      dmActor,
+      'dm',
+    );
+    expect(result.hpCurrent).toBe(7);
+
+    // Simulate a committed claim whose response body was never backfilled (or was lost).
+    await db
+      .update(encounterOpIdempotency)
+      .set({ responseJson: null })
+      .where(eq(encounterOpIdempotency.key, key));
+
+    const replay = await encountersService.updateCombatant(
+      enc.id,
+      goblin.id,
+      { hpDelta: -3, idempotencyKey: key },
+      dmActor,
+      'dm',
+    );
+    expect(replay.hpCurrent).toBe(7);
   });
 });
