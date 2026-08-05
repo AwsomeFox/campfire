@@ -905,10 +905,9 @@ export class EncountersService {
       .where(eq(campaigns.id, campaignId))
       .get();
     if (!campaign) throw new NotFoundException('Campaign not found');
-    if (campaign.deletedAt != null) throw new NotFoundException('Campaign not found');
-    if (campaign.status !== 'active') {
+    if (campaign.deletedAt != null || campaign.status !== 'active') {
       throw new ForbiddenException(
-        `Campaign is ${campaign.status} (read-only) — set its status back to 'active' to make changes`,
+        `Campaign is ${campaign.deletedAt != null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
       );
     }
   }
@@ -4436,22 +4435,26 @@ export class EncountersService {
     // removed or the campaign became read-only. The controller/MCP tool has already
     // checked current campaign membership and role; this lookup performs no domain
     // write and is keyed to that authorized actor, encounter, and target.
-    const replayCommittedDeathSave = (): { combatant: Combatant; roll: DiceRoll } | null => {
-      let replay: { combatant: Combatant; roll: DiceRoll } | null = null;
-      this.db.transaction((tx) => {
-        const prior = findPriorEncounterOp(tx, deathSaveClaim, Date.now());
-        replay = prior ? replayResponse(prior.response) : null;
-      });
-      return replay;
+    const replayCommittedDeathSave = async (): Promise<{ combatant: Combatant; roll: DiceRoll } | null> => {
+      const prior = this.db.transaction((tx) => findPriorEncounterOp(tx, deathSaveClaim, Date.now()));
+      if (!prior) return null;
+      const parsed = replayResponse(prior.response);
+      if (!parsed) return null;
+      if (prior.responseRole === role) return parsed;
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (!found) return null;
+      return { combatant: found, roll: parsed.roll };
     };
-    const earlyReplay = replayCommittedDeathSave();
+    const earlyReplay = await replayCommittedDeathSave();
     if (earlyReplay) return earlyReplay;
 
     try {
-      // Fresh death saves retain the normal archive protection. Recheck inside the
-      // write transaction below as well, so an archive racing this request cannot
-      // admit a new result after the preflight succeeds.
-      await this.assertCampaignWritableForFreshDeathSave(encounter.campaignId);
+      // Reject an already archived/trashed campaign before any further work, so an
+      // ended encounter does not mask the 403 (issue #1759). `updateCombatant` repeats
+      // the canonical in-transaction check, so a race that trashes the campaign after
+      // this preflight still cannot admit a new result.
+      this.assertCampaignWritableInTx(this.db, encounter.campaignId);
       const adapter = await this.adapterForCampaign(encounter.campaignId);
       if (!hasDeathSavesForAdapter(adapter)) {
         throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
@@ -4470,7 +4473,6 @@ export class EncountersService {
       }
 
       let roll: DiceRoll | null = null;
-      let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
       const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
       const updated = await this.updateCombatant(
         encounterId,
@@ -4484,7 +4486,6 @@ export class EncountersService {
           // target, not that random face, so the same intent replays before any new RNG work.
           operationFingerprint,
           beforeWriteInTransaction: (tx, fresh, freshEncounter) => {
-            this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
             this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
@@ -4561,24 +4562,26 @@ export class EncountersService {
           },
           deathSaveEventsInTransaction: true,
           operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
-          replayCombatant: (response) => {
-            replayed = replayResponse(response);
-            return replayed?.combatant ?? null;
-          },
+          replayCombatant: (response) => replayResponse(response)?.combatant ?? null,
         },
       );
-      if (replayed) return replayed;
-      if (roll === null) throw new Error('Death-save dice roll was not persisted');
-      const persistedRoll = roll as DiceRoll;
-      this.rolls.emitDiceRolled?.(persistedRoll);
+      if (roll === null) {
+        // updateCombatant replayed (or lost a race to) an existing keyed result.
+        // Recover the full death-save response, re-derived for the caller's role.
+        const replay = await replayCommittedDeathSave();
+        if (replay) return replay;
+        throw new Error('Death-save dice roll was not persisted');
+      }
 
-      return { combatant: updated, roll: persistedRoll };
+      this.rolls.emitDiceRolled?.(roll);
+
+      return { combatant: updated, roll };
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but
       // before a mutable-row preflight (for example, before another DM removes the
       // combatant). Recheck the stored outcome before surfacing that later 404/409 so
       // an ambiguous retry still recovers the committed authoritative result.
-      const lateReplay = replayCommittedDeathSave();
+      const lateReplay = await replayCommittedDeathSave();
       if (lateReplay) return lateReplay;
       throw err;
     }
@@ -4587,37 +4590,6 @@ export class EncountersService {
   /** Kept as a seam for deterministic death-save endpoint regressions. */
   private rollDeathSaveD20(): RollResult {
     return rollDice('1d20');
-  }
-
-  private async assertCampaignWritableForFreshDeathSave(campaignId: number): Promise<void>;
-  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx: SyncDb): void;
-  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx?: SyncDb): Promise<void> | void {
-    if (tx) {
-      const [campaign] = tx
-        .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
-        .from(campaigns)
-        .where(eq(campaigns.id, campaignId))
-        .limit(1)
-        .all();
-      if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
-        throw new ForbiddenException(
-          `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
-        );
-      }
-      return;
-    }
-    return this.db
-      .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
-      .from(campaigns)
-      .where(eq(campaigns.id, campaignId))
-      .limit(1)
-      .then(([campaign]) => {
-        if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
-          throw new ForbiddenException(
-            `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
-          );
-        }
-      });
   }
 
   private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
@@ -4907,7 +4879,10 @@ export class EncountersService {
           ),
         }
       : null;
-    let replayedCombatant: Combatant | null = null;
+    // Issue #1990: keyed replay must be resolved outside the synchronous transaction
+    // callback because role-filtered re-derivation (getWithCombatantsOrThrow) is async.
+    // The prior is captured here and resolved below after the transaction commits.
+    let priorFromReplay: EncounterOpPrior | null = null;
     // Issue #1902 rework (round 21, codex P2 sweep continuation): read after the
     // transaction commits, at this method's own `emitEncounterEvent` call below — see
     // `ActionResolverService.apply()`'s `sheetMirrored` doc comment for the general
@@ -4916,19 +4891,25 @@ export class EncountersService {
     // here into an outer-scope flag the same way.
     let combatantSheetMirrored = false;
 
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant | null> => {
+      const parsed = options?.replayCombatant
+        ? options.replayCombatant(prior.response)
+        : ((prior.response as Combatant | null) ?? null);
+      if (!parsed) return null;
+      if (prior.responseRole === role) return parsed;
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      return snapshot.combatants.find((c) => c.id === combatantId) ?? null;
+    };
+
     try {
       this.db.transaction((tx) => {
         if (opClaim) {
           const prior = findPriorEncounterOp(tx, opClaim, Date.now());
           if (prior) {
-            // Already applied. Return the ORIGINAL committed combatant — the retrying
-            // client does not know the outcome, so the committed HP is the whole point.
-            // (A missing body cannot happen here: the combatant response is stored inside
-            // this transaction, never backfilled. Fall back defensively anyway.)
-            replayedCombatant = options?.replayCombatant
-              ? options.replayCombatant(prior.response)
-              : (prior.response as Combatant | null) ?? null;
-            if (replayedCombatant) return;
+            // Already applied. Capture the prior outside this synchronous transaction
+            // so role-filtered replay can perform async work (issue #1990).
+            priorFromReplay = prior;
+            return;
           }
         }
         // No matching committed response: this is a fresh write. Re-read the encounter
@@ -4937,6 +4918,7 @@ export class EncountersService {
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
         this.assertMutable(freshEncounter);
+        this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
         // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
         // THIS transaction-local row, not just the pre-transaction `encounterRow` checked
         // above — the same reason `freshEncounter` itself is re-read here rather than reused
@@ -5285,22 +5267,23 @@ export class EncountersService {
     } catch (err) {
       if (err instanceof EncounterOpRaceMarker) {
         // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
-        // Replay their response so exactly one apply survives (issue #580).
+        // Replay their response so exactly one apply survives (issue #580), re-deriving
+        // for the caller's current role (issue #1990).
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response) {
-          const replayed = options?.replayCombatant
-            ? options.replayCombatant(prior.response)
-            : (prior.response as Combatant | null);
-          if (replayed) return replayed;
-        }
-        return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
+        const replayed = await resolveReplay(prior);
+        if (replayed) return replayed;
+        throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       throw err;
     }
 
     // An idempotent replay stops here: no second audit row, no duplicate combat-log
     // events, no second SSE nudge — the first attempt already produced all of those.
-    if (replayedCombatant) return replayedCombatant;
+    if (priorFromReplay) {
+      const replayedCombatant = await resolveReplay(priorFromReplay);
+      if (replayedCombatant) return replayedCombatant;
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+    }
 
     // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
     // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
