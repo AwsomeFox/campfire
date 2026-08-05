@@ -118,8 +118,25 @@ test.describe('combat tracker — DM view', () => {
       // unusable at tablet width — clipped or unreachable. A control clipped horizontally
       // cannot be brought into view by scrolling in a layout that does not scroll on x, so
       // it still fails here; what no longer fails is "the page happened to be scrolled".
-      await control.scrollIntoViewIfNeeded();
-      await expect(control).toBeInViewport();
+      // Re-scroll on EVERY attempt (review). A single `scrollIntoViewIfNeeded()` before a
+      // retrying assertion leaves the same race one notch further along: the auto-scroll
+      // happens at an unpredictable moment after load, so if it lands between the scroll and
+      // the poll, `toBeInViewport` re-measures without ever re-scrolling and fails with the
+      // identical `viewport ratio 0`. Polling around the scroll closes that window.
+      //
+      // The predicate asserts full containment rather than a non-zero ratio, which is the
+      // stricter reading of #762 and keeps the guard that matters: a control clipped on the x
+      // axis fails `left >= 0 && right <= innerWidth` and cannot be scrolled out of that,
+      // because this layout does not scroll horizontally.
+      await expect
+        .poll(async () => {
+          await control.scrollIntoViewIfNeeded();
+          return control.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth;
+          });
+        })
+        .toBe(true);
     }
     await expect(page.getByTestId('player-display-status')).toBeVisible();
     await expect(page).toHaveURL(encounterUrl());
