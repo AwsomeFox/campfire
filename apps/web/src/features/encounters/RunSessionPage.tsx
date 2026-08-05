@@ -958,10 +958,19 @@ export default function RunSessionPage() {
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
   const turnPulseTimerRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    previousTurnBeatRef.current = null;
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+    setTurnBeat(null);
+    setTurnPulse(false);
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+  }, [eid]);
+
   // A loaded encounter is a silent baseline. This prevents opening an already
   // running encounter (or any ordinary refetch) from replaying a turn-start beat.
   useEffect(() => {
-    if (previousTurnBeatRef.current?.encounterId === eid || !encounter) return;
+    if (previousTurnBeatRef.current?.encounterId === eid || !encounter || encounter.id !== eid) return;
     const current = encounter.currentCombatantId == null
       ? undefined
       : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
@@ -977,10 +986,6 @@ export default function RunSessionPage() {
   useEffect(() => () => {
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
   }, []);
-  useEffect(() => {
-    setTurnOwnerFromEvent(null);
-    setTurnOwnerPendingCombatantId(null);
-  }, [eid]);
   // Ending an encounter emits an encounter.updated frame rather than a turn edge.
   // Clear every transient turn signal here so a disabled /turn query cannot keep
   // a prior owned turn (including the hidden-tab title) alive after combat stops.
@@ -1229,7 +1234,9 @@ export default function RunSessionPage() {
             round: event.round ?? null,
             isYourTurn,
           };
-          const previous = previousTurnBeatRef.current;
+          const previous = previousTurnBeatRef.current?.encounterId === eid
+            ? previousTurnBeatRef.current
+            : null;
           const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
           const tickerKind = previous?.round != null && next.round != null && next.round > previous.round

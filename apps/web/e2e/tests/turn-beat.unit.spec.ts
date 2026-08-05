@@ -24,6 +24,12 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectSseTurnBeat(initial, initial)).toBeNull();
   });
 
+  test('clears a previous encounter baseline before accepting the next encounter edge', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
+  });
+
   test('detects an owned edge once per combatant and round', () => {
     const yours = { ...initial, combatantId: 15, isYourTurn: true };
     expect(detectTurnBeat(initial, yours)).toBe('your-turn');
