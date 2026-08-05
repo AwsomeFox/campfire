@@ -17,8 +17,10 @@ test('legal targets are shared for player characters and monster actors', () => 
 
 test('targeting lifecycle contracts keep preview and Back transitions explicit', async () => {
   const source = await readFile(resolve(process.cwd(), 'src/features/encounters/ActionUseFlow.tsx'), 'utf8');
-  expect(source).toContain('onBackToTargets();');
-  expect(source).toContain('onPreview();');
+  expect(source).toContain('onBackToTargets(actionToken);');
+  expect(source).toContain('onPreview(resolveActionToken);');
+  expect(source).toContain('onPreviewStart(resolveActionToken);');
+  expect(source).toContain('onPreviewError(resolveActionToken);');
 });
 
 test('legal target affordances support repeated pointer and keyboard selection', async () => {
@@ -31,6 +33,7 @@ test('legal target affordances support repeated pointer and keyboard selection',
   expect(mapSource).toContain('tabIndex={movable || targetClickable ? 0 : -1}');
   expect(mapSource).toContain("e.key === 'Enter' || e.key === ' '");
   expect(mapSource).toContain('if (movable) onTokenKeyDown(e, c);');
+  expect(mapSource).toContain('if (movable) setSelectedTokenId(c.id);');
   expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
   expect(mapSource).toContain('strokeWidth={2}');
   expect(mapSource).not.toContain('event.detail === 1');

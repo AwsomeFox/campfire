@@ -2453,7 +2453,7 @@ export function BattleMap({
                         if (movable) onTokenKeyDown(e, c);
                       }}
                       onFocus={(e) => {
-                        setSelectedTokenId(c.id);
+                        if (movable) setSelectedTokenId(c.id);
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                       }}
                     >

@@ -53,6 +53,7 @@ export function ActionUsePanel({
   actorName,
   actionIndex,
   actionName,
+  actionToken,
   spec,
   combatants,
   targetIds,
@@ -73,6 +74,8 @@ export function ActionUsePanel({
   actorName: string;
   actionIndex: number;
   actionName: string;
+  /** Monotonic identity assigned by the session page to ignore stale resolve callbacks. */
+  actionToken: number;
   spec: ActionSpec;
   combatants: Combatant[];
   targetIds: number[];
@@ -89,10 +92,10 @@ export function ActionUsePanel({
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
-  onPreview: () => void;
-  onPreviewStart: () => void;
-  onPreviewError: () => void;
-  onBackToTargets: () => void;
+  onPreview: (actionToken: number) => void;
+  onPreviewStart: (actionToken: number) => void;
+  onPreviewError: (actionToken: number) => void;
+  onBackToTargets: (actionToken: number) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -116,7 +119,7 @@ export function ActionUsePanel({
   const needsTarget = spec.targets.count > 0;
 
   const resolvePreview = useMutation({
-    mutationFn: (rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit') =>
+    mutationFn: ({ rollMode }: { rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit'; actionToken: number }) =>
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
@@ -138,14 +141,14 @@ export function ActionUsePanel({
         commit: false,
         rollMode,
       }),
-    onMutate: () => { onPreviewStart(); onError(null); },
-    onSuccess: (res) => {
+    onMutate: ({ actionToken: resolveActionToken }) => { onPreviewStart(resolveActionToken); onError(null); },
+    onSuccess: (res, { actionToken: resolveActionToken }) => {
       setPreview(res);
       setStep('preview');
-      onPreview();
+      onPreview(resolveActionToken);
       announce(res.resolution.playerSummary);
     },
-    onError: (err) => { onPreviewError(); onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })); },
+    onError: (err, { actionToken: resolveActionToken }) => { onPreviewError(resolveActionToken); onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })); },
   });
 
   const commit = useMutation({
@@ -257,7 +260,7 @@ export function ActionUsePanel({
             className="btn btn-primary"
             data-testid="action-use-preview"
             disabled={!canPreview || resolvePreview.isPending}
-            onRoll={(mode) => resolvePreview.mutate(mode)}
+            onRoll={(rollMode) => resolvePreview.mutate({ rollMode, actionToken })}
           >
             {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
           </RollContextMenu>
@@ -326,7 +329,7 @@ export function ActionUsePanel({
                 setPreview(null);
                 setCommitSubmitted(false);
                 setIsUnconfirmed(false);
-                onBackToTargets();
+                onBackToTargets(actionToken);
               }}
             >
               Back

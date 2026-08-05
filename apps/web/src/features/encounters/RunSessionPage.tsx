@@ -652,12 +652,15 @@ export default function RunSessionPage() {
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
+    id: number;
     combatantId: number;
     actorName: string;
     actionIndex: number;
     actionName: string;
     spec: ActionSpec;
   } | null>(null);
+  const pendingActionUseSequence = useRef(0);
+  const pendingActionUseIdRef = useRef<number | null>(null);
   const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
   const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
   const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
@@ -1623,10 +1626,12 @@ export default function RunSessionPage() {
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
+      const id = ++pendingActionUseSequence.current;
+      pendingActionUseIdRef.current = id;
       setPendingApply(null);
       setActionTargetIds([]);
       setActionTargetsDeclared(false);
-      setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
+      setPendingActionUse({ id, combatantId, actorName, actionIndex, actionName, spec });
     },
     [],
   );
@@ -3792,19 +3797,21 @@ export default function RunSessionPage() {
 
       {pendingActionUse && (
         <ActionUsePanel
+          key={pendingActionUse.id}
           encounterId={eid}
           actorCombatantId={pendingActionUse.combatantId}
           actorName={pendingActionUse.actorName}
           actionIndex={pendingActionUse.actionIndex}
           actionName={pendingActionUse.actionName}
+          actionToken={pendingActionUse.id}
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
           targetIds={actionTargetIds}
           onToggleTarget={toggleActionTarget}
-          onPreview={() => setActionTargetsDeclared(true)}
-          onPreviewStart={() => setActionTargetsDeclared(true)}
-          onPreviewError={() => setActionTargetsDeclared(false)}
-          onBackToTargets={() => setActionTargetsDeclared(false)}
+          onPreview={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewStart={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewError={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
+          onBackToTargets={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
           isDm={isDm}
           // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
           // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
@@ -3818,11 +3825,12 @@ export default function RunSessionPage() {
           // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
           applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
-          onDismiss={() => { setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
+          onDismiss={() => { pendingActionUseIdRef.current = null; setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
+            pendingActionUseIdRef.current = null;
             setPendingActionUse(null);
             if (!prefersReducedMotion()) {
               setActionImpactTargetIds(actionTargetIds);
