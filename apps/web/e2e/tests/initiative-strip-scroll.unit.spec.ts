@@ -10,7 +10,11 @@ const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSe
 test.describe('initiative strip scroll (issue #1956)', () => {
   test('scrolls from a current-combatant transition, not the callback ref on same-current rerenders', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    const initiativeStrip = source.slice(source.indexOf('function InitiativeStrip'), source.indexOf('function hpLogActorId'));
+    const stripStart = source.indexOf('function InitiativeStrip');
+    expect(stripStart).toBeGreaterThan(-1);
+    const stripEnd = source.indexOf('function hpLogActorId', stripStart);
+    expect(stripEnd).toBeGreaterThan(stripStart);
+    const initiativeStrip = source.slice(stripStart, stripEnd);
 
     expect(initiativeStrip).toMatch(/const combatantRefs = useRef\(new Map<number, HTMLDivElement>\(\)\)/);
     expect(initiativeStrip).toMatch(/useLayoutEffect\(\(\) => \{[\s\S]*currentCombatantId[\s\S]*scrollIntoView[\s\S]*\}, \[currentCombatantId\]\)/);
