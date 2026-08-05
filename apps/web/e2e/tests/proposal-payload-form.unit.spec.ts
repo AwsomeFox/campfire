@@ -1,0 +1,280 @@
+import { expect, test } from '@playwright/test';
+import { QuestCreate, QuestUpdate, CharacterCreate } from '@campfire/schema';
+import {
+  buildProposalDraftPayload,
+  computeGuidedProposalPreview,
+  describeProposalFields,
+  diffProposalChangedKeys,
+  humanizeFieldKey,
+  initProposalFieldBool,
+  initProposalFieldText,
+  jsonFieldKeys,
+  schemaForProposal,
+  validateProposalPayload,
+  type ProposalFieldDescriptor,
+} from '../../src/features/proposals/proposalPayloadForm';
+
+function fieldByKey(fields: ProposalFieldDescriptor[], key: string): ProposalFieldDescriptor {
+  const found = fields.find((f) => f.key === key);
+  if (!found) throw new Error(`no field descriptor for "${key}"`);
+  return found;
+}
+
+test.describe('proposalPayloadForm: humanizeFieldKey', () => {
+  test('title-cases the first word and expands known acronyms wherever they occur', () => {
+    expect(humanizeFieldKey('title')).toBe('Title');
+    expect(humanizeFieldKey('dmSecret')).toBe('DM secret');
+    expect(humanizeFieldKey('mapAttachmentId')).toBe('Map attachment ID');
+    expect(humanizeFieldKey('hpMax')).toBe('HP max');
+    expect(humanizeFieldKey('npcId')).toBe('NPC ID');
+    expect(humanizeFieldKey('sortOrder')).toBe('Sort order');
+  });
+});
+
+test.describe('proposalPayloadForm: schemaForProposal', () => {
+  test('resolves the exact server Create/Update schema for a known entity + action', () => {
+    expect(schemaForProposal('quest', 'create')).toBe(QuestCreate);
+    expect(schemaForProposal('quest', 'update')).toBe(QuestUpdate);
+  });
+
+  test('falls back to null (raw JSON advanced mode) for an entity type it does not recognize', () => {
+    expect(schemaForProposal('map', 'create')).toBeNull();
+    expect(schemaForProposal('not-a-real-type', 'update')).toBeNull();
+  });
+});
+
+test.describe('proposalPayloadForm: describeProposalFields', () => {
+  const fields = describeProposalFields(QuestCreate);
+
+  test('classifies a required short string as a labeled single-line text field', () => {
+    const title = fieldByKey(fields, 'title');
+    expect(title.kind).toBe('text');
+    expect(title.label).toBe('Title');
+    expect(title.optional).toBe(false);
+    expect(title.nullable).toBe(false);
+    expect(title.help).toContain('Required');
+  });
+
+  test('classifies a long string (50k cap) as a textarea', () => {
+    const body = fieldByKey(fields, 'body');
+    expect(body.kind).toBe('textarea');
+  });
+
+  test('classifies an optional boolean with no Zod default (hidden) correctly', () => {
+    const hidden = fieldByKey(fields, 'hidden');
+    expect(hidden.kind).toBe('boolean');
+    expect(hidden.optional).toBe(true);
+  });
+
+  test('classifies an enum-with-default as a select carrying every option', () => {
+    const status = fieldByKey(fields, 'status');
+    expect(status.kind).toBe('select');
+    expect(status.optional).toBe(true); // has a Zod default, so may be omitted
+    expect(status.options).toEqual(['available', 'active', 'completed', 'failed']);
+  });
+
+  test('classifies a nullable numeric FK (giverNpcId) as a nullable number field', () => {
+    const giver = fieldByKey(fields, 'giverNpcId');
+    expect(giver.kind).toBe('number');
+    expect(giver.nullable).toBe(true);
+  });
+
+  test('excludes fields it cannot render as a guided control from the field list', () => {
+    expect(fields.some((f) => f.key === 'linkedEncounters')).toBe(false);
+  });
+});
+
+test.describe('proposalPayloadForm: jsonFieldKeys', () => {
+  test('surfaces every top-level array/object/record field as a JSON-box key', () => {
+    expect(jsonFieldKeys(QuestCreate)).toEqual(['linkedEncounters']);
+    // Character has several record/array fields (stats, skills, spellSlots, resources,
+    // conditions, saveProficiencies, actions) that describeProposalFields cannot render.
+    const characterJsonKeys = jsonFieldKeys(CharacterCreate);
+    expect(characterJsonKeys).toEqual(
+      expect.arrayContaining(['stats', 'skills', 'spellSlots', 'resources', 'conditions', 'actions']),
+    );
+    // Never both a guided field AND a JSON-box key for the same name.
+    const guidedKeys = new Set(describeProposalFields(CharacterCreate).map((f) => f.key));
+    for (const key of characterJsonKeys) expect(guidedKeys.has(key)).toBe(false);
+  });
+});
+
+test.describe('proposalPayloadForm: buildProposalDraftPayload', () => {
+  const fields = describeProposalFields(QuestCreate);
+  const jsonKeys = jsonFieldKeys(QuestCreate);
+
+  test('flags a blank required text field as an error and leaves the merged object without it', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Old title' });
+    const bool = initProposalFieldBool(fields, { title: 'Old title' });
+    const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, { ...text, title: '' }, bool, {
+      title: 'Old title',
+    });
+    expect(fieldErrors.title).toBe('This field is required.');
+    expect(data.title).toBe('Old title'); // untouched fallback, not blanked out
+  });
+
+  test('omits a blank optional non-nullable field entirely', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
+    const bool = initProposalFieldBool(fields, { title: 'Quest' });
+    const { fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest', reward: 'Gold' });
+    expect(fieldErrors).toEqual({});
+    // `reward` text was initialized from the original payload ("Gold"), unchanged here,
+    // so this exercises the nullable/optional-empty branch via a field the user actually clears:
+    const cleared = buildProposalDraftPayload(fields, jsonKeys, { ...text, reward: '' }, bool, {
+      title: 'Quest',
+      reward: 'Gold',
+    });
+    expect(cleared.fieldErrors).toEqual({});
+    expect('reward' in cleared.data).toBe(false);
+  });
+
+  test('sets a nullable field to null when cleared', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest', giverNpcId: 7 });
+    const bool = initProposalFieldBool(fields, { title: 'Quest', giverNpcId: 7 });
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, { ...text, giverNpcId: '' }, bool, {
+      title: 'Quest',
+      giverNpcId: 7,
+    });
+    expect(data.giverNpcId).toBeNull();
+  });
+
+  test('rejects a non-numeric value typed into a number field', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest', giverNpcId: 7 });
+    const bool = initProposalFieldBool(fields, { title: 'Quest', giverNpcId: 7 });
+    const { fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, { ...text, giverNpcId: 'not-a-number' }, bool, {
+      title: 'Quest',
+      giverNpcId: 7,
+    });
+    expect(fieldErrors.giverNpcId).toBe('Enter a valid number.');
+  });
+
+  test('always sends an explicitly checked boolean, even when the original payload omitted it', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
+    const bool = initProposalFieldBool(fields, { title: 'Quest', hidden: true });
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest' });
+    expect(data.hidden).toBe(true);
+  });
+
+  test('an untouched boolean absent from the original payload stays OMITTED, never coerced to false', () => {
+    // Regression for a real secrecy-default bug this feature introduced: QuestCreate's
+    // `hidden` has NO Zod default (issue #754's `resolveCreateHidden` — omitted means
+    // "DM-only by default", an explicit `false` means "public"). If the guided editor's
+    // checkbox always materialized an explicit boolean, opening the editor and clicking
+    // Approve without ever touching the "Hidden" checkbox would silently flip an
+    // omitted/DM-only-by-default quest to explicitly public. It must stay omitted.
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
+    const bool = initProposalFieldBool(fields, { title: 'Quest' }); // original omits `hidden`
+    const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest' });
+    expect(fieldErrors).toEqual({});
+    expect('hidden' in data).toBe(false);
+  });
+
+  test('an explicit false already present in the original payload round-trips as false, not omitted', () => {
+    const original = { title: 'Quest', hidden: false };
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, bool, original);
+    expect(data.hidden).toBe(false);
+  });
+
+  test('parses a per-field JSON box and flags invalid JSON without touching other fields', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest', linkedEncounters: [{ id: 1 }] });
+    const bool = initProposalFieldBool(fields, { title: 'Quest' });
+    const original = { title: 'Quest', linkedEncounters: [{ id: 1 }] };
+    const broken = buildProposalDraftPayload(fields, jsonKeys, { ...text, linkedEncounters: '{not json' }, bool, original);
+    expect(broken.fieldErrors.linkedEncounters).toBe('Invalid JSON.');
+    expect(broken.fieldErrors.title).toBeUndefined();
+
+    const fixed = buildProposalDraftPayload(
+      fields,
+      jsonKeys,
+      { ...text, linkedEncounters: '[{"id":2,"name":"Ambush","status":"preparing"}]' },
+      bool,
+      original,
+    );
+    expect(fixed.fieldErrors).toEqual({});
+    expect(fixed.data.linkedEncounters).toEqual([{ id: 2, name: 'Ambush', status: 'preparing' }]);
+  });
+
+  test('passes through a key the schema does not declare at all, untouched', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
+    const bool = initProposalFieldBool(fields, { title: 'Quest' });
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest', futureField: 'kept' });
+    expect(data.futureField).toBe('kept');
+  });
+});
+
+test.describe('proposalPayloadForm: validateProposalPayload', () => {
+  test('normalizes a valid draft, returning exactly the fields that were validated', () => {
+    const result = validateProposalPayload(QuestCreate, { title: 'A quest', status: 'active' });
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ title: 'A quest', status: 'active' });
+  });
+
+  test('an omitted optional field is NOT materialized to its Zod default', () => {
+    // QuestCreate wraps every field (including defaulted ones) in ZodOptional via its own
+    // `.partial()` call; Zod's ZodOptional short-circuits on `undefined` before ever
+    // reaching the inner ZodDefault, so an omitted `status`/`hidden` stays simply absent
+    // rather than being filled in. This matters for the preview: an omitted optional
+    // field must not appear as a "changed" key just because the schema COULD default it
+    // (see computeGuidedProposalPreview's "clean edit" case below).
+    const result = validateProposalPayload(QuestCreate, { title: 'A quest' });
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBeUndefined();
+    expect(result.data.hidden).toBeUndefined(); // also true because QuestCreate's `hidden` has no Zod default (#754)
+  });
+
+  test('maps a schema violation back onto the offending field key', () => {
+    const result = validateProposalPayload(QuestCreate, { title: '' });
+    expect(result.ok).toBe(false);
+    expect(result.fieldErrors.title).toBeTruthy();
+    expect(typeof result.fieldErrors.title).toBe('string');
+  });
+});
+
+test.describe('proposalPayloadForm: diffProposalChangedKeys', () => {
+  test('reports only keys whose value actually differs, ignoring identical ones', () => {
+    const changed = diffProposalChangedKeys({ title: 'Old', reward: 'Gold' }, { title: 'New', reward: 'Gold' });
+    expect(changed).toEqual(['title']);
+  });
+
+  test('reports an added key and a removed key', () => {
+    const changed = diffProposalChangedKeys({ title: 'Quest' }, { title: 'Quest', status: 'available' }).sort();
+    expect(changed).toEqual(['status']);
+    const removed = diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' });
+    expect(removed).toEqual(['reward']);
+  });
+});
+
+test.describe('proposalPayloadForm: computeGuidedProposalPreview (end-to-end)', () => {
+  const fields = describeProposalFields(QuestCreate);
+  const jsonKeys = jsonFieldKeys(QuestCreate);
+  const originalPayload = { title: 'Old title', reward: 'Gold' };
+
+  test('a clean edit normalizes and reports exactly the fields that changed', () => {
+    const text = { ...initProposalFieldText(fields, jsonKeys, originalPayload), title: 'New title' };
+    const bool = initProposalFieldBool(fields, originalPayload);
+    const preview = computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, QuestCreate);
+    expect(preview.fieldErrors).toEqual({});
+    expect(preview.normalized?.title).toBe('New title');
+    expect(preview.changedKeys).toContain('title');
+    expect(preview.changedKeys).not.toContain('reward');
+  });
+
+  test('an invalid field blocks normalization and is reported by key, but the draft is preserved', () => {
+    const text = { ...initProposalFieldText(fields, jsonKeys, originalPayload), title: '' };
+    const bool = initProposalFieldBool(fields, originalPayload);
+    const preview = computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, QuestCreate);
+    expect(preview.normalized).toBeNull();
+    expect(preview.fieldErrors.title).toBeTruthy();
+    // The best-effort draft keeps the ORIGINAL title rather than the blanked value, so
+    // switching to advanced mode (or re-rendering) doesn't silently discard the proposal.
+    expect(preview.draft.title).toBe('Old title');
+  });
+
+  test('with no known schema, the draft is returned as the normalized result unchanged', () => {
+    const preview = computeGuidedProposalPreview([], [], {}, {}, { foo: 'bar' }, null);
+    expect(preview.normalized).toEqual({ foo: 'bar' });
+    expect(preview.changedKeys).toEqual([]);
+  });
+});

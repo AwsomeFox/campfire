@@ -4,7 +4,7 @@
  * Approve/Reject (or a decided-status tag once resolved).
  * DM-only guardrail queue for AI/collab writes: nothing touches canon until approved.
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Proposal } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -22,6 +22,7 @@ import {
   retainPendingSelection,
   summarizeProposalBatch,
 } from './proposalSelection';
+import { ProposalPayloadEditor, type ProposalPayloadEditorHandle } from './ProposalPayloadEditor';
 import { timeAgo, useTimeTick } from '../../lib/format';
 
 type EntityType = Proposal['entityType'];
@@ -460,8 +461,7 @@ function ProposalCard({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  const [editError, setEditError] = useState<string | null>(null);
+  const editorRef = useRef<ProposalPayloadEditorHandle | null>(null);
   const href = proposalTargetHref(campaignId, proposal);
   const isDelete = proposal.action === 'delete';
   // Edit-before-approve is meaningful only for create/update (delete carries no payload).
@@ -472,26 +472,18 @@ function ProposalCard({
   // 'map' isn't (yet) a member of the shared EntityType enum — see the `targetHref`
   // comment above — hence the string cast rather than a plain literal comparison.
   const isGenerated = proposal.entityType === 'encounter' || (proposal.entityType as string) === 'map';
-
-  function startEdit() {
-    setDraft(JSON.stringify(proposal.payload, null, 2));
-    setEditError(null);
-    setEditing(true);
-  }
+  const noteId = `proposal-${proposal.id}-note`;
+  const noteHelpId = `${noteId}-help`;
 
   async function act(fn: (note: string, payload?: Record<string, unknown>) => void, withPayload: boolean) {
     let payload: Record<string, unknown> | undefined;
     if (withPayload && editing) {
-      try {
-        const parsed = JSON.parse(draft);
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('Payload must be a JSON object.');
-        }
-        payload = parsed as Record<string, unknown>;
-      } catch (err) {
-        setEditError(err instanceof Error ? err.message : 'Invalid JSON.');
-        return;
-      }
+      // The editor validates against the entity's real Create/Update schema (when known)
+      // and, on failure, focuses the first invalid control itself — nothing to do here
+      // but bail out, leaving the draft exactly as the DM left it (issue #769).
+      const normalized = editorRef.current?.submit();
+      if (!normalized) return;
+      payload = normalized;
     }
     setBusy(true);
     try {
@@ -545,27 +537,35 @@ function ProposalCard({
       {isDelete ? (
         <DeleteView snapshot={proposal.snapshot} />
       ) : editing ? (
-        <div className="space-y-1">
-          <textarea
-            className="w-full text-[12px] font-mono bg-[var(--color-surface-2,#1a1b26)] border border-[var(--color-divider)] rounded-[var(--radius-md)] p-2.5 min-h-[140px] text-slate-200"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            spellCheck={false}
-          />
-          {editError && <p className="text-[11px] text-red-400 m-0">{editError}</p>}
-          <p className="text-[10px] text-secondary m-0">Edit the proposed payload (JSON) before approving.</p>
-        </div>
+        <ProposalPayloadEditor
+          ref={editorRef}
+          idPrefix={`proposal-${proposal.id}`}
+          entityType={proposal.entityType}
+          action={proposal.action === 'create' ? 'create' : 'update'}
+          originalPayload={proposal.payload}
+        />
       ) : (
         <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
       )}
 
       {canResolve && expanded && (
-        <TextInput density="compact"
-          className="text-sm"
-          placeholder="Optional note…"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-        />
+        <div className="space-y-1">
+          <label htmlFor={noteId} className="text-[11px] font-semibold text-secondary">
+            Note (optional)
+          </label>
+          <TextInput
+            id={noteId}
+            density="compact"
+            className="text-sm"
+            aria-describedby={noteHelpId}
+            placeholder="Visible to the proposer once resolved…"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <p id={noteHelpId} className="text-[10px] text-secondary m-0">
+            Shown to the proposer alongside the approve/reject decision.
+          </p>
+        </div>
       )}
 
       <div className="flex items-center gap-2 justify-end flex-wrap">
@@ -580,7 +580,7 @@ function ProposalCard({
           <button
             type="button"
             className="text-[11px] text-secondary hover:text-white"
-            onClick={() => (editing ? setEditing(false) : startEdit())}
+            onClick={() => setEditing((cur) => !cur)}
           >
             {editing ? 'Cancel edit' : 'Edit payload'}
           </button>
@@ -804,30 +804,18 @@ function MyProposalCard({
   onRevised: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const editorRef = useRef<ProposalPayloadEditorHandle | null>(null);
   const href = proposalTargetHref(campaignId, proposal);
   const isDelete = proposal.action === 'delete';
 
-  function startEdit() {
-    setDraft(JSON.stringify(proposal.payload, null, 2));
-    setEditError(null);
-    setEditing(true);
-  }
-
   async function saveRevision() {
-    let payload: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(draft);
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Payload must be a JSON object.');
-      }
-      payload = parsed as Record<string, unknown>;
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Invalid JSON.');
-      return;
-    }
+    // Same schema-validated, focus-on-error path as the DM's edit-before-approve
+    // (issue #769) — bail out silently on a failed local validation; the editor has
+    // already focused the offending control.
+    const payload = editorRef.current?.submit();
+    if (!payload) return;
     setSaving(true);
     setEditError(null);
     try {
@@ -862,25 +850,23 @@ function MyProposalCard({
       {isDelete ? (
         <DeleteView snapshot={proposal.snapshot} />
       ) : editing ? (
-        <div className="space-y-1">
-          <textarea
-            className="w-full text-[12px] font-mono bg-[var(--color-surface-2,#1a1b26)] border border-[var(--color-divider)] rounded-[var(--radius-md)] p-2.5 min-h-[140px] text-slate-200"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            spellCheck={false}
-          />
-          {editError && <p className="text-[11px] text-red-400 m-0">{editError}</p>}
-          <p className="text-[10px] text-secondary m-0">Edit the proposed payload (JSON) for your pending proposal.</p>
-        </div>
+        <ProposalPayloadEditor
+          ref={editorRef}
+          idPrefix={`my-proposal-${proposal.id}`}
+          entityType={proposal.entityType}
+          action={proposal.action === 'create' ? 'create' : 'update'}
+          originalPayload={proposal.payload}
+        />
       ) : (
         <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
       )}
+      {editError && <p role="alert" className="text-[11px] text-rose-400 m-0">{editError}</p>}
       <div className="flex items-center gap-2 justify-end">
         {!isDelete && (
           <button
             type="button"
             className="text-[11px] text-secondary hover:text-white"
-            onClick={() => (editing ? setEditing(false) : startEdit())}
+            onClick={() => setEditing((cur) => !cur)}
           >
             {editing ? 'Cancel edit' : 'Edit payload'}
           </button>
