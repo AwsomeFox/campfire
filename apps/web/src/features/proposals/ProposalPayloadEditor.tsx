@@ -134,8 +134,32 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       // re-seeds guided state from the raw text, so the typed text would be gone from both
       // modes with nothing said. Only the JSON boxes block: a scalar field error is
       // recoverable in raw mode, which is often exactly why someone switches.
-      const badJsonKey = jsonKeys.find((key) => guidedPreview.fieldErrors[key]);
+      // Narrowed to a genuine PARSE failure, and it shows the error (review — the first
+      // version of this guard was wrong in both directions).
+      //
+      // Only unparseable text is lossy: there, `data[key]` still holds the value seeded from
+      // the working payload, so serializing the draft would replace what the reviewer typed.
+      // A parseable-but-schema-invalid value is different — the draft holds exactly what they
+      // typed, so the switch is lossless, and blocking it trapped them in the guided editor
+      // fixing a schema violation in a small JSON box. `fieldErrors[key]` covers both cases,
+      // because Zod issues are keyed by top-level field too, so the text has to be re-tested.
+      //
+      // And a refusal has to make the reason visible: field errors are gated on `showErrors`,
+      // which only flips on a failed submit, so before any submit this named a field whose
+      // own message was not rendered — "fix X", with nothing shown next to X.
+      const badJsonKey = jsonKeys.find((key) => {
+        if (!guidedPreview.fieldErrors[key]) return false;
+        const raw = text[key] ?? '';
+        if (raw.trim() === '') return false;
+        try {
+          JSON.parse(raw);
+          return false;
+        } catch {
+          return true;
+        }
+      });
       if (badJsonKey) {
+        setShowErrors(true);
         setModeSwitchError(`Fix ${humanizeFieldKey(badJsonKey)} before switching to raw JSON.`);
         return;
       }
