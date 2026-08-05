@@ -73,6 +73,36 @@ export function actionEconomySlotMax(
   return declared ? declared.max : null;
 }
 
+/**
+ * The effective max for one declared action-economy slot, honoring a combatant's own
+ * add-time movement snapshot when the slot is the movement slot. A no-op for every other
+ * slot kind — callers can route ALL slots through this without a movement-specific branch
+ * of their own.
+ *
+ * Issue #1910 round 5 review (Devin): `getTurnWorkspace`'s DISPLAY and
+ * `ActionResolverService.resolveActionEconomyCost`'s spend/guard ENFORCEMENT had drifted —
+ * the turn workspace showed a per-combatant movement number (the combatant's own speed
+ * snapshot, or the adapter default) while the resolver still bounded every movement spend
+ * by the adapter's flat constant regardless of that snapshot. A speed-40 PC was told 40 ft
+ * and then rejected past 30; a speed-25 PC was told 25 but allowed to move the full 30 —
+ * the exact "the app tells you one number and enforces another" failure issue #1910 set
+ * out to fix, just moved from the adapter-hardcode into a display/enforcement split.
+ *
+ * This is the SINGLE shared rule for the movement cap specifically, mirroring
+ * {@link actionEconomySlotMax}'s "one shared rule, both entry points consume it" convention
+ * for every other slot: `getTurnWorkspace` (`encounters.service.ts`) and
+ * `resolveActionEconomyCost` (`action-resolver.service.ts`) both call this, so the two paths
+ * cannot disagree about how far a combatant may move.
+ */
+export function movementSlotMax(
+  kind: ActionEconomySlot['kind'],
+  declaredMax: number,
+  combatantSpeed: number | null,
+): number {
+  if (kind !== 'movement') return declaredMax;
+  return combatantSpeed ?? declaredMax;
+}
+
 /** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
 export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
 
@@ -81,6 +111,8 @@ export type EncounterEventRedactionCombatant = {
   id: number;
   name: string;
   npcId: number | null;
+  /** Internal source link retained by unlinked duplicate combatants. */
+  npcIdentitySourceId?: number | null;
 };
 
 /**
@@ -105,7 +137,7 @@ export function redactEncounterEventsForViewer(
   const hiddenCombatantIds = new Set<number>();
   const hiddenNames = new Set<string>();
   for (const c of combatants) {
-    if (c.npcId !== null && hiddenNpcIds.has(c.npcId)) {
+    if ([c.npcId, c.npcIdentitySourceId].some((id) => id != null && hiddenNpcIds.has(id))) {
       hiddenCombatantIds.add(c.id);
       if (c.name) hiddenNames.add(c.name);
     }

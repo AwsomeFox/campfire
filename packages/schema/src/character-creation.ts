@@ -182,6 +182,12 @@ export function isMinimalCharacterCreate(input: {
   ac?: number | null;
   eac?: number | null;
   kac?: number | null;
+  // Issue #1910 review (Codex, PR #1980, round 5): a `{ name, speed }` create is a combat-data
+  // create by the same argument that put `speed` next to ac/eac/kac in the schema in the first
+  // place — omitting it here made that create silently land as `draft` with 0/0 HP (skipped by
+  // encounter auto-add) instead of `active` with the legacy 10/10 default, unlike an otherwise-
+  // equivalent `{ name, ac }` create.
+  speed?: number | null;
   stats?: Record<string, number>;
 }): boolean {
   if (input.status !== undefined) return false;
@@ -191,6 +197,7 @@ export function isMinimalCharacterCreate(input: {
     input.ac != null ||
     input.eac != null ||
     input.kac != null ||
+    input.speed != null ||
     (input.stats != null && Object.keys(input.stats).length > 0);
   return !hasCombatData;
 }
@@ -204,6 +211,7 @@ export function resolveCharacterCreateStatus(
     ac?: number | null;
     eac?: number | null;
     kac?: number | null;
+    speed?: number | null;
     stats?: Record<string, number>;
     name?: string;
     className?: string;

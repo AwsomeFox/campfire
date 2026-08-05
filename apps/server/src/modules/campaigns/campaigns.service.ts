@@ -278,6 +278,21 @@ const asArr = (v: unknown): Rec[] => (Array.isArray(v) ? v.map(asRec) : []);
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null);
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
+// Issue #1910 review (Devin, PR #1980, on c3ea4545): `speed` (unlike `ac`) has a
+// schema-level `min(0)`, so a malformed/negative import value would otherwise write
+// past the domain contract and fail zod validation on the next read (bricking the
+// imported sheet) — that part of the original fix was right. But the original
+// version of this helper CLAMPED a negative value to 0 via Math.max(0, n), which
+// collided with this PR's own stated design: 0 is a REAL value (a homebrew
+// immobilized PC), and null means "unset" so the turn workspace falls through to
+// the adapter default. Clamping a corrupted/hand-edited negative import to 0 would
+// silently paralyze that PC instead of landing it on the adapter default. Returns
+// null for anything out of range so it's always schema-valid AND preserves the
+// null/0 distinction the rest of the PR depends on.
+const nonNegativeIntOrNull = (v: unknown): number | null => {
+  const n = intOrNull(v);
+  return n == null || n < 0 ? null : n;
+};
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
 /**
@@ -1609,6 +1624,7 @@ export class CampaignsService {
                 kind: c.kind,
                 characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
+                npcIdentitySourceId: c.npcIdentitySourceId != null ? (npcMap.get(c.npcIdentitySourceId) ?? null) : null,
                 // Clones reset encounters to fresh prep, so they must derive NPC
                 // allegiance from the cloned NPC rather than retain played history.
                 npcDispositionSnapshot: null,
@@ -1621,6 +1637,11 @@ export class CampaignsService {
                 ruleEntryId: c.ruleEntryId,
                 sortOrder: c.sortOrder,
                 sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
+                // Issue #1910 review (Codex, round 5): a baseline stat snapshot like
+                // initMod above, not combat state — carry it forward the same way,
+                // rather than silently resetting it like the play-progress fields
+                // (hp/initiative/conditions) this insert deliberately does reset.
+                speed: c.speed,
               })
               .run();
           }
@@ -2525,6 +2546,7 @@ export class CampaignsService {
             background: str(c.background),
             stats: jsonCol(c.stats, '{}'),
             ac: intOrNull(c.ac),
+            speed: nonNegativeIntOrNull(c.speed),
             hpCurrent: intOr(c.hpCurrent, 10),
             hpMax: intOr(c.hpMax, 10),
             // #1667 half B: write the paired condition columns through the sheet helper.
@@ -2728,7 +2750,9 @@ export class CampaignsService {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
           const npcSrc = intOrNull(c.npcId);
+          const npcIdentitySourceSrc = intOrNull(c.npcIdentitySourceId);
           const mappedNpcId = npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null;
+          const mappedNpcIdentitySourceId = npcIdentitySourceSrc != null ? (npcMap.get(npcIdentitySourceSrc) ?? null) : null;
           const compendiumResolved = resolveImportedCombatantRuleEntryId(c, compendiumResolution);
           if (compendiumResolved.detached) compendiumDetachedCount += 1;
           const [cRow] = tx
@@ -2738,11 +2762,15 @@ export class CampaignsService {
               kind: str(c.kind, 'monster'),
               characterId: charSrc != null ? (charMap.get(charSrc) ?? null) : null,
               npcId: mappedNpcId,
+              npcIdentitySourceId: mappedNpcIdentitySourceId,
               // A fresh encounter cannot retain allegiance for an NPC that import
               // could not restore: preparation ignores that snapshot, and /start
               // cannot refresh an unlinked combatant.
               npcDispositionSnapshot:
-                encounterStatus === 'preparing' && npcSrc != null && mappedNpcId === null
+                encounterStatus === 'preparing' &&
+                (npcSrc != null || npcIdentitySourceSrc != null) &&
+                mappedNpcId === null &&
+                mappedNpcIdentitySourceId === null
                   ? null
                   : typeof c.npcDispositionSnapshot === 'string'
                     ? c.npcDispositionSnapshot
@@ -2752,6 +2780,10 @@ export class CampaignsService {
               initMod: intOr(c.initMod, 0),
               hpCurrent: intOr(c.hpCurrent, 10),
               hpMax: intOr(c.hpMax, 10),
+              // Issue #1910: carry the add-time speed snapshot through import so a
+              // re-imported encounter's movement budget matches what was exported,
+              // rather than silently falling back to the adapter default.
+              speed: nonNegativeIntOrNull(c.speed),
               conditions: jsonCol(c.conditions, '[]'),
               ruleEntryId: compendiumResolved.ruleEntryId,
               sortOrder: intOr(c.sortOrder, 0),

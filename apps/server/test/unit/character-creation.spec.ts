@@ -24,6 +24,14 @@ describe('character-creation (issue #719)', () => {
     it('treats hp-only payloads as non-minimal', () => {
       expect(isMinimalCharacterCreate({ hpMax: 20, hpCurrent: 20 })).toBe(false);
     });
+
+    // Issue #1910 review (Codex, PR #1980, round 5): speed is a combat statistic by the
+    // same argument that put it next to ac/eac/kac in the schema — a { name, speed }
+    // create must not be treated as identity-only the way a bare { name } create is.
+    it('treats a speed-only payload as non-minimal, the same as ac/eac/kac (issue #1910)', () => {
+      expect(isMinimalCharacterCreate({ speed: 30 })).toBe(false);
+      expect(isMinimalCharacterCreate({ speed: 0 })).toBe(false); // a real value, not "unset"
+    });
   });
 
   describe('resolveCharacterCreateStatus', () => {
@@ -33,6 +41,13 @@ describe('character-creation (issue #719)', () => {
 
     it('keeps non-minimal API creates active for backward compatibility', () => {
       expect(resolveCharacterCreateStatus({ name: 'Hero', hpMax: 20 } as never, Dnd5eAdapter)).toBe('active');
+    });
+
+    // Issue #1910 review (Codex, PR #1980, round 5): a { name, speed } create used to be
+    // indistinguishable from a bare { name } create (draft, 0/0 HP, skipped by encounter
+    // auto-add), unlike an otherwise-equivalent { name, ac } create (active, 10/10 HP).
+    it('keeps a speed-only API create active, matching an ac-only create (issue #1910)', () => {
+      expect(resolveCharacterCreateStatus({ name: 'Fleet', speed: 40 } as never, Dnd5eAdapter)).toBe('active');
     });
 
     it('derives dead lifecycle status when deathState is dead and status is omitted (issue #1757)', () => {

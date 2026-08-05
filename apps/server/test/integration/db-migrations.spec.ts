@@ -29,6 +29,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
+  it('boots a fresh database before the combatants table exists (#1924)', () => {
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'combatants')).toContain('npc_identity_source_id');
+    } finally { fresh.sqlite.close(); }
+  });
+
   it('adds every migrated column when upgrading an old-shaped DB', () => {
     dataDir = makeTempDataDir();
     writeOldSchemaDb(dataDir);
@@ -56,6 +64,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'death_state',
           'death_save_successes',
           'death_save_failures',
+          'speed', // 0161 (#1910): movement speed, additive nullable column.
         ]),
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
@@ -76,7 +85,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
-        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot']),
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot', 'speed']),
       );
       expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
@@ -166,6 +175,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['series_id', 'occurrence_id', 'recurrence_local_date', 'kind', 'from_scheduled_at', 'to_scheduled_at']),
       );
       expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
+      expect(MIGRATION_NAMES).toContain('0161_character_combatant_speed_1910');
     } finally {
       sqlite.close();
     }
@@ -240,6 +250,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(character.death_state).toBe('none');
       expect(character.death_save_successes).toBe(0);
       expect(character.death_save_failures).toBe(0);
+      // 0161 (#1910): speed ADD COLUMN — a pre-existing character row reads null
+      // (unset), not a fabricated 30, so the turn workspace supplies the adapter
+      // default at read time instead of the migration guessing a value.
+      expect(character.speed).toBeNull();
 
       expect((sqlite.prepare('SELECT hidden FROM quests WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       expect((sqlite.prepare('SELECT hidden FROM npcs WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
@@ -263,6 +277,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
       expect(combatant.npc_id).toBeNull(); // 0044: npc_id ADD COLUMN — null for the pre-existing row
+      expect(combatant.speed).toBeNull(); // 0161 (#1910): pre-existing combatant row reads null too.
 
 
 
@@ -2401,6 +2416,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     } finally {
       upgraded.sqlite.close();
     }
+  });
+  it('adds and backfills NPC identity sources without blocking fresh bootstrap (#1924)', () => {
+    expect(MIGRATION_NAMES).toContain('0145b_combatants_npc_identity_source_1924');
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE combatants DROP COLUMN npc_identity_source_id');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145b_combatants_npc_identity_source_1924');
+      const now = '2026-08-05T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy identity source campaign', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Legacy identity source encounter', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO npcs (id, campaign_id, name, created_at, updated_at) VALUES (42, 1, 'Legacy NPC identity', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO combatants (encounter_id, kind, npc_id, name, hp_current, hp_max) VALUES (1, 'npc', 42, 'Legacy NPC', 1, 1)").run();
+    } finally { legacy.close(); }
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatants')).toContain('npc_identity_source_id');
+      expect(upgraded.sqlite.prepare('SELECT npc_identity_source_id FROM combatants WHERE name = ?').get('Legacy NPC')).toEqual({ npc_identity_source_id: 42 });
+    } finally { upgraded.sqlite.close(); }
   });
   it('adds the rule_packs manifest_hash column when upgrading a pre-#1518 DB (#1518)', () => {
     expect(MIGRATION_NAMES).toContain('0148_rule_packs_manifest_hash_1518');

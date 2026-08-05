@@ -26,6 +26,7 @@ import {
   characterSheetDraftFrom,
   characterSheetDraftsEqual,
   isCharacterSheetDirty,
+  normalizeRestoredDraft,
 } from '../../src/features/characters/characterSheetFormState';
 import { Dnd5eAdapter, OpenLegendAdapter } from '@campfire/schema';
 import type { Character } from '@campfire/schema';
@@ -74,6 +75,7 @@ function character(overrides: Partial<Character> = {}): Character {
     ac: 16,
     eac: null,
     kac: null,
+    speed: null,
     hpCurrent: 20,
     hpMax: 20,
     spCurrent: 0,
@@ -204,5 +206,66 @@ test.describe('character sheet dirty detection (issue #641)', () => {
     expect(baseline.stats.ENERGY).toBe('3');
     expect(baseline.stats.CUSTOM_NATIVE).toBe('7');
     expect(Object.keys(baseline.stats)).toContain('PRESCIENCE');
+  });
+
+  // Issue #1910: a character created before the `speed` column existed reads null —
+  // the draft must render that as an empty field, not a fabricated "0" or "30", and a
+  // real value must round-trip so editing then clearing it back to null is detectable.
+  test('speed is empty for a legacy null-speed character and round-trips a real value', () => {
+    const legacy = characterSheetDraftFrom(character({ speed: null }), Dnd5eAdapter);
+    expect(legacy.speed).toBe('');
+
+    const dwarf = characterSheetDraftFrom(character({ speed: 25 }), Dnd5eAdapter);
+    expect(dwarf.speed).toBe('25');
+    expect(isCharacterSheetDirty(legacy, dwarf)).toBe(true);
+    expect(characterSheetDraftsEqual(dwarf, characterSheetDraftFrom(character({ speed: 25 }), Dnd5eAdapter))).toBe(true);
+
+    // Clearing a set speed back to '' (-> null on save) must register as a change.
+    expect(isCharacterSheetDirty({ ...dwarf, speed: '' }, dwarf)).toBe(true);
+  });
+
+  // Devin review on PR #1980: readFormDraft validates only the storage
+  // envelope, never the persisted field set — a draft saved before `speed` joined
+  // CharacterSheetDraft restores with `speed: undefined`. CharacterPage's save()
+  // later calls `speed.trim()` unconditionally; `undefined.trim()` throws a
+  // TypeError inside the async onClick handler (`void save()`), an unhandled
+  // rejection — no PATCH, no error banner, the Save button silently does nothing.
+  // normalizeRestoredDraft is the fix: it fills every field defensively so
+  // restoring a legacy (or otherwise partial) draft always yields real strings.
+  test('a legacy draft missing speed normalizes to an empty string, not undefined, so save() never throws', () => {
+    // Simulates exactly what JSON.parse of a pre-#1910 persisted draft produces:
+    // no `speed` key at all, not `speed: undefined` written out (JSON has no way
+    // to serialize `undefined` as a value either way — the key is just absent).
+    const legacyPersisted = {
+      name: 'Pre-Speed Hero',
+      species: 'Human',
+      className: 'Fighter',
+      background: '',
+      level: '5',
+      ac: '15',
+      hpMax: '30',
+      status: 'active' as const,
+      stats: { STR: '16' },
+    };
+
+    // Reproduces save()'s exact guard clause (`if (speed.trim() !== '')`). Restoring
+    // the RAW legacy object (the pre-fix code path: `setSpeed(restored.speed)` with
+    // no fallback) would leave `speed` undefined in state, and this line is what
+    // later throws inside the async handler.
+    expect(() => (legacyPersisted as { speed?: string }).speed!.trim()).toThrow(TypeError);
+
+    const normalized = normalizeRestoredDraft(legacyPersisted);
+    expect(normalized.speed).toBe('');
+    // The fixed shape never throws save()'s guard clause.
+    expect(() => normalized.speed.trim()).not.toThrow();
+    // Every other field passes through unchanged — this isn't a lossy reset.
+    expect(normalized.name).toBe('Pre-Speed Hero');
+    expect(normalized.ac).toBe('15');
+    expect(normalized.stats).toEqual({ STR: '16' });
+  });
+
+  test('normalizeRestoredDraft is a no-op for an already-complete draft', () => {
+    const complete = characterSheetDraftFrom(character({ speed: 30 }), Dnd5eAdapter);
+    expect(normalizeRestoredDraft(complete)).toEqual(complete);
   });
 });
