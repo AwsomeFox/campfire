@@ -241,6 +241,34 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(service.listUsableActions(encounterId, actor, alice, 'player')).toHaveLength(3);
   });
 
+  // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped at
+  // 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
+  // ActionResolveRequest.actionIndex only accepts 0-99. A character already at that sheet
+  // maximum would push every appended equipped-item action to index >= 100 — advertised by
+  // listUsableActions/the encounter card, but permanently unresolvable (a 400 from the
+  // request schema itself) and silently dropped by /turn's own 100-row slice. The merged
+  // list must never advertise an action it cannot also resolve.
+  it('#1901 review (codex P2): a character already at the 100-sheet-action maximum does not advertise an unresolvable equipped-item action', () => {
+    const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
+    const fullSheet = Array.from({ length: 100 }, (_, i) => ({ ...greatsword, name: `Sheet Action ${i}` }));
+    orm.update(characters).set({ actions: JSON.stringify(fullSheet) }).where(eq(characters.id, aliceChar.id)).run();
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
+
+    const list = service.listUsableActions(encounterId, actor, alice, 'player');
+    // The equipped item's action is NOT appended past the resolvable maximum — it would
+    // otherwise land at index 100, which ActionResolveRequest.actionIndex (max 99) can never
+    // accept. Every index this list DOES return must stay resolvable.
+    expect(list).toHaveLength(100);
+    expect(list.some((a) => a.name === 'Dagger')).toBe(false);
+    for (const a of list) {
+      expect(() => ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: a.index, targetIds: [] })).not.toThrow();
+    }
+    // The last sheet action (index 99) still resolves cleanly through the same shared cap.
+    expect(() =>
+      service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 99, targetIds: [drake], commit: false }), alice, 'player'),
+    ).not.toThrow();
+  });
+
   it('#1326: an equipped item action is resolvable and applyable through the existing action pipeline (by index and by name)', () => {
     const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
     addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
@@ -1373,6 +1401,123 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
       /changed or moved/i,
     );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
+  // Issue #1901 review (chatgpt-codex-connector P1, PR #1951): the ActionUsePanel scenario —
+  // it fetches a row's exact spec when the panel opens, then later POSTs actionIndex +
+  // actionName to /resolve. If, in between, the item/action that occupied that index is
+  // removed/unequipped and a DIFFERENT action that happens to share the same display name
+  // shifts into the same index (equipped-item actions are appended after sheet actions in one
+  // merged, reindexable list — see ActionResolverService.characterUsableActionRows), the
+  // existing actionIndex+actionName guard in resolveSpec cannot catch it: the name still
+  // matches. `expectedSpec` closes that gap by checking CONTENT, not just name.
+  it('#1901 review (codex P1): resolve rejects a same-named replacement at the requested index when expectedSpec is supplied', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const character = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const originalActions = JSON.parse(character.actions ?? '[]');
+    // The exact spec the panel would have fetched and displayed for "Greatsword" at index 0.
+    const expectedSpec = originalActions[0].spec;
+
+    // Between the panel opening and the resolve request, a different action — coincidentally
+    // sharing the same display name — takes over index 0 (e.g. a re-equip swapped in a
+    // different item's action under a name that collides with the sheet action the player
+    // actually selected).
+    const actions = JSON.parse(character.actions ?? '[]');
+    actions[0] = { ...fireball(21), name: 'Greatsword' };
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    expect(() =>
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: actor,
+          actionIndex: 0,
+          actionName: 'Greatsword',
+          expectedSpec,
+          targetIds: [drake],
+          commit: false,
+        }),
+        alice,
+        'player',
+      ),
+    ).toThrow(/changed or moved/i);
+    // Rejected before any pending resolution was persisted or damage applied.
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
+  it('#1901 review (codex P1): resolve succeeds when expectedSpec matches the current row at that index', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const character = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const expectedSpec = JSON.parse(character.actions ?? '[]')[0].spec;
+
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({
+        actorCombatantId: actor,
+        actionIndex: 0,
+        actionName: 'Greatsword',
+        expectedSpec,
+        targetIds: [drake],
+        commit: false,
+      }),
+      alice,
+      'player',
+    );
+    expect(preview.resolution.targets).toHaveLength(1);
+  });
+
+  // Same underlying flaw as the two tests above, on the equipped-item half of the merged
+  // action list (issue #1901's own feature surface): unequipping the selected item and
+  // equipping a DIFFERENT item whose authored action happens to share the same name into the
+  // same merged index must not let a stale expectedSpec silently resolve the new content.
+  it('#1901 review (codex P1): resolve rejects when an equipped-item action is swapped for a same-named one at the same merged index', () => {
+    const { orm, service, campaignId, encounterId, actor, drake, aliceChar } = seed();
+    const dagger = {
+      name: 'Sidearm',
+      kind: 'melee',
+      toHit: '+5',
+      damage: '1d4+2 piercing',
+      notes: '',
+      spec: {
+        mode: 'attack',
+        attack: { ability: 'DEX', proficient: true },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: { hit: { damage: [{ formula: '1d4', flat: 2, type: 'piercing' }] } },
+      },
+    };
+    const item = addInventoryItem(orm, { campaignId, characterId: aliceChar.id, equipped: true, equipSlot: 'off-hand', equippedAction: dagger });
+    const expectedSpec = dagger.spec;
+    const mergedIndex = 3; // after the 3 manual sheet actions from seed()
+
+    // The item is unequipped and a DIFFERENT item, whose authored action happens to share the
+    // same name "Sidearm", is equipped into the same slot — the merged list re-derives on
+    // every read, so index 3 is now a different action's content under the old name.
+    orm.update(inventoryItems).set({ equipped: false, equipSlot: null }).where(eq(inventoryItems.id, item.id)).run();
+    addInventoryItem(orm, {
+      campaignId,
+      characterId: aliceChar.id,
+      equipped: true,
+      equipSlot: 'off-hand',
+      equippedAction: { ...dagger, spec: { ...dagger.spec, outcomes: { hit: { damage: [{ formula: '20d6', type: 'piercing' }] } } } },
+    });
+
+    expect(() =>
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: actor,
+          actionIndex: mergedIndex,
+          actionName: 'Sidearm',
+          expectedSpec,
+          targetIds: [drake],
+          commit: false,
+        }),
+        alice,
+        'player',
+      ),
+    ).toThrow(/changed or moved/i);
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 

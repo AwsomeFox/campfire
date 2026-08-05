@@ -78,7 +78,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import {
   beginReconcile,
@@ -1642,12 +1642,9 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
-          // Issue #1900 review: character.updated is also the only signal a REMOTE
-          // client gets for a slot/spell edit — the Spellbook now reads exclusively
-          // from the /turn cache (queryKeys.encounterTurn), not the character read
-          // just invalidated above. Without this, another open run-session tab keeps
-          // showing stale slot pips / spell rows until an unrelated encounter event
-          // happens to invalidate the turn workspace.
+          // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
+          // character.updated — invalidate derived encounter actions AND the turn workspace query.
+          invalidateEncounterActions(queryClient, eid);
           if (event.type === 'character.updated' && Number.isFinite(eid)) {
             void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
           }
@@ -3809,12 +3806,12 @@ export default function RunSessionPage() {
                     c.characterId != null &&
                     canEditCombatant(c) &&
                     (canDmWrite || (encounter.status === 'running' && c.id === currentCombatantId))
-                      ? (actionIndex) => {
-                          const ch = charactersById.get(c.characterId!);
-                          const act = ch?.actions[actionIndex];
-                          if (!act?.spec) return;
-                          onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
-                        }
+                      ? // Issue #1901: CharacterStatCard now hands back the SERVER's merged
+                        // action index (sheet actions + equipped-item actions) plus its
+                        // name/spec directly — no more re-deriving them from
+                        // `ch.actions[actionIndex]`, which silently missed anything past
+                        // the raw sheet's length.
+                        (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
                   onUseMonsterAction={
@@ -7091,8 +7088,12 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
-  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
-  onUseAction?: (actionIndex: number) => void;
+  /**
+   * Issue #414 / #425 / #1901: open the structured action Use flow. Carries the action's
+   * name/spec alongside the (server-merged, for a character) index — same shape as
+   * `onUseMonsterAction` below.
+   */
+  onUseAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
@@ -8092,6 +8093,11 @@ function CombatantRow({
             openOnActiveTurn={openCardOnActiveTurn}
             /* Click-to-roll only from an active owned card, or any card for the DM. */
             campaignId={campaignId}
+            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+               actions) — mounting this card already implies DM-or-owner (see the `character`
+               prop gate above), matching listUsableActions' own authorization. */
+            encounterId={encounterId}
+            combatantId={combatant.id}
             onError={onRollError}
             onApplyDamage={onApplyDamage}
             onUseAction={onUseAction}

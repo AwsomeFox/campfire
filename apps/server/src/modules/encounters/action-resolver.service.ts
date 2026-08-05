@@ -362,11 +362,13 @@ export class ActionResolverService {
    * issue). Ordered by item id so the index space is stable across calls, which
    * matters because {@link listUsableActions} and {@link resolveSpec} both append
    * these AFTER the character's manually-authored `character.actions`, and the apply
-   * path resolves an action purely by that combined index/name.
+   * path resolves an action purely by that combined index/name. Each row carries the
+   * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
+   * without a second inventory lookup.
    */
-  private equippedItemActions(characterId: number, campaignId: number): CharacterAction[] {
+  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ equippedAction: inventoryItems.equippedAction })
+      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
       .from(inventoryItems)
       .where(
         and(
@@ -378,25 +380,47 @@ export class ActionResolverService {
       )
       .orderBy(inventoryItems.id)
       .all();
-    const actions: CharacterAction[] = [];
+    const actions: Array<{ action: CharacterAction; itemName: string }> = [];
     for (const row of rows) {
       if (!row.equippedAction) continue;
       const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push(parsed.data);
+      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
     }
     return actions;
   }
 
   /**
-   * A character's full usable-action list (issue #1326): hand-authored sheet actions
-   * FIRST, then equipped-item actions appended — merged, never replacing, and in one
-   * stable index space so `resolveSpec`'s actionIndex lookup and `listUsableActions`
-   * agree on what index N means for this character right now.
+   * A character's full usable-action list (issue #1326, #1901): hand-authored sheet actions
+   * FIRST, then equipped-item actions appended — merged, never replacing, and in one stable
+   * index space so `resolveSpec`'s actionIndex lookup, `listUsableActions`, AND the `/turn`
+   * `suggestedActions` payload (via {@link EncountersService}) all agree on what index N means
+   * for this character right now. `itemName` is `null` for a sheet action, the equipping
+   * item's name for an equipped-item action — the ONE thing that distinguishes the two halves
+   * of the merge for a caller that wants to label the source (issue #1901).
    */
-  private characterActionRows(character: typeof characters.$inferSelect): Array<Record<string, unknown>> {
+  characterUsableActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActions(character.id, character.campaignId) as unknown as Array<Record<string, unknown>>;
-    return [...manual, ...equipped];
+    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
+    // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
+    // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
+    // sheet-action maximum would push every appended equipped-item action to index >= 100,
+    // where it can never be resolved (and the /turn payload's own `out.slice(0, 100)` would
+    // silently drop it too). Cap the SAME merged index space every caller of this method
+    // shares (listUsableActions, resolveSpec, and EncountersService's /turn payload) here,
+    // once, so nothing this method ever returns can land outside the resolvable range.
+    return [
+      ...manual.map((row) => ({ row, itemName: null as string | null })),
+      ...equipped.map(({ action, itemName }) => ({ row: action as unknown as Record<string, unknown>, itemName })),
+    ].slice(0, 100);
+  }
+
+  private characterActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<Record<string, unknown>> {
+    return this.characterUsableActionRows(character).map((x) => x.row);
   }
 
   private actionToUsable(a: CharacterAction, index: number): UsableAction {
@@ -458,6 +482,24 @@ export class ActionResolverService {
     return role === 'dm' || (encounter.status === 'running' && encounter.turnPhase === 'combatant' && encounter.currentCombatantId === actor.id);
   }
 
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P1): reject a lookup-by-index/name whose
+   * result doesn't match the caller's `expectedSpec` — closes the gap the plain name check
+   * in {@link resolveSpec} leaves open when two rows in the SAME merged list share a name
+   * (character sheet actions and equipped-item actions are both free-named, and the service
+   * already knows names aren't unique — that's exactly why `actionFingerprint` exists for the
+   * apply-time check below). Content is compared via the SAME canonicalized-hash approach as
+   * `actionFingerprint`, but applied to the PARSED `ActionSpec` on both sides — never the raw
+   * sheet-JSON row — so an unrelated extra key on the stored row can't produce a false
+   * mismatch against a client that only ever sees the normalized `ActionSpec` shape.
+   */
+  private assertExpectedSpecMatches(req: ActionResolveRequest, name: string, spec: ActionSpec): void {
+    if (req.expectedSpec === undefined) return;
+    if (actionFingerprint(spec) !== actionFingerprint(ActionSpec.parse(req.expectedSpec))) {
+      throw new BadRequestException(`Action "${name}" changed or moved before it could be applied.`);
+    }
+  }
+
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
   private resolveSpec(
     actor: typeof combatants.$inferSelect,
@@ -494,6 +536,7 @@ export class ActionResolverService {
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
+      this.assertExpectedSpecMatches(req, name, parsed.data);
       return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
     }
     const statActions = this.combatantActions(actor, campaignId);
@@ -517,6 +560,7 @@ export class ActionResolverService {
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
+    this.assertExpectedSpecMatches(req, action.name, parsed.data);
     return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
   }
 
@@ -540,8 +584,8 @@ export class ActionResolverService {
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
-      const actions = this.characterActionRows(character);
-      return actions.map((a, index) => {
+      const rows = this.characterUsableActionRows(character);
+      return rows.map(({ row: a, itemName }, index) => {
         const parsed = ActionSpec.safeParse(a?.spec);
         const spec = parsed.success ? parsed.data : null;
         return UsableAction.parse({
@@ -554,6 +598,8 @@ export class ActionResolverService {
           notes: typeof a?.notes === 'string' ? a.notes : '',
           resolvable: isResolvableSpec(spec),
           spec,
+          // Issue #1901: tag which equipped item granted this action; empty for a sheet action.
+          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : '',
         });
       });
     }
