@@ -22,8 +22,9 @@ import {
   normalizeOffsetIsoDateTime,
   CharacterAction,
   isRegisteredRuleSystemSlug,
+  HomebrewMechanicsProfile,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium, HomebrewMechanicsProfile } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -2107,8 +2108,10 @@ export class CampaignsService {
    *    row is recreated under the new campaign with a fresh id + its file written to
    *    disk, and every reference to it — campaign.mapAttachmentId, character.portraitUrl,
    *    encounter.mapAttachmentId — is remapped to that new id instead of being reset.
-   *  - ruleSystem: kept only if that rule pack is installed on THIS server; otherwise
-   *    cleared to '' so a dangling slug can't break compendium lookups.
+   *  - ruleSystem: kept only if that rule pack is installed on THIS server, OR if the
+   *    document carries a valid customMechanicsProfile that names the same slug (issue
+   *    #1502 — a homebrew system is defined by its profile, not by an installed pack);
+   *    otherwise cleared to '' so a dangling slug can't break compendium lookups.
    *  - status: forced to 'active' so a freshly imported campaign is editable even if
    *    the source was archived (paused/completed, read-only).
    *  - members / audit / proposals: not imported — install-specific; only the caller
@@ -2159,7 +2162,26 @@ export class CampaignsService {
     // dangling slug would silently break Compendium lookups scoped by pack.
     const ruleSystemSrc = str(campaignSrc.ruleSystem);
     let ruleSystem = '';
-    if (ruleSystemSrc) {
+    // Issue #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule
+    // pack, so the pack lookup alone dropped it — an exported homebrew campaign came back on
+    // the 5e fallback with its entire rule system silently gone. The clone path already
+    // carries the pair for exactly this reason.
+    //
+    // An export document is untrusted input, so the profile goes through the SAME rules a
+    // create/update write does — full schema validation, non-empty slug, never a built-in
+    // registered slug, and profile.slug === ruleSystem — and anything that fails is dropped
+    // rather than persisted, leaving the campaign on the ordinary cleared-slug path.
+    let customMechanicsProfile: string | null = null;
+    const profileParsed = HomebrewMechanicsProfile.safeParse(campaignSrc.customMechanicsProfile);
+    if (
+      ruleSystemSrc &&
+      profileParsed.success &&
+      profileParsed.data.slug === ruleSystemSrc &&
+      !isRegisteredRuleSystemSlug(ruleSystemSrc)
+    ) {
+      ruleSystem = ruleSystemSrc;
+      customMechanicsProfile = JSON.stringify(profileParsed.data);
+    } else if (ruleSystemSrc) {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
       if (pack) ruleSystem = ruleSystemSrc;
     }
@@ -2366,6 +2388,7 @@ export class CampaignsService {
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
+          customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           createdAt: ts,
           updatedAt: ts,

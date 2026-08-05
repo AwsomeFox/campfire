@@ -560,6 +560,24 @@ export function createHomebrewRuleSystemAdapter(rawProfile: unknown): RuleSystem
   return createOsrVariantAdapter(profile);
 }
 
+/**
+ * Non-throwing sibling for RESOLUTION (review). `ruleSystemAdapter` runs on hot read paths —
+ * a character sheet, a turn, a statblock render — and must never throw, so it cannot use the
+ * parsing factory above. But it must not skip validation either: the server reads the stored
+ * profile with an unchecked `JSON.parse` cast, so a row written by an older version, restored
+ * from a backup, repaired by hand, or (once import carries the field) supplied by an untrusted
+ * export document would otherwise ride straight into the combat-math seam — where an unknown
+ * `abilityTable` silently degrades to `bx-banded` rather than being rejected.
+ *
+ * `null` means "this profile is not usable"; the caller falls back to its own default, which
+ * is the same thing that happens when no profile is stored at all. Returning the default
+ * rather than throwing keeps a malformed row from taking down every read of the campaign.
+ */
+export function tryCreateHomebrewRuleSystemAdapter(rawProfile: unknown): RuleSystemAdapter | null {
+  const parsed = HomebrewMechanicsProfile.safeParse(rawProfile);
+  return parsed.success ? createOsrVariantAdapter(parsed.data) : null;
+}
+
 // ---------- Per-variant adapter exports ----------
 
 export const BasicFantasyAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['basic-fantasy']);

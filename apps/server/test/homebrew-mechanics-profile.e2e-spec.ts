@@ -162,6 +162,69 @@ describe('campaign customMechanicsProfile (issue #1502, e2e)', () => {
     expect(patchRes.body.message).toMatch(/does not match any installed rule pack/i);
   });
 
+  it('survives an export -> import round trip, including the handoff profile', async () => {
+    // #1502 review. The clone path carried the pair; export/import did not — the allowlist
+    // stripped the profile while keeping the slug, and importCampaign only ever looked for an
+    // installed rule pack. A homebrew campaign moved between installs came back on the 5e
+    // fallback with its whole rule system gone, silently.
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Roundtrip Campaign', ruleSystem: 'e2e-roundtrip-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-roundtrip-hack' } });
+    expect(createRes.status).toBe(201);
+
+    for (const profile of ['', '&profile=handoff']) {
+      const exportRes = await request(server)
+        .get(`/api/v1/campaigns/${createRes.body.id}/export?format=json${profile}`)
+        .set(dm);
+      expect(exportRes.status).toBe(200);
+      expect(exportRes.body.campaign.customMechanicsProfile).toMatchObject({ slug: 'e2e-roundtrip-hack' });
+
+      const importRes = await request(server).post('/api/v1/campaigns/import').set(dm).send(exportRes.body);
+      expect(importRes.status).toBe(201);
+      expect(importRes.body.ruleSystem).toBe('e2e-roundtrip-hack');
+      expect(importRes.body.customMechanicsProfile).toMatchObject({ slug: 'e2e-roundtrip-hack', abilityTable: 'sw-banded' });
+    }
+  });
+
+  it('drops a profile an import document cannot justify, instead of persisting it', async () => {
+    // An export document is untrusted input, so it goes through the same rules a create/update
+    // write does. Each of these must land on the ordinary cleared-slug path rather than
+    // persisting a profile the server would have rejected at the REST boundary.
+    const base = {
+      campaign: { name: 'Hostile Import', status: 'active', narrationLanguage: 'en' },
+      locations: [],
+      npcs: [],
+      quests: [],
+      factions: [],
+      sessions: [],
+      characters: [],
+    };
+    const cases = [
+      // slug does not match the profile it claims to be defined by
+      { ruleSystem: 'e2e-hostile-a', customMechanicsProfile: { ...validProfile, slug: 'something-else' } },
+      // out-of-enum strategy value
+      { ruleSystem: 'e2e-hostile-b', customMechanicsProfile: { ...validProfile, slug: 'e2e-hostile-b', abilityTable: 'not-a-table' } },
+      // attempts to redefine a BUILT-IN system's mechanics through the import side door
+      { ruleSystem: 'dnd5e', customMechanicsProfile: { ...validProfile, slug: 'dnd5e' } },
+      // not an object at all
+      { ruleSystem: 'e2e-hostile-c', customMechanicsProfile: 'nope' },
+    ];
+    for (const campaign of cases) {
+      const res = await request(server)
+        .post('/api/v1/campaigns/import')
+        .set(dm)
+        .send({ ...base, campaign: { ...base.campaign, ...campaign } });
+      expect(res.status).toBe(201);
+      expect(res.body.customMechanicsProfile).toBeNull();
+      // 'dnd5e' is an installed pack in the test app only if seeded; either way the profile
+      // must not have been stored, which is what this guards.
+      expect(res.body.ruleSystem).not.toBe('e2e-hostile-a');
+      expect(res.body.ruleSystem).not.toBe('e2e-hostile-b');
+      expect(res.body.ruleSystem).not.toBe('e2e-hostile-c');
+    }
+  });
+
   it('carries customMechanicsProfile over on campaign clone (otherwise a clone would silently fall back to 5e)', async () => {
     const createRes = await request(server)
       .post('/api/v1/campaigns')

@@ -264,6 +264,27 @@ describe('#1502 review — resolution and diff hardening', () => {
     expect(preview.changes).not.toEqual(['No mechanics changes — profiles are identical.']);
   });
 
+  it('treats a MALFORMED stored profile as no profile at all rather than applying it', () => {
+    // The server reads this column with an unchecked JSON.parse, so a row from an older
+    // version, a restored backup, a hand repair, or an untrusted export document reaches
+    // resolution unvalidated. Building the adapter straight from it meant an out-of-enum
+    // abilityTable silently degraded to bx-banded — wrong maths presented as the table's own.
+    const malformed = { ...validHomebrewProfile, abilityTable: 'not-a-real-table' };
+    expect(ruleSystemAdapter('my-pirate-hack', malformed as unknown as HomebrewMechanicsProfile)).toBe(Dnd5eAdapter);
+
+    // Missing a required field, and an unknown extra field, are rejected the same way.
+    const { acMode: _dropped, ...incomplete } = validHomebrewProfile;
+    expect(ruleSystemAdapter('my-pirate-hack', incomplete as unknown as HomebrewMechanicsProfile)).toBe(Dnd5eAdapter);
+    const extra = { ...validHomebrewProfile, rogueField: 'x' };
+    expect(ruleSystemAdapter('my-pirate-hack', extra as unknown as HomebrewMechanicsProfile)).toBe(Dnd5eAdapter);
+  });
+
+  it('resolution never throws on a bad profile — it is called on hot read paths', () => {
+    for (const bad of [null, undefined, 'a string', 42, {}, { slug: 'my-pirate-hack' }]) {
+      expect(() => ruleSystemAdapter('my-pirate-hack', bad as unknown as HomebrewMechanicsProfile)).not.toThrow();
+    }
+  });
+
   it('reports a re-split condition list as a change too', () => {
     const merged: HomebrewMechanicsProfile = { ...validHomebrewProfile, conditions: ['Soaked,Becalmed,Cursed'] };
     const preview = previewMechanicsProfileMigration(merged, validHomebrewProfile);
