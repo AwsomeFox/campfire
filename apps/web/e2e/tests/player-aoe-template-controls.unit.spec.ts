@@ -9,7 +9,8 @@ const RUN_SESSION = readFileSync(resolve(ROOT, 'features/encounters/RunSessionPa
 test.describe('player AoE template controls (issue #1913)', () => {
   test('players use scoped declare/update/remove callbacks while DM whole-list editing remains available', () => {
     expect(BATTLE_MAP).toContain('effectiveCanDeclareAoe');
-    expect(BATTLE_MAP).toContain('onDeclareAoe(t)');
+    expect(BATTLE_MAP).toContain('const { declaredByUserId: _serverOwnedDeclarer, ...declaration } = t;');
+    expect(BATTLE_MAP).toContain('onDeclareAoe(declaration)');
     expect(BATTLE_MAP).toContain('onUpdateAoe(id, patch)');
     expect(BATTLE_MAP).toContain('onRemoveAoe(id)');
     expect(BATTLE_MAP).toContain('if (effectiveCanDmWrite) onSetAoe');
@@ -19,8 +20,10 @@ test.describe('player AoE template controls (issue #1913)', () => {
   test('player declarations are visibly attributed and the DM can clear only player templates', () => {
     expect(BATTLE_MAP).toContain("strokeDasharray={playerDeclared ? '6 4' : undefined}");
     expect(BATTLE_MAP).toContain('declaredByUserId != null');
+    expect(BATTLE_MAP).toContain('aoeDeclarerNames.get(t.declaredByUserId)');
     expect(BATTLE_MAP).toContain('onClearPlayerAoe');
     expect(RUN_SESSION).toContain('clearPlayerAoeTemplates');
+    expect(RUN_SESSION).toContain('queryKeys.campaignMembers(cid)');
   });
 
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {

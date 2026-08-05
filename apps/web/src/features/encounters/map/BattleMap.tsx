@@ -187,6 +187,7 @@ export type BattleMapProps = {
   onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void;
   onRemoveAoe?: (templateId: string) => void;
   onClearPlayerAoe?: () => void;
+  aoeDeclarerNames?: ReadonlyMap<string, string>;
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
@@ -229,6 +230,7 @@ export function BattleMap({
   onUpdateAoe = () => undefined,
   onRemoveAoe = () => undefined,
   onClearPlayerAoe,
+  aoeDeclarerNames = new Map(),
   onGenerateMap,
   onImportMap,
   showGuidance,
@@ -1374,7 +1376,12 @@ export function BattleMap({
     const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null, declaredByUserId: null };
     setSelectedAoeId(t.id);
     if (effectiveCanDmWrite) onSetAoe([...aoeTemplates, t]);
-    else onDeclareAoe(t);
+    else {
+      // Omit at runtime, not merely in the TypeScript annotation: the server's
+      // strict declaration schema rejects caller-supplied attribution.
+      const { declaredByUserId: _serverOwnedDeclarer, ...declaration } = t;
+      onDeclareAoe(declaration);
+    }
   }
   function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
     if (effectiveCanDmWrite) onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -2653,7 +2660,8 @@ export function BattleMap({
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;
                     const y = drag ? drag.y : t.y;
-                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}${t.declaredByUserId ? ` · ${t.declaredByUserId}` : ''}`;
+                    const declarerName = t.declaredByUserId == null ? null : (aoeDeclarerNames.get(t.declaredByUserId) ?? t.declaredByUserId);
+                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}${declarerName ? ` · ${declarerName}` : ''}`;
                     return (
                       <div
                         key={t.id}
