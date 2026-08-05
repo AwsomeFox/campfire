@@ -44,6 +44,22 @@ export function mergeRulesAndHomebrew(
   return items;
 }
 
+/** Combine merged search/homebrew results with the actively expanded recent entry if outside search results. */
+export function getDisplayedResults(
+  mergedResults: Array<RuleEntry & { isHomebrew?: boolean }>,
+  recentLookups: RuleEntry[],
+  expandedEntryId: number | null,
+): Array<RuleEntry & { isHomebrew?: boolean }> {
+  const items = [...mergedResults];
+  if (expandedEntryId !== null) {
+    const expandedEntry = recentLookups.find((r) => r.id === expandedEntryId);
+    if (expandedEntry && !items.some((i) => i.id === expandedEntryId)) {
+      items.unshift(expandedEntry);
+    }
+  }
+  return items;
+}
+
 /** Prepend a newly opened lookup entry, capping at 5 and deduping by id. */
 export function updateRecentLookups(prev: RuleEntry[], entry: RuleEntry): RuleEntry[] {
   const next = prev.filter((item) => item.id !== entry.id);
@@ -139,6 +155,10 @@ export function RulesLookupPanel({ campaignId, ruleSystem }: RulesLookupPanelPro
     return mergeRulesAndHomebrew(searchPage?.items ?? [], homebrewList, debouncedQuery);
   }, [homebrewList, searchPage?.items, debouncedQuery]);
 
+  const displayedResults = useMemo(() => {
+    return getDisplayedResults(mergedResults, recentLookups, expandedEntryId);
+  }, [mergedResults, recentLookups, expandedEntryId]);
+
   const toggleExpandEntry = useCallback((entry: RuleEntry) => {
     setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id));
     setRecentLookups((prev) => updateRecentLookups(prev, entry));
@@ -200,15 +220,15 @@ export function RulesLookupPanel({ campaignId, ruleSystem }: RulesLookupPanelPro
             </p>
           )}
 
-          {!searchLoading && mergedResults.length === 0 && (
+          {!searchLoading && displayedResults.length === 0 && (
             <p className="text-muted text-xs" style={{ margin: 0 }}>
               {t('rulesLookup.noResults', 'No matching rules found.')}
             </p>
           )}
 
-          {mergedResults.length > 0 && (
+          {displayedResults.length > 0 && (
             <ul className="space-y-1.5 min-w-0" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-              {mergedResults.map((entry) => {
+              {displayedResults.map((entry) => {
                 const isExpanded = expandedEntryId === entry.id;
                 const packName = !entry.isHomebrew && !effectivePack && entry.packId ? resolvePackName(entry.packId, packMap) : null;
                 return (

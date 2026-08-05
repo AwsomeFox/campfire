@@ -3,6 +3,7 @@ import type { RuleEntry } from '@campfire/schema';
 import {
   buildSearchUrlParams,
   filterHomebrewEntries,
+  getDisplayedResults,
   getInitialCollapsedState,
   mergeRulesAndHomebrew,
   resolvePackName,
@@ -96,6 +97,22 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     // Opening r3 again should move it to top without duplicating
     recents = updateRecentLookups(recents, r3);
     expect(recents.map((r) => r.id)).toEqual([3, 6, 5, 4, 2]);
+  });
+
+  test('getDisplayedResults prepends expanded recent entry if outside active search results', () => {
+    const searchItem = dummyRule(1, 'Grappled');
+    const recentItem = dummyRule(99, 'Fireball');
+    const merged = [searchItem];
+    const recents = [recentItem];
+
+    // When expandedEntryId is null, displayedResults is identical to merged
+    expect(getDisplayedResults(merged, recents, null)).toEqual([searchItem]);
+
+    // When expandedEntryId is 99 (recentItem), it prepends recentItem to displayedResults
+    const displayed = getDisplayedResults(merged, recents, 99);
+    expect(displayed).toHaveLength(2);
+    expect(displayed[0]).toEqual(recentItem);
+    expect(displayed[1]).toEqual(searchItem);
   });
 
   test('collapse persistence reads sessionStorage values correctly', () => {
