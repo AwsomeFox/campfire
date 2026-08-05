@@ -17,6 +17,7 @@ import {
   campaignMembers,
   campaigns,
   passwordResetRequests,
+  campaignCreationRequests,
   characters,
   membershipIntegrityRepairs,
   participantSupportPreferences,
@@ -509,6 +510,10 @@ export class UsersService {
       tx.delete(userSessions).where(eq(userSessions.userId, id)).run();
       tx.delete(apiTokens).where(eq(apiTokens.userId, id)).run();
       tx.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id)).run();
+      // Issue #851 review: the same cleanup for the table modelled on it. `listPendingRequests`
+      // inner-joins `users`, so an orphaned row vanishes from the admin queue while staying
+      // 'pending' in storage — handled by nobody, visible to nobody.
+      tx.delete(campaignCreationRequests).where(eq(campaignCreationRequests.userId, id)).run();
       tx.delete(participantSupportPreferences)
         .where(eq(participantSupportPreferences.ownerUserId, String(id)))
         .run();

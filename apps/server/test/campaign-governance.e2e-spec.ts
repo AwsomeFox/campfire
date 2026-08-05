@@ -1,3 +1,5 @@
+import Database from 'better-sqlite3';
+import path from 'node:path';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
@@ -49,6 +51,59 @@ describe('shared-instance governance (issue #851, e2e)', () => {
     expect(res.status).toBe(200);
     expect(res.body.policy).toBe('everyone');
     expect(res.body.canCreate).toBe(true);
+  });
+
+  it('withholds server-wide campaign counts from a non-admin caller', async () => {
+    // Review: every other campaign read in this product is membership-scoped — GET /campaigns
+    // is, even for a server admin — so returning an aggregate over campaigns the caller has no
+    // membership relationship with widened that boundary. The per-user figures they DO have
+    // standing to see are unaffected.
+    await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsServerWide: 50 });
+    const user = await createUser('scopecheck1');
+    const res = await user.get('/api/v1/campaigns/allowance');
+    expect(res.status).toBe(200);
+    expect(res.body.activeServerWide).toBeNull();
+    expect(res.body.totalServerWide).toBeNull();
+    expect(res.body.activePerUser).toMatchObject({ used: expect.any(Number) });
+  });
+
+  it('still reports server-wide counts to an admin, who configures them', async () => {
+    await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsServerWide: 50 });
+    const res = await adminAgent.get('/api/v1/campaigns/allowance');
+    expect(res.status).toBe(200);
+    expect(res.body.activeServerWide).toMatchObject({ used: expect.any(Number), max: 50 });
+    expect(res.body.totalServerWide).not.toBeNull();
+  });
+
+  it('deletes a user\'s pending creation requests along with the account', async () => {
+    // The table is modelled on password_reset_requests, whose rows ARE cleaned up on delete.
+    // listPendingRequests inner-joins users, so an orphan silently vanishes from the admin
+    // queue while staying 'pending' in storage — handled by nobody, visible to nobody.
+    await adminAgent.patch('/api/v1/settings').send({ campaignCreationPolicy: 'approved_organizers' });
+    const user = await createUser('orphanreq1');
+    const filed = await user.post('/api/v1/campaigns/creation-requests').send({ note: 'please' });
+    expect(filed.status).toBe(201);
+
+    // Observed in STORAGE, not through the admin queue. `listPendingRequests` inner-joins
+    // `users`, so an orphaned row disappears from that endpoint whether or not it was
+    // actually deleted — asserting against the queue would pass either way and guard nothing.
+    const countRows = (): number => {
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'), { readonly: true });
+      try {
+        const row = db
+          .prepare('SELECT COUNT(*) AS n FROM campaign_creation_requests WHERE user_id = ?')
+          .get(filed.body.userId) as { n: number };
+        return row.n;
+      } finally {
+        db.close();
+      }
+    };
+    expect(countRows()).toBe(1);
+
+    const del = await adminAgent.delete(`/api/v1/users/${filed.body.userId}`);
+    expect(del.status).toBe(204);
+
+    expect(countRows()).toBe(0);
   });
 
   it('applies the operator default storage quota atomically to a newly created campaign', async () => {

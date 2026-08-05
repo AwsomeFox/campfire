@@ -3,7 +3,7 @@
  * design's "Campaign hub" screen (card grid with cover strip + dashed
  * "New campaign" tile). Grid of campaign tiles plus a create-campaign tile
  * that launches the full NewCampaignWizard overlay (details -> rule system
- * -> POST + PATCH ruleSystem). Any user may create a campaign.
+ * -> POST + PATCH ruleSystem). Campaign creation and import are gated by instance governance (issue #851) — policy tier, per-user and server-wide limits, and the organizer request flow. The tiles below reflect the caller's allowance; the server re-enforces it on every write regardless.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';

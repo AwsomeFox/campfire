@@ -82,6 +82,11 @@ export class CampaignGovernanceService {
     const all = await this.settings.getAll();
     const numericId = Number(user.id);
     const userId = Number.isInteger(numericId) ? numericId : null;
+    // Fails CLOSED for a numeric principal whose row is gone (review). A stale session or a
+    // token minted for a since-deleted account would otherwise be treated as an approved
+    // organizer under `approved_organizers` — the policy answering "yes" for a user it cannot
+    // find. A principal with no numeric id at all (a dev/synthetic actor) keeps the permissive
+    // default, because there is no row to look up and no account to have been revoked.
     let canCreateCampaigns = true;
     if (userId != null) {
       const [row] = await this.db
@@ -89,7 +94,7 @@ export class CampaignGovernanceService {
         .from(users)
         .where(eq(users.id, userId))
         .limit(1);
-      if (row) canCreateCampaigns = row.canCreateCampaigns;
+      canCreateCampaigns = row ? row.canCreateCampaigns : false;
     }
     return {
       bypass: false,
@@ -268,8 +273,11 @@ export class CampaignGovernanceService {
       reason,
       activePerUser: { used: activePerUser, max: ctx.limits.activePerUser },
       totalPerUser: { used: totalPerUser, max: ctx.limits.totalPerUser },
-      activeServerWide: { used: activeServerWide, max: ctx.limits.activeServerWide },
-      totalServerWide: { used: totalServerWide, max: ctx.limits.totalServerWide },
+      // Admin-only (review) — see the schema comment. The counts are still computed above
+      // because `canCreate`/`reason` below depend on them; they are simply not returned to a
+      // caller with no standing to see a server-wide aggregate.
+      activeServerWide: ctx.isServerAdmin ? { used: activeServerWide, max: ctx.limits.activeServerWide } : null,
+      totalServerWide: ctx.isServerAdmin ? { used: totalServerWide, max: ctx.limits.totalServerWide } : null,
       defaultStorageQuotaBytes: ctx.defaultStorageQuotaBytes,
       hasPendingRequest,
     };

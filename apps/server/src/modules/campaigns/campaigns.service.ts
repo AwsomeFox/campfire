@@ -114,6 +114,7 @@ import {
   preflightCompendiumImport,
   resolveImportedCombatantRuleEntryId,
 } from './compendium-import';
+import { auditBestEffort } from '../audit/audit-best-effort';
 import { CampaignGovernanceDeniedError, CampaignGovernanceService } from './campaign-governance.service';
 
 function safeImportedCompendiumSnapshot(value: unknown): string | null {
@@ -718,13 +719,22 @@ export class CampaignsService {
     } catch (err) {
       if (err instanceof CampaignGovernanceDeniedError) {
         // Best-effort, outside the rolled-back transaction (see AuditService.log's doc).
-        await this.audit.log({
-          actor: auditActor(user),
-          actorRole: 'dm',
-          action: 'campaign.create.denied',
-          entityType: 'campaign',
-          detail: `reason=${err.code}`,
-        });
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: 'dm',
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       throw err;
     }
@@ -1412,6 +1422,19 @@ export class CampaignsService {
         .all();
       const cloneId = campaignRow.id;
 
+      // Issue #851 review: the owner row is written INSIDE this transaction, exactly as
+      // create() and importCampaign() do. `enforceTx` counts a user's campaigns by joining
+      // `campaignMembers.primaryOwner`, so writing it after the commit (and after an awaited
+      // attachment-copy loop) left a window in which the clone existed but was owned by
+      // nobody — a concurrent clone counted past it and both slipped the limit. The atomicity
+      // this PR claims for create/import has to hold for clone too, or the limit is advisory.
+      if (!user.devRole) {
+        const numericOwnerId = Number(user.id);
+        if (Number.isInteger(numericOwnerId)) {
+          this.members.addCreatorAsDmTx(tx, cloneId, numericOwnerId, ts);
+        }
+      }
+
       // Locations first — npcs, quests-via-npcs and currentLocationId all point at them.
       // Two passes like quests below: insert all (parentId deferred), then remap the
       // nesting parentId (#99) — a child's parent may appear after it in insert order.
@@ -2092,13 +2115,22 @@ export class CampaignsService {
       // Issue #851: a governance denial rolled back the transaction (no row committed) —
       // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
       if (err instanceof CampaignGovernanceDeniedError) {
-        await this.audit.log({
-          actor: auditActor(user),
-          actorRole: 'dm',
-          action: 'campaign.create.denied',
-          entityType: 'campaign',
-          detail: `reason=${err.code}, path=clone, sourceCampaignId=${id}`,
-        });
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: 'dm',
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=clone, sourceCampaignId=${id}`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       throw err;
     }
@@ -2113,14 +2145,6 @@ export class CampaignsService {
             err instanceof Error ? err.message : String(err)
           }`,
         );
-      }
-    }
-
-    // Same membership rule as create(): the caller becomes the clone's dm.
-    if (!user.devRole) {
-      const numericId = Number(user.id);
-      if (Number.isInteger(numericId)) {
-        await this.members.addCreatorAsDm(newId, numericId);
       }
     }
 
@@ -3454,13 +3478,22 @@ export class CampaignsService {
       // Issue #851: a governance denial rolled back the transaction (no row committed) —
       // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
       if (err instanceof CampaignGovernanceDeniedError) {
-        await this.audit.log({
-          actor: auditActor(user),
-          actorRole: 'dm',
-          action: 'campaign.create.denied',
-          entityType: 'campaign',
-          detail: `reason=${err.code}, path=import`,
-        });
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: 'dm',
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=import`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       throw err;
     } finally {

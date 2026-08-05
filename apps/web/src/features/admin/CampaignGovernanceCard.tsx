@@ -14,22 +14,33 @@ import { Btn, Card, Skeleton } from '../../components/ui';
 function limitToInput(value: number | null): string {
   return value == null ? '' : String(value);
 }
-function inputToLimit(value: string): number | null {
+/**
+ * `null` = unlimited, `INVALID` = refuse to save (issue #851 review).
+ *
+ * These two used to collapse together: anything non-numeric, zero, or negative returned
+ * `null`, and `null` is the wire value for "no limit". An admin tightening a cap who typed
+ * `0` — which `type="number"` with `min={1}` does not stop them typing — silently turned the
+ * cap OFF and saw a blank box afterwards, believing it was still enforced. Only a genuinely
+ * empty field may mean unlimited.
+ */
+const INVALID = Symbol('invalid');
+function inputToLimit(value: string): number | null | typeof INVALID {
   const trimmed = value.trim();
   if (trimmed === '') return null;
   const n = Number(trimmed);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+  return Number.isFinite(n) && n > 0 && Number.isInteger(n) ? n : INVALID;
 }
 
 const BYTES_PER_MB = 1024 * 1024;
 function bytesToMbInput(value: number | null): string {
   return value == null ? '' : String(Math.round(value / BYTES_PER_MB));
 }
-function mbInputToBytes(value: string): number | null {
+function mbInputToBytes(value: string): number | null | typeof INVALID {
   const trimmed = value.trim();
   if (trimmed === '') return null;
   const n = Number(trimmed);
-  return Number.isFinite(n) && n >= 0 ? Math.round(n * BYTES_PER_MB) : null;
+  // Same collapse as above: a negative quota became "no default quota" rather than an error.
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * BYTES_PER_MB) : INVALID;
 }
 
 export function CampaignGovernanceCard({ settings, onChange }: { settings: ServerSettings | null; onChange: () => void }) {
@@ -75,14 +86,21 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
     setSaving(true);
     setError(null);
     try {
-      await api.patch(`${API}/settings`, {
+      const patch = {
         campaignCreationPolicy: policy,
         maxActiveCampaignsPerUser: inputToLimit(maxActivePerUser),
         maxTotalCampaignsPerUser: inputToLimit(maxTotalPerUser),
         maxActiveCampaignsServerWide: inputToLimit(maxActiveServerWide),
         maxTotalCampaignsServerWide: inputToLimit(maxTotalServerWide),
         defaultCampaignStorageQuotaBytes: mbInputToBytes(defaultQuotaMb),
-      });
+      };
+      // Refuse the whole save rather than sending a limit the admin did not ask for. Nothing
+      // partial: a governance setting must never move because a neighbouring box was mistyped.
+      if (Object.values(patch).some((v) => v === INVALID)) {
+        setError('Enter a whole number of 1 or more, or leave a box empty for no limit. Nothing was saved.');
+        return;
+      }
+      await api.patch(`${API}/settings`, patch);
       onChange();
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));

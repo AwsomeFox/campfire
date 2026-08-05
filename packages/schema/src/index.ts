@@ -6679,8 +6679,14 @@ export const CampaignAllowance = z.object({
   reason: CampaignAllowanceReason,
   activePerUser: CampaignAllowanceCounter,
   totalPerUser: CampaignAllowanceCounter,
-  activeServerWide: CampaignAllowanceCounter,
-  totalServerWide: CampaignAllowanceCounter,
+  // Server-wide counts are ADMIN-ONLY; null for everyone else (issue #851 review).
+  // Every other campaign read in this product is membership-scoped — `GET /campaigns` is,
+  // even for a server admin — so handing a viewer-scoped PAT an aggregate over campaigns it
+  // has no membership relationship with widens that boundary. A non-admin who is blocked by
+  // a server-wide ceiling still learns it from `reason`, which is what they need in order to
+  // act; the population figure is not.
+  activeServerWide: CampaignAllowanceCounter.nullable(),
+  totalServerWide: CampaignAllowanceCounter.nullable(),
   defaultStorageQuotaBytes: z.number().int().nonnegative().nullable(),
   /** Whether the caller already has an undecided creation request pending. */
   hasPendingRequest: z.boolean(),
