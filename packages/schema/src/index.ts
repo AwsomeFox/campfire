@@ -7686,7 +7686,14 @@ export const AI_DM_STYLE_PRESET_AXES = [
  * this is an ACCESSIBILITY preference — how readable a turn's narration is for the humans at
  * THIS table, independent of what voice the DM likes. Same mechanism as #1049 on purpose: a
  * closed, bounded set of dropdowns that complement the freeform `instructions` textarea rather
- * than replace it, and `'default'` on every axis states no preference and costs zero tokens.
+ * than replace it, and `'default'` on every axis states no preference.
+ *
+ * Its COST is not #1049's, and the difference matters for prompt-budget expectations (review).
+ * Table style renders nothing at all until a DM opts in. This section always renders: its
+ * baseline IS the issue's stated default behaviour, owed to every table whether or not anyone
+ * has visited the settings page. So an all-`'default'` profile costs the baseline section, and
+ * it is only the four per-axis LINES that are zero-cost while left on `'default'`. The whole
+ * section is bounded by `AI_DM_COMPREHENSION_SECTION_MAX_TOKENS`.
  *
  * The four axes are exactly the issue's acceptance criteria: how complex the vocabulary/sentence
  * structure may be, how long a paragraph runs before breaking, how much sensory description to

@@ -100,6 +100,7 @@ import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { formatUsdRangeValue } from './costEstimate';
+import { appendQuickRequest } from './quickRequest';
 import { CostDisclosure } from './CostDisclosure';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -1338,7 +1339,8 @@ export default function AiTablePage() {
                   className="btn btn-secondary"
                   style={{ fontSize: 11.5, padding: '2px 8px' }}
                   disabled={submitting}
-                  onClick={() => setInput(t(`table.quickActions.${action}Text`))}
+                  // APPENDS, never replaces — see appendQuickRequest's own comment for why.
+                  onClick={() => setInput((current) => appendQuickRequest(current, t(`table.quickActions.${action}Text`)))}
                 >
                   {t(`table.quickActions.${action}`)}
                 </button>
