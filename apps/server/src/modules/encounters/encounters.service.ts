@@ -4447,7 +4447,7 @@ export class EncountersService {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
       if (prior.responseRole === role) return parsed;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
       const found = snapshot.combatants.find((c) => c.id === combatantId);
       if (!found) return null;
       const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
