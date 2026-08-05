@@ -20,7 +20,8 @@
       "rulesOnly": "Rules reference only; it does not expose campaign secrets.",
       "tableVisible": "Shared table agreement visible to every campaign member.",
       "dmOnly": "DM-only prep space; players and viewers cannot see it.",
-      "liveCanonSplit": "Acts in live play, while durable canon edits still become proposals."
+      "liveCanonSplit": "Acts in live play, while durable canon edits still become proposals.",
+      "dmSetTableVisible": "تُعرض لكل أفراد الطاولة، ولا يمكن لغير سيد اللعبة تغييرها."
     },
     "phase": {
       "livePlay": "Live play",
@@ -28,7 +29,8 @@
       "prepCanon": "Prep and canon",
       "reference": "Reference",
       "prepSafety": "Table safety",
-      "aiAssist": "AI assist"
+      "aiAssist": "AI assist",
+      "campaignSetting": "إعداد الحملة"
     },
     "terms": {
       "cast": {
@@ -70,6 +72,11 @@
         "label": "Driver",
         "short": "Driver lets the AI run live play directly, while canon edits still go through proposals.",
         "definition": "Driver is the AI mode where the AI holds the DM seat for live play: narrating, rolling dice, applying HP and conditions, and advancing turns within its budget. Durable canon edits such as new NPCs, quests, or locations still become proposals for DM review."
+      },
+      "dangerLevel": {
+        "label": "مستوى خطورة الحملة",
+        "short": "يحدد مستوى خطورة الحملة نبرة الحملة الكلية وتحديها الأساسي، وليس مقياسًا للتهديد اللحظي.",
+        "definition": "مستوى خطورة الحملة هو إعداد يحدده سيد اللعبة لنبرة الحملة الكلية وتحديها الأساسي، وليس خاصًا بمشهد أو جلسة أو مواجهة بعينها. يبقى كما هو حتى يغيّره سيد اللعبة من الإعدادات أو لوحة التحكم، ويؤثر فقط في أسلوب سرد الذكاء الاصطناعي (Driver) عند ضبطه فوق المستوى المنخفض. وهو يختلف عن صعوبة المواجهة (حساب مخصص لمواجهة واحدة)، وحالة نقاط حياة المقاتل (وضعه الصحي الحالي)، وميثاق الأمان الخاص بالجلسة الصفرية (حدود المحتوى والأمان المتفق عليها على الطاولة)."
       }
     }
   }
