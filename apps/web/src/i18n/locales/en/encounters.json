@@ -45,6 +45,12 @@
       "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced.",
       "controlsPaused": "Paused — reconnecting to live updates."
     },
+    "feedback": {
+      "down": "DOWN",
+      "revive": "UP",
+      "hurt": "Hurt",
+      "recover": "Recovered"
+    },
     "errors": {
       "load": "Couldn't load encounters.",
       "create": "Couldn't create the encounter.",
