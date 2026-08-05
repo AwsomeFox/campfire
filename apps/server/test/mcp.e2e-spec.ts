@@ -1171,6 +1171,42 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(again.isError).toBe(true);
   });
 
+  // Issue #1904 review finding: a viewer hitting a HIDDEN encounter's id must get the same
+  // 404 a nonexistent id gets — not a 403 from the stricter 'player' role gate, which would
+  // leak that the encounter exists (hidden entities are indistinguishable from nonexistent
+  // for a non-DM elsewhere in this codebase, and the REST handler for this same action
+  // already gets this right via a viewer-role visibility pre-check).
+  it('roll_combatant_initiative 404s a hidden encounter for a viewer, matching REST — not a role-gate 403 that leaks existence', async () => {
+    const hidden = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Hidden Roll Target', hidden: true });
+    expect(hidden.status).toBe(201);
+    const monster = await dmAgent
+      .post(`/api/v1/encounters/${hidden.body.id}/combatants`)
+      .send({ kind: 'monster', name: 'MCP Hidden Kobold', hpMax: 5 });
+    expect(monster.status).toBe(201);
+
+    const viewerClient = await mcpClient(viewerToken);
+    const nonexistentEncounterId = 999999999;
+    const [hiddenAttempt, nonexistentAttempt] = await Promise.all([
+      viewerClient.callTool({
+        name: 'roll_combatant_initiative',
+        arguments: { encounterId: hidden.body.id, combatantId: monster.body.id, idempotencyKey: 'mcp-viewer-hidden-encounter' },
+      }),
+      viewerClient.callTool({
+        name: 'roll_combatant_initiative',
+        arguments: { encounterId: nonexistentEncounterId, combatantId: monster.body.id, idempotencyKey: 'mcp-viewer-nonexistent-encounter' },
+      }),
+    ]);
+    expect(hiddenAttempt.isError).toBe(true);
+    expect(nonexistentAttempt.isError).toBe(true);
+    const hiddenError = parseResult(hiddenAttempt) as { error: { status: number } };
+    const nonexistentError = parseResult(nonexistentAttempt) as { error: { status: number } };
+    // The core regression: identical status for "hidden" and "doesn't exist" — a 403 on the
+    // hidden one (from falling straight into the player-role gate) would have distinguished
+    // them, leaking the hidden encounter's existence to a viewer.
+    expect(hiddenError.error.status).toBe(404);
+    expect(nonexistentError.error.status).toBe(404);
+  });
+
   it('rejects legacy deathSaveRoll MCP input with migration guidance before any mutation', async () => {
     const character = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)

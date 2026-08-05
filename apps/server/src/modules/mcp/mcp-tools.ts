@@ -166,7 +166,7 @@ import { CommentsService } from '../comments/comments.service';
 import { SchedulingService } from '../sessions/scheduling.service';
 import { OrganizedPlayService } from '../sessions/organized-play.service';
 import { ScribeService } from '../scribe/scribe.service';
-import { filterHidden } from '../../common/redact';
+import { filterHidden, isVisibleTo } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
 // Dice-roll retention is applied inside ScribeService.assembleSourceWithConsent, which
@@ -4594,6 +4594,21 @@ export class McpToolsService {
         // Same-key retries replay a stored response without writing, even after the
         // encounter is trashed; the service still rejects a fresh key transactionally.
         const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        // Issue #1904 review finding: mirror the REST handler's viewer-role visibility
+        // pre-check (POST .../roll-initiative in encounters.controller.ts) so a viewer
+        // hitting a HIDDEN encounter's id gets the same 404 a nonexistent id gets. Without
+        // this, a viewer-role caller falls straight into the stricter 'player' role gate
+        // below and gets 403 instead — distinguishable from a real 404, which leaks that
+        // the hidden encounter exists (hidden entities must be indistinguishable from
+        // nonexistent for a non-DM).
+        if (
+          !isVisibleTo(
+            { hidden: row.hidden },
+            await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }),
+          )
+        ) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
         const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
         return this.encounters.rollCombatantInitiative(
           encounterId as number,
