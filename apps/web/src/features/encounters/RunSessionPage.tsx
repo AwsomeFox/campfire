@@ -1728,6 +1728,7 @@ export default function RunSessionPage() {
           statblock: combatant.statblock ?? undefined,
           hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
           initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
           tokenSize: combatant.tokenSize,
         },
       });

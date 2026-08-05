@@ -11,4 +11,5 @@ test('serializes duplicate combatant clicks and reconciles ambiguous outcomes', 
   expect(source.indexOf('pendingDuplicateCombatantIds.current.add(combatant.id);')).toBeLessThan(source.indexOf('duplicateCombatant.mutate({'));
   expect(source).toContain('pendingDuplicateCombatantIds.current.delete(combatantId);');
   expect(source).toContain('if (isAmbiguousOutcome(err)) enterReconciling();');
+  expect(source).toContain('initiativeGroup: combatant.initiativeGroup ?? undefined,');
 });

@@ -3496,6 +3496,14 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       npcId: null,
       name: UNKNOWN_COMBATANT_LABEL,
     });
+    const handoff = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json&profile=handoff`).set(dm);
+    const handoffImported = await request(server).post('/api/v1/campaigns/import').set(dm).send(handoff.body);
+    expect(handoffImported.status).toBe(201);
+    const handoffEncounter = (await request(server).get(`/api/v1/campaigns/${handoffImported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const handoffPlayerDetail = await request(server).get(`/api/v1/encounters/${handoffEncounter.id}`).set(player);
+    expect(handoffPlayerDetail.body.combatants.find((c: { name: string }) => c.name === UNKNOWN_COMBATANT_LABEL)).toBeDefined();
     const archive = await request(server)
       .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`)
       .set(dm)
