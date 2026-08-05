@@ -178,6 +178,10 @@ export function DiceTray({
 
   useEffect(() => {
     setSavedPresets(loadPresets(campaignId));
+    // A preset label belongs to the campaign that supplied its preset. Keep the
+    // tray reusable across SPA navigation without carrying that label into the
+    // next campaign's shared log.
+    setPendingLabel(null);
   }, [campaignId]);
 
   // Cancel any pending delete timer on unmount so it never fires into a stale closure.
