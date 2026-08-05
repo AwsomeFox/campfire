@@ -195,6 +195,8 @@ export type BattleMapProps = {
   castToken?: string | null;
   hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
+  targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; atCapacity: boolean; onToggle: (id: number) => void } | null;
+  impactTargetIds?: readonly number[];
 };
 
 export function BattleMap({
@@ -230,6 +232,8 @@ export function BattleMap({
   castToken = null,
   hpFeedbackByCombatant = new Map(),
   ruleSystem,
+  targeting = null,
+  impactTargetIds = [],
 }: BattleMapProps) {
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
@@ -248,7 +252,7 @@ export function BattleMap({
   };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
-    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; clientX: number; clientY: number; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
@@ -351,6 +355,7 @@ export function BattleMap({
   // released id long enough to identify that expected notification; any earlier capture loss is
   // an interruption and must roll the gesture back without persisting it.
   const successfulPointerUpRef = useRef<number | null>(null);
+  const targetGestureRef = useRef<{ tokenId: number; moved: boolean } | null>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
   const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
@@ -928,9 +933,13 @@ export function BattleMap({
     const point = pointerToPercent(e, true);
     if (!point) return;
     const captureTarget = e.currentTarget;
+    const targetable = (targeting?.legalIds.includes(c.id) ?? false)
+      && !targeting?.declared
+      && ((targeting?.selectedIds.includes(c.id) ?? false) || !targeting?.atCapacity);
+    if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
-    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point };
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, clientX: e.clientX, clientY: e.clientY, moved: false, targetable };
     setDraggingId(c.id);
     setDragPos(point);
   }
@@ -1071,6 +1080,11 @@ export function BattleMap({
 
     if (gesture.kind === 'token') {
       gesture.point = pct;
+      // A movable legal target needs ordinary touch jitter to remain a target tap. Use the
+      // same CSS-pixel slop as map pings; map-percent movement varies with rendered map size.
+      if (gesture.targetable
+        ? mapPingTapExceededSlop(gesture, e.clientX, e.clientY)
+        : Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
       setDragPos(pct);
     } else if (gesture.kind === 'token-select') {
       gesture.end = pct;
@@ -1152,6 +1166,8 @@ export function BattleMap({
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
 
     if (gesture.kind === 'token') {
+      if (gesture.targetable) targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };
+      if (gesture.targetable && !gesture.moved) return;
       const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
@@ -2323,6 +2339,24 @@ export function BattleMap({
                   );
                 })()}
 
+                {targeting && (() => {
+                  const actor = placed.find((combatant) => combatant.id === targeting.actorId);
+                  if (!actor || actor.tokenX == null || actor.tokenY == null) return null;
+                  const actorX = actor.tokenX;
+                  const actorY = actor.tokenY;
+                  return (
+                    <svg data-testid="map-target-lines" className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ pointerEvents: 'none', zIndex: 1 }}>
+                      {targeting.selectedIds.map((targetId) => {
+                        const target = placed.find((combatant) => combatant.id === targetId);
+                        if (!target || target.tokenX == null || target.tokenY == null) return null;
+                        const targetX = target.tokenX;
+                        const targetY = target.tokenY;
+                        return <line key={targetId} data-testid={`map-target-line-${targetId}`} x1={actorX} y1={actorY} x2={targetX} y2={targetY} stroke="var(--color-accent)" strokeWidth={2} opacity="0.6" strokeDasharray={targeting.declared ? '1.2 0.8' : undefined} vectorEffect="non-scaling-stroke" />;
+                      })}
+                    </svg>
+                  );
+                })()}
+
                 {placed.map((c) => {
                   const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
                   const feedbackClass = feedback.some((event) => event.kind === 'down')
@@ -2346,7 +2380,14 @@ export function BattleMap({
                           gridType,
                         });
                   const selectedForBatch = selectedTokenIds.has(c.id);
-                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedForBatch ? ', selected' : ''}`;
+                  const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
+                  const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  const targetAvailable = selectedTarget || !targeting?.atCapacity;
+                  // Map gestures retain precedence outside move mode, and movable tokens keep
+                  // their drag behavior.
+                  const targetClickable = legalTarget && targetAvailable && !targeting?.declared && tool === 'move' && !viewportPan && !movable;
+                  const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
+                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
                   const hpTone = tokenHpTone(hpFraction);
                   const arc = tokenArcGeometry(sizePx);
@@ -2371,26 +2412,56 @@ export function BattleMap({
                       key={c.id}
                       data-testid={`map-token-${c.id}`}
                       role="button"
-                      tabIndex={movable ? 0 : -1}
+                      tabIndex={movable || targetClickable ? 0 : -1}
                       aria-label={tokenLabel}
+                      aria-pressed={legalTarget ? selectedTarget : undefined}
+                      aria-disabled={legalTarget && !targetAvailable ? true : undefined}
                       aria-describedby="map-keyboard-help"
-                      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
+                      aria-keyshortcuts={movable ? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined}
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                       style={{
                         left: `${left}%`,
                         top: `${top}%`,
                         // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: movable ? 'auto' : 'none',
+                        pointerEvents: movable || targetClickable ? 'auto' : 'none',
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
-                        opacity: isDragging ? 0.85 : 1,
-                        outline: selectedForBatch ? '3px solid var(--color-accent)' : undefined,
+                        opacity: isDragging ? 0.85 : targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1,
+                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable && !targeting?.declared ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
-                      onPointerDown={(e) => onTokenPointerDown(e, c)}
-                      onKeyDown={(e) => onTokenKeyDown(e, c)}
+                      onPointerDown={(e) => {
+                        if (targetClickable && e.isPrimary) {
+                          e.stopPropagation();
+                          return;
+                        }
+                        onTokenPointerDown(e, c);
+                      }}
+                      onClick={(event) => {
+                        const targetGesture = targetGestureRef.current;
+                        if (targetGesture?.tokenId === c.id) {
+                          targetGestureRef.current = null;
+                          if (!targetGesture.moved && legalTarget && targetAvailable) {
+                            event.stopPropagation();
+                            targeting?.onToggle(c.id);
+                          }
+                          return;
+                        }
+                        if (targetClickable) event.stopPropagation();
+                        // A drag ends with a click; only a stationary token tap may select.
+                        if (targetClickable && !isDragging) targeting?.onToggle(c.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (legalTarget && targetAvailable && !targeting?.declared && !e.repeat && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          targeting?.onToggle(c.id);
+                          return;
+                        }
+                        if (movable) onTokenKeyDown(e, c);
+                      }}
                       onFocus={(e) => {
-                        setSelectedTokenId(c.id);
+                        if (movable) setSelectedTokenId(c.id);
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                       }}
                     >
@@ -2411,6 +2482,8 @@ export function BattleMap({
                         >
                           {tokenInitials(c.name)}
                         </span>
+                        {selectedTarget && <span aria-hidden="true" data-testid={`map-target-crosshair-${c.id}`} style={{ position: 'absolute', inset: -7, display: 'grid', placeItems: 'center', color: 'var(--color-accent)', fontSize: Math.max(14, Math.round(sizePx * .45)), pointerEvents: 'none' }}>⌖</span>}
+                        {impactTarget && <span aria-hidden="true" data-testid={`map-target-impact-${c.id}`} className="cf-target-impact-ring" />}
                         {showTokenState && hpFraction != null && hpTone != null && (
                           <svg data-testid={`map-token-hp-arc-${c.id}`} width={sizePx} height={sizePx} viewBox={`0 0 ${sizePx} ${sizePx}`}
                             aria-label={t('encounters.map.tokenDetails.hp', { state: t(`encounters.map.tokenDetails.hpStates.${hpTone}`) })}

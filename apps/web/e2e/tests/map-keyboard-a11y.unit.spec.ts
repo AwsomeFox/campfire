@@ -16,11 +16,14 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
   const src = readFileSync(BATTLE_MAP, 'utf8');
   const css = readFileSync(INDEX_CSS, 'utf8');
 
-  test('tokens are focusable buttons with keyboard movement and announced position', () => {
+  test('tokens are focusable buttons with keyboard movement, targeting, and announced position', () => {
     expect(src).toMatch(/role="button"/);
-    expect(src).toMatch(/tabIndex=\{movable \? 0 : -1\}/);
-    expect(src).toMatch(/onKeyDown=\{\(e\) => onTokenKeyDown\(e, c\)\}/);
-    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
+    expect(src).toMatch(/tabIndex=\{movable \|\| targetClickable \? 0 : -1\}/);
+    expect(src).toMatch(/legalTarget && targetAvailable && !targeting\?\.declared && !e\.repeat && \(e\.key === 'Enter' \|\| e\.key === ' '\)/);
+    expect(src).not.toMatch(/else if \(targetClickable\) e\.stopPropagation\(\);/);
+    expect(src).toMatch(/onKeyDown=\{onViewportKeyDown\}/);
+    expect(src).toMatch(/onTokenKeyDown\(e, c\);/);
+    expect(src).toMatch(/aria-keyshortcuts=\{movable \? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined\}/);
     expect(src).toMatch(/aria-describedby="map-keyboard-help"/);
     expect(src).toMatch(/onTokenKeyDown/);
     expect(src).toMatch(/nudgeMapPoint/);

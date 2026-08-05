@@ -37,7 +37,7 @@ function isAllyTarget(actor: Combatant, target: Combatant): boolean {
     : target.kind === 'monster' || target.kind === 'npc';
 }
 
-function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+export function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
   const actor = combatants.find((c) => c.id === actorId);
   if (!actor) return [];
   if (allow === 'self') return combatants.filter((c) => c.id === actorId);
@@ -53,22 +53,33 @@ export function ActionUsePanel({
   actorName,
   actionIndex,
   actionName,
+  actionToken,
   spec,
   combatants,
+  targetIds,
+  onToggleTarget,
   isDm,
   applyDisabled = false,
   applyGateReason,
   onDismiss,
   onApplied,
   onError,
+  onPreview,
+  onPreviewStart,
+  onPreviewError,
+  onBackToTargets,
 }: {
   encounterId: number;
   actorCombatantId: number;
   actorName: string;
   actionIndex: number;
   actionName: string;
+  /** Monotonic identity assigned by the session page to ignore stale resolve callbacks. */
+  actionToken: number;
   spec: ActionSpec;
   combatants: Combatant[];
+  targetIds: number[];
+  onToggleTarget: (id: number) => void;
   isDm: boolean;
   applyDisabled?: boolean;
   /**
@@ -81,12 +92,15 @@ export function ActionUsePanel({
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
+  onPreview: (actionToken: number) => void;
+  onPreviewStart: (actionToken: number) => void;
+  onPreviewError: (actionToken: number) => void;
+  onBackToTargets: (actionToken: number) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>('targets');
-  const [targetIds, setTargetIds] = useState<number[]>([]);
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
   const [commitSubmitted, setCommitSubmitted] = useState(false);
   const [isUnconfirmed, setIsUnconfirmed] = useState(false);
@@ -105,7 +119,7 @@ export function ActionUsePanel({
   const needsTarget = spec.targets.count > 0;
 
   const resolvePreview = useMutation({
-    mutationFn: (rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit') =>
+    mutationFn: ({ rollMode }: { rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit'; actionToken: number }) =>
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
@@ -127,13 +141,14 @@ export function ActionUsePanel({
         commit: false,
         rollMode,
       }),
-    onMutate: () => onError(null),
-    onSuccess: (res) => {
+    onMutate: ({ actionToken: resolveActionToken }) => { onPreviewStart(resolveActionToken); onError(null); },
+    onSuccess: (res, { actionToken: resolveActionToken }) => {
       setPreview(res);
       setStep('preview');
+      onPreview(resolveActionToken);
       announce(res.resolution.playerSummary);
     },
-    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })),
+    onError: (err, { actionToken: resolveActionToken }) => { onPreviewError(resolveActionToken); onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })); },
   });
 
   const commit = useMutation({
@@ -176,15 +191,6 @@ export function ActionUsePanel({
       }
     },
   });
-
-  function toggleTarget(id: number) {
-    setTargetIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
-      const max = spec.targets.count > 0 ? spec.targets.count : 50;
-      if (prev.length >= max) return prev;
-      return [...prev, id];
-    });
-  }
 
   const canPreview = !needsTarget || targetIds.length > 0;
 
@@ -240,7 +246,7 @@ export function ActionUsePanel({
                     type="button"
                     className={targetIds.includes(c.id) ? 'tag tag-accent' : 'tag tag-neutral'}
                     aria-pressed={targetIds.includes(c.id)}
-                    onClick={() => toggleTarget(c.id)}
+                    onClick={() => onToggleTarget(c.id)}
                     style={{ minHeight: 44, minWidth: 44, cursor: 'pointer', border: 0 }}
                   >
                     {c.name}
@@ -254,7 +260,7 @@ export function ActionUsePanel({
             className="btn btn-primary"
             data-testid="action-use-preview"
             disabled={!canPreview || resolvePreview.isPending}
-            onRoll={(mode) => resolvePreview.mutate(mode)}
+            onRoll={(rollMode) => resolvePreview.mutate({ rollMode, actionToken })}
           >
             {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
           </RollContextMenu>
@@ -323,6 +329,7 @@ export function ActionUsePanel({
                 setPreview(null);
                 setCommitSubmitted(false);
                 setIsUnconfirmed(false);
+                onBackToTargets(actionToken);
               }}
             >
               Back
@@ -362,4 +369,3 @@ export function ActionUsePanel({
     </div>
   );
 }
-

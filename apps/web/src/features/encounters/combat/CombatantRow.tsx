@@ -122,6 +122,7 @@ export type CombatantRowProps = {
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
+  targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
 };
 
 export function CombatantRow({
@@ -169,6 +170,7 @@ export function CombatantRow({
   onReleaseLegendary,
   onDuplicate,
   onRemove,
+  targeting = null,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -283,12 +285,15 @@ export function CombatantRow({
       : hpFeedbackEvents.some((event) => event.crit)
         ? ' cf-hp-feedback-anchor--crit'
         : '';
+  const targetSelectionUnavailable = targeting?.legal && targeting.atCapacity && !targeting.selected;
 
   return (
     <div
       ref={rowRef}
       data-testid={`combatant-row-${combatant.id}`}
       data-current-turn={isCurrentTurn ? 'true' : undefined}
+      data-target-legal={targeting?.legal ? 'true' : undefined}
+      data-target-selected={targeting?.selected ? 'true' : undefined}
       className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
@@ -298,12 +303,33 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
-        opacity: down ? 0.55 : 1,
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targeting?.declared && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : targetSelectionUnavailable ? 0.65 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
+      }}
+      onClick={(event) => {
+        if (!targeting?.legal || targeting.declared || targetSelectionUnavailable) return;
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
+        if (interactive && interactive !== event.currentTarget) return;
+        targeting.onToggle();
       }}
     >
       <FloatingNumbers events={hpFeedbackEvents} />
+      {targeting?.legal && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44"
+          data-testid={`combatant-target-toggle-${combatant.id}`}
+          aria-label={targetSelectionUnavailable ? `Target limit reached; ${combatant.name} cannot be selected` : `${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
+          aria-pressed={targeting.selected}
+          disabled={targeting.declared || targetSelectionUnavailable}
+          title={targetSelectionUnavailable ? 'Target limit reached' : undefined}
+          onClick={targeting.onToggle}
+          style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
+        >
+          {targeting.selected ? 'Targeted' : 'Target'}
+        </button>
+      )}
       {/* Issue #1746: single accessible reason shared by every write control this row
           disables while the sync gate blocks, referenced via aria-describedby below. */}
       {syncBlocked && (
@@ -1118,20 +1144,22 @@ export function CombatantRow({
             surface the linked entry's AC / attacks / ability scores inline so the DM can
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
-        {statblock}
+        {statblock && <div data-combatant-statblock>{statblock}</div>}
         {onUseMonsterAction && (
-          <CombatantActionsList
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            combatantName={combatant.name}
-            campaignId={campaignId}
-            enabled
-            disabledReason={syncBlockedReason}
-            onUseAction={onUseMonsterAction}
-          />
+          <div data-combatant-detail>
+            <CombatantActionsList
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              combatantName={combatant.name}
+              campaignId={campaignId}
+              enabled
+              disabledReason={syncBlockedReason}
+              onUseAction={onUseMonsterAction}
+            />
+          </div>
         )}
         {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
-          <details className="mt-2">
+          <details className="mt-2" data-combatant-detail>
             <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
             <CombatantStatblockEditor
               value={combatant.statblock}
@@ -1143,22 +1171,24 @@ export function CombatantRow({
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
-          <CharacterStatCard
-            character={character}
-            ruleSystem={ruleSystem}
-            defaultOpen={openCardByDefault}
-            openOnActiveTurn={openCardOnActiveTurn}
-            /* Click-to-roll only from an active owned card, or any card for the DM. */
-            campaignId={campaignId}
-            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
-               actions) — mounting this card already implies DM-or-owner (see the `character`
-               prop gate above), matching listUsableActions' own authorization. */
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            onError={onRollError}
-            onApplyDamage={onApplyDamage}
-            onUseAction={onUseAction}
-          />
+          <div data-combatant-detail>
+            <CharacterStatCard
+              character={character}
+              ruleSystem={ruleSystem}
+              defaultOpen={openCardByDefault}
+              openOnActiveTurn={openCardOnActiveTurn}
+              /* Click-to-roll only from an active owned card, or any card for the DM. */
+              campaignId={campaignId}
+              /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+                 actions) — mounting this card already implies DM-or-owner (see the `character`
+                 prop gate above), matching listUsableActions' own authorization. */
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              onError={onRollError}
+              onApplyDamage={onApplyDamage}
+              onUseAction={onUseAction}
+            />
+          </div>
         )}
       </div>
       <div style={{ minWidth: 140, flex: 'none' }}>
