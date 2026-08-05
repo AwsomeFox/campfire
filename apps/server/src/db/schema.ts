@@ -14,6 +14,9 @@ export const campaigns = sqliteTable('campaigns', {
   description: text('description').notNull().default(''),
   status: text('status').notNull().default('active'),
   currentLocationId: integer('current_location_id'),
+  // Issue #871: campaign-wide narrative tone/challenge backdrop — see the full object/timeframe/
+  // audience/owner/consequence definition on `DangerLevel` in @campfire/schema. No column rename:
+  // the wire format is unchanged, only the user-facing label and contextual help were clarified.
   dangerLevel: text('danger_level').notNull().default('low'),
   // When true, only the DM may award XP / level up characters (issue #270). Added in
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.

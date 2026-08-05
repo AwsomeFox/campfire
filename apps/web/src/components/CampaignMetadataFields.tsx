@@ -20,6 +20,7 @@
  */
 import type { Campaign, DangerLevel } from '@campfire/schema';
 import { formatNumber } from '../lib/format';
+import { TermHelp } from './TermHelp';
 
 export const CAMPAIGN_NAME_MAX = 120;
 export const CAMPAIGN_DESC_MAX = 10_000;
@@ -128,21 +129,31 @@ export function CampaignMetadataFields({
         </p>
       </div>
 
-      <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor={dangerId}>Danger level</label>
-        <select
-          id={dangerId}
-          className="input"
-          value={dangerLevel}
-          onChange={(e) => onDangerLevelChange(e.target.value as DangerLevel)}
-          disabled={disabled}
-        >
-          {DANGER_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {labelForDanger(level)}
-            </option>
-          ))}
-        </select>
+      <div className="field" style={{ maxWidth: 240 }}>
+        {/* Issue #871: labeled "Campaign danger level" (not bare "Danger level") so the field
+            itself communicates scope — this is a campaign-wide backdrop, not the live threat of
+            the current scene/session/encounter. TermHelp carries the full object/timeframe/
+            audience/owner/consequence definition and explicitly distinguishes it from encounter
+            difficulty, HP danger bands, and Session Zero safety boundaries. The trigger is placed
+            after the <select>, not between the label and it, so it does not shift the field's tab
+            position relative to Name/Description/Cancel/Save. */}
+        <label htmlFor={dangerId}>Campaign danger level</label>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            id={dangerId}
+            className="input"
+            value={dangerLevel}
+            onChange={(e) => onDangerLevelChange(e.target.value as DangerLevel)}
+            disabled={disabled}
+          >
+            {DANGER_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {labelForDanger(level)}
+              </option>
+            ))}
+          </select>
+          <TermHelp termId="dangerLevel" />
+        </div>
       </div>
 
       {error && (

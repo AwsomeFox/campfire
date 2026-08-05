@@ -7,6 +7,7 @@ export const GLOSSARY_TERM_IDS = [
   'storylines',
   'coDm',
   'driver',
+  'dangerLevel',
 ] as const;
 
 export type GlossaryTermId = (typeof GLOSSARY_TERM_IDS)[number];
@@ -98,5 +99,18 @@ export const GLOSSARY_TERMS: Record<GlossaryTermId, GlossaryTerm> = {
     audienceKey: 'glossary.audience.all',
     visibilityKey: 'glossary.visibility.liveCanonSplit',
     phaseKey: 'glossary.phase.livePlay',
+  },
+  // Issue #871: campaign-wide danger level was unexplained and shown beside live
+  // encounter/session/location state, so users could not tell whether it meant campaign
+  // tone, current threat, encounter difficulty, or content/safety severity. This entry is
+  // the definition: object (whole campaign), timeframe (persistent), audience (everyone),
+  // owner (DM), consequence (narrative-only) — see glossary.terms.dangerLevel.definition.
+  dangerLevel: {
+    labelKey: 'glossary.terms.dangerLevel.label',
+    shortKey: 'glossary.terms.dangerLevel.short',
+    definitionKey: 'glossary.terms.dangerLevel.definition',
+    audienceKey: 'glossary.audience.all',
+    visibilityKey: 'glossary.visibility.dmSetTableVisible',
+    phaseKey: 'glossary.phase.campaignSetting',
   },
 };

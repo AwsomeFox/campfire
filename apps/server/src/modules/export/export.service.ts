@@ -1905,7 +1905,9 @@ export class ExportService {
     const lines = [
       ...this.identityHeader('campaign', campaign.id, campaign.name),
       `- Status: ${campaign.status}`,
-      `- Danger level: ${campaign.dangerLevel}`,
+      // Issue #871: labeled "Campaign danger level" (not bare "Danger level") so an exported
+      // Markdown archive reads with the same scope-clarifying wording as the app UI.
+      `- Campaign danger level: ${campaign.dangerLevel}`,
       `- Sessions played: ${campaign.sessionCount}`,
       `- Map attachment: ${campaign.mapAttachmentId != null ? `\`${typedRecordId('attachment', campaign.mapAttachmentId)}\`` : '_none_'}`,
       '',

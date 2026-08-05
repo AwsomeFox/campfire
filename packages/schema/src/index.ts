@@ -176,6 +176,21 @@ export const ExpectedUpdatedAt = z
   );
 
 // ---------- campaign ----------
+/**
+ * Issue #871: campaign danger level, defined —
+ *  - Object: the whole campaign, not any single scene, session, location, or encounter.
+ *  - Timeframe: persistent until the DM deliberately changes it; not a live/moment-to-moment state.
+ *  - Audience: visible to every campaign member (dashboard chip + Settings); editable by the DM only.
+ *  - Owner: the DM, set via PATCH /campaigns/:id or the `update_campaign`/`update_campaign_status`
+ *    MCP tools — the same field both REST and MCP mutate.
+ *  - Consequence: purely descriptive narrative backdrop. It has no mechanical effect on rules and
+ *    does not gate content; the only functional effect is coloring the AI Driver's narration tone
+ *    when non-default (see world-state-prompt.ts formatLocationEnvironmentFromSummary).
+ * Explicitly distinct from: per-encounter difficulty (`DifficultyBand`, a computed party-vs-monster
+ * budget for one specific encounter), a combatant's live HP band (`hpBand` — current wound state),
+ * and the Session Zero safety charter (the table's agreed content/safety boundaries). See the
+ * in-app glossary entry (`dangerLevel` in glossaryTerms.ts) for the copy shown to users.
+ */
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 export const AiExternalContentPolicy = z.enum(['disabled', 'member_consent']);
 export type AiExternalContentPolicy = z.infer<typeof AiExternalContentPolicy>;
@@ -195,7 +210,12 @@ export const Campaign = z.object({
   description: z.string().max(10_000).default(''),
   status: z.enum(['active', 'paused', 'completed']).default('active'),
   currentLocationId: Id.nullable().default(null),
-  dangerLevel: DangerLevel.default('low'),
+  dangerLevel: DangerLevel.default('low').describe(
+    "Campaign-wide narrative tone/challenge backdrop the DM sets (low/moderate/high/deadly). " +
+      "Persistent until changed — not tied to a specific scene, session, or encounter. Purely " +
+      "descriptive: no mechanical effect on rules; only colors AI Driver narration when non-default. " +
+      "Distinct from encounter difficulty, a combatant's live HP band, and Session Zero safety boundaries.",
+  ),
   // When true, only the DM may award XP / level up characters (issue #270); when false
   // (default) any character owner may self-progress, preserving the original behavior.
   dmControlsProgression: z.boolean().default(false),
