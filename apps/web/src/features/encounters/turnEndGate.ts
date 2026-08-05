@@ -42,3 +42,29 @@ export function turnEndGateReason(input: {
   if (input.syncBlocked) return 'syncBlocked';
   return null;
 }
+
+/**
+ * The STANDING reason, independent of the transient gates (issue #1933 review).
+ *
+ * `dmControlsTurns` is a campaign SETTING, not a passing condition: it is true for the whole
+ * fight, and it is the answer to "why can I never end my own turn here". A safety hold or a
+ * sync outage are the opposite — momentary, and worth a tooltip. Before `GatedControl` was
+ * adopted, this setting had a permanently visible line beside the button; folding it into the
+ * priority-ranked resolver put it behind hover/focus/tap, so a sighted mouse user who never
+ * hovers saw a dead control with no explanation. Same category as the Start button's roster
+ * hints, and it gets the same standing treatment.
+ *
+ * Returns only `dmControlsTurns`, never the transient keys, and only for a viewer the control
+ * actually belongs to — an onlooker has no button to explain.
+ */
+export function turnEndStandingReason(input: {
+  canEndTurn: boolean;
+  isYourTurn: boolean;
+  dmControlsTurns: boolean;
+}): Extract<TurnEndGateReason, 'dmControlsTurns'> | null {
+  const applicable = input.canEndTurn || input.isYourTurn;
+  if (!applicable) return null;
+  // Applicable + !canEndTurn implies isYourTurn, matching turnEndGateReason's own branch.
+  if (!input.canEndTurn && input.dmControlsTurns) return 'dmControlsTurns';
+  return null;
+}

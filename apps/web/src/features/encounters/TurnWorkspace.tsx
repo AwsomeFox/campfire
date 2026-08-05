@@ -29,7 +29,10 @@ import { GatedControl } from '../../components/GatedControl';
 import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap, type SpellCastContext } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
-import { turnEndGateReason } from './turnEndGate';
+import { turnEndGateReason, turnEndStandingReason } from './turnEndGate';
+
+/** Ties the End-turn button to its standing dmControlsTurns line for assistive tech. */
+const TURN_END_STANDING_ID = 'turn-end-standing-reason';
 
 const STANDARD_ACTIONS = [
   { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
@@ -678,18 +681,38 @@ export function TurnWorkspace({
         // Applicability still keys off the UNsuppressed reason, so an in-flight request
         // never makes the button vanish for a player who had one.
         const showButton = turn.canEndTurn || gateReasonKey != null;
+        // `dmControlsTurns` is a campaign SETTING, not a passing condition — it holds for the
+        // whole fight and is the answer to "why can I never end my own turn here". Before
+        // GatedControl it had a permanently visible line; folding it into the priority-ranked
+        // resolver put it behind hover/focus/tap, leaving a sighted mouse user with a dead
+        // control and no explanation (issue #1933 review). Same category as the Start
+        // button's roster hints, so it gets the same standing treatment.
+        const standingKey = turnEndStandingReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+        });
+        const standingReason = standingKey ? t(`run.gate.${standingKey}`) : undefined;
+        // Don't let GatedControl emit a second, visually-hidden copy of a sentence the line
+        // below is already showing — that double-announces to a screen reader and makes
+        // getByText resolve to two nodes (the same trap the header hit).
+        const tooltipReason = gateReasonKey === standingKey ? undefined : gateReason;
         return (
           <div className="flex items-center gap-2 flex-wrap">
             {showButton && (
-              <GatedControl reason={gateReason}>
+              <GatedControl reason={tooltipReason}>
                 <Btn
                   disabled={controlsDisabled}
                   onClick={() => onEndTurn?.(turn.current!.combatantId)}
+                  aria-describedby={standingReason ? TURN_END_STANDING_ID : undefined}
                   data-testid="workspace-end-turn"
                 >
                   {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
                 </Btn>
               </GatedControl>
+            )}
+            {standingReason && (
+              <span id={TURN_END_STANDING_ID} className="text-sm text-muted">{standingReason}</span>
             )}
             {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
               <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>

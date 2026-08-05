@@ -5,7 +5,7 @@
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { turnEndGateReason } from '../../src/features/encounters/turnEndGate';
+import { turnEndGateReason, turnEndStandingReason } from '../../src/features/encounters/turnEndGate';
 
 const BASE = {
   canEndTurn: true,
@@ -91,5 +91,42 @@ test.describe('TurnWorkspace adoption (issue #1933)', () => {
     expect(code).toMatch(/const gateReason = gateReasonKey && !endTurnBusy \? t\(`run\.gate\.\$\{gateReasonKey\}`\) : undefined;/);
     expect(code).not.toMatch(/gateReasonKey && !busy/);
     expect(code).toMatch(/const showButton = turn\.canEndTurn \|\| gateReasonKey != null;/);
+  });
+});
+
+/**
+ * `dmControlsTurns` is a campaign SETTING, not a passing condition, so it gets a
+ * permanently visible line rather than a hover-only tooltip — the same distinction the
+ * Start button draws between its roster hints and the transient gates (issue #1933 review).
+ * Adopting GatedControl had replaced that line with a bubble, leaving a sighted mouse user
+ * with a dead control and no explanation.
+ */
+test.describe('turnEndStandingReason (issue #1933) — standing, not transient', () => {
+  test('a player whose DM controls turns gets the standing reason', () => {
+    expect(turnEndStandingReason({ canEndTurn: false, isYourTurn: true, dmControlsTurns: true })).toBe('dmControlsTurns');
+  });
+  test('it is unaffected by the transient gates that outrank it in the tooltip', () => {
+    const standing = { canEndTurn: false, isYourTurn: true, dmControlsTurns: true };
+    expect(turnEndGateReason({ ...standing, safetyHoldActive: true, syncBlocked: true })).toBe('safetyHold');
+    expect(turnEndStandingReason(standing)).toBe('dmControlsTurns');
+  });
+  test('a plain onlooker still gets nothing — applicability wins', () => {
+    expect(turnEndStandingReason({ canEndTurn: false, isYourTurn: false, dmControlsTurns: true })).toBeNull();
+  });
+  test('a viewer who CAN end the turn has no standing reason', () => {
+    expect(turnEndStandingReason({ canEndTurn: true, isYourTurn: true, dmControlsTurns: true })).toBeNull();
+  });
+
+  test('the workspace renders it as a visible line and de-dupes the tooltip', () => {
+    const code = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'),
+      'utf8',
+    );
+    expect(code).toMatch(/const standingKey = turnEndStandingReason\(/);
+    expect(code).toMatch(/\{standingReason && \(/);
+    // The tooltip must not repeat what the visible line already says.
+    expect(code).toMatch(/const tooltipReason = gateReasonKey === standingKey \? undefined : gateReason;/);
+    expect(code).toMatch(/<GatedControl reason=\{tooltipReason\}>/);
+    expect(code).toMatch(/aria-describedby=\{standingReason \? TURN_END_STANDING_ID : undefined\}/);
   });
 });
