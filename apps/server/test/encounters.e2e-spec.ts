@@ -3562,7 +3562,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     const quickRoll = await request(server)
       .post(`/api/v1/encounters/${encounter.body.id}/quick-roll`)
       .set(dm)
-      .send({ combatantId, actionName: 'Late strike', kind: 'to-hit', expr: '+3', mode: 'flat' });
+      .send({ combatantId, actionName: "Later Hidden NPC · the Betrayer's strike", kind: 'to-hit', expr: '+3', mode: 'flat' });
     expect(quickRoll.status).toBe(201);
     expect(quickRoll.body.roll.actor).toBe('Later Hidden NPC · the Betrayer');
     expect((await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true })).status).toBe(200);
@@ -3585,7 +3585,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
     expect(playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id)).toMatchObject({
       actor: UNKNOWN_COMBATANT_LABEL,
-      label: `${UNKNOWN_COMBATANT_LABEL} · Late strike (to-hit)`,
+      label: UNKNOWN_COMBATANT_LABEL,
     });
     expect(playerRolls.body.find((roll: { id: number }) => roll.id === unstructuredRoll.id)).toMatchObject({
       actor: UNKNOWN_COMBATANT_LABEL,
@@ -5578,14 +5578,17 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(false);
     // ...but the row itself is not (the encounter is still visible — only the NPC's identity
     // is secret, same as the roster/combat-log masking rule this mirrors).
-    const masked = (afterHide.body as Array<{ label?: string; npcId?: number }>).find(
-      (r) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`,
+    const masked = (afterHide.body as Array<{ label?: string; npcId?: number; actor?: string }>).find(
+      (r) => (r.label ?? '') === UNKNOWN_COMBATANT_LABEL,
     );
     expect(masked).toBeDefined();
     // Issue #1904 review finding (reported 3x): the label alone is not enough — npcId is a
     // stable handle that would let a player correlate this roll with a LATER reveal of the
     // same NPC. It must be nulled out, not just the display name.
     expect(masked?.npcId).toBeUndefined();
+    // Initiative rolls carry no in-fiction actor, so masking must preserve the absent
+    // actor and let the client use the real roller attribution rather than inventing one.
+    expect(masked?.actor).toBeUndefined();
 
     const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
     expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
@@ -5634,7 +5637,7 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     // The core regression: the replay's roll payload is re-redacted for the CURRENT
     // (demoted) role, not reused verbatim from the original DM-rendered response.
     expect(replay.body.roll.label).not.toContain('Replay Redact NPC');
-    expect(replay.body.roll.label).toBe(`${UNKNOWN_COMBATANT_LABEL} · Initiative`);
+    expect(replay.body.roll.label).toBe(UNKNOWN_COMBATANT_LABEL);
     expect(replay.body.roll.npcId).toBeUndefined();
   });
 

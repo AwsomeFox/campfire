@@ -279,11 +279,11 @@ export class RollsService implements OnApplicationBootstrap {
    * redaction, only for the row-dropping encounter check (pushed into SQL instead, see
    * `listForCampaign`).
    *
-   * Preserve the portion after the final display-name separator rather than reconstructing
-   * an Initiative suffix: NPC-tagged quick rolls carry action-specific labels too. The
-   * display name itself may contain the separator, so splitting at the first one would
-   * re-emit part of a concealed name. A malformed label has no safe suffix and is redacted
-   * to the identity-free fallback instead.
+   * The rest of a label is not safe to preserve: quick-roll action names are DM-authored
+   * free text and can name the concealed NPC too. Replace the whole label, rather than
+   * trying to parse an identity-free suffix. Rolls that did not persist an in-fiction
+   * actor keep their real roller attribution, so initiative records still identify the
+   * player or DM account that made the roll.
    */
   private async maskHiddenNpcLabels(rolls: DiceRoll[]): Promise<DiceRoll[]> {
     const npcIds = [...new Set(rolls.map((r) => r.npcId).filter((id): id is number => id !== undefined))];
@@ -304,10 +304,11 @@ export class RollsService implements OnApplicationBootstrap {
       // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
       // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
       const { npcId: _npcId, actor: _actor, ...withoutIdentity } = r;
-      const originalLabel = r.label ?? '';
-      const separator = originalLabel.lastIndexOf(' · ');
-      const label = separator >= 0 ? `${UNKNOWN_COMBATANT_LABEL} · ${originalLabel.slice(separator + 3)}` : UNKNOWN_COMBATANT_LABEL;
-      return { ...withoutIdentity, actor: UNKNOWN_COMBATANT_LABEL, label };
+      return {
+        ...withoutIdentity,
+        ...(r.actor !== undefined ? { actor: UNKNOWN_COMBATANT_LABEL } : {}),
+        label: UNKNOWN_COMBATANT_LABEL,
+      };
     });
   }
 
