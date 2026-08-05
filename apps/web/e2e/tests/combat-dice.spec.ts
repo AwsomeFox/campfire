@@ -1,4 +1,4 @@
-import { test, expect, request, type APIRequestContext } from '@playwright/test';
+import { test, expect, request, type APIRequestContext, type Request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
@@ -223,6 +223,84 @@ test.describe('encounter dice — apply rolled damage', () => {
         await playerCtx.dispose();
         await dm.dispose();
       }
+  });
+
+  test('the dice tray labels presets, clears that label after an edit, and posts a mixed pool once', async ({ page }) => {
+    const { baseURL, campaignId } = seed();
+    const playerCtx = await request.newContext({ baseURL });
+    const dm = await request.newContext({ baseURL });
+    let drill: Drill | null = null;
+    try {
+      await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+      const me = await (await playerCtx.get('/api/v1/me')).json();
+      await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+      drill = await startDrill(dm, campaignId, String(me.user.id), OWN_TURN);
+
+      await page.addInitScript((key) => {
+        localStorage.setItem(key, JSON.stringify([
+          { label: 'Sneak attack', pool: { 8: 1 }, modifier: 2, advMode: 'flat', persisted: true },
+        ]));
+      }, `campfire.dicePresets.${campaignId}`);
+      await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
+
+      const rollResponse = () => page.waitForResponse((response) =>
+        response.request().method() === 'POST' && response.url().endsWith(`/campaigns/${campaignId}/roll`),
+      );
+      const rollButton = (name: string) => page.getByRole('button', { name, exact: true });
+
+      await page.getByRole('button', { name: 'Initiative', exact: true }).click();
+      const initiativeResponse = rollResponse();
+      await rollButton('Roll 1d20').click();
+      await expect(initiativeResponse.then((response) => response.request().postDataJSON())).resolves.toEqual({ expr: '1d20', label: 'Initiative' });
+      await expect(page.getByTestId('shared-dice-log').getByText('Initiative: 1d20', { exact: false })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Sneak attack', exact: true }).click();
+      await expect(rollButton('Roll 1d8 +2')).toBeEnabled();
+      const savedResponse = rollResponse();
+      await rollButton('Roll 1d8 +2').click();
+      await expect(savedResponse.then((response) => response.request().postDataJSON())).resolves.toEqual({ expr: '1d8+2', label: 'Sneak attack' });
+      await expect(page.getByTestId('shared-dice-log').getByText('Sneak attack: 1d8+2', { exact: false })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Clear', exact: true }).click();
+      await page.getByRole('button', { name: 'Initiative', exact: true }).click();
+      await page.getByRole('button', { name: 'Increase modifier', exact: true }).click();
+      await expect(rollButton('Roll 1d20 +1')).toBeEnabled();
+      const editedResponse = rollResponse();
+      await rollButton('Roll 1d20 +1').click();
+      await expect(editedResponse.then((response) => response.request().postDataJSON())).resolves.toEqual({ expr: '1d20+1' });
+
+      await page.getByRole('button', { name: 'Clear', exact: true }).click();
+      await page.getByRole('button', { name: 'Add a d6', exact: true }).click();
+      await page.getByRole('button', { name: 'Add a d6', exact: true }).click();
+      await page.getByRole('button', { name: 'Add a d8', exact: true }).click();
+      for (let i = 0; i < 3; i += 1) await page.getByRole('button', { name: 'Increase modifier', exact: true }).click();
+
+      let mixedRequests = 0;
+      const countMixedRequest = (request: Request) => {
+        if (request.method() === 'POST' && request.url().endsWith(`/campaigns/${campaignId}/roll`)) mixedRequests += 1;
+      };
+      page.on('request', countMixedRequest);
+      const mixedResponse = rollResponse();
+      await rollButton('Roll 2d6 + 1d8 +3').click();
+      const mixed = await mixedResponse;
+      page.off('request', countMixedRequest);
+
+      expect(mixedRequests).toBe(1);
+      expect(mixed.request().postDataJSON()).toEqual({ expr: '2d6+1d8+3' });
+      const result = await mixed.json() as { total: number; terms?: Array<{ value: number }> };
+      expect(result.terms).toHaveLength(3);
+      expect(result.terms?.reduce((total, term) => total + term.value, 0)).toBe(result.total);
+      await expect(page.getByTestId('shared-dice-log').getByText('2d6+1d8+3', { exact: false })).toBeVisible();
+      const overlay = page.getByTestId('dice-roll-overlay');
+      await expect(overlay).toBeVisible();
+      await expect(overlay.locator('[data-sides="6"]')).toHaveCount(2);
+      await expect(overlay.locator('[data-sides="8"]')).toHaveCount(1);
+    } finally {
+      await teardownDrill(dm, drill);
+      await playerCtx.dispose();
+      await dm.dispose();
+    }
   });
 
   test('players see only their own sheet and cannot roll before their turn, while the DM can', async ({ page, browser }) => {
