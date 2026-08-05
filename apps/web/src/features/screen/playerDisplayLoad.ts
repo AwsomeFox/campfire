@@ -355,22 +355,65 @@ export class PlayerDisplayLoadSequencer {
  *      interval while staying comfortably below `CAST_SAFETY_POLL_TIMEOUT_MS`
  *      (10s) — see that constant's own doc for the exact derivation and
  *      the worst-case bound this still satisfies.
+ * 13a. Widening round 12's window reopened a DIFFERENT exposure round 11a
+ *      thought it had closed: single-writer's "a tick arriving while busy
+ *      is simply skipped" meant that a hold raised WHILE a slow request was
+ *      in flight had to wait not only for that request to conclude, but
+ *      for the NEXT externally-scheduled tick (`usePollWhileVisible`'s
+ *      fixed interval) to fire before a fresh request could even START —
+ *      up to one more full poll interval, on top of whatever the widened
+ *      window already tolerated. Treating a raised hold (`true`) and an
+ *      inactive read (`false`) symmetrically under one "freshness window"
+ *      number was the wrong shape: `true` must never be delayed by ANY of
+ *      this, at any window size. Fix: stop treating a skipped tick as
+ *      discarded. `poll()` now COALESCES a call that arrives while busy
+ *      onto a pending follow-up, and the moment the in-flight request
+ *      concludes, that follow-up fires IMMEDIATELY — not gated by the next
+ *      scheduled tick — so a hold raised during the busy window is observed
+ *      as soon as the poller is next free, never later. This is still
+ *      single-writer (at most one HTTP request in flight at any instant —
+ *      the follow-up only starts once the prior one has fully concluded),
+ *      so out-of-order application remains structurally impossible; only
+ *      the SCHEDULING of the next attempt changed, from timer-driven to
+ *      event-driven. Multiple calls arriving during the same busy window
+ *      coalesce onto ONE follow-up (the freshest arrival's `fetchSafety`/
+ *      `options` win), since it reflects the freshest achievable state
+ *      regardless of how many ticks were coalesced into it.
+ * 13b. `Date.now()` is wall-clock time: NTP correction or a device
+ *      resuming from sleep (exactly this feature's deployment target — a
+ *      wall-mounted shared-TV display) can make it jump BACKWARD. Every
+ *      elapsed-time comparison in this module (`issuedAt`/`concludedAt`
+ *      round-trip age, `lastConfirmedAt` staleness) used it, so a backward
+ *      jump during an aged observation could make a stale `false`, or a
+ *      run of failures, compute a negative or understated elapsed time —
+ *      looking artificially FRESH regardless of how long it has actually
+ *      been, silently defeating rounds 11a/11c's whole protection. Fix:
+ *      `performance.now()` for all of it — monotonic, immune to wall-clock
+ *      adjustments, exactly the class of source `Date.now()`'s docs
+ *      themselves warn against using for measuring elapsed duration.
  *
  * The trade round 11a accepts, explicitly: a hung request now DOES delay
  * the next observation (rounds 1-3's exact tension), bounded by
  * `CAST_SAFETY_POLL_TIMEOUT_MS` rather than the sequencing being free of it.
  * That constant is therefore back to being load-bearing for correctness —
  * unlike the generation scheme's version, which (rounds 4-9) explicitly
- * carried none. Combined with round 11a's freshness check (and round 11c's
- * extension of it to failures), the worst-case exposure from hold-raised
- * to curtain-shown stays within the feature's 15s acceptance bound even
- * with round 12's widened window (10s either way: `CAST_SAFETY_POLL_TIMEOUT_MS`
- * for a single slow response, or roughly two poll intervals — the same
- * 10s, given the current tuning — for a fast-failure burst to cross the
- * freshness window) — see that constant's own doc for the exact reasoning.
+ * carried none. Combined with round 11a's freshness check (round 11c's
+ * extension of it to failures, and round 13a's immediate-catch-up on a
+ * coalesced follow-up), the worst-case exposure from hold-raised to
+ * curtain-shown stays within the feature's 15s acceptance bound: a
+ * `true` observation is NEVER gated on freshness and is now also never
+ * delayed by a skipped tick waiting on the next scheduled interval, so its
+ * only remaining bound is `CAST_SAFETY_POLL_TIMEOUT_MS` (10s) — the
+ * longest a single in-flight request (whichever one happens to be running
+ * when the hold is raised) can take to conclude before the poller is free
+ * to observe it. A `false`/failure path staying wrongly "confident" is
+ * separately bounded by round 12's widened freshness window (~10s worst
+ * case for a fast-failure burst, given the current tuning) — see that
+ * constant's own doc for the exact reasoning.
  *
  * Cancellation on an identity change (unmount / cast-token change) is just
- * "abort the one possible in-flight request and free the poller"
+ * "abort the one possible in-flight request, free the poller, and drop
+ * (resolving as `ignored`) any coalesced follow-up that hadn't started yet"
  * (`invalidate()`) — no generation bump, no watermark to fast-forward,
  * because there is only ever one thing to cancel. The identity-BOUNDARY
  * guard (`shouldApplyCastSafetyResult`/`shouldMarkCastSafetyUnknown`,
@@ -469,6 +512,8 @@ const INVALIDATE_ABORT_REASON = 'campfire/cast-safety-poller-invalidated';
  * for the (separate) issue-time freshness check that bounds a single slow
  * request's own exposure.
  */
+type CastSafetyPollOptions = { timeoutMs?: number; freshnessMs?: number };
+
 export class CastSafetyPoller {
   private controller: AbortController | null = null;
   private busy = false;
@@ -476,9 +521,27 @@ export class CastSafetyPoller {
    * When the last successful observation (of ANY value, true or false) was
    * confirmed. `null` means never — the fail-safe starting state. Round
    * 11c: this is what a FAILURE/timeout conclusion is judged against, not
-   * its own individual duration — see that round's note on `poll()` below.
+   * its own individual duration — see that round's note on `executeOnce`
+   * below. Stamped with `performance.now()` (round 13b), not `Date.now()`
+   * — see the module doc's round 13b entry for why that distinction is
+   * load-bearing on THIS feature's deployment target.
    */
   private lastConfirmedAt: number | null = null;
+  /**
+   * Set when a `poll()` call arrives while `busy`. Holds the fetcher/
+   * options to run as an IMMEDIATE follow-up the instant the in-flight
+   * request concludes (round 13a), plus every caller's resolver waiting on
+   * that follow-up's real result. Multiple arrivals during the same busy
+   * window coalesce onto this ONE pending follow-up — the latest arrival's
+   * `fetchSafety`/`options` win, since only the freshest achievable check
+   * matters, but every coalesced caller's resolver is kept and all are
+   * notified together once it runs.
+   */
+  private followUp: {
+    fetchSafety: CastSafetyFetcher;
+    options: CastSafetyPollOptions;
+    resolvers: Array<(result: CastSafetyPollResult) => void>;
+  } | null = null;
 
   /** True while a request is in flight. Exposed for tests/observability —
    * `poll()` already consults this itself. */
@@ -487,23 +550,54 @@ export class CastSafetyPoller {
   }
 
   /**
-   * Run one poll tick. If a previous call on this instance is still
-   * in flight, this is a no-op: single-writer means never more than one
-   * request outstanding at a time, so a tick arriving while busy is simply
-   * skipped rather than started as a second thing to reconcile later.
+   * Run one poll tick. If a previous call on this instance is still in
+   * flight, this call does NOT start a second concurrent request — single-
+   * writer still holds, so out-of-order application stays structurally
+   * impossible — but it is no longer simply discarded either (round 13a):
+   * it coalesces onto a pending follow-up that fires the INSTANT the
+   * in-flight request concludes, rather than waiting for the next
+   * externally-scheduled tick. A hold raised while a request happens to be
+   * in flight is therefore observed as soon as the poller is next free,
+   * not up to one more poll interval later on top of that.
    */
-  async poll(
-    fetchSafety: CastSafetyFetcher,
-    options: { timeoutMs?: number; freshnessMs?: number } = {},
-  ): Promise<CastSafetyPollResult> {
-    if (this.busy) return { kind: 'ignored' };
+  async poll(fetchSafety: CastSafetyFetcher, options: CastSafetyPollOptions = {}): Promise<CastSafetyPollResult> {
+    if (this.busy) {
+      return new Promise<CastSafetyPollResult>((resolve) => {
+        if (this.followUp) {
+          // A later arrival supersedes an earlier one's fetcher/options —
+          // only the freshest coalesced request actually needs to run —
+          // but every arrival's resolver still gets notified from it.
+          this.followUp.fetchSafety = fetchSafety;
+          this.followUp.options = options;
+          this.followUp.resolvers.push(resolve);
+        } else {
+          this.followUp = { fetchSafety, options, resolvers: [resolve] };
+        }
+      });
+    }
+    return this.executeOnce(fetchSafety, options);
+  }
+
+  /**
+   * Runs exactly one request and returns ITS OWN result to its direct
+   * caller (`poll()`, or the recursive catch-up below). If a `poll()` call
+   * coalesced onto a follow-up while this one was running, that follow-up
+   * fires immediately afterward (still sequential — single-writer holds
+   * throughout) via `drainFollowUp`, whose own result goes exclusively to
+   * the resolvers that coalesced onto it, not to this call's caller.
+   */
+  private async executeOnce(fetchSafety: CastSafetyFetcher, options: CastSafetyPollOptions): Promise<CastSafetyPollResult> {
     this.busy = true;
     const controller = new AbortController();
     this.controller = controller;
     const { signal } = controller;
     const timeoutMs = options.timeoutMs ?? CAST_SAFETY_POLL_TIMEOUT_MS;
     const freshnessMs = options.freshnessMs ?? CAST_SAFETY_OBSERVATION_FRESHNESS_MS;
-    const issuedAt = Date.now();
+    // performance.now() (round 13b): monotonic, immune to a backward
+    // wall-clock jump (NTP correction, or this feature's own deployment
+    // target — a wall-mounted display resuming from sleep) making a stale
+    // observation compute as artificially fresh. See the module doc.
+    const issuedAt = performance.now();
     // No reason passed here (defaults to a generic AbortError) — deliberately
     // distinct from `INVALIDATE_ABORT_REASON`, so the checks below can tell
     // "the hygiene timeout fired" apart from "invalidate() abandoned this".
@@ -517,7 +611,7 @@ export class CastSafetyPoller {
         return { kind: 'ignored' };
       }
       if (state.active) {
-        this.lastConfirmedAt = Date.now();
+        this.lastConfirmedAt = performance.now();
         return { kind: 'ok', active: true };
       }
       // This value's OWN round trip (issue to conclusion) must itself be
@@ -528,7 +622,7 @@ export class CastSafetyPoller {
       // `lastConfirmedAt` would be, so a fresh, fast `false` is always
       // trusted here regardless of how long ago the PRIOR confirmation was
       // — this new reading itself supersedes that gap.
-      const concludedAt = Date.now();
+      const concludedAt = performance.now();
       if (concludedAt - issuedAt > freshnessMs) return { kind: 'unknown' };
       this.lastConfirmedAt = concludedAt;
       return { kind: 'ok', active: false };
@@ -555,7 +649,7 @@ export class CastSafetyPoller {
       // "inactive" indefinitely. `lastConfirmedAt === null` (nothing ever
       // confirmed) counts as expired too, matching the page's own fail-safe
       // starting state.
-      if (this.lastConfirmedAt === null || Date.now() - this.lastConfirmedAt > freshnessMs) {
+      if (this.lastConfirmedAt === null || performance.now() - this.lastConfirmedAt > freshnessMs) {
         return { kind: 'unknown' };
       }
       return { kind: 'failed' };
@@ -568,8 +662,30 @@ export class CastSafetyPoller {
       if (this.controller === controller) {
         this.busy = false;
         this.controller = null;
+        // Fire-and-forget: any follow-up that coalesced while THIS request
+        // was running fires immediately, right now — a microtask after this
+        // `finally`, strictly before any externally-scheduled tick (a
+        // macrotask) could otherwise have started one (round 13a). This
+        // does not affect what THIS call returns to ITS caller; the
+        // follow-up's own result reaches only the resolvers that coalesced
+        // onto it, via `drainFollowUp`.
+        this.drainFollowUp();
       }
     }
+  }
+
+  /** Starts the currently-pending follow-up (if any) and, once it
+   * concludes, resolves every caller that coalesced onto it with its real
+   * result — then checks again, in case further calls coalesced onto a
+   * NEW follow-up while this one was itself running (recursion here is
+   * bounded by real request completions, never by ticks alone). */
+  private drainFollowUp(): void {
+    const followUp = this.followUp;
+    if (!followUp) return;
+    this.followUp = null;
+    void this.executeOnce(followUp.fetchSafety, followUp.options).then((result) => {
+      for (const resolve of followUp.resolvers) resolve(result);
+    });
   }
 
   /**
@@ -585,13 +701,21 @@ export class CastSafetyPoller {
    * otherwise unaffected — this is a one-time flush, not a permanent
    * shutdown. `lastConfirmedAt` is also cleared: a confirmation from the
    * OLD identity must never lend false confidence to the NEW one's early
-   * failures.
+   * failures. Any coalesced follow-up that hadn't started yet is dropped
+   * (it belonged to the OLD identity — round 13a) and its waiting
+   * resolvers are settled with `{ kind: 'ignored' }` rather than left
+   * hanging forever.
    */
   invalidate(): void {
     this.controller?.abort(INVALIDATE_ABORT_REASON);
     this.controller = null;
     this.busy = false;
     this.lastConfirmedAt = null;
+    const followUp = this.followUp;
+    this.followUp = null;
+    if (followUp) {
+      for (const resolve of followUp.resolvers) resolve({ kind: 'ignored' });
+    }
   }
 }
 

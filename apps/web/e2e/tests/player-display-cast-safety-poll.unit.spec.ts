@@ -55,7 +55,7 @@
  * structurally impossible rather than merely checked-for — there is no
  * `generation` field left to get the comparison wrong on.
  *
- * Three more findings landed on THAT redesign itself:
+ * Five more findings landed on THAT redesign itself:
  *
  * 11a. Single-writer closes cross-request ordering, but a single SLOW
  *      request is still a problem: it can observe `active: false` moments
@@ -90,6 +90,26 @@
  *      successful observation of any value) and judge a failure/timeout by
  *      elapsed time since THAT, not by its own duration — collapsing the
  *      slow-failure and fast-failure-burst paths into one rule.
+ * 12.  `CAST_SAFETY_OBSERVATION_FRESHNESS_MS` (5s) equaled the poll
+ *      interval exactly, so one ordinary missed/slow response — not a
+ *      genuine outage — routinely flashed the curtain over a live shared
+ *      TV. Fix: widen to 8s, real headroom above the interval.
+ * 13a. Widening round 12's window reopened a DIFFERENT exposure: a tick
+ *      arriving while busy used to be discarded outright, so a hold raised
+ *      during a slow request's busy window had to wait not only for that
+ *      request to conclude but for the NEXT externally-scheduled tick on
+ *      top of that. `true` and `false` were being gated by one symmetric
+ *      "freshness window" number when they should not be: `true` must
+ *      never be delayed by ANY of this. Fix: a tick arriving while busy
+ *      now coalesces onto a follow-up that fires the INSTANT the in-flight
+ *      request concludes (still strictly sequential — single-writer
+ *      holds), not gated by the next scheduled tick.
+ * 13b. Every elapsed-time comparison used `Date.now()` (wall-clock time),
+ *      which can jump BACKWARD (NTP correction, or a wall-mounted
+ *      shared-TV device resuming from sleep — this feature's own
+ *      deployment target) and make a stale observation compute as
+ *      artificially fresh. Fix: `performance.now()` (monotonic) for all of
+ *      it.
  *
  * Consequently, several of the ORIGINAL rounds' specific scenarios (6, 7, 8,
  * 9 — all about comparing generation numbers against each other) are not
@@ -100,14 +120,18 @@
  * documents that rather than silently dropping coverage. What DOES carry
  * forward, adapted to the new shape:
  *
- *  - out-of-order application (1): now trivial — a second concurrent call is
- *    skipped outright, never started, so there is nothing to apply out of
- *    order;
+ *  - out-of-order application (1): now trivial — a second concurrent call
+ *    never starts a SECOND request while the first is outstanding (it
+ *    coalesces onto a follow-up instead — round 13a — but that follow-up
+ *    only starts once the prior request has fully concluded, so there is
+ *    still never more than one thing in flight to apply out of order);
  *  - starvation (2)/(3): the single-writer model deliberately reintroduces a
- *    BOUNDED version of this trade (a hung request delays the next tick),
- *    which rounds 1-9 spent their effort trying to avoid entirely. This is
- *    an intentional, reviewed trade-off (see `playerDisplayLoad.ts`), not a
- *    regression, and is tested below as the new model's documented behavior;
+ *    BOUNDED version of this trade (a hung request delays the next
+ *    request), which rounds 1-9 spent their effort trying to avoid
+ *    entirely. This is an intentional, reviewed trade-off (see
+ *    `playerDisplayLoad.ts`), not a regression, and round 13a further
+ *    bounds it by firing the coalesced follow-up immediately rather than
+ *    waiting for the next scheduled tick on top of the delay;
  *  - the deadline value (4): re-derived against round 11a's actual
  *    constraint (`CAST_SAFETY_POLL_TIMEOUT_MS <= 15s` on its own, since a
  *    stale conclusion now reverts to `unknown` immediately rather than
@@ -166,33 +190,51 @@ function trackAbort<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
 }
 
 test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-writer model)', () => {
-  test('out-of-order application is structurally impossible: a second concurrent call is skipped, not started', async () => {
+  test('out-of-order application is structurally impossible: a second concurrent call never starts its own request', async () => {
     // This replaces the original "P1 race" test. Under the old
     // generation-comparison scheme, both calls actually ran and the test
     // proved the LATER one's value won regardless of completion order.
     // Under the single-writer model there is nothing to compare: the
-    // second call never starts a request at all.
+    // second call never starts a SECOND request while the first is
+    // outstanding — it coalesces onto a follow-up instead (round 13a),
+    // which is still strictly sequential (only ever one request actually
+    // in flight at any instant).
     const poller = new CastSafetyPoller();
     const first = deferred<CastSafetyState>();
     let fetchCalls = 0;
+    const responses: CastSafetyState[] = [];
     const fetchSafety: CastSafetyFetcher = () => {
       fetchCalls += 1;
-      return first.promise;
+      // First call returns the controllable deferred; any LATER call
+      // (the coalesced follow-up) resolves immediately with the next
+      // queued response — proving it only starts after the first
+      // concludes, never concurrently with it.
+      if (fetchCalls === 1) return first.promise;
+      return Promise.resolve(responses.shift() ?? { active: false });
     };
+    responses.push({ active: true });
 
     const inFlight = runCastSafetyPoll(poller, fetchSafety);
     expect(poller.isBusy).toBe(true);
 
-    // A second tick while the first is still outstanding is a no-op — it
-    // never calls the fetcher, so there is no second response to ever be
-    // "out of order" relative to the first.
-    const skipped = await runCastSafetyPoll(poller, fetchSafety);
-    expect(skipped).toEqual({ kind: 'ignored' });
+    // A second call while the first is still outstanding coalesces onto a
+    // follow-up rather than starting a second concurrent request — its
+    // promise does not resolve until AFTER the first concludes and the
+    // follow-up itself has run.
+    const coalesced = runCastSafetyPoll(poller, fetchSafety);
+    // Still only one fetch has actually started — the coalesced call has
+    // not issued a second, concurrent request.
     expect(fetchCalls).toBe(1);
 
-    first.resolve({ active: true });
+    first.resolve({ active: false });
     const result = await inFlight;
-    expect(result).toMatchObject({ kind: 'ok', active: true });
+    expect(result).toMatchObject({ kind: 'ok', active: false });
+
+    // Only NOW (after the first concludes) does the coalesced follow-up
+    // actually run — proving strict sequencing, not concurrency.
+    const coalescedResult = await coalesced;
+    expect(fetchCalls).toBe(2);
+    expect(coalescedResult).toMatchObject({ kind: 'ok', active: true });
     expect(poller.isBusy).toBe(false);
   });
 
@@ -206,31 +248,38 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     expect(raised).toMatchObject({ kind: 'ok', active: true });
   });
 
-  test('an intentional, bounded trade-off: a hung request delays (does not lose) the next observation', async () => {
+  test('an intentional, bounded trade-off: a hung request delays (does not lose) the next observation, and round 13a coalesces it rather than discarding it', async () => {
     // Rounds 1-9 spent nine iterations trying to avoid ANY coupling between
     // "is a request still outstanding" and "can the next tick run". The
     // single-writer redesign deliberately accepts a BOUNDED version of that
     // coupling in exchange for making ordering unrepresentable: while one
-    // request is in flight, a new tick is skipped outright rather than
-    // started. This is not silent data loss — the outstanding request still
-    // settles and its value still applies — it is a bounded delay, capped
-    // by `CAST_SAFETY_POLL_TIMEOUT_MS`.
+    // request is in flight, a new tick cannot start a SECOND concurrent
+    // request. This is not silent data loss — the outstanding request still
+    // settles and its value still applies, AND (round 13a) a tick arriving
+    // while busy coalesces onto an immediate follow-up rather than being
+    // discarded — so the delay is capped by `CAST_SAFETY_POLL_TIMEOUT_MS`
+    // (the hung request's own ceiling), not stretched further by having to
+    // also wait for the next externally-scheduled tick on top of that.
     const poller = new CastSafetyPoller();
     const hung = deferred<CastSafetyState>();
     const hungFetch: CastSafetyFetcher = (signal) => trackAbort(signal, hung.promise);
 
     const stuck = runCastSafetyPoll(poller, hungFetch, { timeoutMs: 10_000 });
 
-    // Ticks that fire while the hung request is outstanding are skipped, not
-    // queued and not separately started.
-    const skippedTick = await runCastSafetyPoll(poller, async () => ({ active: true }), { timeoutMs: 10_000 });
-    expect(skippedTick).toEqual({ kind: 'ignored' });
+    // A tick that fires while the hung request is outstanding coalesces
+    // onto a follow-up — it does not resolve until the hung request
+    // concludes AND the follow-up itself runs, but it is NOT discarded.
+    const coalescedTick = runCastSafetyPoll(poller, async () => ({ active: true }), { timeoutMs: 10_000 });
 
     // Once the hung request finally settles, the poller frees up and the
-    // NEXT tick runs and applies normally — nothing was permanently lost.
-    hung.resolve({ active: true });
+    // coalesced follow-up fires IMMEDIATELY — no wait for a further
+    // externally-scheduled tick.
+    hung.resolve({ active: false });
     const stuckResult = await stuck;
-    expect(stuckResult).toMatchObject({ kind: 'ok', active: true });
+    expect(stuckResult).toMatchObject({ kind: 'ok', active: false });
+
+    const coalescedResult = await coalescedTick;
+    expect(coalescedResult).toMatchObject({ kind: 'ok', active: true });
 
     const nextTick = await runCastSafetyPoll(poller, async () => ({ active: true }), { timeoutMs: 10_000 });
     expect(nextTick).toMatchObject({ kind: 'ok', active: true });
@@ -617,6 +666,106 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     hungForOldIdentity.reject(new DOMException('Aborted', 'AbortError'));
     await abandoned.catch(() => undefined);
     expect(poller.isBusy).toBe(false);
+  });
+
+  test('regression (round 13a, Codex P1, the reviewer-supplied scenario): a hold raised during an in-flight poll is observed the instant it frees up, not after waiting out the freshness window or the next scheduled tick', async () => {
+    // The exact failure mode from the finding: with the widened
+    // (round 12) freshness window, an in-flight poll observes `active:
+    // false` just before the X-Card is raised; because a tick firing while
+    // busy used to be discarded outright, the next chance to see `true`
+    // waited for the NEXT externally-scheduled tick on top of the first
+    // request's own delay — compounding toward ~18-20s, past the 15s
+    // bound. Round 13a's fix: the tick that arrives while busy coalesces
+    // onto a follow-up that fires the INSTANT the in-flight request
+    // concludes — proven here by NEVER calling the external "next tick"
+    // simulation at all; the coalesced call's own promise is what carries
+    // the `true` observation through, with no additional wait beyond the
+    // in-flight request's own conclusion.
+    const poller = new CastSafetyPoller();
+    const freshnessMs = 30;
+    const timeoutMs = 100;
+
+    // Poll A: issued before the hold is raised, observes a stale `false`
+    // (its own round trip exceeds the freshness window — round 11a stays
+    // in force, so this alone reverts to `unknown`, not a confident
+    // `false`).
+    const slowStaleFalse = deferred<CastSafetyState>();
+    const pollA = runCastSafetyPoll(poller, (signal) => trackAbort(signal, slowStaleFalse.promise), {
+      freshnessMs,
+      timeoutMs,
+    });
+
+    // While A is still outstanding, the hold gets raised, and the next
+    // scheduled tick fires — under the OLD behavior this would have been
+    // discarded outright and had to wait for yet ANOTHER externally
+    // scheduled tick after A concluded. Under round 13a it coalesces onto
+    // an immediate follow-up instead.
+    const coalescedDuringA = runCastSafetyPoll(poller, async () => ({ active: true }), { freshnessMs, timeoutMs });
+
+    // A's own round trip must actually exceed the freshness window for its
+    // `false` to be stale — real elapsed time, not just call order.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    slowStaleFalse.resolve({ active: false });
+    const pollAResult = await pollA;
+    expect(pollAResult).toEqual({ kind: 'unknown' }); // stale — curtain already shows from this alone
+
+    // The coalesced call's promise resolves as soon as ITS follow-up ran —
+    // immediately after A concluded, with no separate "wait for the next
+    // scheduled tick" step in between.
+    const coalescedResult = await coalescedDuringA;
+    expect(coalescedResult).toMatchObject({ kind: 'ok', active: true });
+  });
+
+  test('regression (round 13b, Codex P2): a backwards wall-clock jump does not extend trust in a stale observation', async () => {
+    // NTP correction, or a shared-TV device resuming from sleep (this
+    // feature's own deployment target), can make Date.now() jump
+    // BACKWARD. If freshness arithmetic used it, a stale `false` (or a run
+    // of failures) landing right after such a jump could compute a
+    // negative or understated elapsed time and look artificially fresh —
+    // silently defeating rounds 11a/11c. The poller uses `performance.now()`
+    // instead, which this test proves by corrupting `Date.now()` itself
+    // and confirming the poller's behavior is UNAFFECTED.
+    const poller = new CastSafetyPoller();
+    const freshnessMs = 30;
+
+    const confirmed = await runCastSafetyPoll(poller, async () => ({ active: false }), { freshnessMs });
+    expect(confirmed).toMatchObject({ kind: 'ok', active: false });
+
+    const realDateNow = Date.now;
+    Date.now = () => realDateNow() - 3_600_000; // simulate a 1-hour backward jump
+    try {
+      // Real (monotonic) elapsed time exceeds the freshness window even
+      // though the corrupted Date.now() would report a large NEGATIVE
+      // elapsed time (i.e. "impossibly fresh") if it were still in use.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const failing: CastSafetyFetcher = async () => {
+        throw new TypeError('network down');
+      };
+      const result = await runCastSafetyPoll(poller, failing, { freshnessMs });
+      expect(result).toEqual({ kind: 'unknown' });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test('regression (round 13a): invalidate() drops a pending coalesced follow-up, resolving it as ignored rather than hanging forever', async () => {
+    const poller = new CastSafetyPoller();
+    const hung = deferred<CastSafetyState>();
+    const hungFetch: CastSafetyFetcher = (signal) => trackAbort(signal, hung.promise);
+
+    const inFlight = runCastSafetyPoll(poller, hungFetch);
+    // Coalesces onto a follow-up — belongs to the OLD identity.
+    const coalesced = runCastSafetyPoll(poller, async () => ({ active: true }));
+
+    poller.invalidate(); // cast-token change to a new campaign
+
+    // The coalesced follow-up must resolve (not hang) even though it never
+    // got to run — and must not apply the new identity's would-be value.
+    const coalescedResult = await coalesced;
+    expect(coalescedResult).toEqual({ kind: 'ignored' });
+
+    hung.reject(new DOMException('Aborted', 'AbortError'));
+    await inFlight.catch(() => undefined);
   });
 });
 

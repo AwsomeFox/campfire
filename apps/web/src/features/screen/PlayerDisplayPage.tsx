@@ -365,25 +365,30 @@ export default function PlayerDisplayPage() {
    *
    * `runCastSafetyPoll`/`CastSafetyPoller` (see that module's doc for the
    * full history, including the nine-round comparison-based scheme this
-   * replaced) allows at most one request in flight at a time — a tick that
-   * fires while one is still outstanding is simply skipped. Because there is
-   * never a second, differently-ordered response to reconcile against,
-   * out-of-order application is structurally impossible rather than merely
-   * checked-for: whichever response arrives IS the most recent observation,
-   * unconditionally. The trade this accepts is explicit and bounded: a hung
-   * request now delays the NEXT observation, up to
-   * `CAST_SAFETY_POLL_TIMEOUT_MS` — see that constant's doc for why the
-   * bound holds. A single slow-but-not-timed-out request is ALSO bounded:
-   * a `false` (or a failure) that concludes too long after being issued
-   * (`CAST_SAFETY_OBSERVATION_FRESHNESS_MS`) resolves `{ kind: 'unknown' }`
+   * replaced) allows at most one HTTP request in flight at a time. Because
+   * there is never a second, differently-ordered response to reconcile
+   * against, out-of-order application is structurally impossible rather
+   * than merely checked-for: whichever response arrives IS the most recent
+   * observation, unconditionally. A tick firing while one is still
+   * outstanding does NOT simply wait for the next scheduled tick, though
+   * (round 13a): it coalesces onto a follow-up that fires the INSTANT the
+   * in-flight request concludes, so a hold raised during that busy window
+   * is observed as soon as the poller is next free. The trade this accepts
+   * is explicit and bounded: a hung request delays observing whatever
+   * happens next, up to `CAST_SAFETY_POLL_TIMEOUT_MS` — see that
+   * constant's doc for why the bound holds. A single slow-but-not-timed-out
+   * request is ALSO bounded: a `false` (or a failure, judged by elapsed
+   * time since the last confirmation rather than its own duration — round
+   * 11c) that concludes too long after being issued
+   * (`CAST_SAFETY_OBSERVATION_FRESHNESS_MS`, measured on a monotonic clock
+   * immune to wall-clock jumps — round 13b) resolves `{ kind: 'unknown' }`
    * rather than `ok`, and `shouldMarkCastSafetyUnknown` reverts
    * `castSafetyKnown` to false on that outcome — reverting to the curtain
-   * rather than trusting a stale "safe" verdict, so worst-case exposure
-   * never compounds across two slow requests in a row. Fail safe
-   * throughout: an ignored tick and a genuine, promptly-concluded failure
-   * on the current request leave the last-known hold state alone rather
-   * than guessing a new value — neither can ever clear an active curtain.
-   * The regular projection poll already surfaces a hard failure
+   * rather than trusting a stale "safe" verdict. Fail safe throughout: an
+   * ignored tick and a genuine, promptly-concluded failure on the current
+   * request leave the last-known hold state alone rather than guessing a
+   * new value — neither can ever clear an active curtain. The regular
+   * projection poll already surfaces a hard failure
    * (expired/revoked token) for the page as a whole.
    *
    * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
