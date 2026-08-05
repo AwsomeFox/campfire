@@ -110,9 +110,20 @@ export class CampaignEncountersController {
       'warnings (role duplication, action-economy mismatch, missing statblocks, unsupported-system math, ' +
       'swinginess). Pass back `roster` (the returned plan) with a `tune` op to reroll all/one slot, swap, adjust ' +
       'count, or pin — deterministic by the per-slot seeds so pinned slots survive re-rolls. Requires campaign ' +
-      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit.',
+      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit. ' +
+      'Same honesty contract as /generate (issue #1928): the target difficulty SIZES the roster for every ' +
+      'system, but the REPORTED `difficulty` is that system\'s own audited math only under ' +
+      '`difficultySupport: \'supported\'`. A registered non-5e system returns `\'heuristic\'` with ' +
+      '`difficulty.status: \'unsupported\'` and a null band — the absence of a rating, not a 5e-shaped one.',
   })
-  @ApiResponse({ status: 200, description: 'Read-only preview: roster + inspection + difficulty explanation + warnings + fallbacks.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Read-only preview: roster + inspection + difficulty explanation + `difficultySupport` + ' +
+      '`matchedBand` + warnings + fallbacks. `matchedBand` describes the 5e-shaped SIZING pass only and ' +
+      'can be true beside an `unsupported` difficulty — never report it as an achieved difficulty when ' +
+      '`difficultySupport` is `heuristic`.',
+  })
   async preview(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: EncounterPreviewDto,

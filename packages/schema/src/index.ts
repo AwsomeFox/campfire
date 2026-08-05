@@ -9795,12 +9795,20 @@ export const EncounterSuggestionCombatant = z.object({
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
 /**
- * Issue #1928: whether a reported encounter difficulty is the rule system's own audited
- * XP/CR budget math (`supported`, {@link encounterDifficultySupported} true — 5e and the
- * empty/unrecognized-slug fallback) or a 5e-shaped estimate not owned by the active system
- * (`heuristic` — PF2e, OSR, Open Legend, …). Never blocks generation/preview — the roster is
- * still valid and still sized by the internal count/CR heuristic either way; this only labels
- * whether the REPORTED band is the system's own.
+ * Issue #1928: whether the REPORTED encounter difficulty is the rule system's own audited
+ * XP/CR budget math.
+ *
+ * - `supported` ({@link encounterDifficultySupported} true — 5e and the empty/unrecognized-slug
+ *   fallback): the reported `difficulty` is that system's own audited math.
+ * - `heuristic` (PF2e, OSR, Open Legend, …): the roster was SIZED by the internal 5e-shaped
+ *   count/CR pass, and `totalXp` is that pass's own adjusted total — but the reported
+ *   `difficulty` is `status: 'unsupported'` with a **null band**. `heuristic` therefore means
+ *   the ABSENCE of an audited reported difficulty, NOT a 5e-shaped estimate of one: there is no
+ *   band in the payload to report, and a consumer must not present one. `matchedBand` likewise
+ *   describes only the sizing pass and can be `true` beside that null band.
+ *
+ * Never blocks generation/preview — the roster is valid either way; this only labels what the
+ * reported difficulty is, and is not.
  */
 export const DifficultySupport = z.enum(['supported', 'heuristic']);
 export type DifficultySupport = z.infer<typeof DifficultySupport>;
