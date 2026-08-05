@@ -78,6 +78,8 @@ export function DeathSaveTracker({
   onSet,
   onRoll,
 }: DeathSaveTrackerProps) {
+  const { t } = useTranslation();
+
   return (
     <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }} data-testid="death-save-tracker">
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
@@ -90,9 +92,10 @@ export function DeathSaveTracker({
       </span>
       {canEditPermission && canRoll && (
         <button type="button" className="btn btn-ghost cf-target-44" aria-label="Roll a death save" aria-describedby={syncBlockedDescribedBy} title={syncBlockedReason ?? 'Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)'} disabled={busy || syncBlocked} onClick={onRoll} style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}>
-          Roll
+          {t('dice.roll')}
         </button>
       )}
     </div>
   );
 }
+import { useTranslation } from 'react-i18next';
