@@ -1234,6 +1234,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     ).toEqual({ ok: true });
   });
 
+  it('get_encounter keeps a player declaration visible in unrevealed fog exactly like REST', async () => {
+    const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-aoe-fog-player', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP fog owner AoE', hidden: false } })) as { id: number };
+    const declared = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'fog-owner', shape: 'circle', x: 20, y: 20, sizeFt: 10 } });
+    expect(declared.isError).toBeFalsy();
+    expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
+
+    const mcpEncounter = parseResult(await playerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } })) as { aoe: Array<{ id: string }> };
+    const restEncounter = await request(ctx.app.getHttpServer()).get(`/api/v1/encounters/${encounter.id}`).set('Authorization', `Bearer ${playerTokenRes.body.token}`);
+    expect(restEncounter.status).toBe(200);
+    expect(mcpEncounter.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'fog-owner' })]));
+    expect(restEncounter.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'fog-owner' })]));
+  });
+
   it('keeps hidden archived encounters non-enumerating for AoE MCP writes', async () => {
     const archivedCampaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP hidden archived AoE' });
     expect(archivedCampaign.status).toBe(201);
