@@ -2548,8 +2548,14 @@ export class EncountersService {
       } else {
         this.db.transaction((tx) => {
           for (const charId of recipientIds) {
+            // Issue #1902 rework (round 13, codex P2 sweep): PER CHARACTER, not the shared
+            // `ts` above — same class of bug as `restParty`/`awardXp`'s own per-character
+            // fix. This fallback path only runs when `charactersService` isn't injected
+            // (the preferred branch above already calls the fixed `awardXp`), but it writes
+            // the same CAS-guarded `updatedAt` column, so it needs the same guarantee.
+            const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, charId)).get();
             tx.update(characters)
-              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: ts })
+              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: nextUpdatedAt(current?.updatedAt ?? ts) })
               .where(eq(characters.id, charId))
               .run();
           }
@@ -3875,10 +3881,11 @@ export class EncountersService {
           const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
           const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
           const turnIndex = turnIndexFor(sorted, freshEncounter.currentCombatantId);
+          const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            ...(turnIndex !== freshEncounter.turnIndex ? { updatedAt: nowIso() } : {}),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
           }).where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running'))).run();
         }
         emittedEncounter = freshEncounter;
@@ -4397,6 +4404,13 @@ export class EncountersService {
         }
       : null;
     let replayedCombatant: Combatant | null = null;
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): read after the
+    // transaction commits, at this method's own `emitEncounterEvent` call below — see
+    // `ActionResolverService.apply()`'s `sheetMirrored` doc comment for the general
+    // rationale. `mirrorSheet` itself is computed from the transaction-local encounter
+    // row (line ~4426), so it can't be read at that emission point directly; mirrored
+    // here into an outer-scope flag the same way.
+    let combatantSheetMirrored = false;
 
     try {
       this.db.transaction((tx) => {
@@ -4419,9 +4433,17 @@ export class EncountersService {
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
         this.assertMutable(freshEncounter);
+        // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
+        // THIS transaction-local row, not just the pre-transaction `encounterRow` checked
+        // above — the same reason `freshEncounter` itself is re-read here rather than reused
+        // (a caller between the outer check and this transaction, e.g. an unrelated combatant
+        // PATCH, can advance the encounter's `updatedAt`; the outer check already passed
+        // against the now-stale value, so without this the write proceeds anyway).
+        if (patch.expectedUpdatedAt) this.revisions.assertNotStale(freshEncounter, patch.expectedUpdatedAt);
         // The sheet mirror has the same lifecycle boundary: derive it from the
         // transaction-local encounter row, never the stale preflight snapshot.
         const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
+        combatantSheetMirrored = mirrorSheet;
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
         if (!fresh || fresh.encounterId !== encounterId) {
           throw new NotFoundException(`Combatant ${combatantId} not found`);
@@ -4630,7 +4652,11 @@ export class EncountersService {
           }
           const concentrationBroken = willBreakConcentration && isConcentrating;
           if (concentrationBroken) {
-            const { removed, casterInstances } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            // Issue #1902 rework (round 22, codex P2): a concentration cascade off this
+            // combatant's own HP change can mirror a DIFFERENT character's sheet — fold
+            // that into the flag this method's own `encounter.updated` emission reports.
+            const { removed, casterInstances, sheetMirrored: cascadeSheetMirrored } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            if (cascadeSheetMirrored) combatantSheetMirrored = true;
             concentrationCascades = removed;
             writeSet.turnState = toJsonText(turnState);
             if (conditionFieldsTouched) {
@@ -4697,7 +4723,14 @@ export class EncountersService {
           afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
         }
         if (mirrorSheet) {
-          const mirroredAt = nowIso();
+          // Issue #1902 rework (round 13, codex P2 sweep): read the character's CURRENT
+          // `updatedAt` here, inside the transaction, rather than reusing `character` (read
+          // pre-transaction, via an earlier `await` — the same stale-snapshot gap fixed
+          // elsewhere in this rework). `nextUpdatedAt`, not `nowIso()`, for the same reason
+          // every other `characters` table writer in this rework needs it: this column is
+          // the CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on.
+          const priorCharUpdatedAt = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, existing.characterId!)).get()?.updatedAt;
+          const mirroredAt = nextUpdatedAt(priorCharUpdatedAt ?? nowIso());
           const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
           if (recomputeHp || spFieldsTouched || deathStateTouched) {
             sheetSet.hpCurrent = updated.hpCurrent;
@@ -4971,13 +5004,33 @@ export class EncountersService {
         adapter,
       );
       const turnIndex = turnIndexFor(sortedAfter, encounterRow.currentCombatantId);
+      // Issue #1902 rework (round 23, codex P2): this write lands AFTER the transaction
+      // above already committed (and after the awaited adapter/roster lookups just above),
+      // so `encounterRow.updatedAt` captured at the top of this method is stale — the
+      // transaction's own write already advanced it via `nextUpdatedAt`, which can land
+      // STRICTLY AHEAD of wall-clock `now` on a same-millisecond collision (see
+      // `nextUpdatedAt`'s own doc comment). A bare `nowIso()` here would not just fail to
+      // advance the token — it can tie or roll it BACKWARD relative to that already-committed
+      // value. That regression is exactly the defect `CharactersService.update()` fixed for
+      // the `characters.updatedAt` CAS token (issue #1902 rework, round 12/15: re-read the
+      // row fresh and derive the next token from THAT, never from the wall clock alone) —
+      // applied here to the identical `encounters.updatedAt` token so the two mirror the same
+      // rule. Without this, a client holding an older `expectedUpdatedAt` (from before the
+      // transaction's own change) could pass `assertNotStale` against this rolled-back value
+      // and silently overwrite that change with a stale whole-statblock PATCH.
+      const [freshEncounterRow] = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).limit(1);
       await this.db
         .update(encounters)
-        .set({ turnIndex, updatedAt: nowIso() })
+        .set({ turnIndex, updatedAt: nextUpdatedAt(freshEncounterRow?.updatedAt ?? encounterRow.updatedAt) })
         .where(eq(encounters.id, encounterId));
     }
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): tag this frame the same
+    // way `apply()`/`undo()`/`adjustCombatantResource` do (see `sheetMirrored`'s schema doc
+    // comment) — a combatant HP/condition/death-state PATCH mirrors onto a linked character
+    // sheet whenever `combatantSheetMirrored` is true, so the client's `campaignCharacters`
+    // invalidation needs to fire for THIS write too, not just the other three.
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden, { sheetMirrored: combatantSheetMirrored });
 
     if (row.kind === 'character' && row.characterId) {
       if (beforeDeath !== 'dead' && afterDeath === 'dead') {
@@ -5241,12 +5294,13 @@ export class EncountersService {
         }
         tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-        updatedAt: now,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
       }).where(eq(encounters.id, encounterId)).run();
       const escalationEventId = wrappedToNextRound && escalation?.logDetail
         ? Number(tx.insert(encounterEvents).values({ encounterId, round: afterEncounter.round, type: 'override', actor: null, target: null, actorId: null, targetId: null, detail: escalation.logDetail, chainId: null, parentEventId: null, phase: null, performedByJson: null, metadataJson: JSON.stringify({ escalationDie: escalation.escalationDie }), createdAt: now }).run().lastInsertRowid)
@@ -5413,6 +5467,7 @@ export class EncountersService {
           for (const legendarySnapshot of roundLegendarySnapshots) {
             tx.update(combatants).set({ turnState: legendarySnapshot.turnState }).where(eq(combatants.id, legendarySnapshot.id)).run();
           }
+          const currentEnc1 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             currentCombatantId: before.currentCombatantId,
             turnIndex: restoredTurnIndex,
@@ -5423,7 +5478,7 @@ export class EncountersService {
             turnPhase: before.turnPhase,
             ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
           if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
         } else if (runningAdapter) {
@@ -5434,11 +5489,12 @@ export class EncountersService {
           // lair resume target; an unrelated combatant mutation must not lose it.
           const restoreLairResume = before.lairResumeCombatantId === snapshot.id
             && current.lairResumeCombatantId === after.lairResumeCombatantId;
+          const currentEnc2 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             ...(restoreLairResume ? { lairResumeCombatantId: before.lairResumeCombatantId } : {}),
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc2?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
         }
         // Snapshot is the receipt's response body after its first successful undo.
@@ -5549,10 +5605,11 @@ export class EncountersService {
           adapter,
         );
         const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters).set({
           turnIndex,
           combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-          ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         }).where(eq(encounters.id, encounterId)).run();
       }
 
@@ -5685,6 +5742,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -5696,7 +5754,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -6144,6 +6202,7 @@ export class EncountersService {
           newCurrentName = 'Lair';
         }
 
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
           .set({
             turnIndex,
@@ -6154,7 +6213,7 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
           .run();
@@ -6509,6 +6568,7 @@ export class EncountersService {
         tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           turnIndex,
@@ -6519,7 +6579,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-          updatedAt: nowIso(),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -6595,8 +6655,8 @@ export class EncountersService {
           : `automatic round ${encounterRow.round} default +${value}`;
     const entry = this.escalationEntry(encounterRow.round, value, source, held, override, note);
     const history = this.appendEscalationHistory(encounterRow.escalationDieHistory, entry);
-    const ts = nowIso();
 
+    const currentEnc = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
     await this.db
       .update(encounters)
       .set({
@@ -6604,7 +6664,7 @@ export class EncountersService {
         escalationDieHeld: held,
         escalationDieOverride: override,
         escalationDieHistory: history,
-        updatedAt: ts,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
       })
       .where(eq(encounters.id, encounterId));
 
@@ -7060,8 +7120,12 @@ export class EncountersService {
         .all();
       row = updated;
       if (encounterRow.status === 'running') {
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
-          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .set({
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
+          })
           .where(eq(encounters.id, encounterId))
           .run();
       }
@@ -7265,6 +7329,22 @@ export class EncountersService {
       }
       for (const w of characterWrites) {
         const prior = priorById.get(w.characterId);
+        // Issue #1902 rework (round 13, codex P2 sweep; corrected round 15, devin): PER
+        // CHARACTER, from `prior` (already read fresh, inside this transaction, a few
+        // lines above) — not the shared `ts` this whole encounter-end call uses for OTHER
+        // purposes (endedAt, the encounter's own updatedAt). This column is the CAS token
+        // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every
+        // writer. Computed ONCE here (not inline in `set` below) because
+        // `sheetSyncedUpdatedAt` on the combatant row MUST be stamped with this EXACT same
+        // value — `sheetSyncedUpdatedAt` is defined as "the sheet's `updatedAt` at the
+        // moment of sync" (see `CharactersService.syncActiveCombatants` and
+        // `updateCombatant`'s mirror, which both write one shared value to both rows).
+        // Round 13 advanced the character's token per-character but left the combatant
+        // stamped with the shared `ts`, breaking that equality — `canWriteBackHp` and the
+        // CAS predicate below both compare the two directly, so ANY later end would either
+        // report a false HP_SYNC_CONFLICT or silently no-op its write-back (0 rows
+        // matched) once the two values diverged.
+        let sheetSyncToken = nextUpdatedAt(prior?.updatedAt ?? ts);
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
@@ -7282,7 +7362,7 @@ export class EncountersService {
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
           conditionInstances: w.conditionInstances,
-          updatedAt: ts,
+          updatedAt: sheetSyncToken,
         };
         if (prior !== undefined && prior.status !== w.status) {
           set.status = w.status;
@@ -7318,20 +7398,25 @@ export class EncountersService {
             });
           }
           // Slices already match (e.g. name-only sheet edit) — bump updatedAt + token.
+          // `nextUpdatedAt(fresh.updatedAt)` (issue #1902 rework, round 13) — `fresh` was
+          // just read above, inside this same transaction. Reassign `sheetSyncToken` to
+          // whatever was ACTUALLY written here, so the combatant marker below matches.
           if (fresh) {
+            sheetSyncToken = nextUpdatedAt(fresh.updatedAt);
             tx.update(characters)
-              .set({ updatedAt: ts })
+              .set({ updatedAt: sheetSyncToken })
               .where(eq(characters.id, w.characterId))
               .run();
           }
         }
         tx.update(combatants)
-          .set({ sheetSyncedUpdatedAt: ts })
+          .set({ sheetSyncedUpdatedAt: sheetSyncToken })
           .where(eq(combatants.id, w.combatantId))
           .run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: ts })
+        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -7508,6 +7593,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -7521,7 +7607,7 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -7974,7 +8060,11 @@ export class EncountersService {
         }
         slot.used = nextUsed;
         slots[levelKey] = slot;
-        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
+        // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+        // EVERY spellSlots writer. `character` was read INSIDE this same transaction
+        // above, so there's no separate atomicity gap to guard here.
+        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
       } else if (patch.key) {
         const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
@@ -7985,7 +8075,7 @@ export class EncountersService {
         }
         res.used = nextUsed;
         resources[patch.key] = res;
-        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
       } else {
         throw new BadRequestException('Must supply either spellLevel or key to adjust');
@@ -8006,7 +8096,10 @@ export class EncountersService {
         .run();
     });
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    // Issue #1902 rework (round 19, codex P2): `sheetMirrored: true` unconditionally — this
+    // method's entire purpose is spending/restoring a linked character's spell slot or
+    // resource, so every call here writes the sheet (see the `characters` update above).
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored: true });
 
     return this.getRowOrThrow(encounterId);
   }
@@ -8202,7 +8295,16 @@ export class EncountersService {
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] } | null,
     casterExcluded: boolean,
     effectName?: string | null,
-  ): { removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[]; casterInstances?: ConditionInstance[] } {
+  ): {
+    removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[];
+    casterInstances?: ConditionInstance[];
+    sheetMirrored: boolean;
+  } {
+    // Issue #1902 rework (round 22, codex P2): report whether this cascade mirrored any
+    // character sheet, matching the same signal `action-resolver.service.ts`'s
+    // `breakConcentration` now returns — a cascade can touch a character-linked combatant
+    // other than the caster the caller already has in hand.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -8227,15 +8329,24 @@ export class EncountersService {
       const row = withInstances.find((r) => r.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — see the matching fix (and its
+      // fuller doc comment) in `action-resolver.service.ts`'s `breakConcentration` for why
+      // the combatant's `sheetSyncedUpdatedAt` and the character's own `updatedAt` must be
+      // the EXACT same value.
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     if (turnState) {
@@ -8251,6 +8362,7 @@ export class EncountersService {
         condition: r.condition,
       })),
       casterInstances,
+      sheetMirrored,
     };
   }
 }

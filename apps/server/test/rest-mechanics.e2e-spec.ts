@@ -113,6 +113,43 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(combatant.hpCurrent).toBe(40);
   });
 
+  it('#1902: POST /characters/:id/rest mirrors the restored HP into a running combatant immediately — no acknowledgement step, no stale write-back on End', async () => {
+    // This is the direct single-character rest endpoint the in-encounter
+    // ResourceTrackerPanel calls (issue #1902), as opposed to the DM's bulk
+    // preview/apply party-recovery flow exercised by the test above. A PR review
+    // (devin-ai-integration) flagged that resting mid-combat "is applied only to the
+    // character sheet" and gets silently overwritten when the encounter later ends.
+    // That is not what the code does: `CharactersService.rest()` delegates short/long
+    // rests to `restParty()`, which calls `syncActiveCombatants()` for every character
+    // in the plan straight after the sheet write commits — unconditionally, with no
+    // acknowledgement gate (that gate is specific to the bulk party-recovery preview/
+    // apply flow above). This test pins that behaviour for the single-character path so
+    // a future change cannot silently reintroduce the stale-HP defect the review
+    // described.
+    const id = await batteredCharacter('Solo combat rest', { hpCurrent: 5, hpMax: 40 });
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Solo running rest', status: 'running', createdAt: now, updatedAt: now }).returning();
+    const [combatant] = await db
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Solo combat rest', hpCurrent: 5, hpMax: 40 })
+      .returning();
+
+    const res = await request(server).post(`/api/v1/characters/${id}/rest`).set(dm).send({ type: 'long' });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(40);
+
+    const [mirrored] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(mirrored.hpCurrent).toBe(40);
+
+    // Ending the encounter writes the combatant's HP back to the sheet — with the
+    // combatant already carrying the rested value, that write-back is a no-op for HP,
+    // not a silent revert of the healing the rest just applied.
+    const endRes = await request(server).post(`/api/v1/encounters/${encounter.id}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+    const [afterEnd] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    expect(afterEnd.hpCurrent).toBe(40);
+  });
+
   it('replays an undo key and refuses a different key or later sheet edit', async () => {
     const id = await batteredCharacter('Undo replay');
     const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
@@ -159,6 +196,43 @@ describe('rest mechanics (#1041, e2e)', () => {
       expect(sheet.resources[HIT_DICE_RESOURCE_KEY].used).toBe(2);
       // Exhaustion ends with a night's sleep; petrification does not.
       expect(sheet.conditions).toEqual(['Petrified']);
+    }
+  });
+
+  /**
+   * Issue #1902 rework, round 7 (codex P2) — `restParty` writes `spellSlots`, the same
+   * field `patchSpellSlots`'s `expectedUpdatedAt` compare-and-set guards, but stamped
+   * every character in the batch with ONE shared `nowIso()` timestamp. If that shared
+   * value happened to equal a character's PRE-rest `updatedAt` (two writes landing in
+   * the same millisecond — the identical class of bug fixed for `patchSpellSlots` in an
+   * earlier round), the rest would visibly change nothing about the token even though it
+   * changed the sheet, and a spell-slot request already in flight with that pre-rest
+   * token as `expectedUpdatedAt` would incorrectly pass the CAS check against a sheet the
+   * rest had, in fact, just rested. Freezes the clock to reproduce the collision
+   * deterministically, matching `spell-slot-concurrency.spec.ts`'s equivalent test for
+   * `patchSpellSlots` itself.
+   */
+  it('#1902 rework: restParty advances each character\'s revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock caster');
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await db.update(charactersTable).set({ updatedAt: frozen.toISOString() }).where(eq(charactersTable.id, id));
+      const [before] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+      expect(before.updatedAt).toBe(frozen.toISOString());
+
+      await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');
+      const [after] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `after`'s
+      // token would be IDENTICAL to `before`'s — the rest happened (spell slots reset,
+      // HP restored), but the CAS token a concurrent request might be holding never
+      // visibly moved.
+      expect(after.updatedAt).not.toBe(before.updatedAt);
+      expect(JSON.parse(after.spellSlots)['1'].used).toBe(0);
+    } finally {
+      jest.useRealTimers();
     }
   });
 
@@ -311,6 +385,219 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(after.conditions).toEqual(before.conditions);
     expect(after.spellSlots['1'].used).toBe(4);
     expect(after.resources.rage.used).toBe(3);
+  });
+
+  /**
+   * Issue #1902 rework, round 10 (codex P1) — `restParty`'s plan (`p.spellSlotsAfter`,
+   * computed from `targets`, read BEFORE this method's transaction — and before its own
+   * `await this.adapterForCampaign(...)` and dice rolling) used to be written back
+   * UNCONDITIONALLY. A short rest does not touch spell slots at all, so its plan's
+   * `spellSlotsAfter` is simply whatever `restParty` read at the very start — if a
+   * DIFFERENT concurrent spend (a normal `patchSpellSlots` call, itself correctly
+   * CAS-protected) commits in the gap between that read and `restParty`'s transaction,
+   * the old code would silently write the STALE pre-race blob back over it, erasing the
+   * completed spend without any error. The fix gates `restParty`'s write on `updatedAt`
+   * still matching what the plan was computed from (the same WHERE-clause CAS
+   * `applyPartyRecovery` already uses) — a race is REJECTED, not silently applied on top
+   * of a stale snapshot.
+   *
+   * This is deliberately NOT driven as two `Promise.allSettled`-raced real service calls:
+   * measured empirically (10/10 local runs), `restParty`'s own transaction consistently
+   * commits before a concurrently-started `patchSpellSlots` call reaches its transaction
+   * (it has more pre-transaction `await`s, but each resolves in strictly fewer ticks in
+   * practice than `patchSpellSlots`'s own chain does here) — so a naive race would pass
+   * identically whether or not the WHERE-clause CAS is even present, silently testing
+   * nothing. Confirmed directly: reverting the CAS to an unconditional `WHERE id` still
+   * left all 10 trials green. Instead, `planPartyRest` — the pure planner `restParty`
+   * calls SYNCHRONOUSLY between its snapshot read and its write transaction, with no
+   * `await` in between — is spied so the mock performs a raw, synchronous write standing
+   * in for a concurrent `patchSpellSlots` commit landing in exactly that gap, and the
+   * plan itself is left untouched (the real planner still runs). This makes the race
+   * deterministic instead of dependent on this machine's microtask timing.
+   */
+  it('#1902 rework: restParty rejects rather than overwrites when a concurrent spend lands between its snapshot read and its write', async () => {
+    const id = await batteredCharacter('Race condition caster');
+    // `batteredCharacter` always seeds level-1 slots at max:4/used:4 (fully spent) — reset
+    // to used:0 so the simulated concurrent spend below has room to land.
+    await db.update(charactersTable).set({ spellSlots: JSON.stringify({ '1': { max: 4, used: 0 } }) }).where(eq(charactersTable.id, id));
+
+    // Spying on the `@campfire/schema` INDEX re-export doesn't work — `index.ts`'s
+    // `export { planPartyRest, ... } from './rest'` compiles (via TypeScript's
+    // `__createBinding` helper) to an `Object.defineProperty` getter with no explicit
+    // `configurable: true`, which defaults to `false` (confirmed: `jest.spyOn` throws
+    // "Cannot redefine property"). `rest.ts` itself OWNS `export function
+    // planPartyRest(...)` as a genuine top-level declaration, compiling to a plain,
+    // writable `exports.planPartyRest = planPartyRest` assignment, which IS spyable —
+    // and the index's re-export getter reads through to this same module object
+    // dynamically at call time, so a mutation here is visible to
+    // `characters.service.ts`'s `import { planPartyRest } from '@campfire/schema'` too.
+    const restModule = require('../../../packages/schema/src/rest') as { planPartyRest: (...args: unknown[]) => unknown };
+    const originalPlanPartyRest = restModule.planPartyRest;
+    const spy = jest
+      .spyOn(restModule, 'planPartyRest')
+      .mockImplementation((...args: unknown[]) => {
+        // Simulate a concurrent `patchSpellSlots` commit landing in the gap between
+        // `restParty`'s pre-transaction snapshot (already captured — this planner call is
+        // the very next thing `restParty` does with it) and `restParty`'s own write
+        // transaction (which runs synchronously right after this returns). `.run()` (not
+        // `await db.update(...)`) forces synchronous execution so this lands inside that
+        // exact gap rather than on some later microtask tick.
+        db.update(charactersTable)
+          .set({ spellSlots: JSON.stringify({ '1': { max: 4, used: 1 } }), updatedAt: new Date(Date.now() + 5000).toISOString() })
+          .where(eq(charactersTable.id, id))
+          .run();
+        return originalPlanPartyRest(...args);
+      });
+
+    try {
+      // The concurrent write happened AFTER restParty's snapshot but BEFORE its transaction
+      // — restParty's plan is now stale and must reject with the same 409 CAS-conflict
+      // shape every other stale-write guard in this file uses, not silently overwrite.
+      await expect(characters.restParty(campaignId, 'short', [id], {}, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+
+      const final = (await read(id)).body;
+      // The concurrent spend must still be the stored truth — never reverted back to 0 by
+      // restParty's stale plan silently winning.
+      expect(final.spellSlots['1'].used).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
+   * Issue #1902 rework, round 11 (codex P2) — `applyPartyRecovery` and `undoPartyRecovery`
+   * stamp `characters.updatedAt` with ONE shared `nowIso()` value (`at`) for every
+   * character in the batch, the same class of bug fixed for `restParty` in round 8: if
+   * that shared timestamp happens to equal a character's PRE-write token (two writes
+   * landing in the same millisecond), the CAS token `patchSpellSlots`'s
+   * `expectedUpdatedAt` guard depends on never visibly moves, even though the recovery
+   * DID change the sheet — a spell-slot request already in flight with that pre-recovery
+   * token would incorrectly pass staleness against a sheet the recovery just changed.
+   * Freezes the clock to reproduce the collision deterministically for both apply and
+   * undo, matching the round-7/8 `restParty` tests and `spell-slot-concurrency.spec.ts`'s
+   * equivalent test for `patchSpellSlots` itself.
+   */
+  it('#1902 rework: applyPartyRecovery advances the revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock recoveree');
+    const frozen = new Date('2026-01-01T00:00:00.000Z');
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await db.update(charactersTable).set({ updatedAt: frozen.toISOString() }).where(eq(charactersTable.id, id));
+      const [beforeApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+      expect(beforeApply.updatedAt).toBe(frozen.toISOString());
+
+      const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+      await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'frozen-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+      const [afterApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `afterApply`'s
+      // token would be IDENTICAL to `beforeApply`'s — the recovery happened (spell slots
+      // reset), but the CAS token a concurrent request might be holding never visibly moved.
+      expect(afterApply.updatedAt).not.toBe(beforeApply.updatedAt);
+      expect(JSON.parse(afterApply.spellSlots)['1'].used).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Same defect, undo side — isolated from `applyPartyRecovery`'s own fix rather than
+   * chained after it, because chaining would let apply's OWN token advancement mask an
+   * unfixed undo (apply's `nextUpdatedAt` always moves the token strictly past the
+   * frozen instant, so undo's `nowIso()` — frozen at the SAME instant the whole test
+   * freezes to — would trivially differ from it regardless of whether undo's own fix is
+   * present). Applying with a REAL clock first, then freezing exactly at the resulting
+   * `updatedAt`, reproduces the collision `undoPartyRecovery`'s own write would need to
+   * land in.
+   */
+  it('#1902 rework: undoPartyRecovery advances the revision token monotonically, even inside one frozen millisecond', async () => {
+    const id = await batteredCharacter('Frozen clock undoer');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'real-clock-apply-then-frozen-undo', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const [beforeUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+    // Freeze exactly at the row's CURRENT token — the collision undoPartyRecovery's own
+    // `nowIso()` write would need to reproduce the bug.
+    const frozen = new Date(beforeUndo.updatedAt);
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(frozen);
+    try {
+      await characters.undoPartyRecovery(campaignId, applied.batchId, 'frozen-undo', dmUser, 'dm');
+      const [afterUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+
+      // The defect this guards against: with the old shared `nowIso()` write, `afterUndo`'s
+      // token would be IDENTICAL to `beforeUndo`'s — the undo happened (spell slots reverted
+      // to spent), but the CAS token a concurrent request might be holding never visibly moved.
+      expect(afterUndo.updatedAt).not.toBe(beforeUndo.updatedAt);
+      expect(JSON.parse(afterUndo.spellSlots)['1'].used).toBe(4);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Issue #1902 rework, round 17 (codex P2) — `applyPartyRecovery`/`undoPartyRecovery`
+   * advance the sheet's `updatedAt` per-character (round 11), but passed the linked
+   * combatant's sync a DIFFERENT value: the shared batch timestamp `at`, not the actual
+   * per-character token just written to the sheet. `sheetSyncedUpdatedAt` is defined as
+   * "the sheet's `updatedAt` at the moment of sync" — `canWriteBackHp` and
+   * `endEncounter`'s CAS predicate both compare the two directly (the identical mismatch
+   * class fixed for `endEncounter` itself in round 15), so a later `endEncounter` could
+   * report a false `HP_SYNC_CONFLICT`, or silently no-op its write-back, purely because
+   * this recovery's sync marker never matched the sheet it claims to describe.
+   */
+  it("#1902 rework: applyPartyRecovery and undoPartyRecovery stamp the linked combatant's sheetSyncedUpdatedAt with the EXACT token written to the sheet", async () => {
+    const id = await batteredCharacter('Sync marker check');
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Sync marker fight', status: 'running', createdAt: now, updatedAt: now }).returning();
+    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Sync marker check', hpCurrent: 5, hpMax: 40 });
+
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'sync-marker-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+
+    const [sheetAfterApply] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [combatantAfterApply] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatantAfterApply.sheetSyncedUpdatedAt).toBe(sheetAfterApply.updatedAt);
+
+    await characters.undoPartyRecovery(campaignId, applied.batchId, 'sync-marker-undo', dmUser, 'dm');
+    const [sheetAfterUndo] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    const [combatantAfterUndo] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatantAfterUndo.sheetSyncedUpdatedAt).toBe(sheetAfterUndo.updatedAt);
+    // Both markers genuinely advanced across the apply -> undo sequence, not just
+    // coincidentally equal by both staying unset.
+    expect(sheetAfterUndo.updatedAt).not.toBe(sheetAfterApply.updatedAt);
+  });
+
+  /**
+   * Issue #1902 rework, round 12 (devin) — a regression the round-10 WHERE-clause CAS
+   * introduced. `restParty` built `targets = characterIds.map(...)` with no
+   * de-duplication, so `characterIds: [id, id]` produced TWO plans for the SAME row.
+   * Before round 10 both writes applied the identical planned values and the call
+   * succeeded harmlessly. After round 10's CAS gate, the FIRST write for that row
+   * advances `updatedAt`, so the SECOND write's own predicate
+   * (`eq(characters.updatedAt, priorUpdatedAt)`) matches zero rows and throws
+   * `ConflictException` — a self-inflicted conflict that rolled back the WHOLE rest,
+   * including every OTHER participant, with a misleading "changed after this rest was
+   * planned" error. `long_rest`/`short_rest`'s MCP tools accept an id array with no
+   * uniqueness refinement, so an AI caller can readily trigger this. Fixed by
+   * de-duplicating `characterIds` at the very top of `restParty`, before anything
+   * derives from it.
+   */
+  it("#1902 rework: restParty tolerates a duplicate character id instead of self-conflicting and rolling back the whole rest", async () => {
+    const solo = await batteredCharacter('Repeated Rex');
+    const companion = await batteredCharacter('Innocent Bystander');
+
+    const result = await characters.restParty(campaignId, 'long', [solo, solo, companion], {}, dmUser, 'dm');
+
+    // Both distinct characters actually rested — the duplicate did not silently drop the
+    // OTHER participant, and did not roll back the whole call either.
+    expect(result.characters.map((c) => c.characterId).sort((a, b) => a - b)).toEqual([solo, companion].sort((a, b) => a - b));
+    const soloAfter = (await read(solo)).body;
+    expect(soloAfter.spellSlots['1'].used).toBe(0);
+    expect(soloAfter.resources.rage.used).toBe(0);
+    const companionAfter = (await read(companion)).body;
+    expect(companionAfter.spellSlots['1'].used).toBe(0);
   });
 
   it('reports every failure at once rather than one rejected call at a time', async () => {
