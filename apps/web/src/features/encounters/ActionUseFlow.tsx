@@ -19,6 +19,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
 import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { useAnnounce } from '../../components/Announcer';
 import { QuickRollButtons } from './QuickRollButtons';
 
@@ -56,6 +57,7 @@ export function ActionUsePanel({
   combatants,
   isDm,
   applyDisabled = false,
+  applyGateReason,
   onDismiss,
   onApplied,
   onError,
@@ -69,6 +71,13 @@ export function ActionUsePanel({
   combatants: Combatant[];
   isDm: boolean;
   applyDisabled?: boolean;
+  /**
+   * Localized reason the Apply control is gated right now, or `undefined` when it is not
+   * (issue #1933 review). Scoped to Apply alone: `ActionResolverService.apply` calls
+   * `assertNotHeld`, but `resolve` (the preview) stays open during a safety hold on
+   * purpose, so the roll/preview controls beside it must NOT inherit this.
+   */
+  applyGateReason?: string;
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
@@ -264,6 +273,18 @@ export function ActionUsePanel({
               ))}
             </ul>
           </div>
+          {preview.systemMathSupported === false && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }} data-testid="action-use-system-math-notice">
+              {/* Must not name 5e/d20: `systemMathSupported === false` also covers adapters
+                  that supply their own resolveAttack (OSR descending-AC, Open Legend
+                  exploding pools), where the system's OWN math ran. Keep this in step with
+                  the catalog string — action-use-system-math-notice.unit.spec.ts asserts
+                  both this default and the catalog value are free of that claim. */}
+              {t('encounters.actionFlow.systemMathNotice', {
+                defaultValue: "Resolved with math that hasn't been audited for your system — verify the result.",
+              })}
+            </p>
+          )}
           {preview.policy === 'dm-confirmed' && !isDm && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
               Your DM will apply the consequences — this is a declaration only.
@@ -307,16 +328,28 @@ export function ActionUsePanel({
               Back
             </button>
             {!isUnconfirmed && (preview.canApply || (isDm && !preview.applied)) && (
-              <Btn
-                data-testid="action-use-apply"
-                disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
-                onClick={() => {
-                  if (commitSubmitted || commit.isPending) return;
-                  commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
-                }}
+              <GatedControl
+                // Suppressed while the commit is in flight or already applied: `busy` is
+                // the operative blocker then, not the hold, and GatedControl strips the
+                // native `disabled` whenever a reason is present (issue #1933 review).
+                reason={commit.isPending || commitSubmitted || preview.applied ? undefined : applyGateReason}
               >
-                {commit.isPending ? 'Applying…' : 'Apply'}
-              </Btn>
+                <Btn
+                  data-testid="action-use-apply"
+                  // `applyGateReason != null` is the Apply-ONLY blocker (currently the
+                  // safety hold). It must not live in `applyDisabled`, which also feeds
+                  // QuickRollButtons above — `/quick-roll` is not hold-guarded server-side.
+                  disabled={
+                    applyDisabled || applyGateReason != null || commit.isPending || commitSubmitted || preview.applied
+                  }
+                  onClick={() => {
+                    if (commitSubmitted || commit.isPending) return;
+                    commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
+                  }}
+                >
+                  {commit.isPending ? 'Applying…' : 'Apply'}
+                </Btn>
+              </GatedControl>
             )}
             {!preview.canApply && !isDm && !isUnconfirmed && (
               <Btn data-testid="action-use-done" onClick={onDismiss}>

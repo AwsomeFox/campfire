@@ -267,7 +267,8 @@ export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'cri
  * narrow "make proficiency adapter-owned" scope this issue asked for. OSR/Open Legend remain
  * excluded for the original, unchanged reason above.
  */
-export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+export const ResolverMathProfile = z.literal('d20-ascending-ac-5e-proficiency');
+export type ResolverMathProfile = z.infer<typeof ResolverMathProfile>;
 
 /** The only {@link ResolverMathProfile} that exists today. */
 export const RESOLVER_MATH_D20_5E: ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
@@ -796,6 +797,32 @@ export const ActionResolveResult = z.object({
    * client-echoed resolution — so the applied numbers can only ever be the server's own roll.
    */
   chainId: z.string().min(1).max(64),
+  /**
+   * Issue #1928: whether the resolver's OWN attack/save maths (d20 vs ascending AC, 5e-shaped
+   * proficiency — see {@link resolverImplementsSystemMath}) is audited for the campaign's
+   * active rule system. `true` for 5e and for an empty/unrecognized slug (the same 5e fallback
+   * combat math already uses elsewhere); `false` for a registered adapter that has not declared
+   * {@link ResolverAdapter.resolverMath} (PF2e, OSR, Open Legend, …). Defaults to `true` so a
+   * payload shaped before this field existed keeps parsing — before it, no caller was told
+   * anything about audit status at all, so `true` is the least-surprising default rather than a
+   * claim about which maths that payload ran through.
+   *
+   * Label, don't block: `false` never refuses or alters resolution (see
+   * {@link resolverImplementsSystemMath}'s doc comment) — it marks the system UNAUDITED
+   * end-to-end, and does NOT say which maths ran. Some adapters supply their own
+   * {@link ResolverAdapter.resolveAttack} (OSR compares against descending AC, Open Legend
+   * rolls an exploding pool) and are still reported `false` because the combined attack/save
+   * profile is unaudited — so for those, the numbers really are the system's own and telling a
+   * caller they are 5e-shaped would push it to discount a result that was right for the table.
+   * Read `mathProfile` for what actually executed: it names the audited profile in force, and
+   * is null otherwise.
+   */
+  systemMathSupported: z.boolean().default(true),
+  /**
+   * Issue #1928: the audited math profile actually in force, or `null` when
+   * `systemMathSupported` is false (an unaudited system) — never guessed at.
+   */
+  mathProfile: ResolverMathProfile.nullable().default(null),
 });
 export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
 

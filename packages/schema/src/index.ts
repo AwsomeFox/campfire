@@ -606,6 +606,21 @@ export const Character = z.object({
   ac: z.number().int().nullable().default(null),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: movement speed in the adapter's movement unit (feet for 5e/PF2e; no
+  // 5e-specific naming since a future adapter may use meters/squares). Nullable, default
+  // null rather than a baked-in 30 — null means "unset", so this field itself can tell
+  // "a 30-speed PC" apart from "no speed on file yet". This value is snapshotted onto
+  // Combatant.speed at add time; both getTurnWorkspace's DISPLAY and
+  // ActionResolverService.resolveActionEconomyCost's spend/guard ENFORCEMENT resolve the
+  // turn-economy movement max the same way, through the shared `movementSlotMax`
+  // (encounters.logic.ts): the combatant's own snapshot, or — full stop — the adapter's
+  // movement-slot max (e.g. 30 ft for 5e's DND5E_ACTION_ECONOMY), never this field's live
+  // value — a null combatant snapshot can't distinguish "predates the column" from "the
+  // character had no speed set at add time" (the common case, since this field defaults
+  // null), so neither path falls through to this live value once a fight is running
+  // (round 4/5 review findings on PR #1980; see Combatant.speed's own doc). min(0): a
+  // homebrew "speed 0" (e.g. petrified) is valid; negative is not.
+  speed: z.number().int().min(0).nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(0).default(10),
   spCurrent: z.number().int().min(0).default(0),
@@ -9800,6 +9815,25 @@ export const EncounterSuggestionCombatant = z.object({
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
 /**
+ * Issue #1928: whether the REPORTED encounter difficulty is the rule system's own audited
+ * XP/CR budget math.
+ *
+ * - `supported` ({@link encounterDifficultySupported} true — 5e and the empty/unrecognized-slug
+ *   fallback): the reported `difficulty` is that system's own audited math.
+ * - `heuristic` (PF2e, OSR, Open Legend, …): the roster was SIZED by the internal 5e-shaped
+ *   count/CR pass, and `totalXp` is that pass's own adjusted total — but the reported
+ *   `difficulty` is `status: 'unsupported'` with a **null band**. `heuristic` therefore means
+ *   the ABSENCE of an audited reported difficulty, NOT a 5e-shaped estimate of one: there is no
+ *   band in the payload to report, and a consumer must not present one. `matchedBand` likewise
+ *   describes only the sizing pass and can be `true` beside that null band.
+ *
+ * Never blocks generation/preview — the roster is valid either way; this only labels what the
+ * reported difficulty is, and is not.
+ */
+export const DifficultySupport = z.enum(['supported', 'heuristic']);
+export type DifficultySupport = z.infer<typeof DifficultySupport>;
+
+/**
  * Read-only result of a generation: the selected monster lines, the computed 5e
  * difficulty (reusing the #58 math), the adjusted total XP, and the seed that produced
  * it. Nothing is persisted — the caller commits via create_encounter + add_combatant.
@@ -9813,7 +9847,17 @@ export const EncounterSuggestion = z.object({
   seed: z.number().int().nonnegative(), // reproduce with this seed; re-roll with a new one
   // True when the produced band matches the target; false when the compendium couldn't
   // field a group in the requested band (a best-effort closest group is still returned).
+  //
+  // Issue #1928: this reflects the ROSTER-SIZING pass only, which is always 5e-shaped, and is
+  // NOT a claim about `difficulty`. When `difficultySupport` is `'heuristic'`, `difficulty`
+  // is `unsupported` with a null band while this can still be `true` — meaning "the 5e-shaped
+  // sizing heuristic hit the band you asked for", not "this system says the fight is that
+  // hard". Read it together with `difficultySupport`; it is deliberately not derived from the
+  // reported band, because forcing it false for a non-5e system would misreport a sizing pass
+  // that genuinely did match.
   matchedBand: z.boolean(),
+  /** Issue #1928: whether `difficulty` is the system's own audited math or a 5e-shaped heuristic. */
+  difficultySupport: DifficultySupport,
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
@@ -9962,11 +10006,15 @@ export const EncounterPreview = z.object({
   totalXp: z.number().int().nonnegative(),
   shape: EncounterShape,
   seed: z.number().int().nonnegative(),
+  // Issue #1928: sizing-pass only — see the note on EncounterSuggestion.matchedBand. Can be
+  // `true` alongside an `unsupported` `difficulty`; read it with `difficultySupport`.
   matchedBand: z.boolean(),
   party: z.array(z.number().int()),
   warnings: z.array(EncounterWarning),
   /** Actionable next steps when the compendium is empty or the system lacks budget math. */
   fallbacks: z.array(z.string().max(400)),
+  /** Issue #1928: whether `difficulty` is the system's own audited math or a 5e-shaped heuristic. */
+  difficultySupport: DifficultySupport,
 });
 export type EncounterPreview = z.infer<typeof EncounterPreview>;
 
@@ -10193,6 +10241,25 @@ export const Combatant = z.object({
   rpMax: z.number().int().min(0).nullable().default(0),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: add-time snapshot of the linked character's speed, mirroring the
+  // hp/death-state snapshot convention above — a mid-fight sheet edit must not
+  // retroactively change a running encounter's movement budget. Populated only for
+  // kind==='character' combatants at addCombatant time (and both bulk party auto-add
+  // paths, and campaign clone's combatant carry-forward); monsters/NPCs, combatants
+  // added before this column existed, AND a character with no speed set at add
+  // time (the common case — Character.speed defaults to null) all keep it null.
+  // Both getTurnWorkspace's DISPLAY and ActionResolverService.resolveActionEconomyCost's
+  // spend/guard ENFORCEMENT resolve a null snapshot straight to the adapter's movement
+  // max (e.g. 30 ft for 5e), through the shared `movementSlotMax` (encounters.logic.ts)
+  // — deliberately NOT falling through to the linked character's live speed, which
+  // would be unable to tell those cases apart from "genuinely unset at add time" and
+  // would silently un-freeze the snapshot for the common case (round 4 review finding
+  // on PR #1980). Routing both paths through the same function also closes a round-5
+  // finding: display and enforcement independently computing "snapshot or adapter
+  // default" drifted apart once the DISPLAY got a per-combatant value and the
+  // ENFORCEMENT still didn't, so a fast PC was told a number the spend guard wouldn't
+  // honor and a slow PC was allowed more than their own sheet said.
+  speed: z.number().int().min(0).nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.
   // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
@@ -10280,12 +10347,14 @@ export type SavedTokenFormation = z.infer<typeof SavedTokenFormation>;
 
 export const CombatantCreate = z.object({
   kind: CombatantKind,
+  duplicateOfCombatantId: Id.optional(),
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
   npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  tokenSize: TokenSize.optional(),
   // OSR group-initiative side label (issue #765). When the campaign adapter uses group
   // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
   // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.

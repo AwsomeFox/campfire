@@ -2,8 +2,11 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
+import { GatedControl } from '../../components/GatedControl';
+import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -13,12 +16,12 @@ import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, invalidateTableSafety, useTableSafety } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import { beginReconcile, blocksFurtherActions, clearReconcile, completeReconcile, IDLE_RECONCILE, isAmbiguousOutcome, type ReconcileState } from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -568,6 +571,11 @@ export default function RunSessionPage() {
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
+  // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
+  // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
+  // reading the same table-wide safety-hold state SafetyHoldBar already shows everyone.
+  const { data: tableSafety } = useTableSafety(Number.isFinite(cid) ? cid : undefined);
+  const safetyHoldActive = tableSafety?.active === true;
 
   // Resolve the rule-system adapter FROM THE ACTIVE CAMPAIGN (issue #234) rather than at
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
@@ -577,6 +585,13 @@ export default function RunSessionPage() {
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -670,6 +685,9 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // React state disables the source row after render; the ref closes the same-tick
+  // double-click window before that render can happen.
+  const pendingDuplicateCombatantIds = useRef(new Set<number>());
   const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
     setPendingCombatantIds((prev) => {
       const next = new Set(prev);
@@ -1364,6 +1382,19 @@ export default function RunSessionPage() {
           invalidateCampaignCharactersForOwnership();
           return;
         }
+        // Issue #1933 review finding: this event has no encounterId (it is campaign-wide,
+        // like character/membership frames above) and was falling into the encounterId
+        // filter below, which drops it — so another participant's hold activate/release
+        // only reached this page via useTableSafety's own 20s poll. safetyHoldActive
+        // gates real writes (start/nextTurn/undoTurn/endTurn), so a stale mirror meant the
+        // exact failure this feature exists to prevent: the server rejects and the UI
+        // cannot say why, for up to a poll interval. Refetch the safety row immediately
+        // instead — the anonymity rules stay enforced there, this frame carries only
+        // `active` (see useCampaignEvents' own doc comment on 'safety.hold').
+        if (event.type === 'safety.hold') {
+          invalidateTableSafety(queryClient, cid);
+          return;
+        }
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
@@ -1489,6 +1520,12 @@ export default function RunSessionPage() {
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      // Issue #1933 review: handling the delivered `safety.hold` frame is not enough on
+      // its own — a hold activated or released WHILE the stream was down produces no
+      // frame to deliver on reconnect. safetyHoldActive now gates Start/Next/Undo/End
+      // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
+      // useTableSafety's 20s poll happens to land.
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1497,6 +1534,7 @@ export default function RunSessionPage() {
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -1693,6 +1731,44 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
     },
   });
+
+  const duplicateCombatant = useMutation({
+    mutationFn: ({ body }: { combatantId: number; body: Record<string, unknown> }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants`, body),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      pendingDuplicateCombatantIds.current.delete(combatantId);
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  const requestDuplicateCombatant = useCallback(
+    (combatant: Combatant, rosterNames: readonly string[]) => {
+      if (riskyBlocked || reconcileBlocks || pendingDuplicateCombatantIds.current.has(combatant.id)) return;
+      pendingDuplicateCombatantIds.current.add(combatant.id);
+      markCombatantPending(combatant.id, true);
+      duplicateCombatant.mutate({
+        combatantId: combatant.id,
+        body: {
+          kind: combatant.kind,
+          duplicateOfCombatantId: combatant.id,
+          name: duplicateCombatantName(combatant.name, rosterNames),
+          ruleEntryId: combatant.ruleEntryId ?? undefined,
+          statblock: combatant.statblock ?? undefined,
+          hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
+          initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
+          tokenSize: combatant.tokenSize,
+        },
+      });
+    },
+    [duplicateCombatant, markCombatantPending, reconcileBlocks, riskyBlocked],
+  );
 
   const combatantTurnState = useMutation({
     mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
@@ -2675,7 +2751,11 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy || riskyBlocked) return false;
+            // #599/#1933: the keyboard path must honor the same safety-hold mirror as the
+            // Next-turn button's GatedControl reason — otherwise the shortcut would still
+            // fire (and get server-rejected) while the button next to it visibly explains
+            // why it will not.
+            if (!encounter || headerBusy || riskyBlocked || safetyHoldActive) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -3073,6 +3153,7 @@ export default function RunSessionPage() {
           lifecycle={lifecycle}
           headerBusy={headerBusy}
           riskyBlocked={riskyBlocked}
+          safetyHoldActive={safetyHoldActive}
           needsInitiativeCount={needsInitiativeCount}
           hasNoCombatants={hasNoCombatants}
           undoTurnDisabled={
@@ -3426,11 +3507,12 @@ export default function RunSessionPage() {
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3457,9 +3539,23 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
-                Done →
-              </Btn>
+              // Issue #1933 review: this is the THIRD entry point to `nextTurn`, alongside
+              // the keyboard shortcut and DmLifecycleHeader's button. Both of those got the
+              // safety-hold mirror; this one did not, so a DM resolving a lair action while
+              // the table is paused fired a write `assertNoSafetyHold` rejects and got a
+              // bare error — the exact "server rejects and the UI cannot say why" outcome
+              // this issue exists to remove. Same shared resolver as the header, so all
+              // three agree by construction rather than by three people remembering.
+              // `ml-auto` moves to the WRAPPER: it is the flex item of this row now, so the
+              // button's own auto margin would push nothing (issue #1933 review).
+              <GatedControl
+                className="ml-auto"
+                reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}
+              >
+                <Btn disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
+                  Done →
+                </Btn>
+              </GatedControl>
             )}
           </div>
         </Card>
@@ -3548,6 +3644,7 @@ export default function RunSessionPage() {
             endTurn.mutate({ expectedCurrentCombatantId })
           }
           endTurnBusy={endTurn.isPending}
+          safetyHoldActive={safetyHoldActive}
         />
       )}
       <TurnChangeBeat
@@ -3667,7 +3764,18 @@ export default function RunSessionPage() {
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
           isDm={isDm}
+          // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
+          // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
+          // lifecycle controls left this Apply enabled during a pause, so raising an X-Card
+          // after a preview produced a bare server conflict instead of the gate reason.
+          // Scoped to Apply: the server keeps `resolve` (the preview) open during a hold,
+          // so the roll/preview controls in this panel stay as they were.
+          // Deliberately NOT `|| safetyHoldActive`: this prop also feeds the panel's
+          // QuickRollButtons, and `/quick-roll` carries no hold guard server-side (only
+          // `apply` does). Folding the hold in here would disable a control the server
+          // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
@@ -3761,6 +3869,9 @@ export default function RunSessionPage() {
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
                   canRemove={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={

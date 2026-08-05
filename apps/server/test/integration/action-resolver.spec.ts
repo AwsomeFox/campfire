@@ -480,6 +480,126 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(state.used.movement).toBeUndefined();
   });
 
+  // Issue #1910 round 5 review (Devin): getTurnWorkspace's DISPLAY resolved a per-combatant
+  // movement max (the combatant's own speed snapshot, or the adapter default), but this
+  // apply_action spend/guard path still bounded every movement cost by the flat adapter
+  // constant regardless of that snapshot — a speed-40 PC was told 40 ft and rejected past 30.
+  // Proves BOTH directions of the enforcement gap: a faster-than-default PC gets MORE room
+  // than the old flat 30 (not rejected at a 35-ft total), and is still capped at their OWN
+  // speed (rejected past 40, not unbounded).
+  it('#1910: a combatant with a 40-ft speed snapshot is not rejected at the adapter default of 30, but is still capped at their own 40', () => {
+    const { orm, service, encounterId, actor } = seed();
+    orm.update(combatants).set({ speed: 40 }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    // 25 + 10 = 35, past the old flat 30 cap but within this PC's own 40 — must succeed.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(35);
+
+    // 35 + 10 = 45, past this PC's own 40 — must still be rejected, at 40 not 30.
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 40,
+    });
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(35); // the rejected spend did not write
+  });
+
+  it('#1910: a combatant with a 25-ft speed snapshot is rejected past their own 25, not the adapter default of 30', () => {
+    const { orm, service, encounterId, actor } = seed();
+    orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    // 20 + 10 = 30 — within the OLD flat adapter cap, but past this PC's own 25.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 20 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 25,
+    });
+    const state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(20); // the rejected spend did not write
+  });
+
+  it('#1910: a combatant with no speed snapshot (null) is still bounded by the adapter default of 30, unchanged from pre-#1910 behavior', () => {
+    const { orm, service, encounterId, actor } = seed();
+    expect(orm.select({ speed: combatants.speed }).from(combatants).where(eq(combatants.id, actor)).get()!.speed).toBeNull();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 30,
+    });
+  });
+
   it('#1637: inline statblock monsters with legendary actions can spend and refund that slot', () => {
     const { orm, service, encounterId } = seed();
     const [legendaryMonster] = orm

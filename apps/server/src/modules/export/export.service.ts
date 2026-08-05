@@ -7,11 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
-import { and, desc, eq, gt, isNotNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, aiScribeConfigs, aiScribeJobs } from '../../db/schema';
+import { aiDmSeats, aiScribeConfigs, aiScribeJobs, combatants } from '../../db/schema';
 import { loadCompendiumExportContext } from '../campaigns/compendium-import';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -384,6 +384,20 @@ export class ExportService {
     const encountersWithCombatants: EncounterWithCombatants[] = await Promise.all(
       encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
     );
+    // The public combatant contract intentionally omits this internal identity link,
+    // but a DM backup must preserve it or restored hidden NPC duplicates become
+    // unlinkable and leak their display names to players.
+    const encounterIds = encountersWithCombatants.map((enc) => enc.id);
+    const npcIdentitySourceByCombatantId = new Map(
+      encounterIds.length === 0
+        ? []
+        : (
+            await this.db
+              .select({ id: combatants.id, npcIdentitySourceId: combatants.npcIdentitySourceId })
+              .from(combatants)
+              .where(inArray(combatants.encounterId, encounterIds))
+          ).map((row) => [row.id, row.npcIdentitySourceId] as const),
+    );
 
     // Issue #584: replace server-local ruleEntryId with stable compendium refs for portability.
     const ruleEntryIds = [
@@ -398,12 +412,14 @@ export class ExportService {
       ...enc,
       combatants: enc.combatants.map((c) => {
         const { ruleEntryId, ...rest } = c;
-        if (ruleEntryId == null) return { ...rest, ruleEntryId: null };
+        const npcIdentitySourceId = npcIdentitySourceByCombatantId.get(c.id) ?? null;
+        if (ruleEntryId == null) return { ...rest, ruleEntryId: null, npcIdentitySourceId };
         const compendiumRef = compendiumExport.refByEntryId.get(ruleEntryId) ?? null;
         const compendiumSnapshot = compendiumExport.snapshotByEntryId.get(ruleEntryId) ?? null;
         return {
           ...rest,
           ruleEntryId: null,
+          npcIdentitySourceId,
           ...(compendiumRef ? { compendiumRef } : {}),
           ...(compendiumSnapshot ? { compendiumSnapshot } : {}),
         };
