@@ -1134,6 +1134,79 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Retry Nyx · death save')).toHaveLength(1);
   });
 
+  // Issue #1904 — REST/MCP parity for the per-combatant initiative roll: the MCP tool
+  // must behave identically to POST .../combatants/:cid/roll-initiative (same write, same
+  // shared dice-log evidence, same idempotent replay contract).
+  it('roll_combatant_initiative rolls a combatant, lands one dice-log row, and replays a lost response', async () => {
+    const encounter = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'MCP Initiative Roll', hidden: false });
+    expect(encounter.status).toBe(201);
+    const monster = await dmAgent
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .send({ kind: 'monster', name: 'MCP Kobold', hpMax: 5 });
+    expect(monster.status).toBe(201);
+    const combatantId = monster.body.id as number;
+
+    const client = await mcpClient(dmToken);
+    const arguments_ = { encounterId: encounter.body.id, combatantId, idempotencyKey: 'mcp-roll-combatant-initiative' };
+    const first = parseResult(await client.callTool({ name: 'roll_combatant_initiative', arguments: arguments_ })) as {
+      combatant: { initiative: number | null };
+      roll: { label?: string } | null;
+    };
+    expect(first.combatant.initiative).not.toBeNull();
+    expect(first.roll).toMatchObject({ label: 'MCP Kobold · Initiative' });
+
+    const rolls = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(rolls.body.filter((roll: { label?: string }) => roll.label === 'MCP Kobold · Initiative')).toHaveLength(1);
+
+    // Same key replays the original outcome — no second roll, no duplicate dice-log row.
+    const replay = parseResult(await client.callTool({ name: 'roll_combatant_initiative', arguments: arguments_ }));
+    expect(replay).toEqual(first);
+    const rollsAfterReplay = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(rollsAfterReplay.body.filter((roll: { label?: string }) => roll.label === 'MCP Kobold · Initiative')).toHaveLength(1);
+
+    // Already-set initiative 409s over MCP too, matching REST.
+    const again = await client.callTool({ name: 'roll_combatant_initiative', arguments: { ...arguments_, idempotencyKey: 'mcp-roll-combatant-initiative-2' } });
+    expect(again.isError).toBe(true);
+  });
+
+  // Issue #1904 review finding: a viewer hitting a HIDDEN encounter's id must get the same
+  // 404 a nonexistent id gets — not a 403 from the stricter 'player' role gate, which would
+  // leak that the encounter exists (hidden entities are indistinguishable from nonexistent
+  // for a non-DM elsewhere in this codebase, and the REST handler for this same action
+  // already gets this right via a viewer-role visibility pre-check).
+  it('roll_combatant_initiative 404s a hidden encounter for a viewer, matching REST — not a role-gate 403 that leaks existence', async () => {
+    const hidden = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Hidden Roll Target', hidden: true });
+    expect(hidden.status).toBe(201);
+    const monster = await dmAgent
+      .post(`/api/v1/encounters/${hidden.body.id}/combatants`)
+      .send({ kind: 'monster', name: 'MCP Hidden Kobold', hpMax: 5 });
+    expect(monster.status).toBe(201);
+
+    const viewerClient = await mcpClient(viewerToken);
+    const nonexistentEncounterId = 999999999;
+    const [hiddenAttempt, nonexistentAttempt] = await Promise.all([
+      viewerClient.callTool({
+        name: 'roll_combatant_initiative',
+        arguments: { encounterId: hidden.body.id, combatantId: monster.body.id, idempotencyKey: 'mcp-viewer-hidden-encounter' },
+      }),
+      viewerClient.callTool({
+        name: 'roll_combatant_initiative',
+        arguments: { encounterId: nonexistentEncounterId, combatantId: monster.body.id, idempotencyKey: 'mcp-viewer-nonexistent-encounter' },
+      }),
+    ]);
+    expect(hiddenAttempt.isError).toBe(true);
+    expect(nonexistentAttempt.isError).toBe(true);
+    const hiddenError = parseResult(hiddenAttempt) as { error: { status: number } };
+    const nonexistentError = parseResult(nonexistentAttempt) as { error: { status: number } };
+    // The core regression: identical status for "hidden" and "doesn't exist" — a 403 on the
+    // hidden one (from falling straight into the player-role gate) would have distinguished
+    // them, leaking the hidden encounter's existence to a viewer.
+    expect(hiddenError.error.status).toBe(404);
+    expect(nonexistentError.error.status).toBe(404);
+  });
+
   it('rejects legacy deathSaveRoll MCP input with migration guidance before any mutation', async () => {
     const character = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)

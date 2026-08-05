@@ -44,6 +44,11 @@ describe('ExportService unit coverage tests', () => {
   };
 
   let campaignId: number;
+  // Issue #1904 review finding: hoisted so a test can assert what role buildMemberExport
+  // actually threads through to RollsService.listForCampaign — an omitted role there reads
+  // as unredacted DM access, the exact gap that let a player's own member export carry the
+  // full unredacted dice log.
+  let rollsListForCampaignMock: jest.Mock;
 
   beforeEach(async () => {
     previousDataDir = process.env.DATA_DIR;
@@ -101,7 +106,10 @@ describe('ExportService unit coverage tests', () => {
       getTreasury: jest.fn().mockResolvedValue(null),
     } as unknown as InventoryService;
     const revisions = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as RevisionsService;
-    const rolls = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as RollsService;
+    rollsListForCampaignMock = jest.fn().mockResolvedValue([]);
+    const rolls: Pick<RollsService, 'listForCampaign'> = {
+      listForCampaign: rollsListForCampaignMock as unknown as RollsService['listForCampaign'],
+    };
     const library = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as CampaignLibraryService;
     const campaignService = { getOrThrow: jest.fn().mockResolvedValue({ id: 1, name: 'Test Campaign' }) } as unknown as CampaignsService;
 
@@ -128,7 +136,7 @@ describe('ExportService unit coverage tests', () => {
       supportPreferences,
       inventory,
       revisions,
-      rolls,
+      rolls as unknown as RollsService,
       library,
     );
 
@@ -156,5 +164,28 @@ describe('ExportService unit coverage tests', () => {
 
     const memberExp = await exportService.buildMemberExport(campaignId, adminActor, 'dm');
     expect(memberExp).toBeDefined();
+  });
+
+  // Issue #1904 review finding: buildMemberExport's whole contract is "never show a caller
+  // more than the live API already would" (see its own doc comment), which only holds if
+  // every composed read is threaded through the caller's ACTUAL role. rolls.listForCampaign
+  // was called with no role at all — an omitted role reads as unredacted DM access
+  // (RollsService.listForCampaign's own doc comment: "omit it... only for DM-facing
+  // returns") — so a player's own member export carried the full unredacted dice log
+  // (hidden-encounter rolls, unmasked hidden-NPC names/ids) the live GET
+  // /campaigns/:id/rolls would have redacted for that same player.
+  it('threads the caller role through to RollsService.listForCampaign, not an implicit DM view (#1904)', async () => {
+    await exportService.buildMemberExport(campaignId, adminActor, 'player');
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'player');
+
+    rollsListForCampaignMock.mockClear();
+    await exportService.buildMemberExport(campaignId, adminActor, 'viewer');
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'viewer');
+
+    // The full-campaign DM export is legitimately unredacted — explicit role='dm', not an
+    // omission that happens to behave the same way today.
+    rollsListForCampaignMock.mockClear();
+    await exportService.buildExport(campaignId, adminActor);
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'dm');
   });
 });

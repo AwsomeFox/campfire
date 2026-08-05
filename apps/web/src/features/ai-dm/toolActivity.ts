@@ -67,6 +67,14 @@ const RESOURCE_BY_NAME: Record<string, ToolResource> = {
   next_turn: 'encounter',
   set_escalation_die: 'encounter',
   roll_initiative: 'encounter',
+  // Issue #1904 review finding: without this exact-name entry, roll_combatant_initiative
+  // (which starts with "roll_") falls through to the 'dice' prefix rule in toolResource()
+  // BEFORE the combatant/encounter substring rules ever run — same trap roll_initiative and
+  // roll_death_save are listed here to avoid. It mutates a combatant's initiative, appends
+  // an encounter event, and re-sorts the running turn order, so the open tracker must
+  // refetch (and the cross-encounter toast filter, gated on resource === 'encounter', must
+  // scope it to the fight it actually hit — issue #825).
+  roll_combatant_initiative: 'encounter',
   get_encounter_difficulty: 'encounter',
   // character / HP / condition → the party sheet
   upsert_character: 'party',
