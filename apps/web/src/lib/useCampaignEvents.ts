@@ -64,13 +64,20 @@ export type CampaignEventsStatus = SseStreamStatus;
  * discriminated union; #582 added treasury.updated; #790 added schedule.updated;
  * #421 added character.updated; #437 added membership.updated).
  */
-const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
-function isCampaignEvent(value: unknown): value is CampaignEvent {
+const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping', 'encounter.turn_changed']);
+export function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   if (typeof v.type !== 'string' || typeof v.campaignId !== 'number' || typeof v.at !== 'string') return false;
   if (ENCOUNTER_EVENT_TYPES.has(v.type)) {
-    return typeof v.encounterId === 'number';
+    if (typeof v.encounterId !== 'number') return false;
+    if (v.type !== 'encounter.turn_changed') return true;
+    return (
+      (v.round === undefined || (typeof v.round === 'number' && Number.isInteger(v.round) && v.round >= 0))
+      && (v.turnIndex === undefined || (typeof v.turnIndex === 'number' && Number.isInteger(v.turnIndex) && v.turnIndex >= 0))
+      && (v.currentCombatantId === undefined || v.currentCombatantId === null || typeof v.currentCombatantId === 'number')
+      && (v.combatantKind === undefined || v.combatantKind === null || ['character', 'npc', 'lair', 'custom'].includes(String(v.combatantKind)))
+    );
   }
   if (v.type === 'membership.revoked') {
     return typeof v.userId === 'string' && typeof v.memberId === 'number';

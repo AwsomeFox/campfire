@@ -2356,6 +2356,19 @@ a:hover .cf-name-reveal {
 }
 .cf-sparkle { display: inline-block; animation: cf-sparkle-float 1.4s ease-out both; }
 
+/* Turn-change beat (#1906): the motion classes are opt-in from JS so reduced
+   motion keeps the same visible takeover and ticker without transforms. */
+@keyframes cf-turn-beat-enter {
+  from { transform: translateY(-10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes cf-turn-beat-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  45% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 65%, transparent); }
+}
+.cf-turn-beat-motion { animation: cf-turn-beat-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.cf-turn-beat-pulse { animation: cf-turn-beat-pulse 0.7s ease-out both; }
+
 /* Accessibility: honour a reduced-motion preference globally (issue #594).
    Named cf-anim-* classes are not enough — Tailwind animate-* utilities,
    inline/injected keyframes (AI pulse, map pings), and common transitions

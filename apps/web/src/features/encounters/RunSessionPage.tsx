@@ -33,6 +33,8 @@ import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
+import { detectTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -419,10 +421,12 @@ function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
+  turnPulse = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
+  turnPulse?: boolean;
 }) {
   return (
     <div
@@ -451,7 +455,7 @@ function InitiativeStrip({
           >
             <div
               aria-current={isCurrent ? 'true' : undefined}
-              className="flex items-center justify-center overflow-hidden bg-surface"
+              className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
@@ -946,6 +950,33 @@ export default function RunSessionPage() {
     refetchInterval: 10_000,
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
+  const [turnBeat, setTurnBeat] = useState<TurnChangeBeatEvent | null>(null);
+  const [turnPulse, setTurnPulse] = useState(false);
+  const [turnOwnerFromEvent, setTurnOwnerFromEvent] = useState<boolean | null>(null);
+  const turnBeatSequence = useRef(0);
+  const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
+  const turnPulseTimerRef = useRef<number | null>(null);
+
+  // A loaded encounter is a silent baseline. This prevents opening an already
+  // running encounter (or any ordinary refetch) from replaying a turn-start beat.
+  useEffect(() => {
+    if (previousTurnBeatRef.current?.encounterId === eid || !encounter) return;
+    const current = encounter.currentCombatantId == null
+      ? undefined
+      : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
+    const isYourTurn = current?.characterId != null
+      && characters.some((character) => character.id === current.characterId && character.ownerUserId === String(me?.user.id ?? ''));
+    previousTurnBeatRef.current = {
+      encounterId: eid,
+      combatantId: encounter.currentCombatantId,
+      round: encounter.status === 'running' ? encounter.round : null,
+      isYourTurn,
+    };
+  }, [eid, encounter, characters, me?.user.id]);
+  useEffect(() => () => {
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+  }, []);
+  useEffect(() => setTurnOwnerFromEvent(null), [eid]);
   const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
   const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
     eventStatus,
@@ -1148,7 +1179,7 @@ export default function RunSessionPage() {
           invalidateCampaignCheckRequests(queryClient, cid);
           return;
         }
-        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
+        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping' && event.type !== 'encounter.turn_changed') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
           navigate(`/c/${cid}/encounters`);
@@ -1157,6 +1188,58 @@ export default function RunSessionPage() {
         // A ping is a one-shot transient marker — render it, don't refetch the encounter.
         if (event.type === 'encounter.ping') {
           if (event.ping) addPing(event.ping);
+          return;
+        }
+        if (event.type === 'encounter.turn_changed') {
+          // The SSE frame itself is the edge. It carries only viewer-safe ids;
+          // the displayed name and identity colour come from this viewer's
+          // already-authorized roster, never a new server payload.
+          const combatant = event.currentCombatantId == null
+            ? undefined
+            : encounter?.combatants.find((candidate) => candidate.id === event.currentCombatantId);
+          const isYourTurn = combatant?.characterId != null
+            && characters.some((character) => character.id === combatant.characterId && character.ownerUserId === String(me?.user.id ?? ''));
+          // Clear the hidden-tab prefix on the frame that ends an owned turn;
+          // do not wait for the follow-up /turn refetch to settle.
+          setTurnOwnerFromEvent(isYourTurn);
+          const next: TurnBeatSnapshot = {
+            encounterId: eid,
+            combatantId: event.currentCombatantId ?? null,
+            round: event.round ?? null,
+            isYourTurn,
+          };
+          const previous = previousTurnBeatRef.current;
+          const kind = detectTurnBeat(previous, next);
+          previousTurnBeatRef.current = next;
+          const tickerKind = previous?.round != null && next.round != null && next.round > previous.round
+            ? 'round-wrap'
+            : 'turn';
+          // A lair action has no roster combatant, but a round-wrap still has
+          // useful, non-secret feedback for every viewer.
+          if (kind && (combatant || tickerKind === 'round-wrap')) {
+            setTurnBeat({
+              key: ++turnBeatSequence.current,
+              kind,
+              tickerKind,
+              name: combatant?.name ?? '',
+              round: next.round,
+              identityBackground: combatant ? tokenIdentityBackground(combatant) : 'var(--color-neutral-900)',
+            });
+            if (kind === 'your-turn' && combatant && !prefersReducedMotion()) {
+              setTurnPulse(true);
+              if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+              turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
+              // A turn change must not pull a player away from an active form or dialog.
+              const active = document.activeElement as HTMLElement | null;
+              if (!active?.closest('form, [role="dialog"], input, textarea, select')) {
+                document.querySelector<HTMLElement>('[data-testid="turn-workspace"]')?.scrollIntoView({
+                  behavior: scrollBehavior(),
+                  block: 'nearest',
+                });
+              }
+            }
+          }
+          invalidateEncounter(queryClient, eid);
           return;
         }
         invalidateEncounter(queryClient, eid);
@@ -1177,7 +1260,7 @@ export default function RunSessionPage() {
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
-      [eid, cid, navigate, queryClient, addPing],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, me?.user.id],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2944,6 +3027,7 @@ export default function RunSessionPage() {
         <PlayerVitalsHeader 
           combatants={myCombatants} 
           charactersById={charactersById}
+          turnPulse={turnPulse}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3063,6 +3147,10 @@ export default function RunSessionPage() {
           endTurnBusy={endTurn.isPending}
         />
       )}
+      <TurnChangeBeat
+        beat={turnBeat}
+        isYourTurn={turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true)}
+      />
 
       {pendingApply && (
         <ApplyDamageBar
@@ -3212,6 +3300,7 @@ export default function RunSessionPage() {
               combatants={orderedCombatants}
               currentCombatantId={encounter.currentCombatantId}
               charactersById={charactersById}
+              turnPulse={turnPulse}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
