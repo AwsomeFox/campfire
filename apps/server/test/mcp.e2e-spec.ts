@@ -1600,22 +1600,25 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1971-player', password: 'player-password-1' });
     const token = await playerAgent.post('/api/v1/tokens').send({ name: 'mcp-1971-player', scope: 'player', writeScope: 'direct', campaignId });
     const playerClient = await mcpClient(token.body.token);
-    const dmClient = await mcpClient(dmToken);
-    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
-    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
-    const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
-    const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
-    await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
-    await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: hero.id, initiative: 99 } });
-    await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 1 } });
-    await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } });
-    const args = { encounterId: encounter.id, expectedCurrentCombatantId: hero.id, idempotencyKey: 'mcp-player-end-turn-1971' };
-    const first = await playerClient.callTool({ name: 'end_turn', arguments: args });
-    expect(first.isError).toBeFalsy();
-    expect((parseResult(first) as { currentCombatantId: number | null }).currentCombatantId).toBe(monster.id);
-    const replay = await playerClient.callTool({ name: 'end_turn', arguments: args });
-    expect(replay.isError).toBeFalsy();
-    expect(parseResult(replay)).toEqual(parseResult(first));
+    try {
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
+      const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
+      const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
+      const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
+      await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: hero.id, initiative: 99 } });
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 1 } });
+      await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } });
+      const args = { encounterId: encounter.id, expectedCurrentCombatantId: hero.id, idempotencyKey: 'mcp-player-end-turn-1971' };
+      const first = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(first.isError).toBeFalsy();
+      expect((parseResult(first) as { currentCombatantId: number | null }).currentCombatantId).toBe(monster.id);
+      const replay = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(replay.isError).toBeFalsy();
+      expect(parseResult(replay)).toEqual(parseResult(first));
+    } finally {
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: true, dmControlsTurns: true });
+    }
   });
 
   it('get_encounter redacts monster HP for a non-DM viewer PAT (issue #256)', async () => {
