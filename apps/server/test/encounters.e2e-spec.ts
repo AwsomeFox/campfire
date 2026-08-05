@@ -3679,6 +3679,53 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(replacement.body).toMatchObject({ hpCurrent: 22, hpMax: 22, initMod: 4, eac: 21, kac: 23, spCurrent: 9, spMax: 9, rpCurrent: 5, rpMax: 5 });
   });
 
+  it('keeps manual defenses when a duplicate resubmits its source rule entry', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Same-rule duplicate defenses' });
+    expect(campaign.status).toBe(201);
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, campaign.body.id));
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Same-rule duplicate defense test' });
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `same-rule-starfinder-${Date.now()}`, name: 'Same-rule Starfinder', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'same-rule-drone',
+        name: 'Same-rule Drone',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 13, stamina: 2, resolve: 1, eac: 11, kac: 12, abilityScores: { DEX: 14 } }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(source.status).toBe(201);
+    await db
+      .update(combatantsTable)
+      .set({ eac: 17, kac: 19, spCurrent: 3, spMax: 8, rpCurrent: 1, rpMax: 4 })
+      .where(eq(combatantsTable.id, source.body.id));
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: entry.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({ eac: 17, kac: 19, spCurrent: 8, spMax: 8, rpCurrent: 4, rpMax: 4 });
+  });
+
   it('derives manual combatant defaults from the duplicate source for REST and MCP callers', async () => {
     const server = ctx.app.getHttpServer();
     const source = await request(server)

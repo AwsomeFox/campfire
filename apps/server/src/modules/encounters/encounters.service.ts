@@ -3654,6 +3654,7 @@ export class EncountersService {
     let tokenSize = input.tokenSize ?? 'medium';
     let duplicateRuleEntryId: number | undefined;
     let duplicateStatblockJson: string | null = null;
+    let replacesSourceRuleEntry = false;
 
     if (input.duplicateOfCombatantId !== undefined) {
       const [source] = await this.db
@@ -3671,7 +3672,8 @@ export class EncountersService {
         throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
       }
       name ??= source.name;
-      if (input.ruleEntryId === undefined) hpMax ??= source.hpMax ?? undefined;
+      replacesSourceRuleEntry = input.ruleEntryId !== undefined && input.ruleEntryId !== source.ruleEntryId;
+      if (!replacesSourceRuleEntry) hpMax ??= source.hpMax ?? undefined;
       if (input.initMod === undefined) {
         initMod = source.initMod;
       }
@@ -3822,21 +3824,21 @@ export class EncountersService {
         hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
-      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.stamina != null && typeof mapped.stamina === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.stamina != null && typeof mapped.stamina === 'number') {
         spMax = mapped.stamina;
         spCurrent = mapped.stamina;
       }
-      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.resolve != null && typeof mapped.resolve === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.resolve != null && typeof mapped.resolve === 'number') {
         rpMax = mapped.resolve;
         rpCurrent = mapped.resolve;
       }
-      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.eac != null && typeof mapped.eac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.eac != null && typeof mapped.eac === 'number') {
         eac = mapped.eac;
       }
-      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.kac != null && typeof mapped.kac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
-      if (input.initMod === undefined && (input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined)) {
+      if (input.initMod === undefined && (input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry)) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
