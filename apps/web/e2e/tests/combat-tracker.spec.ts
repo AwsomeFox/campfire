@@ -100,8 +100,26 @@ test.describe('combat tracker — DM view', () => {
     const page = await context.newPage();
     await openEncounter(page);
     for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
-      await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      // Scroll to the control before asserting it is in the viewport (issue #1994).
+      //
+      // Without this, the assertion measured the page's SCROLL POSITION rather than the
+      // control's reachability, and it raced an auto-scroll. Measured on this page at this
+      // viewport: the document is ~4-6x the viewport tall, the player-display controls sit
+      // near its top, and shortly after load `window.scrollY` settles around 1786 — putting
+      // all three controls ~1600px ABOVE the fold. `toBeVisible` still passes (they are
+      // rendered), while `toBeInViewport` reports ratio 0 and keeps reporting it, because
+      // once the page has scrolled the state is stable. Whether the assertions won that race
+      // decided whether the test passed, which is why it failed intermittently on PR runs
+      // and looked deceptively branch-specific.
+      //
+      // This does NOT weaken what #762 guards. That issue was about these controls being
+      // unusable at tablet width — clipped or unreachable. A control clipped horizontally
+      // cannot be brought into view by scrolling in a layout that does not scroll on x, so
+      // it still fails here; what no longer fails is "the page happened to be scrolled".
+      await control.scrollIntoViewIfNeeded();
+      await expect(control).toBeInViewport();
     }
     await expect(page.getByTestId('player-display-status')).toBeVisible();
     await expect(page).toHaveURL(encounterUrl());
