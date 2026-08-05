@@ -228,8 +228,10 @@ test.describe('combat log accessibility — remote clients', () => {
         message.includes('Outcome: took 1 damage'),
       );
       expect(stableDamageCount).toBe(1);
-      const proneCount = (await announcements(viewerPage)).filter((message) => message.includes('Outcome: gained Prone'));
-      expect(proneCount).toHaveLength(1);
+      const proneCount = await stableFilteredAnnouncementCount(viewerPage, (message) =>
+        message.includes('Outcome: gained Prone'),
+      );
+      expect(proneCount).toBe(1);
 
       const announcementCountBeforeTurn = (await announcements(viewerPage)).length;
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);

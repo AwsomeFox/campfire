@@ -18,15 +18,32 @@ test.describe('13th Age ruleset encounter panel (#1465)', () => {
     await expect(panel).toBeVisible();
     await expect(panel).toContainText(/Escalation die/i);
 
-    // The override control is a plain-text `TextInput` (inputMode="numeric", no
-    // `type="number"`) — RunSessionPage.tsx renders it with
-    // `aria-label="Escalation die override"`. Require it visible (rather than
-    // conditionally skipping) so a broken override control fails this test instead of
-    // silently passing.
-    const overrideInput = panel.getByLabel('Escalation die override');
-    await expect(overrideInput).toBeVisible();
-    await overrideInput.fill('4');
-    await panel.getByRole('button', { name: 'Override' }).click();
-    await expect(panel).toContainText('+4');
+    try {
+      // This 13th Age campaign/encounter is seeded once in global-setup.ts and is never
+      // reset by restoreSeedEncounter (seed.ts, which only touches the main campaign's
+      // fixture). CI retries once (playwright.config.ts) and local runs reuse the server,
+      // so a rerun could start with the override already applied from a prior attempt —
+      // require the pre-click state to differ from the value about to be set, so the final
+      // assertion can only pass if this click genuinely changed something.
+      await expect(panel).not.toContainText('+4');
+
+      // The override control is a plain-text `TextInput` (inputMode="numeric", no
+      // `type="number"`) — RunSessionPage.tsx renders it with
+      // `aria-label="Escalation die override"`. Require it visible (rather than
+      // conditionally skipping) so a broken override control fails this test instead of
+      // silently passing.
+      const overrideInput = panel.getByLabel('Escalation die override');
+      await expect(overrideInput).toBeVisible();
+      await overrideInput.fill('4');
+      await panel.getByRole('button', { name: 'Override' }).click();
+      await expect(panel).toContainText('+4');
+    } finally {
+      // Clear the override so a CI retry or a later run of this spec starts from the
+      // un-overridden state instead of inheriting +4.
+      const clearBtn = panel.getByRole('button', { name: 'Clear' });
+      if (await clearBtn.isVisible().catch(() => false)) {
+        await clearBtn.click();
+      }
+    }
   });
 });

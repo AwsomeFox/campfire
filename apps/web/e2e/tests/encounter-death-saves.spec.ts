@@ -126,8 +126,17 @@ test.describe('encounter death saves (#1465)', () => {
       }
 
       // Case A: Monster turn -> death save card must be absent regardless of the roll
-      // outcome above (the PC no longer holds the turn either way).
-      await dmCtx.post(`/api/v1/encounters/${encounterId}/next-turn`);
+      // outcome above (the PC no longer holds the turn either way). If the roll above
+      // already resolved the PC (natural 20, 3rd success/failure), the card is absent
+      // regardless of whose turn it is, so a failed/no-op next-turn here would still let
+      // this assertion pass without ever proving the turn actually moved — assert the
+      // request succeeded AND that `currentCombatantId` genuinely advanced to the monster
+      // (the card's own gate is `turn.current.deathState === 'dying'`, TurnWorkspace.tsx),
+      // so this case exercises real monster-turn suppression even in the resolved branch.
+      const nextTurnRes = await dmCtx.post(`/api/v1/encounters/${encounterId}/next-turn`);
+      expect(nextTurnRes.ok(), 'next-turn request must succeed').toBe(true);
+      const nextTurnBody = (await nextTurnRes.json()) as { currentCombatantId: number | null };
+      expect(nextTurnBody.currentCombatantId, 'turn must have advanced to the monster').toBe(monster.id);
       await page.reload();
       await expect(page.getByTestId('turn-death-save-card')).toHaveCount(0);
 

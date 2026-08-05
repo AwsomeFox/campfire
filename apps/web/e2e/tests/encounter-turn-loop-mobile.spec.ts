@@ -14,6 +14,14 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
     await restoreSeedEncounter();
   });
 
+  // This suite is serial (playwright.config.ts: fullyParallel: false, workers: 1) with one
+  // shared seeded fixture. Each viewport case below advances the turn twice and applies
+  // damage to a seed combatant; without restoring afterwards, later specs in file order
+  // would inherit a damaged, mid-turn fight instead of the pristine seed state they expect.
+  test.afterEach(async () => {
+    await restoreSeedEncounter();
+  });
+
   const viewports = [
     { name: '390x844', width: 390, height: 844 },
     { name: '320px', width: 320, height: 720 },
