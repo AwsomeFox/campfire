@@ -49,6 +49,8 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   // encounters
   { rest: 'POST /campaigns/:campaignId/roll/action', mcpTool: 'roll_action_dice' },
   { rest: 'POST /encounters/:id/reopen', mcpTool: 'reopen_encounter' },
+  // combatant inline resources/spell slots (issue #1909) — character AND statblock combatants
+  { rest: 'POST /encounters/:id/combatants/:cid/resources', mcpTool: 'adjust_combatant_resource' },
   // campaign library monsters (issue #425)
   { rest: 'GET /campaigns/:campaignId/library/monsters', mcpTool: 'list_campaign_library_monsters' },
   { rest: 'POST /campaigns/:campaignId/library/monsters', mcpTool: 'create_campaign_library_monster' },

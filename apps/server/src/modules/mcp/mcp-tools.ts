@@ -34,6 +34,7 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantRemoveRequest, CombatantRemoveUndo,
+  CombatantResourceAdjust,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
@@ -4605,6 +4606,75 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    // Issue #1909: the delta-based, transactional counterpart to update_combatant's
+    // `statblock` field above — flipping one Ki pip or one spell-slot checkbox no longer
+    // requires this tool (or a human via REST) to resend the ENTIRE statblock/character
+    // JSON, which raced last-writer-wins against a second writer (another DM tab, a
+    // concurrent MCP call) and silently reverted their unrelated edits.
+    this.writeTool(
+      server,
+      user,
+      'adjust_combatant_resource',
+      'Spend or restore ONE bounded resource or spell-slot level on a combatant mid-fight — a character-linked ' +
+        'combatant OR a monster/NPC combatant with an inline statblock. Exactly one of `key` (feature resource) or ' +
+        '`spellLevel` (1-9); `delta` is relative to the resource\'s current `used` (default +1). `key` must name a ' +
+        'resource that ALREADY exists on the combatant/character (from get_encounter/get_character) — an unknown ' +
+        'key FAILS with a 400 naming it rather than silently creating a new one, the same as an out-of-range ' +
+        '`spellLevel`. Spending past 0 or restoring past `max` FAILS with a 400 — never a silent clamp — so success ' +
+        'can be trusted as "the resource was actually spent/restored." dm may adjust any combatant; a player only a ' +
+        'combatant linked to a character they own; a statblock combatant (no linked character) is dm-only, ' +
+        'matching update_combatant\'s statblock rule. Records a resource_changed encounter event. `idempotencyKey`: ' +
+        'a lost-response retry with the SAME key replays the original outcome instead of double-spending. Returns ' +
+        'the combatant: for a statblock combatant this shows the new value directly (the statblock lives on the ' +
+        'combatant); for a character-linked combatant the resource lives on the CHARACTER sheet instead, so this ' +
+        'response does not show the new value — call get_character separately to confirm it.',
+      // CombatantResourceAdjust is a ZodEffects (.superRefine requiring exactly one of
+      // key|spellLevel), so it has no `.shape` to spread — list the wire fields here and
+      // re-validate with .parse below, matching adjust_character_condition_level's pattern.
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Combatant id — from get_encounter'),
+        key: z.string().min(1).max(80).optional().describe('Feature resource key (exactly one of key or spellLevel required)'),
+        spellLevel: z.number().int().min(1).max(9).optional().describe('Spell slot level 1-9 (exactly one of key or spellLevel required)'),
+        delta: z.number().int().optional().describe('Relative to current used; +1 spends, -1 restores (default +1)'),
+        expectedUsed: z.number().int().min(0).optional().describe(
+          'Optional per-resource CAS guard: the `used` value get_encounter/get_character last showed for this ' +
+            'resource. If another writer changed it since, the request 409s instead of silently applying delta on ' +
+            'top of the new value. Omit for a purely relative intent (e.g. "restore 2 charges") with no rendered baseline.',
+        ),
+        idempotencyKey: IdempotencyKey.describe('Client-minted intent key; reuse for retries of this exact spend/restore'),
+      },
+      async ({ encounterId, combatantId, ...fields }) => {
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        // Issue #1909 review (Devin): mirror roll_combatant_initiative's own viewer-role
+        // visibility pre-check just below — `requireRole(..., 'player')` alone throws 403
+        // for a viewer BEFORE the service's own `isVisibleTo` gate is ever reached, so a
+        // viewer hitting a HIDDEN encounter's real id would get 403, distinguishable from
+        // the 404 a nonexistent id gets (an enumeration oracle). Pre-check at the VIEWER
+        // floor first so a hidden encounter is 404 for every non-DM.
+        //
+        // Issue #1909 review round 2 (Codex): `allowArchived: true` on both this check and
+        // the role gate below — without it, `requireRole(..., 'viewer')` 403'd EVERY member
+        // on a paused/completed campaign before `isVisibleTo` ever ran, reopening the same
+        // oracle keyed on campaign archival instead of role. The service's own
+        // `assertCampaignWritableInTx` still rejects a fresh write against an archived
+        // campaign; see the REST controller's identical fix for the full rationale.
+        if (
+          !isVisibleTo(
+            { hidden: row.hidden },
+            await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }),
+          )
+        ) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+        const validated = CombatantResourceAdjust.parse(fields);
+        return this.encounters.adjustCombatantResource(encounterId as number, combatantId as number, validated, user, role);
       },
     );
 

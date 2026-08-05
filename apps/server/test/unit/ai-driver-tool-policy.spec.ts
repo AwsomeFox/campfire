@@ -240,6 +240,21 @@ describe('driver-tool-policy (#474)', () => {
       expect(isDriverToolAllowed({ name: 'roll_combatant_initiative', mutating: true, proposalCapable: false })).toBe(true);
     });
 
+    // Issue #1909 review (Codex, ninth finding): adjust_combatant_resource was registered in
+    // the MCP catalog without a matching entry on the driver's live-play allow-list, so the
+    // built-in AI-DM driver had no way to reach the new delta-based endpoint at all —
+    // isDriverToolAllowed default-denies any mutating, non-proposal-capable tool absent from
+    // DRIVER_LIVE_PLAY_TOOLS — leaving AI live play to keep using whole-statblock
+    // update_combatant for resource pips, the exact clobber #1909 exists to prevent. Same
+    // safety shape as adjust_spell_slots (a sibling already on this list): overspend/
+    // over-restore is a hard typed error, never a silent clamp.
+    it('#1909: adjust_combatant_resource is on the live-play allow-list, unguarded, same as its adjust_spell_slots sibling', () => {
+      expect(DRIVER_LIVE_PLAY_TOOL_NAMES).toContain('adjust_combatant_resource');
+      expect(DRIVER_UNGUARDED_LIVE_PLAY_TOOLS.has('adjust_combatant_resource')).toBe(true);
+      expect(DRIVER_GUARDED_LIVE_PLAY_TOOLS.has('adjust_combatant_resource')).toBe(false);
+      expect(isDriverToolAllowed({ name: 'adjust_combatant_resource', mutating: true, proposalCapable: false })).toBe(true);
+    });
+
     it('mechanically proves every DRIVER_GUARDED_LIVE_PLAY_TOOLS entry has a REAL branch, not a fall-through (the exact #1495 bug)', () => {
       // For each tool claimed guarded, feed it a hostile arg shape that MUST be rejected (or, for
       // create_encounter, MUST be silently stripped) if the branch genuinely exists. A tool that

@@ -6473,6 +6473,311 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.status).toBe(403);
   });
 
+  describe('POST .../combatants/:cid/resources (issue #1909)', () => {
+    it("dm spends and restores a statblock combatant's feature resource and spell slot by delta, recording a resource_changed event", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Monster Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({
+          kind: 'monster',
+          name: 'REST Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        });
+      expect(addRes.status).toBe(201);
+      const rCombatantId = addRes.body.id;
+
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+      expect(spent.body.statblock.resources.kiPoints.used).toBe(1);
+
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(restored.status).toBe(201);
+      expect(restored.body.statblock.resources.kiPoints.used).toBe(0);
+
+      const slotSpent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ spellLevel: 2, delta: 1 });
+      expect(slotSpent.status).toBe(201);
+      expect(slotSpent.body.statblock.spellSlots['2'].used).toBe(1);
+
+      const events = await request(server).get(`/api/v1/encounters/${rEncounterId}/events`).set(dm);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('a non-dm (player or viewer) is forbidden from adjusting a statblock combatant — it has no owning player', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Role Matrix', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Role-Matrix Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const byPlayer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byPlayer.status).toBe(403);
+
+      const byViewer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byViewer.status).toBe(403);
+    });
+
+    it('a player adjusts their own character combatant; a different player is forbidden', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Owner Fight', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server).patch(`/api/v1/characters/${ownedCharacterId}`).set(dm).send({ resources: { secondWind: { max: 1, used: 0, name: 'Second Wind', recharge: 'short-rest' } } });
+
+      const byOwner = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOwner.status).toBe(201);
+
+      const byOther = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(otherPlayer)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOther.status).toBe(403);
+    });
+
+    it('overspend and below-zero restore return typed 400 with nothing written', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Bounds Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Bounds Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 1, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const overspend = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 5 });
+      expect(overspend.status).toBe(400);
+
+      const belowZero = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(belowZero.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): a hidden/prep encounter auto-adds combatants for existing
+    // characters, so the OWNING PLAYER branch (character-linked, ownerUserId matches) can
+    // reach and mutate a combatant in an encounter that is otherwise wholesale invisible to
+    // them — GET /encounters/:id, /difficulty, /events all 404 a non-DM for a hidden
+    // encounter (issue #262/#869). A 403 here would itself leak the encounter's existence
+    // (distinguishable from "doesn't exist"), so the gate must match the sibling read/roll
+    // paths exactly: 404, not 403.
+    it("a player's own combatant in a HIDDEN encounter is invisible (404), not adjustable, matching GET's secrecy", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server)
+        .patch(`/api/v1/characters/${ownedCharacterId}`)
+        .set(dm)
+        .send({ resources: { hiddenFightResource: { max: 1, used: 0, name: 'Hidden Fight Resource', recharge: 'short-rest' } } });
+
+      // GET already 404s the owning player wholesale (issue #262) — the new endpoint must match.
+      expect((await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(player)).status).toBe(404);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(res.status).toBe(404);
+
+      // The DM (who can see the hidden encounter) is unaffected by the gate.
+      const dmRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(dmRes.status).toBe(201);
+    });
+
+    // Review finding (Devin, catching that the player-only test above did not close the
+    // gap): `requireRole(..., 'player')` 403s a viewer BEFORE the service's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets, which is the
+    // enumeration oracle hidden-entity secrecy exists to close. The controller now
+    // pre-checks visibility at the viewer floor before ever reaching the player-role gate,
+    // mirroring POST .../death-save and POST .../roll-initiative.
+    it("a viewer gets 404 for a HIDDEN encounter's real combatant id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Viewer Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const viewerRealId = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerRealId.status).toBe(404);
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const viewerNonexistent = await request(server)
+        .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerNonexistent.status).toBe(404);
+
+      // Nothing written.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): the controller's viewer-floor visibility precheck above
+    // called `requireRole(..., 'viewer')` with NO `allowArchived` option, so on a
+    // paused/completed campaign `assertWritable` throws 403 for EVERY member (any role,
+    // hidden or not) before the `isVisibleTo` gate is ever reached — reopening exactly the
+    // oracle that gate exists to close, but keyed on campaign archival instead of role: a
+    // hidden encounter that EXISTS gets 403 on an archived campaign, while a NONEXISTENT
+    // encounter id still gets 404 (`getRowOrThrow` throws before any role/archive check
+    // runs) — two different statuses for two cases a non-DM must not be able to tell
+    // apart. Fixed by mirroring `rollDeathSave`/`rollCombatantInitiative`'s existing
+    // pattern exactly: `allowArchived: true` on the viewer-visibility precheck and the
+    // player-role gate, deferring the actual archived-campaign write rejection to the
+    // service's own transactional `assertCampaignWritableInTx` (added in an earlier review
+    // round of this same PR).
+    it("a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id, instead of leaking existence via 403 (Codex review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Archived Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Archived Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerRealId = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+        const viewerNonexistent = await request(server)
+          .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+
+        // Indistinguishable — both cases must return the identical status, matching every
+        // other hidden-entity gate in this file.
+        expect(viewerRealId.status).toBe(404);
+        expect(viewerNonexistent.status).toBe(404);
+        expect(viewerRealId.status).toBe(viewerNonexistent.status);
+
+        // The DM (who CAN see this hidden encounter) reaches the service, whose own
+        // transactional archived-campaign check still correctly rejects a fresh write —
+        // loosening the controller gate must not reopen the archived-write hole itself.
+        const dmRes = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(dm)
+          .send({ key: 'kiPoints', delta: 1 });
+        expect(dmRes.status).toBe(403);
+      } finally {
+        expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
+    // Review finding (Devin + Copilot, same defect): there is no per-combatant revision
+    // column — `PATCH /encounters/:id/combatants/:cid`'s `expectedUpdatedAt` validates
+    // against the ENCOUNTER's own `updatedAt`. A whole-statblock PATCH (e.g. from
+    // CombatantStatblockEditor, or a stale client) must be rejected once a resource-adjust
+    // pip write has landed since the caller's token was read — otherwise a second writer
+    // holding a pre-spend token can silently revert the spend.
+    it("a pip spend advances the encounter's CAS token, so a stale whole-statblock PATCH is rejected instead of silently reverting it", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST CAS Fight' });
+      const rEncounterId = encRes.body.id;
+      const staleToken = encRes.body.updatedAt as string;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST CAS Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      // Someone spends a pip through the new endpoint — the encounter's own `updatedAt`
+      // must move even though this write never touches an encounter-level field directly.
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+
+      // A second writer — a stale CombatantStatblockEditor tab that read the encounter
+      // BEFORE the spend — PATCHes the whole statblock with that pre-spend token.
+      const staleWrite = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}`)
+        .set(dm)
+        .send({
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+          expectedUpdatedAt: staleToken,
+        });
+      expect(staleWrite.status).toBe(409);
+
+      // The spend survived: still 1, not reverted to 0 by the rejected stale PATCH.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(1);
+    });
+  });
+
   describe('fog of war + server-side token redaction', () => {
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();

@@ -10456,6 +10456,61 @@ export const CombatantUpdate = z.object({
 });
 
 /**
+ * Body for `POST /encounters/:id/combatants/:cid/resources` (issue #1909) — spend or
+ * restore ONE bounded resource or spell-slot level on a combatant mid-fight, whether it is
+ * linked to a character sheet or an inline monster/NPC statblock. This is the delta-based,
+ * transactional counterpart to `CombatantUpdate.statblock` above: flipping one Ki pip or one
+ * spell-slot checkbox no longer requires PATCHing the whole statblock/character JSON built
+ * from whatever the client last saw, which raced last-writer-wins across the ENTIRE blob
+ * with a second writer (another tab, an MCP-driven AI DM) and silently reverted their
+ * unrelated edits.
+ *
+ * `key` (a feature resource) and `spellLevel` (1–9) are alternatives, never both/neither.
+ * `delta` is relative to the resource's current `used` (default +1, matching a single pip
+ * click); 0 is rejected as a no-op that would still mint a `resource_changed` event for
+ * nothing. Spending past 0 or restoring past `max` is a 400, never a silent clamp, matching
+ * every other bounded-resource write in this schema (`ResourcePatch`/`SpellSlotPatch`).
+ * `idempotencyKey` reuses the issue #580 convention `CombatantUpdate.idempotencyKey`
+ * documents just above: this is a RELATIVE write, so a lost-response retry must replay the
+ * original outcome rather than double-spend the resource.
+ *
+ * `expectedUsed` (issue #1909 review, Codex P2) closes a DIFFERENT race than the delta
+ * mechanics above protect against: a pip click represents an ABSOLUTE intent ("set this
+ * pip to used=1"), converted to a relative `delta` against whatever `used` this caller last
+ * rendered. If two callers both last rendered `used: 0` and both click the first pip, both
+ * send `delta: 1` — the transactional fresh-row read prevents the WHOLE-BLOB lost-update
+ * this endpoint replaced (issue #1909's headline bug), but does nothing to stop the SECOND
+ * delta from applying on top of the FIRST's fresh result (`used: 0 -> 1`, then `1 -> 2`),
+ * silently landing on a value neither caller intended. Optional so a caller with a purely
+ * relative intent (an AI DM's "restore 2 charges", or any caller not tracking a rendered
+ * baseline) is unaffected; when present, the server verifies it against the FRESH `used`
+ * inside the same transaction that computes `delta` and 409s on a mismatch instead of
+ * applying a delta computed from a baseline that has since moved.
+ */
+export const CombatantResourceAdjust = z
+  .object({
+    key: z.string().min(1).max(80).optional(),
+    spellLevel: z.number().int().min(1).max(9).optional(),
+    delta: z.number().int().optional().default(1),
+    expectedUsed: z.number().int().min(0).optional(),
+    idempotencyKey: IdempotencyKey,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.key !== undefined) === (value.spellLevel !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide exactly one of key or spellLevel',
+        path: ['key'],
+      });
+    }
+    if (value.delta === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'delta must not be 0', path: ['delta'] });
+    }
+  });
+export type CombatantResourceAdjust = z.infer<typeof CombatantResourceAdjust>;
+
+/**
  * Body for the server-authoritative death-save action (issue #1462). The caller supplies
  * no die face: the server rolls exactly one d20, applies that same face, and writes it to
  * the shared dice log. An explicit contract prevents REST and MCP from drifting into

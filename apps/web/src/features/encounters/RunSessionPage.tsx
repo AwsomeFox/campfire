@@ -2188,6 +2188,23 @@ export default function RunSessionPage() {
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
+  // Issue #1909 scope note: earlier rounds of this PR added a CAS token + debounce/
+  // serialization queue to this whole-statblock PATCH (the in-app statblock editor's
+  // onChange path), trying to close a pre-existing lost-update on a caller this issue
+  // never named. That mechanism went through five review-caught regressions in a row (no
+  // token → lost updates; token added → 409 on every keystroke; token re-read at send time
+  // → guard defeated by a concurrent writer; token latched per-combatant → permanent
+  // lockout after any other encounter write; draft leaked across an encounter-id change
+  // mid-debounce) — a strong signal it was being built in the wrong place for this PR.
+  // Reverted back to this endpoint's actual, and already-solved, scope: `patchCombatant`
+  // sends every patch (including `statblock`) as a plain, immediate, token-less PATCH,
+  // exactly as it did before this PR touched this file. This restores the PRE-EXISTING
+  // whole-statblock-editor concurrency gap (a concurrent whole-statblock save can still
+  // revert another writer's unrelated edit) rather than introducing a new one — that gap
+  // predates this PR and is now tracked as its own follow-up issue rather than solved here.
+  // What #1909 actually asked for — flipping ONE resource pip no longer clobbers the WHOLE
+  // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
+  // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
@@ -3996,7 +4013,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
