@@ -27,6 +27,7 @@ import {
 } from '../../src/features/encounters/encounterSyncState';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const DM_LIFECYCLE_HEADER = resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx');
 
 test.describe('encounter sync state (issue #471)', () => {
   test('maps SSE + read freshness into live/connecting/reconnecting/offline/stale', () => {
@@ -101,39 +102,40 @@ test.describe('encounter sync state (issue #471)', () => {
     // independently re-typed literals: the sync-chip/banner testids come from
     // ENCOUNTER_SYNC_CHIP_TESTID / ENCOUNTER_SYNC_BANNER_TESTID (checked for VALUE
     // below), so a rename only requires updating the shared constant, not this file
-    // and the page's JSX in lockstep.
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/deriveEncounterSyncState/);
-    expect(source).toMatch(/encounterActionsBlocked/);
-    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_CHIP_TESTID\}/);
-    expect(source).toMatch(/data-testid=\{ENCOUNTER_SYNC_BANNER_TESTID\}/);
+    // and the owning component's JSX in lockstep.
+    const runSessionSource = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const lifecycleHeaderSource = readFileSync(DM_LIFECYCLE_HEADER, 'utf8');
+    expect(runSessionSource).toMatch(/deriveEncounterSyncState/);
+    expect(runSessionSource).toMatch(/encounterActionsBlocked/);
+    expect(runSessionSource).toMatch(/data-testid=\{ENCOUNTER_SYNC_CHIP_TESTID\}/);
+    expect(lifecycleHeaderSource).toMatch(/data-testid=\{ENCOUNTER_SYNC_BANNER_TESTID\}/);
     expect(ENCOUNTER_SYNC_CHIP_TESTID).toBe('encounter-sync-chip');
     expect(ENCOUNTER_SYNC_BANNER_TESTID).toBe('encounter-sync-banner');
-    expect(source).toMatch(/setResyncPending\(true\)/);
+    expect(runSessionSource).toMatch(/setResyncPending\(true\)/);
     // Issue #1446: the override affordance and its persistence must be wired, not just defined.
-    expect(source).toMatch(/data-testid="encounter-sync-override-prompt"/);
-    expect(source).toMatch(/data-testid="encounter-sync-override-confirm"/);
-    expect(source).toMatch(/confirmEncounterOverride/);
-    expect(source).toMatch(/settleEncounterOverride/);
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-prompt"/);
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-confirm"/);
+    expect(runSessionSource).toMatch(/confirmEncounterOverride/);
+    expect(runSessionSource).toMatch(/settleEncounterOverride/);
     // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
-    expect(source).toMatch(/overrideAuthority\.canDmWrite/);
-    expect(source).toMatch(/encounterSyncOverrideBannerKey/);
+    expect(runSessionSource).toMatch(/overrideAuthority\.canDmWrite/);
+    expect(runSessionSource).toMatch(/encounterSyncOverrideBannerKey/);
     // Issue #1446 review fix (round 4): the override must not survive loss of DM
     // authority — revoked in the persisted state AND masked atomically at render time.
-    expect(source).toMatch(/revokeEncounterOverrideIfUnauthorized/);
+    expect(runSessionSource).toMatch(/revokeEncounterOverrideIfUnauthorized/);
     // Issue #1446 review fix (round 5): stream/session-scoped sync state is explicitly
     // keyed to (campaignId, userId) — reset on a campaign or identity change, but NOT on
     // an encounter-only switch (that classification lives in the `[eid]` effect above).
-    expect(source).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
+    expect(runSessionSource).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
     // Issue #1446 review fix (final round): every override precondition — DM authority,
     // identity freshness, campaign match, identity match — is enumerated once in
     // encounterOverrideAuthorized and composed here as THE single gate, checked both at
     // confirm time (canDmWrite/staleIdentity guard the offer and the click handler) and
     // continuously (effectiveEncounterSyncOverride, re-derived every render).
-    expect(source).toMatch(/overrideAuthority\.staleIdentity/);
-    expect(source).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
-    expect(source).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
-    expect(source).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
+    expect(runSessionSource).toMatch(/overrideAuthority\.staleIdentity/);
+    expect(runSessionSource).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
+    expect(runSessionSource).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
+    expect(runSessionSource).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
   });
 });
 
