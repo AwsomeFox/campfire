@@ -112,7 +112,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('clears a takeover when the following beat is not owned', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
     expect(source).toMatch(/if \(!beat\) \{\s*setShowTakeover\(false\);\s*setShowTicker\(false\);/);
-    expect(source).toMatch(/if \(beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
+    expect(source).toMatch(/if \(!beat \|\| beat\.pending \|\| beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
   });
 
   test('skips owned-turn vibration when reduced motion is preferred', () => {
@@ -172,7 +172,15 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(page).toMatch(/setCharacterOwnershipRefreshPending\(true\);\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnPulse\(false\);/);
     expect(page).toMatch(/isYourTurn=\{encounter\?\.status === 'running'\s*&&\s*!characterOwnershipRefreshPending/);
     expect(page).toMatch(/!turnBeat\s*\|\| characterOwnershipPendingDataUpdatedAtRef\.current != null\s*\|\| turnWorkspace\.isYourTurn !== true/);
-    expect(beat).toMatch(/if \(beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
+    expect(beat).toMatch(/if \(!beat \|\| beat\.pending \|\| beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
+  });
+
+  test('promotes ownership only once for a beat after a roster refresh', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
+    expect(source).toMatch(/const takeoverPlayedForBeatRef = useRef<number \| null>\(null\);/);
+    expect(source).toMatch(/if \(takeoverPlayedForBeatRef\.current === beat\.key\) return;/);
+    expect(source).toMatch(/takeoverPlayedForBeatRef\.current = beat\.key;\s*setShowTakeover\(true\);/);
+    expect(source).toMatch(/\}, \[beat\]\);\s*\/\/ Ownership can settle after the edge/);
   });
 
   test('keeps Player Display to the paired encounter update load', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { setDocumentTitlePrefix } from '../../app/routeFocus';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
@@ -28,6 +28,7 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
   const { t } = useTranslation();
   const [showTakeover, setShowTakeover] = useState(false);
   const [showTicker, setShowTicker] = useState(false);
+  const takeoverPlayedForBeatRef = useRef<number | null>(null);
   const reducedMotion = prefersReducedMotion();
 
   useEffect(() => {
@@ -53,10 +54,19 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
       beat.tickerKind === 'round-wrap' ? 2_200 : 1_600,
     );
 
-    if (beat.kind !== 'your-turn' || !isYourTurn) {
+    return () => window.clearTimeout(tickerTimer);
+  }, [beat]);
+
+  // Ownership can settle after the edge while a roster refresh completes. That
+  // may promote this one beat, but must never replay an already-announced turn
+  // when a later sheet refresh temporarily gates and restores ownership.
+  useEffect(() => {
+    if (!beat || beat.pending || beat.kind !== 'your-turn' || !isYourTurn) {
       setShowTakeover(false);
-      return () => window.clearTimeout(tickerTimer);
+      return;
     }
+    if (takeoverPlayedForBeatRef.current === beat.key) return;
+    takeoverPlayedForBeatRef.current = beat.key;
     setShowTakeover(true);
     if (!reducedMotion && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate([100, 50, 100]);
@@ -66,12 +76,11 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
     window.addEventListener('pointerdown', dismiss, { once: true });
     window.addEventListener('keydown', dismiss, { once: true });
     return () => {
-      window.clearTimeout(tickerTimer);
       window.clearTimeout(takeoverTimer);
       window.removeEventListener('pointerdown', dismiss);
       window.removeEventListener('keydown', dismiss);
     };
-  }, [beat, isYourTurn]);
+  }, [beat?.key, beat?.kind, beat?.pending, isYourTurn, reducedMotion]);
 
   // RouteChangeFocus rebuilds titles after navigation. Its formatter observes
   // this shared prefix, while this hook owns the visibility lifecycle.
