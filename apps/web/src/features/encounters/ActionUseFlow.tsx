@@ -266,8 +266,13 @@ export function ActionUsePanel({
           </div>
           {preview.systemMathSupported === false && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }} data-testid="action-use-system-math-notice">
+              {/* Must not name 5e/d20: `systemMathSupported === false` also covers adapters
+                  that supply their own resolveAttack (OSR descending-AC, Open Legend
+                  exploding pools), where the system's OWN math ran. Keep this in step with
+                  the catalog string — action-use-system-math-notice.unit.spec.ts asserts
+                  both this default and the catalog value are free of that claim. */}
               {t('encounters.actionFlow.systemMathNotice', {
-                defaultValue: 'Resolved with 5e-style d20 math — verify against your system.',
+                defaultValue: "Resolved with math that hasn't been audited for your system — verify the result.",
               })}
             </p>
           )}

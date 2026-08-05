@@ -25,6 +25,18 @@ test.describe('ActionUseFlow system-math honesty notice (issue #1928)', () => {
     expect(code).toMatch(/data-testid="action-use-system-math-notice"/);
     expect(code).toMatch(/t\(['"]encounters\.actionFlow\.systemMathNotice['"]/);
 
+    // Devin review (#1981): the catalog string was corrected to drop its 5e claim, but the
+    // inline i18n `defaultValue` in this component kept the old wording — so the fallback
+    // path still asserted 5e math for OSR/Open Legend, where the system's own resolveAttack
+    // actually ran. The catalog assertion below could not catch that, because it never read
+    // the source. Pin the source too: no 5e/d20 claim may appear anywhere in this file's
+    // notice, whichever branch renders.
+    const noticeBlock = code.slice(
+      code.indexOf('action-use-system-math-notice'),
+      code.indexOf('action-use-system-math-notice') + 600,
+    );
+    expect(noticeBlock).not.toMatch(/5e-style|5e d20|d20 math/i);
+
     const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { actionFlow?: Record<string, unknown> } };
     // Codex review (#1981): the notice must NOT claim 5e d20 math ran. `systemMathSupported`
     // is false whenever the system is unaudited end-to-end, but OSR and Open Legend supply
