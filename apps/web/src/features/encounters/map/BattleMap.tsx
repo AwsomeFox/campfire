@@ -2427,7 +2427,7 @@ export function BattleMap({
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
                         opacity: isDragging ? 0.85 : targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1,
-                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
+                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable && !targeting?.declared ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => {
@@ -2452,7 +2452,7 @@ export function BattleMap({
                         if (targetClickable && !isDragging) targeting?.onToggle(c.id);
                       }}
                       onKeyDown={(e) => {
-                        if (legalTarget && targetAvailable && !targeting?.declared && (e.key === 'Enter' || e.key === ' ')) {
+                        if (legalTarget && targetAvailable && !targeting?.declared && !e.repeat && (e.key === 'Enter' || e.key === ' ')) {
                           e.preventDefault();
                           e.stopPropagation();
                           targeting?.onToggle(c.id);

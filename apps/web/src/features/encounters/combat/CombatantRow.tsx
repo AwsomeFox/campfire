@@ -303,7 +303,7 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targeting?.declared && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
         opacity: down ? 0.55 : targetSelectionUnavailable ? 0.65 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
