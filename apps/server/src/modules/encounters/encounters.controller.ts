@@ -637,18 +637,33 @@ export class EncountersController {
     @Body() body: CombatantResourceAdjustDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const row = await this.encounters.getRowOrThrow(id);
+    const row = await this.encounters.getRowOrThrow(id, true);
     // Issue #1909 review (Devin): `requireRole(..., 'player')` below throws 403 for a
     // viewer BEFORE the service's own `isVisibleTo` gate is ever reached — a viewer hitting
     // a HIDDEN encounter's real id would get 403, distinguishable from the 404 a nonexistent
     // id gets (an enumeration oracle). Pre-check visibility at the VIEWER floor first, same
     // as the sibling death-save/roll-initiative routes just below, so a hidden encounter is
     // 404 for every non-DM regardless of whether they'd otherwise pass the player-role gate.
-    await this.access.requireMember(user, row.campaignId);
-    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer'))) {
+    //
+    // Issue #1909 review round 2 (Codex): the ORIGINAL fix above still called
+    // `requireRole(..., 'viewer')` with no `allowArchived`, so `assertWritable` 403'd EVERY
+    // member on a paused/completed campaign before this line's `isVisibleTo` check could
+    // ever run — reopening the same oracle, now keyed on campaign archival instead of role:
+    // a hidden encounter that exists 403'd, a nonexistent id still 404'd. `allowArchived:
+    // true` on both this visibility precheck and the role gate below (mirroring
+    // `rollDeathSave`/`rollCombatantInitiative` exactly, including retaining a soft-deleted
+    // encounter row via `getRowOrThrow(id, true)` for a same-key replay) restores the
+    // archived-agnostic 404 here; the service's own transactional
+    // `assertCampaignWritableInTx` (added in an earlier round of this same PR) still
+    // rejects a FRESH write against an archived campaign, so archived-campaign writes stay
+    // correctly blocked — just no longer distinguishably from "doesn't exist" at this gate.
+    await this.access.requireMember(user, row.campaignId, { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }))) {
       throw new NotFoundException(`Encounter ${id} not found`);
     }
-    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    // A same-key retry only replays an already-committed response. Let the service
+    // distinguish that safe read from a fresh write after membership is established.
+    const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
     return this.encounters.adjustCombatantResource(id, cid, body, user, role);
   }
 

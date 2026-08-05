@@ -16,17 +16,29 @@
  *   2. SERIALIZATION: a save for a given id never starts while a PRIOR save for that same
  *      id is still in flight — it waits for it to settle first.
  *
- * Property 2 is what actually closes the CAS race: the caller's `save` implementation reads
- * the CURRENT encounter revision from the query cache immediately before constructing its
- * request. Because saves for one id can never overlap, save N+1 always reads that revision
- * AFTER save N's write (and the cache reconciliation that follows it) has fully landed —
- * never a stale snapshot from before save N started.
+ * Property 2 is what makes it SAFE for the caller's `save` to track a per-id "known
+ * revision" and reconcile it only from a refetch AFTER its own write lands (never before
+ * sending, which would let a refetch that picked up a genuinely concurrent OTHER writer's
+ * change ride in on a stale draft and defeat the CAS guard — issue #1909 review round 2,
+ * Devin + Codex). Because saves for one id can never overlap, save N+1 always reads the
+ * "known revision" AFTER save N's own post-write reconciliation has completed — never a
+ * stale pre-N snapshot — while still 409ing correctly if some OTHER writer moved the
+ * revision in between, since nothing here ever substitutes a fresher value for the one the
+ * in-flight draft was actually built from.
  */
 export interface StatblockSaveQueue<T> {
   /** Debounce a save of `draft` for `id`; coalesces with any pending un-flushed enqueue. */
   enqueue(id: number, draft: T): void;
   /** Force an immediate flush for `id`, bypassing the debounce timer (e.g. on unmount). Resolves once any in-flight and this flush's save have settled. */
   flushNow(id: number): Promise<void>;
+  /**
+   * Force an immediate flush for EVERY id with a pending (un-flushed) or in-flight save
+   * (issue #1909 review, Devin — `flushNow` existed but had no call site, so a debounced
+   * edit sitting only in `pendingDrafts` was silently lost if the caller navigated away
+   * before the 600ms timer fired). Call this from the editor's unmount/page-hide path,
+   * since the caller does not track which ids currently have pending edits.
+   */
+  flushAll(): Promise<void>;
 }
 
 export function createStatblockSaveQueue<T>(options: {
@@ -81,6 +93,22 @@ export function createStatblockSaveQueue<T>(options: {
         timers.delete(id);
       }
       await flush(id);
+    },
+    async flushAll(): Promise<void> {
+      // A pending draft can exist for an id with no live timer (its debounce already
+      // fired and flush() is awaiting a prior in-flight save) as well as one still
+      // waiting out its debounce window — union both so neither is missed.
+      const ids = new Set<number>([...timers.keys(), ...pendingDrafts.keys(), ...inFlight.keys()]);
+      await Promise.all(
+        [...ids].map((id) => {
+          const existingTimer = timers.get(id);
+          if (existingTimer) {
+            clearTimeout(existingTimer);
+            timers.delete(id);
+          }
+          return flush(id);
+        }),
+      );
     },
   };
 }

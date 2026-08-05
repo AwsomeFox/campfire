@@ -4627,22 +4627,31 @@ export class McpToolsService {
         idempotencyKey: IdempotencyKey.describe('Client-minted intent key; reuse for retries of this exact spend/restore'),
       },
       async ({ encounterId, combatantId, ...fields }) => {
-        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
         // Issue #1909 review (Devin): mirror roll_combatant_initiative's own viewer-role
         // visibility pre-check just below — `requireRole(..., 'player')` alone throws 403
         // for a viewer BEFORE the service's own `isVisibleTo` gate is ever reached, so a
         // viewer hitting a HIDDEN encounter's real id would get 403, distinguishable from
         // the 404 a nonexistent id gets (an enumeration oracle). Pre-check at the VIEWER
         // floor first so a hidden encounter is 404 for every non-DM.
+        //
+        // Issue #1909 review round 2 (Codex): `allowArchived: true` on both this check and
+        // the role gate below — without it, `requireRole(..., 'viewer')` 403'd EVERY member
+        // on a paused/completed campaign before `isVisibleTo` ever ran, reopening the same
+        // oracle keyed on campaign archival instead of role. The service's own
+        // `assertCampaignWritableInTx` still rejects a fresh write against an archived
+        // campaign; see the REST controller's identical fix for the full rationale.
         if (
           !isVisibleTo(
             { hidden: row.hidden },
-            await this.access.requireRole(user, row.campaignId, 'viewer'),
+            await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }),
           )
         ) {
           throw new NotFoundException(`Encounter ${encounterId} not found`);
         }
-        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
         const validated = CombatantResourceAdjust.parse(fields);
         return this.encounters.adjustCombatantResource(encounterId as number, combatantId as number, validated, user, role);
       },

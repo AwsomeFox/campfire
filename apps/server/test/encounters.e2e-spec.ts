@@ -6251,6 +6251,63 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
     });
 
+    // Review finding (Codex): the controller's viewer-floor visibility precheck above
+    // called `requireRole(..., 'viewer')` with NO `allowArchived` option, so on a
+    // paused/completed campaign `assertWritable` throws 403 for EVERY member (any role,
+    // hidden or not) before the `isVisibleTo` gate is ever reached — reopening exactly the
+    // oracle that gate exists to close, but keyed on campaign archival instead of role: a
+    // hidden encounter that EXISTS gets 403 on an archived campaign, while a NONEXISTENT
+    // encounter id still gets 404 (`getRowOrThrow` throws before any role/archive check
+    // runs) — two different statuses for two cases a non-DM must not be able to tell
+    // apart. Fixed by mirroring `rollDeathSave`/`rollCombatantInitiative`'s existing
+    // pattern exactly: `allowArchived: true` on the viewer-visibility precheck and the
+    // player-role gate, deferring the actual archived-campaign write rejection to the
+    // service's own transactional `assertCampaignWritableInTx` (added in an earlier review
+    // round of this same PR).
+    it("a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id, instead of leaking existence via 403 (Codex review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Archived Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Archived Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerRealId = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+        const viewerNonexistent = await request(server)
+          .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+
+        // Indistinguishable — both cases must return the identical status, matching every
+        // other hidden-entity gate in this file.
+        expect(viewerRealId.status).toBe(404);
+        expect(viewerNonexistent.status).toBe(404);
+        expect(viewerRealId.status).toBe(viewerNonexistent.status);
+
+        // The DM (who CAN see this hidden encounter) reaches the service, whose own
+        // transactional archived-campaign check still correctly rejects a fresh write —
+        // loosening the controller gate must not reopen the archived-write hole itself.
+        const dmRes = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(dm)
+          .send({ key: 'kiPoints', delta: 1 });
+        expect(dmRes.status).toBe(403);
+      } finally {
+        expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
     // Review finding (Devin + Copilot, same defect): there is no per-combatant revision
     // column — `PATCH /encounters/:id/combatants/:cid`'s `expectedUpdatedAt` validates
     // against the ENCOUNTER's own `updatedAt`. A whole-statblock PATCH (e.g. from

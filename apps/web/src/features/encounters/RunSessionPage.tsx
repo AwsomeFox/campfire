@@ -2121,9 +2121,24 @@ export default function RunSessionPage() {
   // Sending that token unconditionally on every keystroke meant the SECOND keystroke's
   // PATCH would carry the token the FIRST keystroke's PATCH had already invalidated,
   // 409ing at ordinary typing speed. `statblockSaveQueue` debounces keystrokes into one
-  // save per pause and serializes saves per combatant so each save's `save()` callback
-  // below always re-reads the CURRENT encounter revision immediately before constructing
-  // its request — never a snapshot a prior save (from this same client) has since moved.
+  // save per pause and serializes saves per combatant.
+  //
+  // Issue #1909 review round 2 (Devin + Codex, converging independently) — the FIRST fix
+  // here refetched the encounter and read its revision immediately before EVERY send, which
+  // defeated the CAS guard it was supposed to enforce: the draft being sent was captured
+  // BEFORE that refetch, so a refetch that picked up a genuinely concurrent OTHER writer's
+  // change would still pair a stale draft with that writer's fresh token and sail straight
+  // through `assertNotStale` — silently clobbering their edit, the exact whole-blob-clobber
+  // class this PR set out to close. Fixed by tracking, per combatant, the revision this
+  // client's OWN reconciled state is at (`knownRevisionRef`) — read to build a save's CAS
+  // token BEFORE that save's network call, and updated ONLY from a refetch AFTER a save's
+  // own write has landed. Because the queue serializes saves per combatant, that post-write
+  // refetch always completes before the NEXT save for the same id starts, so a second
+  // same-client edit reads the just-advanced revision and still succeeds — while a save
+  // whose captured base revision predates a genuinely concurrent OTHER writer's change
+  // still 409s, since nothing here ever substitutes a fresher revision for the one the
+  // in-flight draft actually corresponds to.
+  const knownRevisionRef = useRef<Map<number, string | undefined>>(new Map());
   // The `deps` ref sidesteps a stale-closure trap from creating this queue once (a lazy
   // ref, so the debounce/serialization state survives across renders) while `eid`/
   // `combatantPatch`/`reportError` still need their CURRENT values at save time.
@@ -2138,16 +2153,50 @@ export default function RunSessionPage() {
       debounceMs: 600,
       save: async (combatantId, draft) => {
         const deps = statblockSaveDepsRef.current;
-        // Refetch (not just an async invalidate) so this AWAITS the current server
-        // revision landing in the cache before constructing the CAS token below.
-        await queryClient.invalidateQueries({ queryKey: queryKeys.encounter(deps.eid) });
-        const fresh = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(deps.eid));
-        const withRevision = withStatblockRevision({ statblock: draft }, fresh?.updatedAt);
+        const encounterKey = queryKeys.encounter(deps.eid);
+        // The token this SEND uses: whatever revision this combatant's statblock was last
+        // reconciled to (seeded, the very first time, from the CURRENT cache with no
+        // refetch — the revision this draft's editor state was actually rendered from).
+        // Never refetched here: refetching at send time is exactly what let a stale draft
+        // ride in on a fresher-but-unrelated revision (see the comment above).
+        let expectedUpdatedAt = knownRevisionRef.current.get(combatantId);
+        if (expectedUpdatedAt === undefined) {
+          expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(encounterKey)?.updatedAt;
+        }
+        const withRevision = withStatblockRevision({ statblock: draft }, expectedUpdatedAt);
         await deps.combatantPatch.mutateAsync({ combatantId, patch: withRevision });
+        // Reconcile AFTER this write lands, for whichever save comes NEXT (never for the
+        // one just sent above) — serialization guarantees the next save for this id cannot
+        // start until this refetch has completed.
+        await queryClient.invalidateQueries({ queryKey: encounterKey });
+        const fresh = queryClient.getQueryData<EncounterWithCombatants>(encounterKey);
+        if (fresh?.updatedAt) knownRevisionRef.current.set(combatantId, fresh.updatedAt);
       },
       onError: (_combatantId, err) => statblockSaveDepsRef.current.reportError(err),
     });
   }
+
+  // Issue #1909 review (Devin) — `flushNow` existed with zero call sites, so a debounced
+  // edit sitting only in the queue's pending-draft map was silently dropped if the DM
+  // navigated away (or the page was hidden) before the 600ms timer fired; before this PR
+  // every keystroke issued its own PATCH, so the worst case was losing one in-flight
+  // request, not a whole unflushed burst. Best-effort flush on unmount AND on the page
+  // being hidden (covers a tab switch/close as well as an in-app navigation) — this cannot
+  // guarantee delivery on a hard process kill, but neither could the pre-PR per-keystroke
+  // PATCH in that same case.
+  useEffect(() => {
+    const flushAll = () => {
+      void statblockSaveQueueRef.current?.flushAll();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushAll();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      flushAll();
+    };
+  }, []);
 
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {

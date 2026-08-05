@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
 import { characters, combatants, encounters, encounterEvents, campaigns, auditLog } from '../../src/db/schema';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -365,6 +365,67 @@ describe('inline spell slots & character resources (issue #422)', () => {
     // `RequestUser.id` is always a string) without pinning to that incidental format.
     const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
     expect(rows.some((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor).startsWith(String(user.id)))).toBe(true);
+  });
+
+  // Issue #1909 review (Codex): the outer `getCombatantRowOrThrow` runs BEFORE the
+  // transaction starts — if the combatant is removed (a real DELETE, not soft) in that
+  // window, the character branch must not go on to write the character sheet and log a
+  // resource_changed event for a combatant no longer in the encounter using only the
+  // stale outer row. Simulate the race by wrapping the outer read so it deletes the
+  // combatant, exactly as a concurrent removeCombatant would, right after the outer read
+  // resolves but before the transaction below re-reads it.
+  it("a combatant removed between the outer read and the transaction aborts the write instead of updating an orphaned character sheet (Codex review)", async () => {
+    const user = { id: 1, username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'TOCTOU Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Goblin Ambush', status: 'active', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1 })
+      .returning()
+      .all();
+
+    const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+    const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...(args as [number, number]));
+      // Simulate a concurrent removeCombatant landing in the window between this outer
+      // read and the transaction below.
+      db.delete(combatants).where(eq(combatants.id, comb.id)).run();
+      return result;
+    });
+
+    try {
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(NotFoundException);
+
+      const cAfter = await charactersService.getRowOrThrow(c.id);
+      expect(JSON.parse(cAfter.resources).layOnHands.used).toBe(0);
+      const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+      expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own

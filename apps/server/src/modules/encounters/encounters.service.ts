@@ -8634,6 +8634,22 @@ export class EncountersService {
           // `updateCombatant` itself turns out to be a pre-existing exception (missing it
           // too), noted here rather than silently left unmentioned.
           this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+          // Issue #1909 review (Codex): re-read the COMBATANT row too, inside this same
+          // transaction — the outer `getCombatantRowOrThrow` above ran before this
+          // transaction started, so a `removeCombatant` (a real DELETE, not a soft one) in
+          // that window would otherwise leave this branch writing to the character's sheet
+          // and inserting a `resource_changed` event for a combatant no longer in the
+          // encounter, using only the stale outer row. Same TOCTOU class as the
+          // `assertCampaignWritableInTx` gap above; `updateCombatant`'s own transaction
+          // re-reads its combatant row the identical way (`:4499-4502`) after its own fresh
+          // encounter read, so this mirrors the established sibling shape. `row` (used below
+          // for the event detail and the idempotency claim's stored response body) is
+          // reassigned to this fresh row so a name change in the same window isn't lost.
+          const freshCombatant = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
+          if (!freshCombatant || freshCombatant.encounterId !== encounterId) {
+            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+          }
+          row = freshCombatant;
           const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
           if (!character) throw new NotFoundException(`No such character ${characterId}`);
 
@@ -8706,8 +8722,8 @@ export class EncountersService {
               encounterId,
               round: freshEncounter.round,
               type: 'resource_changed',
-              actor: combatant.name,
-              actorId: combatant.id,
+              actor: row.name,
+              actorId: row.id,
               target: null,
               targetId: null,
               detail: eventDetail,
@@ -8715,9 +8731,11 @@ export class EncountersService {
             })
             .run();
 
-          // `row` is the pre-fetched combatant snapshot: this branch never touches the
-          // `combatants` row itself (the resource lives on the linked character sheet), so
-          // there is nothing fresher to re-select here.
+          // `row` was reassigned to the fresh in-transaction re-read above (issue #1909
+          // review, Codex) — this branch never WRITES to the `combatants` row itself (the
+          // resource lives on the linked character sheet), but the re-read still confirms
+          // the combatant is still actually present before either the event or this claim
+          // body references it.
           if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
         });
         if (priorClaim) replayed = await resolveReplay(priorClaim);

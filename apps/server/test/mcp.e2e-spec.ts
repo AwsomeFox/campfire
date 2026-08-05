@@ -4205,6 +4205,60 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect((nonexistent.content as TextContent[])[0].text).toContain('404');
     });
 
+    // Review finding (Codex): REST/MCP parity counterpart to the controller's identical
+    // fix — the tool's viewer-role visibility precheck had no `allowArchived`, so on a
+    // paused/completed campaign `assertWritable` 403'd every member before `isVisibleTo`
+    // ever ran, reopening the hidden-encounter oracle keyed on campaign archival instead of
+    // role: a hidden encounter that exists 403'd, a nonexistent id still 404'd.
+    it("adjust_combatant_resource: a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id (issue #1909 review)", async () => {
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Archived Hidden Secrecy', hidden: true });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Archived Secrecy Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      expect((await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerClient = await mcpClient(viewerToken);
+        const realId = await viewerClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        });
+        const nonexistent = await viewerClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId: 999999999, combatantId, key: 'kiPoints', delta: 1 },
+        });
+
+        expect(realId.isError).toBe(true);
+        expect((realId.content as TextContent[])[0].text).toContain('404');
+        expect(nonexistent.isError).toBe(true);
+        expect((nonexistent.content as TextContent[])[0].text).toContain('404');
+
+        // The DM (who CAN see this hidden encounter) still hits the service's own
+        // transactional archived-campaign rejection for a fresh write.
+        const dmResult = await dmClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        });
+        expect(dmResult.isError).toBe(true);
+        expect((dmResult.content as TextContent[])[0].text).toContain('403');
+      } finally {
+        expect((await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
     // Issue #1643 — "verify what already works first": before this PR, exhaustion was
     // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
     // the level on a character sheet — set_character_conditions only adds/removes a bare
