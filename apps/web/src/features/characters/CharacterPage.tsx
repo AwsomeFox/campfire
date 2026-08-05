@@ -30,6 +30,7 @@ import { CharacterSheetNav } from './CharacterSheetNav';
 import { characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type {
+  ActionSpec,
   Attachment,
   Character,
   CharacterAction,
@@ -49,6 +50,8 @@ import {
   sortCheckCatalog,
   formatCheckBreakdown,
   restOptionsForAdapter,
+  inferActionSpecFromText,
+  isResolvableSpec,
 } from '@campfire/schema';
 import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
@@ -1593,6 +1596,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
 }
 
 function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCardProps & { roller: Roller }) {
+  const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
@@ -1640,6 +1644,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
 
   async function add() {
     if (!name.trim()) return;
+    const inferredSpec = inferActionSpecFromText(toHit.trim(), damage.trim(), kind.trim());
     const action: CharacterAction = {
       name: name.trim(),
       kind: kind.trim(),
@@ -1647,6 +1652,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       damage: damage.trim(),
       targetAc: targetAc.trim(),
       notes: notes.trim(),
+      ...(inferredSpec ? { spec: inferredSpec } : {}),
     };
     const ok = await saveActions([...character.actions, action], "Couldn't add the action.", `Added action ${action.name}`);
     if (ok) {
@@ -1657,13 +1663,35 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
 
   async function saveEdit() {
     if (editingIndex == null || !name.trim()) return;
+    const existingAction = character.actions[editingIndex];
+    const nextToHit = toHit.trim();
+    const nextDamage = damage.trim();
+    const nextKind = kind.trim();
+
+    let nextSpec: ActionSpec | undefined = existingAction?.spec;
+
+    if (!existingAction?.spec) {
+      nextSpec = inferActionSpecFromText(nextToHit, nextDamage, nextKind);
+    } else if (existingAction.spec.provenance?.source === 'sheet-inferred') {
+      const toHitChanged = nextToHit !== (existingAction.toHit ?? '');
+      const damageChanged = nextDamage !== (existingAction.damage ?? '');
+      const kindChanged = nextKind !== (existingAction.kind ?? '');
+      if (toHitChanged || damageChanged || kindChanged) {
+        nextSpec = inferActionSpecFromText(nextToHit, nextDamage, nextKind);
+      }
+    } else {
+      nextSpec = existingAction.spec;
+    }
+
     const action: CharacterAction = {
+      ...existingAction,
       name: name.trim(),
-      kind: kind.trim(),
-      toHit: toHit.trim(),
-      damage: damage.trim(),
+      kind: nextKind,
+      toHit: nextToHit,
+      damage: nextDamage,
       targetAc: targetAc.trim(),
       notes: notes.trim(),
+      spec: nextSpec,
     };
     const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
     const ok = await saveActions(next, "Couldn't save the action.", `Updated action ${action.name}`);
@@ -1754,6 +1782,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
         }
         const attackExpr = action.toHit ? toHitExpr(action.toHit, 'flat') : null;
         const dmgExpr = action.damage ? damageExpr(action.damage) : null;
+        const isResolvable = action.spec != null && isResolvableSpec(action.spec);
         return (
           <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
             <div className="flex-1 min-w-0">
@@ -1767,6 +1796,15 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                 {action.targetAc && (
                   <span className="tag tag-neutral text-[10px]" title="Target Armor Class">
                     vs {action.targetAc}
+                  </span>
+                )}
+                {isResolvable ? (
+                  <span className="tag tag-neutral text-[10px]" data-testid="action-one-tap-badge">
+                    {t('characters.actions.oneTapReady')}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400" data-testid="action-text-only-hint">
+                    {t('characters.actions.textOnly')}
                   </span>
                 )}
               </p>
