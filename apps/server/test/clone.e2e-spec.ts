@@ -523,6 +523,46 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(endedDetail.body.round).toBe(0);
   });
 
+  // Issue #1910 review (Codex, round 5): the combatant snapshot fields the clone insert
+  // DOES carry (initMod, ruleEntryId, sortOrder, characterId mapping) are baseline stats,
+  // not combat state — HP/initiative/conditions reset because THOSE are play progress, but
+  // a non-default speed snapshot must survive a clone the same way initMod already does.
+  // This matters more since e19d4f81 dropped the live-character fallback in getTurnWorkspace:
+  // a null combatant.speed now resolves straight to the adapter default with no second
+  // chance to recover the real value from the linked character, so a clone that dropped
+  // the snapshot would be a clean, permanent data loss rather than a masked one.
+  it('full clone carries a non-default combatant speed snapshot forward (issue #1910)', async () => {
+    const speedPatch = await dmAgent.patch(`/api/v1/characters/${heroId}`).send({ speed: 27 });
+    expect(speedPatch.status).toBe(200);
+    expect(speedPatch.body.speed).toBe(27);
+
+    try {
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Speed Snapshot Fight' });
+      expect(encRes.status).toBe(201);
+      const sourceEncounterId = encRes.body.id;
+      const heroCombatant = (await dmAgent.get(`/api/v1/encounters/${sourceEncounterId}`)).body.combatants.find(
+        (c: { characterId: number | null }) => c.characterId === heroId,
+      );
+      expect(heroCombatant).toBeDefined();
+      expect(heroCombatant.speed).toBe(27); // add-time snapshot taken from the just-patched character
+
+      const cloneRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Speed Snapshot Sequel' });
+      expect(cloneRes.status).toBe(201);
+      const cloneId = cloneRes.body.id;
+
+      const clonedEncs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/encounters`);
+      const clonedEncounter = clonedEncs.body.find((e: { name: string }) => e.name === 'Speed Snapshot Fight');
+      expect(clonedEncounter).toBeDefined();
+      const clonedDetail = await dmAgent.get(`/api/v1/encounters/${clonedEncounter.id}`);
+      const clonedHeroCombatant = clonedDetail.body.combatants.find((c: { name: string }) => c.name === heroCombatant.name);
+      expect(clonedHeroCombatant).toBeDefined();
+      expect(clonedHeroCombatant.speed).toBe(27); // must survive the clone, not reset to null
+    } finally {
+      // Restore source Hero so later tests (encounter auto-add) see the original null speed.
+      await dmAgent.patch(`/api/v1/characters/${heroId}`).send({ speed: null });
+    }
+  });
+
   it('template clone copies prep only and resets play state', async () => {
     const res = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/clone`)

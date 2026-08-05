@@ -32,6 +32,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     rpMax: 0,
     eac: null,
     kac: null,
+    speed: null,
     hpTemp: 0,
     hpBand: null,
     deathState: 'none',

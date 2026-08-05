@@ -586,6 +586,21 @@ export const Character = z.object({
   ac: z.number().int().nullable().default(null),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: movement speed in the adapter's movement unit (feet for 5e/PF2e; no
+  // 5e-specific naming since a future adapter may use meters/squares). Nullable, default
+  // null rather than a baked-in 30 — null means "unset", so this field itself can tell
+  // "a 30-speed PC" apart from "no speed on file yet". This value is snapshotted onto
+  // Combatant.speed at add time; both getTurnWorkspace's DISPLAY and
+  // ActionResolverService.resolveActionEconomyCost's spend/guard ENFORCEMENT resolve the
+  // turn-economy movement max the same way, through the shared `movementSlotMax`
+  // (encounters.logic.ts): the combatant's own snapshot, or — full stop — the adapter's
+  // movement-slot max (e.g. 30 ft for 5e's DND5E_ACTION_ECONOMY), never this field's live
+  // value — a null combatant snapshot can't distinguish "predates the column" from "the
+  // character had no speed set at add time" (the common case, since this field defaults
+  // null), so neither path falls through to this live value once a fight is running
+  // (round 4/5 review findings on PR #1980; see Combatant.speed's own doc). min(0): a
+  // homebrew "speed 0" (e.g. petrified) is valid; negative is not.
+  speed: z.number().int().min(0).nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(0).default(10),
   spCurrent: z.number().int().min(0).default(0),
@@ -10198,6 +10213,25 @@ export const Combatant = z.object({
   rpMax: z.number().int().min(0).nullable().default(0),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: add-time snapshot of the linked character's speed, mirroring the
+  // hp/death-state snapshot convention above — a mid-fight sheet edit must not
+  // retroactively change a running encounter's movement budget. Populated only for
+  // kind==='character' combatants at addCombatant time (and both bulk party auto-add
+  // paths, and campaign clone's combatant carry-forward); monsters/NPCs, combatants
+  // added before this column existed, AND a character with no speed set at add
+  // time (the common case — Character.speed defaults to null) all keep it null.
+  // Both getTurnWorkspace's DISPLAY and ActionResolverService.resolveActionEconomyCost's
+  // spend/guard ENFORCEMENT resolve a null snapshot straight to the adapter's movement
+  // max (e.g. 30 ft for 5e), through the shared `movementSlotMax` (encounters.logic.ts)
+  // — deliberately NOT falling through to the linked character's live speed, which
+  // would be unable to tell those cases apart from "genuinely unset at add time" and
+  // would silently un-freeze the snapshot for the common case (round 4 review finding
+  // on PR #1980). Routing both paths through the same function also closes a round-5
+  // finding: display and enforcement independently computing "snapshot or adapter
+  // default" drifted apart once the DISPLAY got a per-combatant value and the
+  // ENFORCEMENT still didn't, so a fast PC was told a number the spend guard wouldn't
+  // honor and a slow PC was allowed more than their own sheet said.
+  speed: z.number().int().min(0).nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.
   // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).

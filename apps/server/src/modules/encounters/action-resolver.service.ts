@@ -86,6 +86,7 @@ import {
   cascadeConcentrationLoss,
   concentrationCheckForDamage,
   enqueueConcentrationCheck,
+  movementSlotMax,
   type CombatantHpState,
 } from './encounters.logic';
 
@@ -242,6 +243,15 @@ export class ActionResolverService {
    * own {@link actionEconomyForAdapter} model doesn't declare, and that isn't the legendary slot
    * either. Refusing to invent a cap for an unrecognised key follows the same "refuse rather than
    * guess" rule this resolver already applies elsewhere.
+   *
+   * For the movement slot specifically, `max` is routed through {@link movementSlotMax} with
+   * `actor.speed` (the combatant's own add-time speed snapshot) rather than the adapter's flat
+   * constant unconditionally — issue #1910 round 5 review: `getTurnWorkspace` already showed a
+   * per-combatant movement number, but this spend/guard path still bounded every movement cost
+   * by the adapter default regardless of that snapshot, so a fast PC was told a higher number
+   * than the guard would honor and a slow PC was allowed more than their own sheet said. `actor`
+   * is always a full `combatants` row (fetched via `tx.select().from(combatants)` at every call
+   * site), so its `speed` column is already in hand here — no extra lookup needed.
    */
   private resolveActionEconomyCost(actor: typeof combatants.$inferSelect, adapter: RuleSystemAdapter, slot: string): ResolvedActionEconomyCost {
     if (slot === LEGENDARY_ACTION_SLOT) {
@@ -264,7 +274,9 @@ export class ActionResolverService {
       // Generated/default structured actions historically say "action"; PF2e's declared pool
       // is keyed "actions", so map the generic default to the adapter's primary action slot.
       (slot === 'action' ? model.slots.find((s) => s.kind === 'action') : undefined);
-    return declared ? { slot: declared.key, kind: declared.kind, max: declared.max } : { slot, kind: 'resource', max: null };
+    return declared
+      ? { slot: declared.key, kind: declared.kind, max: movementSlotMax(declared.kind, declared.max, actor.speed) }
+      : { slot, kind: 'resource', max: null };
   }
 
   private inlineStatblockHasLegendaryAction(actor: typeof combatants.$inferSelect): boolean {
