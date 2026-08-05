@@ -19,7 +19,6 @@ import {
   NEUTRAL_ACTION_ECONOMY,
   NEUTRAL_HP_MODEL,
   ruleSystemAdapter,
-  type OsrMechanicsProfile,
   type RuleSystemAdapter,
 } from '@campfire/schema';
 
