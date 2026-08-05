@@ -1653,13 +1653,14 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     }
 
     const action: CharacterAction = {
+      ...existingAction,
       name: name.trim(),
       kind: nextKind,
       toHit: nextToHit,
       damage: nextDamage,
       targetAc: targetAc.trim(),
       notes: notes.trim(),
-      ...(nextSpec ? { spec: nextSpec } : {}),
+      spec: nextSpec,
     };
     const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
     const ok = await saveActions(next, "Couldn't save the action.", `Updated action ${action.name}`);

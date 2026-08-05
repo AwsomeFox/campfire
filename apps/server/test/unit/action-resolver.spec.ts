@@ -332,6 +332,25 @@ describe('applyDamageModifiers — half on save + resistance', () => {
   });
 });
 
+describe('isResolvableSpec — fallback gate (no silent math)', () => {
+  it('attack with a bonus or ability is resolvable', () => {
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack', attack: { bonus: '+5' } }))).toBe(true);
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack', attack: { ability: 'STR' } }))).toBe(true);
+  });
+  it('attack with neither bonus nor ability is NOT resolvable (fall back to statblock)', () => {
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack' }))).toBe(false);
+  });
+  it('save is resolvable only with a real DC source', () => {
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'save', save: { dc: { kind: 'fixed', dc: 15 } } }))).toBe(true);
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'save' }))).toBe(false);
+  });
+  it("mode 'none' and a null spec never auto-resolve", () => {
+    expect(isResolvableSpec(ActionSpec.parse({ mode: 'none' }))).toBe(false);
+    expect(isResolvableSpec(null)).toBe(false);
+    expect(isResolvableSpec(undefined)).toBe(false);
+  });
+});
+
 describe('inferActionSpecFromText — sheet action spec inference (issue #1930)', () => {
   it('infers an attack spec from "+5" and "1d8+3 slashing"', () => {
     const spec = inferActionSpecFromText('+5', '1d8+3 slashing', '');
@@ -363,9 +382,17 @@ describe('inferActionSpecFromText — sheet action spec inference (issue #1930)'
     expect(isResolvableSpec(spec)).toBe(true);
   });
 
+  it('preserves negative flat damage modifiers ("1d4-1 poison")', () => {
+    const spec = inferActionSpecFromText('+5', '1d4-1 poison', '');
+    expect(spec).toBeDefined();
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d4', flat: -1, type: 'poison' }]);
+  });
+
   it('returns undefined for non-resolvable text or empty input', () => {
     expect(inferActionSpecFromText('', '', '')).toBeUndefined();
     expect(inferActionSpecFromText('versatile', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('', '3d6 fire', 'save')).toBeUndefined();
   });
 });
+
 

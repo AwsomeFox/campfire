@@ -1058,7 +1058,9 @@ export function isResolvableSpec(spec: ActionSpec | null | undefined): boolean {
 export function parseDamagePartsFromText(damageText?: string | null): DamagePart[] {
   const text = (damageText ?? '').trim();
   if (!text) return [];
-  const parts = text.split(/\s*[,;]\s*|\s+[+-]\s+/).map((p) => p.trim()).filter(Boolean);
+  // Split on component boundaries: commas, semicolons, " and ", or " + ".
+  // Minus signs ('-') are part of flat modifiers (e.g. "1d4-1" or "1d4 - 1") and are NOT component separators.
+  const parts = text.split(/\s*[,;]\s*|\s+and\s+|\s+\+\s+/i).map((p) => p.trim()).filter(Boolean);
   const out: DamagePart[] = [];
   for (const part of parts) {
     const diceMatch = /^((?:\d*d\d+(?:\s*[+-]\s*\d*d\d+)*))(?:\s*([+-]\s*\d+))?\s*(.*)$/i.exec(part);
@@ -1104,22 +1106,18 @@ export function inferActionSpecFromText(
 
   const damageParts = parseDamagePartsFromText(damageText);
 
-  // Check for save DC in toHit (e.g. "DC 15", "DC 14 DEX", "DC15") or kind ("save")
+  // Check for save DC in toHit (e.g. "DC 15", "DC 14 DEX", "DC15"). Requires explicit DC text.
   const saveDcMatch = /\bDC\s*(\d{1,2})(?:\s*([A-Za-z]{3}))?/i.exec(toHitText);
-  if (saveDcMatch || kindText === 'save') {
-    let dcVal = 10;
-    let ability = '';
-    if (saveDcMatch) {
-      dcVal = Number.parseInt(saveDcMatch[1], 10);
-      ability = (saveDcMatch[2] ?? '').toUpperCase();
-    }
+  if (saveDcMatch) {
+    const dcVal = Number.parseInt(saveDcMatch[1], 10);
+    const ability = (saveDcMatch[2] ?? '').toUpperCase();
     const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
       ? {
           failure: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' },
           success: { damage: [], halfDamage: true, healing: '', tempHp: '', effects: [], text: '' },
         }
       : {};
-    const spec = ActionSpec.parse({
+    const parsed = ActionSpec.safeParse({
       mode: 'save',
       save: { ability, dc: { kind: 'fixed', dc: dcVal } },
       cost: { slot: 'action', count: 1 },
@@ -1127,7 +1125,7 @@ export function inferActionSpecFromText(
       outcomes,
       provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
     });
-    return isResolvableSpec(spec) ? spec : undefined;
+    return parsed.success && isResolvableSpec(parsed.data) ? parsed.data : undefined;
   }
 
   // Attack mode: extract attack bonus from toHit (e.g. "+5", "5", "-1", "+0", "1d20+5", "d20+5")
@@ -1159,7 +1157,7 @@ export function inferActionSpecFromText(
     const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
       ? { hit: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' } }
       : {};
-    const spec = ActionSpec.parse({
+    const parsed = ActionSpec.safeParse({
       mode: 'attack',
       attack: { bonus: attackBonus, ability: '', proficient: true, vs: 'ac' },
       cost: { slot: 'action', count: 1 },
@@ -1167,7 +1165,7 @@ export function inferActionSpecFromText(
       outcomes,
       provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
     });
-    return isResolvableSpec(spec) ? spec : undefined;
+    return parsed.success && isResolvableSpec(parsed.data) ? parsed.data : undefined;
   }
 
   return undefined;
