@@ -184,7 +184,7 @@ describe('action resolver (real SQLite, service layer)', () => {
 
   function addInventoryItem(
     orm: ReturnType<typeof build>['orm'],
-    opts: { campaignId: number; characterId: number; equipped: boolean; equipSlot?: string | null; equippedAction?: unknown },
+    opts: { campaignId: number; characterId: number; name?: string; equipped: boolean; equipSlot?: string | null; equippedAction?: unknown },
   ) {
     const ts = new Date().toISOString();
     const [row] = orm
@@ -193,7 +193,7 @@ describe('action resolver (real SQLite, service layer)', () => {
         campaignId: opts.campaignId,
         ownerType: 'character',
         characterId: opts.characterId,
-        name: 'Dagger',
+        name: opts.name ?? 'Dagger',
         qty: 1,
         equipped: opts.equipped,
         equipSlot: opts.equipSlot ?? null,
@@ -219,6 +219,16 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(equippedAction.name).toBe('Dagger');
     expect(equippedAction.mode).toBe('attack');
     expect(equippedAction.resolvable).toBe(true);
+  });
+
+  it('#1960: equipped item action source preserves long item names up to 200 chars', () => {
+    const { orm, service, campaignId, encounterId, actor, aliceChar } = seed();
+    const longItemName = 'Longsword of Extraordinary Ancient Dragon Slaying and Arcane Might';
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, name: longItemName, equipped: true, equipSlot: 'main-hand', equippedAction: dagger });
+
+    const list = service.listUsableActions(encounterId, actor, alice, 'player');
+    const equippedAction = list[3];
+    expect(equippedAction.source).toBe(`equipped: ${longItemName}`);
   });
 
   it('#1326: unequipping the item removes its action from listUsableActions', () => {
