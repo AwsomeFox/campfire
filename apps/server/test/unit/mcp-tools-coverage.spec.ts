@@ -1,5 +1,7 @@
 import { McpToolsService } from '../../src/modules/mcp/mcp-tools';
 import type { RequestUser } from '../../src/common/user.types';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 describe('McpToolsService coverage unit tests', () => {
   const user: RequestUser = {
@@ -168,6 +170,31 @@ describe('McpToolsService coverage unit tests', () => {
    * report a band the payload does not contain. `generate_encounter` already got this right;
    * `preview_encounter` did not, so both are pinned here rather than only the one that broke.
    */
+  /**
+   * Issue #1928, fifth round on this one claim. The first four corrections each fixed the
+   * copy that was quoted and left another surface behind: the web catalog, the component's
+   * inline fallback, `resolve_action`'s description, `preview_encounter`'s. The fifth was
+   * the SCHEMA JSDoc — the thing a downstream TypeScript consumer actually reads on hover,
+   * and the one surface no test looked at. Pin it here alongside the tool descriptions so
+   * "the docs and the registered descriptions agree" is one assertion, not a habit.
+   */
+  it('the ActionResolveResult schema docs do not claim the unsupported flag means 5e math ran', () => {
+    const source = readFileSync(
+      resolve(__dirname, '../../../../packages/schema/src/action-resolver.ts'),
+      'utf8',
+    );
+    const block = source.slice(
+      source.indexOf('Issue #1928: whether the resolver'),
+      source.indexOf('systemMathSupported: z.boolean()'),
+    );
+    expect(block.length).toBeGreaterThan(200);
+    // Whitespace-tolerant: this is a JSDoc block, so any phrase can be split across a line
+    // wrap by ` * `. A literal-space regex here would fail on formatting rather than meaning.
+    expect(block).toMatch(/UNAUDITED[\s*]+end-to-end/);
+    expect(block).toMatch(/OSR|Open Legend/);
+    expect(block).not.toMatch(/it only tells a caller the numbers it\s*\n?\s*\*?\s*just got are 5e-shaped/);
+  });
+
   it.each(['generate_encounter', 'preview_encounter'])(
     '%s does not describe the reported difficulty itself as 5e-shaped',
     (toolName) => {

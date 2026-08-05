@@ -803,12 +803,19 @@ export const ActionResolveResult = z.object({
    * active rule system. `true` for 5e and for an empty/unrecognized slug (the same 5e fallback
    * combat math already uses elsewhere); `false` for a registered adapter that has not declared
    * {@link ResolverAdapter.resolverMath} (PF2e, OSR, Open Legend, …). Defaults to `true` so a
-   * payload shaped before this field existed keeps parsing — every system that DID parse before
-   * this field existed was, in fact, run through the 5e-shaped math this flag is naming.
+   * payload shaped before this field existed keeps parsing — before it, no caller was told
+   * anything about audit status at all, so `true` is the least-surprising default rather than a
+   * claim about which maths that payload ran through.
    *
    * Label, don't block: `false` never refuses or alters resolution (see
-   * {@link resolverImplementsSystemMath}'s doc comment) — it only tells a caller the numbers it
-   * just got are 5e-shaped, not audited for the table's own rules.
+   * {@link resolverImplementsSystemMath}'s doc comment) — it marks the system UNAUDITED
+   * end-to-end, and does NOT say which maths ran. Some adapters supply their own
+   * {@link ResolverAdapter.resolveAttack} (OSR compares against descending AC, Open Legend
+   * rolls an exploding pool) and are still reported `false` because the combined attack/save
+   * profile is unaudited — so for those, the numbers really are the system's own and telling a
+   * caller they are 5e-shaped would push it to discount a result that was right for the table.
+   * Read `mathProfile` for what actually executed: it names the audited profile in force, and
+   * is null otherwise.
    */
   systemMathSupported: z.boolean().default(true),
   /**
