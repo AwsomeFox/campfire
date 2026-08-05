@@ -126,16 +126,9 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     const preview = mode === 'guided' ? guidedPreview : advancedPreview;
 
     function switchToAdvanced() {
-      // Refuse the switch while a per-field JSON box is unparseable — the mirror of what
-      // `switchToGuided` already does (review). `buildProposalDraftPayload` records the field
-      // error but leaves `data[key]` at the value seeded from the working payload, so
-      // serializing that best-effort draft would replace the reviewer's half-typed `stats` /
-      // `skills` / `linkedEncounters` text with the ORIGINAL value — and switching back
-      // re-seeds guided state from the raw text, so the typed text would be gone from both
-      // modes with nothing said. Only the JSON boxes block: a scalar field error is
-      // recoverable in raw mode, which is often exactly why someone switches.
-      // Narrowed to a genuine PARSE failure, and it shows the error (review — the first
-      // version of this guard was wrong in both directions).
+      // Refuse the switch only when a per-field JSON box genuinely fails to PARSE, and show
+      // the error when refusing (review — the first version of this guard was wrong in both
+      // directions).
       //
       // Only unparseable text is lossy: there, `data[key]` still holds the value seeded from
       // the working payload, so serializing the draft would replace what the reviewer typed.
