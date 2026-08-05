@@ -9,7 +9,7 @@ import type { Combatant, HpBand } from '@campfire/schema';
 
 export type TokenDetailMode = 'full' | 'minimal' | 'off';
 
-export const TOKEN_DETAIL_STORAGE_KEY = 'campfire.encounters.token-detail';
+export const TOKEN_DETAIL_STORAGE_KEY = 'cf.encounters.tokenDetail';
 
 /** The exact four visual fractions already used by the redacted roster bar. */
 export const HP_BAND_FRACTION: Record<HpBand, number> = {

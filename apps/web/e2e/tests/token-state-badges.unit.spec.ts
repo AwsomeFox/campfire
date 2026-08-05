@@ -131,6 +131,7 @@ test.describe('token death and detail mode (issue #1905)', () => {
   });
 
   test('persists only valid DM detail modes and safely defaults when storage fails', () => {
+    expect(TOKEN_DETAIL_STORAGE_KEY).toBe('cf.encounters.tokenDetail');
     const values = new Map<string, string>();
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,

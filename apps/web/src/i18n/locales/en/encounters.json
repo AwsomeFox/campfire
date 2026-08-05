@@ -118,7 +118,13 @@
         "dead": "Dead",
         "concentration": "Concentrating: {{effect}}",
         "conditions": "Conditions for {{name}}: {{conditions}}",
-        "moreConditions": "{{count}} more conditions for {{name}}"
+        "moreConditions": "{{count}} more conditions for {{name}}",
+        "moreConditions_zero": "No more conditions for {{name}}",
+        "moreConditions_one": "{{count}} more condition for {{name}}",
+        "moreConditions_two": "{{count}} more conditions for {{name}}",
+        "moreConditions_few": "{{count}} more conditions for {{name}}",
+        "moreConditions_many": "{{count}} more conditions for {{name}}",
+        "moreConditions_other": "{{count}} more conditions for {{name}}"
       },
       "derivatives": {
         "processing": "Preparing faster map sizes — showing the full-size board for now.",
