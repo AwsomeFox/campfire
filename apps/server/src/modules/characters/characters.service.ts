@@ -62,6 +62,7 @@ import type {
   CheckRequestResolution,
   AdapterResourceDef,
   DdbCharacterImport,
+  DdbImportResult,
   ResourcePatch,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
@@ -90,7 +91,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
+import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, summarizeDdbImport, computeDdbActionEntryCount, type DdbFetch } from './ddb-importer';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
@@ -937,6 +938,11 @@ export class CharactersService {
    * (an e2e test points this at an in-process fake server, mirroring the Open5e `url`
    * override); otherwise the live service is used. `fetchImpl` is injectable for the same
    * reason. Neither is exposed on the API surface.
+   *
+   * Issue #1903: the mapper now also carries attacks/spells (`actions`) and `spellSlots`, so
+   * the created character can take a turn without hand re-entry. The result is the created
+   * character PLUS a summary (counts + any text-only entries) so REST/MCP callers can show
+   * the DM what needs a manual touch-up rather than discovering it only inside the sheet.
    */
   async importFromDdb(
     campaignId: number,
@@ -944,7 +950,7 @@ export class CharactersService {
     user: RequestUser,
     role: Role,
     fetchImpl?: DdbFetch,
-  ): Promise<Character> {
+  ): Promise<DdbImportResult> {
     // System gate before any network/parse work — incompatible campaigns never reach DDB.
     const [campaign] = await this.db
       .select({ ruleSystem: campaigns.ruleSystem })
@@ -965,7 +971,10 @@ export class CharactersService {
     // source id we actually fetched so the stored ddbId is authoritative even if the sheet's
     // own `data.id` was absent.
     create.ddbId = ddbId;
-    return this.create(campaignId, create, user, role);
+    const entriesOmitted = Math.max(0, computeDdbActionEntryCount(data) - 100);
+    const summary = summarizeDdbImport(create, entriesOmitted);
+    const character = await this.create(campaignId, create, user, role);
+    return { character, summary };
   }
 
   async create(campaignId: number, input: CharacterCreateInput, user: RequestUser, role: Role): Promise<Character> {

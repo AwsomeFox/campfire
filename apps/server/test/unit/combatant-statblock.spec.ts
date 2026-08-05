@@ -63,6 +63,54 @@ describe('combatant statblock expansion (issue #425)', () => {
     expect(action.notes).toContain('two claw');
   });
 
+  // Regression for a PR #1950 review finding: a description containing a "DC N Ability"
+  // phrase is a real, intentional fallback for callers with no structured save field at all
+  // (e.g. compendium monster prose) — confirm it still resolves when nothing else opts out.
+  it('infers a save purely from description text when no structured field is given', () => {
+    const action = expandRawStatblockAction(
+      { name: 'Prose-Only Save', desc: 'Each target must make a DC 14 Wisdom saving throw.' },
+      'action',
+    );
+    expect(isResolvableSpec(action.spec)).toBe(true);
+    expect(action.spec?.mode).toBe('save');
+  });
+
+  // Regression for the DDB importer's explicit opt-out signal (issue #1903 review, PR #1950
+  // round 12 — replacing round 10's overloading of `savingThrow: null`): `noSaveInference`
+  // suppresses ALL save inference, including the description-text fallback, even when the
+  // description itself contains a matching "DC N Ability" phrase.
+  it('noSaveInference:true suppresses the description-text fallback entirely', () => {
+    const action = expandRawStatblockAction(
+      { name: 'Deliberately Unresolvable', desc: 'Each target must make a DC 14 Wisdom saving throw.', noSaveInference: true },
+      'action',
+    );
+    expect(isResolvableSpec(action.spec)).toBe(false);
+  });
+
+  // Regression for a PR #1950 round-12 review finding: round 10's original fix treated an
+  // explicit `null` on EITHER `savingThrow` or `saving_throw` as "suppress all inference,"
+  // which broke callers (open5e/pf2e importers) that spread raw statblock data verbatim and
+  // may set one of those two keys to `null` as "no structured value here" while a DIFFERENT
+  // fallback (a numeric `save_dc`, or the description text) still holds the real answer.
+  // `noSaveInference` fixes this by using a dedicated field instead of overloading these two.
+  it('an explicit null on saving_throw does not block a save_dc fallback on the same entry (round-12 fix)', () => {
+    const action = expandRawStatblockAction(
+      { name: 'Partial Statblock Save', desc: 'Failed prose parse.', saving_throw: null, save_dc: 14, save_ability: 'Wisdom' },
+      'action',
+    );
+    expect(isResolvableSpec(action.spec)).toBe(true);
+    expect(action.spec?.mode).toBe('save');
+  });
+
+  it('an explicit null on saving_throw does not block the description-text fallback on the same entry (round-12 fix)', () => {
+    const action = expandRawStatblockAction(
+      { name: 'Partial Statblock Save Prose', desc: 'Each target must make a DC 14 Wisdom saving throw.', saving_throw: null },
+      'action',
+    );
+    expect(isResolvableSpec(action.spec)).toBe(true);
+    expect(action.spec?.mode).toBe('save');
+  });
+
   it('expands a full fixture statblock via the adapter', () => {
     const data = {
       actions: [
