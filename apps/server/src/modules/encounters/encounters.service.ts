@@ -3669,6 +3669,15 @@ export class EncountersService {
       }
       npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
       npcDispositionSnapshot = source.npcDispositionSnapshot;
+      // A duplicate starts fresh, but it must retain the source's configured defenses
+      // and pool capacities. In particular, manual Starfinder combatants do not have a
+      // rule entry from which EAC/KAC, stamina, or resolve can be re-derived.
+      eac = source.eac;
+      kac = source.kac;
+      spMax = source.spMax;
+      spCurrent = source.spMax;
+      rpMax = source.rpMax;
+      rpCurrent = source.rpMax;
     }
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
@@ -3788,18 +3797,18 @@ export class EncountersService {
         hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
-      if (mapped.stamina != null && typeof mapped.stamina === 'number') {
+      if (input.duplicateOfCombatantId === undefined && mapped.stamina != null && typeof mapped.stamina === 'number') {
         spMax = mapped.stamina;
         spCurrent = mapped.stamina;
       }
-      if (mapped.resolve != null && typeof mapped.resolve === 'number') {
+      if (input.duplicateOfCombatantId === undefined && mapped.resolve != null && typeof mapped.resolve === 'number') {
         rpMax = mapped.resolve;
         rpCurrent = mapped.resolve;
       }
-      if (mapped.eac != null && typeof mapped.eac === 'number') {
+      if (input.duplicateOfCombatantId === undefined && mapped.eac != null && typeof mapped.eac === 'number') {
         eac = mapped.eac;
       }
-      if (mapped.kac != null && typeof mapped.kac === 'number') {
+      if (input.duplicateOfCombatantId === undefined && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
       if (input.initMod === undefined) {
