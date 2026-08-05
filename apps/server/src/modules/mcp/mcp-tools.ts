@@ -3677,14 +3677,18 @@ export class McpToolsService {
       server,
       user,
       'update_campaign_status',
-      'DM only: update campaign state — status (active|paused|completed), current location, and/or danger level. ' +
+      'DM only: update campaign state — status (active|paused|completed), current location, and/or campaign-wide ' +
+        'danger level (a persistent tone/challenge backdrop, not a live threat state — see the `dangerLevel` arg). ' +
         '(sessionCount and latestSessionNumber are intentionally NOT settable here — they\'re denormalized ' +
         'stats auto-recomputed by add_session_recap/session delete/restore, not free-form fields.)',
       {
         campaignId: CampaignIdArg,
         status: z.enum(['active', 'paused', 'completed']).optional().describe('Campaign status'),
         currentLocationId: Id.nullable().optional().describe('Current location id (null to clear)'),
-        dangerLevel: DangerLevel.optional().describe('low | moderate | high | deadly'),
+        dangerLevel: DangerLevel.optional().describe(
+          'low | moderate | high | deadly — campaign-wide narrative tone/challenge backdrop, not a ' +
+            'live threat state, encounter difficulty, or HP status (issue #871).',
+        ),
       },
       async ({ campaignId, status, currentLocationId, dangerLevel }) => {
         // allowArchived: this is the un-archive path (status back to 'active') —
