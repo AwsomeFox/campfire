@@ -610,7 +610,7 @@ export function CombatantRow({
             />
           )}
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (
-          <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+          <div id={`combatant-${combatant.id}-conditions`} tabIndex={-1} style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditionInstances!.map((inst) => {
               const sourceCombatantName = conditionSourceLabel(inst.sourceCombatantId, conditionSourceOptions);
               const details = [
@@ -711,7 +711,7 @@ export function CombatantRow({
             })}
           </div>
         ) : combatant.conditions.length > 0 ? (
-          <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+          <div id={`combatant-${combatant.id}-conditions`} tabIndex={-1} style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditions.map((cond) => (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
                 {cond}

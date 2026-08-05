@@ -19,7 +19,7 @@ import {
 } from '../../src/features/encounters/tokenStateBadges';
 import { hpBandFor } from '../../src/features/screen/playerSafe';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 test.describe('token HP state (issue #1905)', () => {
   test('uses exact HP only when the role-shaped combatant supplies it', () => {
@@ -147,7 +147,7 @@ test.describe('token death and detail mode (issue #1905)', () => {
   });
 
   test('loads a saved detail mode before campaign access has resolved', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toContain("readTokenDetailMode(typeof localStorage === 'undefined' ? null : localStorage)");
     expect(source).not.toContain("effectiveIsDm ? readTokenDetailMode");
   });
