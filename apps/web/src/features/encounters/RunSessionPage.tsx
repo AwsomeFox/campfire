@@ -3004,7 +3004,9 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('encounters.run.rollInitiative')}
+                  {needsInitiativeCount > 0
+                    ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                    : t('encounters.run.rollInitiative')}
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
@@ -3044,7 +3046,7 @@ export default function RunSessionPage() {
             {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
-                    keep {t('encounters.run.rollInitiative')} reachable so the DM can fill them (issue #54).
+                    keep Roll initiative reachable so the DM can fill them (issue #54).
                     Already-set initiatives are left untouched server-side. Once every
                     combatant has a value, disable the control rather than firing a no-op
                     roll (issue #702), and surface how many still need rolling. */}
@@ -3054,7 +3056,9 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('encounters.run.rollInitiative')}
+                  {needsInitiativeCount > 0
+                    ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                    : t('encounters.run.rollInitiative')}
                 </Btn>
                 <Btn
                   data-testid="encounter-header-next-turn"

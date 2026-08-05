@@ -13,7 +13,7 @@ const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSe
 test.describe('Reopen encounter confirmation (issues #493 / #466)', () => {
   test('requires hp resync choices instead of warning about silent overwrite', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/title=\{t\('(?:encounters\.)?run\.reopenDialog\.title'\)\}/);
+    expect(source).toMatch(/title=\{t\('encounters\.run\.reopenDialog\.title'\)\}/);
     expect(source).toMatch(/data-testid="hp-resync-conflicts"/);
     expect(source).toMatch(/pull_sheet/);
     expect(source).toMatch(/keep_combatant/);

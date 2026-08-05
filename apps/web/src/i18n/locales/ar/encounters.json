@@ -135,6 +135,7 @@
     },
     "run": {
       "rollInitiative": "Roll initiative",
+      "rollRemaining": "Roll remaining ({{count}})",
       "start": "Start",
       "nextTurn": "Next turn →",
       "end": "End",

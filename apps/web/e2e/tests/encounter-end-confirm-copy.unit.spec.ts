@@ -13,7 +13,7 @@ const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSe
 
 /** Body string on the End ConfirmDialog (not Delete / Reopen). */
 function endConfirmBody(source: string): string {
-  const bodyMatch = source.match(/body=\{t\('(?:encounters\.)?run\.endDialog\.body'\)\}/);
+  const bodyMatch = source.match(/body=\{t\('encounters\.run\.endDialog\.body'\)\}/);
   expect(bodyMatch, 'End ConfirmDialog body string').toBeTruthy();
   // To test the exact English copy, read the locale JSON
   const enLocale = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/en/encounters.json'), 'utf8'));

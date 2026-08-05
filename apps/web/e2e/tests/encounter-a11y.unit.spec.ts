@@ -24,7 +24,7 @@ test.describe('encounter accessibility (#476)', () => {
 
   test('Add Combatant panel uses WAI-ARIA tabs with roving tabindex', () => {
     expect(runSession).toMatch(/data-testid="add-combatant-tabs"/);
-    expect(runSession).toMatch(/role="tablist"[\s\S]*aria-label=\{t\('(?:encounters\.)?run\.addCombatant'\)\}/);
+    expect(runSession).toMatch(/role="tablist"[\s\S]*aria-label=\{t\('encounters\.run\.addCombatant'\)\}/);
     expect(runSession).toMatch(/role="tab"/);
     expect(runSession).toMatch(/aria-selected=\{selectedTab\}/);
     expect(runSession).toMatch(/aria-controls=\{`add-combatant-panel-\$\{t\}`\}/);
