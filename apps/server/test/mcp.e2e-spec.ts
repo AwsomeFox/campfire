@@ -711,12 +711,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       }),
     ) as { id: number };
 
-    await dmClient.callTool({
+    const addCombatantRaw = await dmClient.callTool({
       name: 'add_combatant',
       arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Manticore', hpMax: 40 },
     });
-    await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
-    await dmClient.callTool({ name: 'start_encounter', arguments: { encounterId: enc.id } });
+    expect(addCombatantRaw.isError).toBeFalsy();
+    const rollInitiativeRaw = await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    expect(rollInitiativeRaw.isError).toBeFalsy();
+    // The catalogued/registered MCP tool is `begin_encounter`, not `start_encounter` (which
+    // does not exist — see mcp-catalog.ts and every other MCP encounter-lifecycle test in this
+    // file). Calling a nonexistent tool name returns an unknown-tool error and never actually
+    // starts the encounter; assert isError is falsy so a regression here fails loudly instead
+    // of letting `set_escalation_die` below silently exercise a still-`preparing` encounter.
+    const beginEncounterRaw = await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    expect(beginEncounterRaw.isError).toBeFalsy();
 
     // DM can update escalation die — assert the write actually succeeded and returned the
     // requested override, not just that the (possibly-error) JSON payload is truthy.
