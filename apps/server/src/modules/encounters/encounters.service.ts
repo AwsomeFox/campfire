@@ -3615,7 +3615,7 @@ export class EncountersService {
     let initMod = input.initMod ?? 0;
     let initBreakdown = manualInitiativeBreakdown(adapter, initMod);
     const initModel = initiativeModelForAdapter(adapter);
-    const initiativeGroup =
+    let initiativeGroup =
       input.initiativeGroup !== undefined
         ? input.initiativeGroup
         : initModel.mode === 'group'
@@ -3651,6 +3651,9 @@ export class EncountersService {
     let eac: number | null = null;
     let kac: number | null = null;
     let statblockJson: string | null = null;
+    let tokenSize = input.tokenSize ?? 'medium';
+    let duplicateRuleEntryId: number | undefined;
+    let duplicateStatblockJson: string | null = null;
 
     if (input.duplicateOfCombatantId !== undefined) {
       const [source] = await this.db
@@ -3667,6 +3670,16 @@ export class EncountersService {
       if (input.npcId !== undefined || input.characterId !== undefined) {
         throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
       }
+      name ??= source.name;
+      hpMax ??= source.hpMax ?? undefined;
+      if (input.initMod === undefined) {
+        initMod = source.initMod;
+        initBreakdown = manualInitiativeBreakdown(adapter, initMod);
+      }
+      if (input.initiativeGroup === undefined) initiativeGroup = source.initiativeGroup;
+      if (input.tokenSize === undefined) tokenSize = source.tokenSize as TokenSize;
+      duplicateRuleEntryId = source.ruleEntryId ?? undefined;
+      duplicateStatblockJson = source.statblockJson;
       npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
       npcDispositionSnapshot = source.npcDispositionSnapshot;
       // A duplicate starts fresh, but it must retain the source's configured defenses
@@ -3778,13 +3791,14 @@ export class EncountersService {
         initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
         initMod = initBreakdown.modifier;
       }
-    } else if (input.ruleEntryId !== undefined) {
+    } else if (input.ruleEntryId !== undefined || duplicateRuleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
       // real rule_entries row — 400 rather than silently dropping it and inserting a
       // combatant with a dangling reference.
-      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, input.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
+      const requestedRuleEntryId = input.ruleEntryId ?? duplicateRuleEntryId!;
+      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, requestedRuleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       if (!entry) {
-        throw new BadRequestException(`Rule entry ${input.ruleEntryId} not found`);
+        throw new BadRequestException(`Rule entry ${requestedRuleEntryId} not found`);
       }
       ruleEntryId = entry.id;
       name = name ?? entry.name;
@@ -3811,7 +3825,7 @@ export class EncountersService {
       if (input.duplicateOfCombatantId === undefined && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
-      if (input.initMod === undefined) {
+      if (input.initMod === undefined && input.duplicateOfCombatantId === undefined) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
@@ -3853,6 +3867,8 @@ export class EncountersService {
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
+    } else if (duplicateStatblockJson !== null) {
+      statblockJson = duplicateStatblockJson;
     } else if (
       input.kind === 'monster' &&
       characterId === null &&
@@ -3933,7 +3949,7 @@ export class EncountersService {
             conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
             npcIdentitySourceId,
-            tokenSize: input.tokenSize ?? 'medium',
+            tokenSize,
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })

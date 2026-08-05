@@ -3622,6 +3622,44 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(duplicate.body).toMatchObject({ eac: 17, kac: 19, spCurrent: 8, spMax: 8, rpCurrent: 4, rpMax: 4 });
   });
 
+  it('derives manual combatant defaults from the duplicate source for REST and MCP callers', async () => {
+    const server = ctx.app.getHttpServer();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({
+        kind: 'monster',
+        name: 'API duplicate source',
+        hpMax: 27,
+        initMod: 4,
+        tokenSize: 'large',
+        statblock: {
+          ac: 16,
+          abilityScores: { STR: 18, DEX: 14 },
+          actions: [],
+          resources: { battery: 3 },
+          spellSlots: {},
+          traits: [],
+          notes: 'Authored source statblock',
+        },
+      });
+    expect(source.status).toBe(201);
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({
+      name: 'API duplicate source',
+      hpCurrent: 27,
+      hpMax: 27,
+      initMod: 4,
+      tokenSize: 'large',
+      statblock: { ac: 16, resources: { battery: 3 }, notes: 'Authored source statblock' },
+    });
+  });
+
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
