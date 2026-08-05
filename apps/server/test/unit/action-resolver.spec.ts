@@ -19,6 +19,7 @@ import {
   pf2eProficiencyBonus,
   resolveAttackForAdapter,
   halveDamage,
+  inferActionSpecFromText,
   isResolvableSpec,
   parseSignedBonus,
   pickOutcomeBranch,
@@ -331,21 +332,40 @@ describe('applyDamageModifiers — half on save + resistance', () => {
   });
 });
 
-describe('isResolvableSpec — fallback gate (no silent math)', () => {
-  it('attack with a bonus or ability is resolvable', () => {
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack', attack: { bonus: '+5' } }))).toBe(true);
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack', attack: { ability: 'STR' } }))).toBe(true);
+describe('inferActionSpecFromText — sheet action spec inference (issue #1930)', () => {
+  it('infers an attack spec from "+5" and "1d8+3 slashing"', () => {
+    const spec = inferActionSpecFromText('+5', '1d8+3 slashing', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d8', flat: 3, type: 'slashing' }]);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
   });
-  it('attack with neither bonus nor ability is NOT resolvable (fall back to statblock)', () => {
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'attack' }))).toBe(false);
+
+  it('infers an attack spec from bare bonus with no damage', () => {
+    const spec = inferActionSpecFromText('+5', '', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
   });
-  it('save is resolvable only with a real DC source', () => {
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'save', save: { dc: { kind: 'fixed', dc: 15 } } }))).toBe(true);
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'save' }))).toBe(false);
+
+  it('infers a save spec from "DC 15" and "3d6 fire"', () => {
+    const spec = inferActionSpecFromText('DC 15', '3d6 fire', 'spell');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('save');
+    expect(spec?.save.dc.dc).toBe(15);
+    expect(spec?.outcomes.failure?.damage).toEqual([{ formula: '3d6', flat: 0, type: 'fire' }]);
+    expect(spec?.outcomes.success?.halfDamage).toBe(true);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
   });
-  it("mode 'none' and a null spec never auto-resolve", () => {
-    expect(isResolvableSpec(ActionSpec.parse({ mode: 'none' }))).toBe(false);
-    expect(isResolvableSpec(null)).toBe(false);
-    expect(isResolvableSpec(undefined)).toBe(false);
+
+  it('returns undefined for non-resolvable text or empty input', () => {
+    expect(inferActionSpecFromText('', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('versatile', '', '')).toBeUndefined();
   });
 });
+

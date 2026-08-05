@@ -1052,6 +1052,128 @@ export function isResolvableSpec(spec: ActionSpec | null | undefined): boolean {
 }
 
 /**
+ * Parse damage text (e.g. "1d8+3 slashing", "2d6 fire + 1d4 cold", "5 fire") into typed {@link DamagePart}s (issue #1930).
+ * Preserves the invariant that `formula` contains dice ONLY (e.g. "1d8") and `flat` contains the modifier (e.g. 3).
+ */
+export function parseDamagePartsFromText(damageText?: string | null): DamagePart[] {
+  const text = (damageText ?? '').trim();
+  if (!text) return [];
+  const parts = text.split(/\s*[,;]\s*|\s+[+-]\s+/).map((p) => p.trim()).filter(Boolean);
+  const out: DamagePart[] = [];
+  for (const part of parts) {
+    const diceMatch = /^((?:\d*d\d+(?:\s*[+-]\s*\d*d\d+)*))(?:\s*([+-]\s*\d+))?\s*(.*)$/i.exec(part);
+    if (diceMatch) {
+      const formula = diceMatch[1].replace(/\s+/g, '');
+      const signStr = diceMatch[2] ? diceMatch[2].replace(/\s+/g, '') : '';
+      const flat = signStr ? Number.parseInt(signStr, 10) : 0;
+      const type = (diceMatch[3] ?? '').trim().toLowerCase();
+      if (formula) {
+        out.push({ formula, flat: Number.isFinite(flat) ? flat : 0, type });
+        continue;
+      }
+    }
+    const flatMatch = /^([+-]?\d+)\s*(.*)$/i.exec(part);
+    if (flatMatch) {
+      const flat = Number.parseInt(flatMatch[1], 10);
+      const type = (flatMatch[2] ?? '').trim().toLowerCase();
+      if (Number.isFinite(flat)) {
+        out.push({ formula: '', flat, type });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Infer a structured {@link ActionSpec} from freeform sheet action text (`toHit`, `damage`, `kind`).
+ * Surfaced for web-authored attack editing and DDB/compendium imports (issue #1930).
+ *
+ * Parses text like "+5" and "1d8+3 slashing" into an ActionSpec with `provenance.source = 'sheet-inferred'`.
+ * Returns `undefined` when the text cannot be resolved into a valid, resolvable spec.
+ */
+export function inferActionSpecFromText(
+  toHit?: string | null,
+  damage?: string | null,
+  kind?: string | null,
+): ActionSpec | undefined {
+  const toHitText = (toHit ?? '').trim();
+  const damageText = (damage ?? '').trim();
+  const kindText = (kind ?? '').trim().toLowerCase();
+
+  if (!toHitText && !damageText) return undefined;
+
+  const damageParts = parseDamagePartsFromText(damageText);
+
+  // Check for save DC in toHit (e.g. "DC 15", "DC 14 DEX", "DC15") or kind ("save")
+  const saveDcMatch = /\bDC\s*(\d{1,2})(?:\s*([A-Za-z]{3}))?/i.exec(toHitText);
+  if (saveDcMatch || kindText === 'save') {
+    let dcVal = 10;
+    let ability = '';
+    if (saveDcMatch) {
+      dcVal = Number.parseInt(saveDcMatch[1], 10);
+      ability = (saveDcMatch[2] ?? '').toUpperCase();
+    }
+    const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
+      ? {
+          failure: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' },
+          success: { damage: [], halfDamage: true, healing: '', tempHp: '', effects: [], text: '' },
+        }
+      : {};
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      save: { ability, dc: { kind: 'fixed', dc: dcVal } },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes,
+      provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
+    });
+    return isResolvableSpec(spec) ? spec : undefined;
+  }
+
+  // Attack mode: extract attack bonus from toHit (e.g. "+5", "5", "-1", "+0", "1d20+5", "d20+5")
+  let attackBonus = '';
+  if (toHitText) {
+    if (/^[+-]?\d{1,3}$/.test(toHitText)) {
+      const n = Number.parseInt(toHitText, 10);
+      if (Number.isFinite(n)) {
+        attackBonus = n >= 0 ? `+${n}` : String(n);
+      }
+    } else {
+      const d20Match = /^(?:1\s*)?d20\s*([+-]\s*\d{1,3})?$/i.exec(toHitText);
+      if (d20Match) {
+        const modStr = d20Match[1] ? d20Match[1].replace(/\s+/g, '') : '';
+        const n = modStr ? Number.parseInt(modStr, 10) : 0;
+        if (Number.isFinite(n)) {
+          attackBonus = n >= 0 ? `+${n}` : String(n);
+        }
+      } else {
+        const leadSignedMatch = /^([+-]\d{1,3})\b/.exec(toHitText);
+        if (leadSignedMatch) {
+          attackBonus = leadSignedMatch[1];
+        }
+      }
+    }
+  }
+
+  if (attackBonus !== '') {
+    const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
+      ? { hit: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' } }
+      : {};
+    const spec = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: attackBonus, ability: '', proficient: true, vs: 'ac' },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes,
+      provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
+    });
+    return isResolvableSpec(spec) ? spec : undefined;
+  }
+
+  return undefined;
+}
+
+/**
  * Roll a damage branch, applying the campaign system's CRITICAL rule (issues #414, #1053).
  *
  * This used to hardcode 5e — re-roll `formula`, add `flat` once — for every system, so a
