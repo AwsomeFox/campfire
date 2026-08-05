@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import type { CampaignMember } from '@campfire/schema';
@@ -15,16 +15,30 @@ export interface EncounterQuickWhisperPanelProps {
 }
 
 export function EncounterQuickWhisperPanel({ campaignId, myUserId, onError }: EncounterQuickWhisperPanelProps) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const [recipientUserId, setRecipientUserId] = useState<string>('');
   const [body, setBody] = useState<string>('');
   const [saving, setSaving] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
+      }
+    };
+  }, []);
 
   const membersQuery = useQuery({
     queryKey: queryKeys.campaignMembers(campaignId),
-    queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${campaignId}/members`),
+    queryFn: () => {
+      return api.get<CampaignMember[]>(`${API}/campaigns/${campaignId}/members`);
+    },
     enabled: Number.isFinite(campaignId),
   });
 
@@ -51,15 +65,20 @@ export function EncounterQuickWhisperPanel({ campaignId, myUserId, onError }: En
         visibility: 'whisper',
         recipientUserId,
       });
+      if (!isMountedRef.current) return;
       setBody('');
       setSuccessMsg(t('encounters.whisper.sent', { name: recipientName }));
-      setTimeout(() => setSuccessMsg(null), 4000);
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+      successTimerRef.current = setTimeout(() => {
+        if (isMountedRef.current) setSuccessMsg(null);
+      }, 4000);
     } catch {
+      if (!isMountedRef.current) return;
       const msg = t('encounters.whisper.error');
       setLocalError(msg);
       onError?.(msg);
     } finally {
-      setSaving(false);
+      if (isMountedRef.current) setSaving(false);
     }
   }
 

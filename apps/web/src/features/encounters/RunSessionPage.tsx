@@ -4225,6 +4225,7 @@ export default function RunSessionPage() {
                       ? cid
                       : undefined
                   }
+                  routeCampaignId={cid}
                   // Issue #1898 review: the statblock read is a plain GET, not a write —
                   // it has none of the staleness/edit-permission concerns campaignId above
                   // guards against, so it must not go `undefined` (and 404 for homebrew) in

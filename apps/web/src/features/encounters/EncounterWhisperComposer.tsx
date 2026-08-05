@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api, API } from '../../lib/api';
 import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
@@ -19,10 +19,18 @@ export function EncounterWhisperComposer({
   onClose,
   onSuccess,
 }: EncounterWhisperComposerProps) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -36,13 +44,18 @@ export function EncounterWhisperComposer({
         visibility: 'whisper',
         recipientUserId,
       });
+      if (!isMountedRef.current) return;
       setText('');
       onSuccess?.();
       onClose();
     } catch {
-      setError(t('encounters.whisper.error'));
+      if (isMountedRef.current) {
+        setError(t('encounters.whisper.error'));
+      }
     } finally {
-      setSaving(false);
+      if (isMountedRef.current) {
+        setSaving(false);
+      }
     }
   }
 

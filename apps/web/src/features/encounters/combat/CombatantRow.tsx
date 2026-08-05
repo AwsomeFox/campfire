@@ -76,6 +76,8 @@ export type CombatantRowProps = {
    * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
    */
   campaignId: number | undefined;
+  /** Route campaign id — stable ID for operations like whisper notes not tied to sheet staleness. */
+  routeCampaignId?: number;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
@@ -161,6 +163,7 @@ export function CombatantRow({
   openCardByDefault,
   openCardOnActiveTurn,
   campaignId,
+  routeCampaignId,
   onRollError,
   onApplyDamage,
   onUseAction,
@@ -1512,20 +1515,6 @@ export function CombatantRow({
           <UIIcon name="add" size="xs" />
         </button>
       )}
-      {isDm && campaignId != null && character?.ownerUserId != null && String(character.ownerUserId) !== String(myUserId) && (
-        <button
-          type="button"
-          className="btn btn-icon btn-ghost cf-target-44"
-          style={{ width: 44, height: 44, flex: 'none' }}
-          disabled={busy}
-          onClick={() => setShowWhisper((w) => !w)}
-          aria-label={t('encounters.whisper.buttonLabel', { name: combatant.name })}
-          title={t('encounters.whisper.buttonLabel', { name: combatant.name })}
-          data-testid={`whisper-button-${combatant.id}`}
-        >
-          <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} />
-        </button>
-      )}
       {canRemove && (
         <button
           className="btn btn-icon btn-ghost cf-target-44"
@@ -1537,16 +1526,38 @@ export function CombatantRow({
           <UIIcon name="close" size="xs" />
         </button>
       )}
-      {showWhisper && campaignId != null && character?.ownerUserId != null && (
-        <div style={{ flexBasis: '100%', width: '100%' }}>
-          <EncounterWhisperComposer
-            campaignId={campaignId}
-            recipientUserId={String(character.ownerUserId)}
-            recipientName={combatant.name}
-            onClose={() => setShowWhisper(false)}
-          />
-        </div>
-      )}
+      {(() => {
+        const whisperCid = routeCampaignId ?? campaignId;
+        if (!whisperCid || !character?.ownerUserId || String(character.ownerUserId) === String(myUserId)) return null;
+        return (
+          <>
+            {isDm && (
+              <button
+                type="button"
+                className="btn btn-icon btn-ghost cf-target-44"
+                style={{ width: 44, height: 44, flex: 'none' }}
+                disabled={busy}
+                onClick={() => setShowWhisper((w) => !w)}
+                aria-label={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                title={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                data-testid={`whisper-button-${combatant.id}`}
+              >
+                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} />
+              </button>
+            )}
+            {showWhisper && (
+              <div style={{ flexBasis: '100%', width: '100%' }}>
+                <EncounterWhisperComposer
+                  campaignId={whisperCid}
+                  recipientUserId={String(character.ownerUserId)}
+                  recipientName={combatant.name}
+                  onClose={() => setShowWhisper(false)}
+                />
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
