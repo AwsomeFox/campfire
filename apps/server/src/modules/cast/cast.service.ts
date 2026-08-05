@@ -317,6 +317,21 @@ export class CastService {
     return this.playerDisplayEncounterProjection(encounterId);
   }
 
+  /** Viewer-safe map bytes for the authenticated Player Display preview. */
+  async playerDisplayEncounterMap(
+    campaignId: number,
+    encounterId: number,
+    variant: 'original' | 'thumb',
+  ): Promise<EncounterMapView> {
+    const row = await this.encountersService.getRowOrThrow(encounterId);
+    if (row.campaignId !== campaignId || row.status !== 'running') {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const encounter = this.encountersService.encounterForMapOrThrow(row, CAST_VIEWER_ROLE);
+    const persistedFogInvalid = row.fog !== null && parseFogState(row.fog) === null;
+    return this.encounterMaps.resolve(encounter, CAST_VIEWER_ROLE, variant, persistedFogInvalid);
+  }
+
   /**
    * `getWithCombatantsOrThrow(..., 'viewer')` owns HP, fog, hidden-entity, and
    * AoE redaction. The Player Display also never needs a combat turn workspace

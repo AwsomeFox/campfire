@@ -267,6 +267,13 @@ describe('Player Display cast sessions (e2e)', () => {
     expect(JSON.stringify(display.body)).not.toContain('Invisible ward');
     expect(JSON.stringify(display.body)).not.toContain('"hpCurrent":22');
 
+    const displayMap = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/player-display/encounters/${encounterId}/map`)
+      .set(dm);
+    expect(displayMap.status).toBe(200);
+    expect(displayMap.headers['x-campfire-map-view']).toBe('fog-protected');
+    expect(Buffer.compare(displayMap.body, battleMap)).not.toBe(0);
+
     expect(
       (
         await request(server)

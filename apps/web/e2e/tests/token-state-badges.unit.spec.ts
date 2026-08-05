@@ -1,5 +1,7 @@
 /** Pure battle-map token-state rendering rules (issue #1905). */
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   HP_BAND_FRACTION,
   TOKEN_DETAIL_STORAGE_KEY,
@@ -16,6 +18,8 @@ import {
   writeTokenDetailMode,
 } from '../../src/features/encounters/tokenStateBadges';
 import { hpBandFor } from '../../src/features/screen/playerSafe';
+
+const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 
 test.describe('token HP state (issue #1905)', () => {
   test('uses exact HP only when the role-shaped combatant supplies it', () => {
@@ -137,5 +141,11 @@ test.describe('token death and detail mode (issue #1905)', () => {
     expect(parseTokenDetailMode('unexpected')).toBe('full');
     expect(readTokenDetailMode({ getItem: () => { throw new Error('blocked'); } })).toBe('full');
     expect(writeTokenDetailMode('off', { setItem: () => { throw new Error('blocked'); } })).toBe(false);
+  });
+
+  test('loads a saved detail mode before campaign access has resolved', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(source).toContain("readTokenDetailMode(typeof localStorage === 'undefined' ? null : localStorage)");
+    expect(source).not.toContain("effectiveIsDm ? readTokenDetailMode");
   });
 });
