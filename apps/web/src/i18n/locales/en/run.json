@@ -1,0 +1,15 @@
+{
+  "run": {
+    "gate": {
+      "syncBlocked": "Paused while reconnecting to live updates.",
+      "dmControlsTurns": "The DM controls turn order — wait for them to end your turn.",
+      "measureNoGridScale": "Set a grid scale first to measure distances.",
+      "advDisRequiresLoneD20": "Advantage and disadvantage only apply to a single d20 roll.",
+      "allInitiativeRolled": "Every combatant already has initiative.",
+      "needsCombatantsToStart": "Add at least one combatant before starting.",
+      "needsInitiativeToStart": "Roll initiative for all combatants before starting.",
+      "undoNothingToUndo": "This is the first turn — there's nothing earlier to undo.",
+      "safetyHold": "The table has called a safety pause — combat actions are paused until it's resolved."
+    }
+  }
+}

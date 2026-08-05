@@ -1295,6 +1295,38 @@ h1, h2, h3, h4, h5, h6 {
   cursor: default;
   opacity: 0.6;
 }
+
+/*
+ * GatedControl (issue #1933) — the wrapper is always present (see the component doc
+ * comment for why) so it must never affect layout when nothing is gated: `inline-flex`
+ * shrinks to the child's own size, and `position: relative` only matters once the hint
+ * bubble below is actually rendered.
+ */
+.cf-gated-control {
+  display: inline-flex;
+  position: relative;
+  vertical-align: middle;
+}
+.cf-gated-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.cf-gated-hint {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 30;
+  margin-bottom: 6px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-900);
+  color: var(--color-neutral-100);
+  font-size: var(--type-label);
+  line-height: 1.3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
 .cf-dismiss-target {
   box-sizing: border-box;
   display: inline-flex;
