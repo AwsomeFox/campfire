@@ -1636,6 +1636,11 @@ export class CampaignsService {
                 ruleEntryId: c.ruleEntryId,
                 sortOrder: c.sortOrder,
                 sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
+                // Issue #1910 review (Codex, round 5): a baseline stat snapshot like
+                // initMod above, not combat state — carry it forward the same way,
+                // rather than silently resetting it like the play-progress fields
+                // (hp/initiative/conditions) this insert deliberately does reset.
+                speed: c.speed,
               })
               .run();
           }

@@ -46,6 +46,7 @@ import {
   generateEncounterGroup,
   hpBandFor,
   initialEncounterTurnState,
+  movementSlotMax,
   redactEncounterEventsForViewer,
   resetLegendaryUsage,
   resetTurnStateForStart,
@@ -7253,16 +7254,18 @@ export class EncountersService {
     // the adapter default instead costs nothing relative to pre-PR behavior —
     // every combatant reported the hardcoded adapter constant before this
     // column existed, which for 5e is the same 30 the default resolves to now.
-    let resolvedMovementMax = movementSlot?.max ?? 0;
-    if (movementSlot && current.speed != null) {
-      resolvedMovementMax = current.speed;
-    }
+    //
+    // Routed through the shared `movementSlotMax` (encounters.logic.ts, round 5 review)
+    // rather than computed inline: `ActionResolverService.resolveActionEconomyCost` calls
+    // the SAME function for the movement spend/guard path, so this DISPLAY value and that
+    // ENFORCEMENT value cannot drift apart the way they did before round 5.
+    const resolvedMovementMax = movementSlot ? movementSlotMax('movement', movementSlot.max, current.speed) : 0;
     const actionEconomy = model.slots.map((slot) => ({
       key: slot.key,
       label: slot.label,
       help: slot.help,
       kind: slot.kind,
-      max: slot.kind === 'movement' ? resolvedMovementMax : slot.max,
+      max: movementSlotMax(slot.kind, slot.max, current.speed),
       used: slot.kind === 'movement' ? current.turnState.movementUsedFt : used[slot.key] ?? 0,
       resetsAt: slot.resetsAt,
     }));
