@@ -54,6 +54,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(currentCombatantId === undefined\) \{[\s\S]*setTurnOwnerFromEvent\(false\);[\s\S]*setTurnOwnerPendingCombatantId\(null\);[\s\S]*void queryClient\.invalidateQueries\(\{ queryKey: queryKeys\.encounterTurn\(eid\) \}\);/);
   });
 
+  test('does not use a prior combatant\'s /turn result as the hidden-tab fallback', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/turnWorkspace\?\.current\?\.combatantId === currentCombatantId\s*&&\s*turnWorkspace\?\.isYourTurn === true/);
+  });
+
   test('accepts the optional turn_changed frame fields and rejects malformed values', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
@@ -68,7 +73,9 @@ test.describe('turn-change beat (issue #1906)', () => {
       round: -1,
     })).toBe(false);
     const source = readFileSync(resolve(process.cwd(), 'src/lib/useCampaignEvents.ts'), 'utf8');
+    const schema = readFileSync(resolve(process.cwd(), '../../packages/schema/src/index.ts'), 'utf8');
     expect(source).toMatch(/CombatantKind\.safeParse\(v\.combatantKind\)\.success/);
+    expect(schema).toMatch(/combatantKind: CombatantKind\.nullable\(\)\.optional\(\)/);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       turnReverted: false,
@@ -106,7 +113,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('clears turn ownership and transient cues when combat stops', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);/);
-    expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running' &&/);
+    expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running'\s*&&/);
   });
 
   test('keeps ownership unknown until an SSE combatant is present in the cached roster', () => {

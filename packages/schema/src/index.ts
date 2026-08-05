@@ -11182,7 +11182,7 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     round: z.number().int().min(0).optional(),
     turnIndex: z.number().int().min(0).optional(),
     currentCombatantId: Id.nullable().optional(),
-    combatantKind: z.enum(['character', 'monster', 'npc']).nullable().optional(),
+    combatantKind: CombatantKind.nullable().optional(),
     // An undo restores a historical turn for client reconciliation, but must
     // not be interpreted as a fresh NPC turn by proactive automation.
     turnReverted: z.literal(true).optional(),

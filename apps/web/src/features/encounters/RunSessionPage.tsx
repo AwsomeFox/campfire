@@ -3271,7 +3271,12 @@ export default function RunSessionPage() {
       )}
       <TurnChangeBeat
         beat={turnBeat}
-        isYourTurn={encounter?.status === 'running' && turnOwnerPendingCombatantId == null && (turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true))}
+        isYourTurn={encounter?.status === 'running'
+          && turnOwnerPendingCombatantId == null
+          && (turnOwnerFromEvent ?? (
+            turnWorkspace?.current?.combatantId === currentCombatantId
+            && turnWorkspace?.isYourTurn === true
+          ))}
       />
 
       {pendingApply && (
