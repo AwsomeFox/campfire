@@ -42,6 +42,14 @@ test.describe('turn-change beat (issue #1906)', () => {
         data: { kind: 'monster', name: 'Ticker Dummy', hpMax: 20 },
       })).json();
 
+      // Keep the turn order deterministic: the second advance must be the
+      // monster frame that clears the player's takeover.
+      const preRollRoster = await (await dmApi.get(`/api/v1/encounters/${encounterId}`)).json() as { combatants: Array<{ id: number }> };
+      for (const combatant of preRollRoster.combatants) {
+        if (combatant.id !== hero.id && combatant.id !== dummy.id) {
+          await dmApi.delete(`/api/v1/encounters/${encounterId}/combatants/${combatant.id}`);
+        }
+      }
       await dmApi.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
       const roster = await (await dmApi.get(`/api/v1/encounters/${encounterId}`)).json() as { combatants: Array<{ id: number }> };
       for (const combatant of roster.combatants) {
@@ -71,6 +79,9 @@ test.describe('turn-change beat (issue #1906)', () => {
         document.dispatchEvent(new Event('visibilitychange'));
       });
       await expect(playerPage).not.toHaveTitle(/^● Your turn — /);
+      await dmPage.getByTestId('encounter-header-next-turn').click();
+      await expect(playerPage.getByTestId('turn-ticker')).toContainText('Round 2');
+      await expect(playerPage.getByTestId('turn-takeover')).toHaveCount(0);
       await expect(playerPage.getByTestId('turn-takeover')).toHaveCount(0, { timeout: 4_000 });
     } finally {
       if (encounterId != null) {

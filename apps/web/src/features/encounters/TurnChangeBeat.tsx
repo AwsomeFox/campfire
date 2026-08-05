@@ -6,6 +6,7 @@ import type { TurnBeatKind } from './turnBeat';
 
 export type TurnChangeBeatEvent = {
   key: number;
+  combatantId: number | null;
   kind: TurnBeatKind;
   tickerKind: 'turn' | 'round-wrap';
   name: string;
@@ -29,14 +30,25 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
   const reducedMotion = prefersReducedMotion();
 
   useEffect(() => {
-    if (!beat) return;
+    if (!beat) {
+      setShowTakeover(false);
+      setShowTicker(false);
+      return;
+    }
+    // A new frame supersedes any transient UI from the previous one. In
+    // particular, cleanup of the previous owned timer must not strand a
+    // takeover after the turn has advanced.
+    setShowTakeover(false);
     setShowTicker(true);
     const tickerTimer = window.setTimeout(
       () => setShowTicker(false),
       beat.tickerKind === 'round-wrap' ? 2_200 : 1_600,
     );
 
-    if (beat.kind !== 'your-turn') return () => window.clearTimeout(tickerTimer);
+    if (beat.kind !== 'your-turn') {
+      setShowTakeover(false);
+      return () => window.clearTimeout(tickerTimer);
+    }
     setShowTakeover(true);
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate([100, 50, 100]);

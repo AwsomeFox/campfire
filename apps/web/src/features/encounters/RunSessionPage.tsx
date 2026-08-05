@@ -1197,11 +1197,14 @@ export default function RunSessionPage() {
           const combatant = event.currentCombatantId == null
             ? undefined
             : encounter?.combatants.find((candidate) => candidate.id === event.currentCombatantId);
-          const isYourTurn = combatant?.characterId != null
+          const ownerDataReady = charactersQuery.data !== undefined;
+          const isYourTurn = ownerDataReady && combatant?.characterId != null
             && characters.some((character) => character.id === combatant.characterId && character.ownerUserId === String(me?.user.id ?? ''));
           // Clear the hidden-tab prefix on the frame that ends an owned turn;
-          // do not wait for the follow-up /turn refetch to settle.
-          setTurnOwnerFromEvent(isYourTurn);
+          // do not wait for the follow-up /turn refetch to settle. A character
+          // frame received before its owner list is available stays unknown so
+          // it cannot pin an incorrect negative result for the rest of the turn.
+          setTurnOwnerFromEvent(ownerDataReady || combatant?.characterId == null ? isYourTurn : null);
           const next: TurnBeatSnapshot = {
             encounterId: eid,
             combatantId: event.currentCombatantId ?? null,
@@ -1219,6 +1222,7 @@ export default function RunSessionPage() {
           if (kind && (combatant || tickerKind === 'round-wrap')) {
             setTurnBeat({
               key: ++turnBeatSequence.current,
+              combatantId: event.currentCombatantId ?? null,
               kind,
               tickerKind,
               name: combatant?.name ?? '',
@@ -1240,6 +1244,7 @@ export default function RunSessionPage() {
             }
           }
           invalidateEncounter(queryClient, eid);
+          void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
           return;
         }
         invalidateEncounter(queryClient, eid);
@@ -1260,7 +1265,7 @@ export default function RunSessionPage() {
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, me?.user.id],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, me?.user.id],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2380,6 +2385,40 @@ export default function RunSessionPage() {
     enabled: encounter?.status === 'running',
     staleTime: 2_000,
   });
+
+  // Refresh /turn when the encounter poll observes a change that an SSE frame
+  // might have missed. This supplies an authoritative owner result for the
+  // hidden-tab title after reconnects as well as ordinary stream delivery.
+  useEffect(() => {
+    if (currentCombatantId !== undefined) {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    }
+  }, [currentCombatantId, eid, queryClient]);
+
+  // The event path wins immediately (especially when it clears an owned
+  // hidden-tab title), while a matching, later authoritative /turn result
+  // repairs an optimistic positive after a missed SSE frame or reconnect.
+  useEffect(() => {
+    if (!turnWorkspace || turnWorkspace.current?.combatantId !== currentCombatantId) return;
+    setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
+  }, [currentCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+
+  // If the character list was still loading when an owned frame arrived, the
+  // authoritative workspace can safely promote its already-visible ticker to
+  // the one owned takeover once both reads identify the same combatant.
+  useEffect(() => {
+    if (
+      !turnWorkspace
+      || !turnBeat
+      || turnWorkspace.isYourTurn !== true
+      || turnWorkspace.current?.combatantId !== currentCombatantId
+      || turnBeat.combatantId !== currentCombatantId
+      || turnBeat.kind === 'your-turn'
+    ) return;
+    setTurnBeat((previous) => previous && previous.combatantId === currentCombatantId
+      ? { ...previous, key: ++turnBeatSequence.current, kind: 'your-turn' }
+      : previous);
+  }, [currentCombatantId, turnBeat?.combatantId, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   const currentCombatant = useMemo(
     () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),

@@ -11182,7 +11182,7 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     round: z.number().int().min(0).optional(),
     turnIndex: z.number().int().min(0).optional(),
     currentCombatantId: Id.nullable().optional(),
-    combatantKind: z.enum(['character', 'npc', 'lair', 'custom']).nullable().optional(),
+    combatantKind: z.enum(['character', 'monster', 'npc']).nullable().optional(),
     at: IsoDate,
   }),
   z.object({

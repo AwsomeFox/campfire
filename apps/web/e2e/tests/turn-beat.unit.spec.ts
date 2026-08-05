@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
@@ -37,6 +39,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     })).toBe(true);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
+      round: 2, currentCombatantId: 15, combatantKind: 'monster',
+    })).toBe(true);
+    expect(isCampaignEvent({
+      type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       round: -1,
     })).toBe(false);
   });
@@ -48,5 +54,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     setDocumentTitlePrefix(null);
     expect(formatDocumentTitle({ page: 'Encounters', campaignName: 'Cinderhaven' }))
       .toBe('Encounters · Cinderhaven · Campfire');
+  });
+
+  test('clears a takeover when the following beat is not owned', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
+    expect(source).toMatch(/if \(!beat\) \{\s*setShowTakeover\(false\);\s*setShowTicker\(false\);/);
+    expect(source).toMatch(/if \(beat\.kind !== 'your-turn'\) \{\s*setShowTakeover\(false\);/);
   });
 });

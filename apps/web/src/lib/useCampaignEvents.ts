@@ -76,7 +76,7 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
       (v.round === undefined || (typeof v.round === 'number' && Number.isInteger(v.round) && v.round >= 0))
       && (v.turnIndex === undefined || (typeof v.turnIndex === 'number' && Number.isInteger(v.turnIndex) && v.turnIndex >= 0))
       && (v.currentCombatantId === undefined || v.currentCombatantId === null || typeof v.currentCombatantId === 'number')
-      && (v.combatantKind === undefined || v.combatantKind === null || ['character', 'npc', 'lair', 'custom'].includes(String(v.combatantKind)))
+      && (v.combatantKind === undefined || v.combatantKind === null || ['character', 'monster', 'npc'].includes(String(v.combatantKind)))
     );
   }
   if (v.type === 'membership.revoked') {
