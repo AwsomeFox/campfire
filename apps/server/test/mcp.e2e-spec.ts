@@ -1207,7 +1207,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const encounter = parseResult(
       await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Player AoE', hidden: false } }),
     ) as { id: number };
-    const declaration = { encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+    const declaration = { encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
 
     const created = parseResult(await client.callTool({ name: 'declare_aoe_template', arguments: declaration })) as {
       id: string;
@@ -1218,9 +1218,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(created.declaredByUserId).not.toBeNull();
 
     const moved = parseResult(
-      await client.callTool({ name: 'declare_aoe_template', arguments: { ...declaration, x: 60 } }),
-    ) as { id: string; x: number; declaredByUserId: string | null };
-    expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, declaredByUserId: created.declaredByUserId });
+      await client.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
+    ) as { id: string; x: number; angleDeg: number; color: string | null; declaredByUserId: string | null };
+    expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, angleDeg: 45, color: '#663399', declaredByUserId: created.declaredByUserId });
 
     const spoof = await client.callTool({
       name: 'declare_aoe_template',
@@ -1232,6 +1232,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(
       parseResult(await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone' } })),
     ).toEqual({ ok: true });
+  });
+
+  it('keeps hidden archived encounters non-enumerating for AoE MCP writes', async () => {
+    const archivedCampaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP hidden archived AoE' });
+    expect(archivedCampaign.status).toBe(201);
+    const scopedToken = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-hidden-archived-aoe', scope: 'player', campaignId: archivedCampaign.body.id, writeScope: 'direct' });
+    expect(scopedToken.status).toBe(201);
+    const client = await mcpClient(scopedToken.body.token);
+    const creator = await mcpClient(dmToken);
+    const hiddenResult = await creator.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId: archivedCampaign.body.id, name: 'MCP hidden AoE', hidden: true },
+    });
+    expect(hiddenResult.isError).toBeFalsy();
+    const hidden = parseResult(hiddenResult) as { id: number };
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, archivedCampaign.body.id));
+
+    const declaration = { encounterId: hidden.id, templateId: 'hidden-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+    const declared = await client.callTool({ name: 'declare_aoe_template', arguments: declaration });
+    expect(declared.isError).toBe(true);
+    expect(parseResult(declared)).toMatchObject({ error: { status: 404 } });
+
+    const removed = await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: hidden.id, templateId: 'hidden-cone' } });
+    expect(removed.isError).toBe(true);
+    expect(parseResult(removed)).toMatchObject({ error: { status: 404 } });
   });
 
   it('roll_death_save replays the original MCP outcome for a lost-response retry', async () => {

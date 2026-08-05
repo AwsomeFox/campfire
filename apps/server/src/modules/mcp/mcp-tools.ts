@@ -1378,16 +1378,18 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id: a repeated id upserts this template'),
-        ...AoeTemplateDeclare.omit({ id: true }).shape,
+        ...AoeTemplateDeclare.omit({ id: true }).partial().shape,
       },
       async ({ encounterId, templateId, ...template }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        // Keep the hidden encounter’s 404 behavior inside EncountersService, after
-        // membership/writability but before its player role floor, just like REST.
-        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+        // Keep the hidden encounter's 404 behavior inside EncountersService before
+        // archive enforcement, just like REST.
+        const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.declareAoeTemplate(
           encounterId as number,
-          AoeTemplateDeclare.parse({ ...template, id: templateId }),
+          // Preserve which optional keys the MCP caller actually supplied. The service
+          // validates the declaration before creating and uses that raw presence on upsert.
+          { ...template, id: templateId },
           user,
           role,
           true,
@@ -1407,7 +1409,7 @@ export class McpToolsService {
       },
       async ({ encounterId, templateId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+        const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.removeAoeTemplate(encounterId as number, templateId as string, user, role);
       },
     );

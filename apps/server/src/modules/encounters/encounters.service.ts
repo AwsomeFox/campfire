@@ -87,7 +87,6 @@ type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
-type AoeTemplateDeclareInput = z.infer<typeof AoeTemplateDeclare>;
 type AoeTemplateUpdateInput = z.infer<typeof AoeTemplateUpdate>;
 type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
@@ -2034,10 +2033,19 @@ export class EncountersService {
       changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, aoeBaseline)) {
-      const aoe = toJsonText(input.aoe);
-      set.aoe = aoe;
-      changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+    if (input.aoe !== undefined) {
+      // This legacy DM whole-list route cannot mint or transfer player attribution:
+      // keep an existing template's declarer by id and stamp new DM templates null.
+      const previousById = new Map(aoeBaseline.map((template) => [template.id, template]));
+      const aoeInput = input.aoe.map((template) => ({
+        ...template,
+        declaredByUserId: previousById.get(template.id)?.declaredByUserId ?? null,
+      }));
+      if (!isDeepStrictEqual(aoeInput, aoeBaseline)) {
+        const aoe = toJsonText(aoeInput);
+        set.aoe = aoe;
+        changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+      }
     }
     // Entity-level secrecy (issue #262) — DM-only (this whole endpoint requires dm). true
     // hides the encounter's roster + difficulty from non-DM reads; the DM reveals by
@@ -2193,9 +2201,9 @@ export class EncountersService {
 
   /**
    * Enforce the role and secrecy rules shared by the player-addressable AoE write
-   * routes. This deliberately runs inside the transaction, after the campaign
-   * lifecycle recheck, so a hidden/ended/archived state transition cannot race a
-   * declaration. Hidden encounters must stay non-enumerating for every non-DM.
+   * routes. This deliberately runs inside the transaction before the campaign
+   * lifecycle recheck, so a hidden encounter stays non-enumerating even after
+   * archive; the lifecycle check still runs transactionally before any write.
    */
   private assertAoeTemplateWriteAccess(encounter: typeof encounters.$inferSelect, role: Role): void {
     if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
@@ -2212,13 +2220,18 @@ export class EncountersService {
    */
   async declareAoeTemplate(
     encounterId: number,
-    input: AoeTemplateDeclareInput,
+    input: unknown,
     user: RequestUser,
     role: Role,
     /** MCP upsert retries/moves retain the original declarer; REST create remains conflict-only. */
     upsert = false,
   ): Promise<AoeTemplateType> {
-    const template = AoeTemplateDeclare.parse(input);
+    // REST declarations are complete; MCP's upsert form deliberately permits a
+    // partial payload when the id already exists. Keep its raw key presence so
+    // schema defaults cannot overwrite fields the caller did not intend to change.
+    const rawInput = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const createTemplate = upsert ? undefined : AoeTemplateDeclare.parse(input);
+    const templateId = createTemplate?.id ?? AoeTemplate.shape.id.parse(rawInput.id);
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
     let declared: AoeTemplateType | undefined;
     let action: 'encounter.aoe.declare' | 'encounter.aoe.update' = 'encounter.aoe.declare';
@@ -2226,26 +2239,31 @@ export class EncountersService {
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
-      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
       const current = parseAoe(fresh.aoe);
-      const existingIndex = current.findIndex((candidate) => candidate.id === template.id);
+      const existingIndex = current.findIndex((candidate) => candidate.id === templateId);
       if (existingIndex >= 0) {
-        if (!upsert) throw new ConflictException(`AoE template ${template.id} already exists`);
+        if (!upsert) throw new ConflictException(`AoE template ${templateId} already exists`);
         const existing = current[existingIndex];
         if (role !== 'dm' && existing.declaredByUserId !== user.id) {
           throw new ForbiddenException('Players may modify only their own AoE templates.');
         }
-        declared = AoeTemplate.parse({ ...existing, ...template, declaredByUserId: existing.declaredByUserId });
+        // MCP upserts may omit defaulted fields such as angle/color; merge only raw
+        // caller-supplied keys so a move cannot reset the existing template's intent.
+        const supplied = Object.fromEntries(
+          Object.entries(rawInput).filter(([key, value]) => key !== 'id' && key !== 'declaredByUserId' && value !== undefined),
+        );
+        declared = AoeTemplate.parse({ ...existing, ...supplied, declaredByUserId: existing.declaredByUserId });
         current[existingIndex] = declared;
         action = 'encounter.aoe.update';
       } else {
         if (current.length >= 50) {
           throw new ConflictException('An encounter may have at most 50 AoE templates');
         }
-        declared = { ...template, declaredByUserId: user.id };
+        declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: user.id };
         current.push(declared);
       }
       tx.update(encounters)
@@ -2277,6 +2295,7 @@ export class EncountersService {
     user: RequestUser,
     role: Role,
   ): Promise<AoeTemplateType> {
+    AoeTemplate.shape.id.parse(templateId);
     const patch = AoeTemplateUpdate.parse(input);
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
     let updated: AoeTemplateType | undefined;
@@ -2285,8 +2304,8 @@ export class EncountersService {
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
-      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
       const current = parseAoe(fresh.aoe);
@@ -2336,13 +2355,14 @@ export class EncountersService {
     user: RequestUser,
     role: Role,
   ): Promise<{ ok: true }> {
+    AoeTemplate.shape.id.parse(templateId);
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
 
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
-      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
       const current = parseAoe(fresh.aoe);

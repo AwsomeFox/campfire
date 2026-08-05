@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
@@ -7343,7 +7343,7 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
       expect((await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player)).status).toBe(200);
 
       const db = ctx.app.get<DrizzleDb>(DB);
-      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)))
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
         .map((row) => row.action)
         .filter((action) => action.startsWith('encounter.aoe.'));
       expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.remove']);
@@ -7351,6 +7351,30 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
     } finally {
       subscription.unsubscribe();
     }
+  });
+
+  it('keeps player attribution immutable through the legacy DM whole-list AoE patch', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerTemplate = { ...declaration, id: 'legacy-player' };
+    expect(
+      (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerTemplate)).status,
+    ).toBe(201);
+
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({
+        aoe: [
+          { ...playerTemplate, declaredByUserId: 'dev:p-2' },
+          { ...declaration, id: 'legacy-dm', declaredByUserId: 'dev:p-2' },
+        ],
+      });
+
+    expect(patched.status).toBe(200);
+    expect(patched.body.aoe).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'legacy-player', declaredByUserId: 'dev:p-1' }),
+      expect.objectContaining({ id: 'legacy-dm', declaredByUserId: null }),
+    ]));
   });
 
   it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
@@ -7398,6 +7422,11 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
 
     await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);
+    // Archive enforcement must not run before hidden visibility: a player probing
+    // this still-hidden encounter receives the same 404 as for a missing id.
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).patch(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player)).status).toBe(404);
   });
 });
 

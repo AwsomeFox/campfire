@@ -319,6 +319,8 @@ export function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
+  const aoeDraftTemplateIdRef = useRef<string | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -1344,6 +1346,7 @@ export function BattleMap({
   }
 
   function onAoeHandleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, t: AoeTemplate) {
+    if (!canEditAoe(t)) return;
     e.stopPropagation();
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -1419,6 +1422,23 @@ export function BattleMap({
     );
   }, [fog?.revealed, fogRegionDrag]);
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
+  useEffect(() => {
+    if (!selectedAoe || effectiveCanDmWrite) {
+      aoeDraftTemplateIdRef.current = null;
+      setAoeDraft(null);
+      return;
+    }
+    if (aoeDraftTemplateIdRef.current === selectedAoe.id) return;
+    aoeDraftTemplateIdRef.current = selectedAoe.id;
+    setAoeDraft({
+      id: selectedAoe.id,
+      x: String(selectedAoe.x),
+      y: String(selectedAoe.y),
+      sizeFt: String(selectedAoe.sizeFt),
+      angleDeg: String(selectedAoe.angleDeg),
+    });
+  }, [effectiveCanDmWrite, selectedAoe]);
+  const playerAoeDraft = !effectiveCanDmWrite && selectedAoe && aoeDraft?.id === selectedAoe.id ? aoeDraft : null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
   // Condition chips already carry their detailed title/metadata in the roster. A
@@ -1837,8 +1857,14 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.x}
-                  onChange={(e) => updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.x ?? selectedAoe.x}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, x: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.currentTarget.value) || 0) });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1849,8 +1875,14 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.y}
-                  onChange={(e) => updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.y ?? selectedAoe.y}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, y: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.currentTarget.value) || 0) });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1860,8 +1892,14 @@ export function BattleMap({
                   type="number"
                   min={0}
                   step={gridScale ?? 5}
-                  value={selectedAoe.sizeFt}
-                  onChange={(e) => updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) })}
+                  value={playerAoeDraft?.sizeFt ?? selectedAoe.sizeFt}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) });
+                    else setAoeDraft((draft) => draft && { ...draft, sizeFt: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.currentTarget.value) || 1) });
+                  }}
                   style={{ width: 56 }}
                 />
                 {gridUnit}
@@ -1872,8 +1910,14 @@ export function BattleMap({
                   <input
                     type="number"
                     step={15}
-                    value={selectedAoe.angleDeg}
-                    onChange={(e) => updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 })}
+                    value={playerAoeDraft?.angleDeg ?? selectedAoe.angleDeg}
+                    onChange={(e) => {
+                      if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 });
+                      else setAoeDraft((draft) => draft && { ...draft, angleDeg: e.target.value });
+                    }}
+                    onBlur={(e) => {
+                      if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.currentTarget.value) || 0 });
+                    }}
                     style={{ width: 56 }}
                   />
                 </label>
@@ -2667,7 +2711,7 @@ export function BattleMap({
                         key={template.id}
                         data-testid={`map-aoe-${template.id}`}
                         role="button"
-                        tabIndex={tool === 'move' ? 0 : -1}
+                        tabIndex={tool === 'move' && canEditAoe(template) ? 0 : -1}
                         aria-label={aoeLabel}
                         aria-describedby="map-keyboard-help"
                         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"

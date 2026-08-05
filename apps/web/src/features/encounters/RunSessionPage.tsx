@@ -2729,8 +2729,10 @@ export default function RunSessionPage() {
     const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
     if (playerTemplates.length === 0) return;
     setActionError(null);
-    await Promise.all(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    const results = await Promise.allSettled(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
     invalidateEncounter(queryClient, eid);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
   }, [eid, encounter?.aoe, queryClient]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
@@ -3564,10 +3566,10 @@ export default function RunSessionPage() {
           onSetAoe={setEncounterAoe}
           aoeDeclarerNames={aoeDeclarerNames}
           canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
-          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(surfaceActionError); }}
-          onUpdateAoe={(templateId, patch) => { void updateAoeTemplate(templateId, patch).catch(surfaceActionError); }}
-          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(surfaceActionError); }}
-          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(surfaceActionError); } : undefined}
+          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
+          onUpdateAoe={(templateId, patch) => { void updateAoeTemplate(templateId, patch).catch(reportError); }}
+          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
+          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={

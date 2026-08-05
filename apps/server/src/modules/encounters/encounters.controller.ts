@@ -561,9 +561,9 @@ export class EncountersController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
-    // As with map pings, the service checks the player floor only after hidden
-    // visibility so a viewer probing hidden preparation receives a 404, not a leak.
-    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+    // Do not run the archive gate before the service's hidden-encounter check:
+    // a non-DM must receive the same 404 for a hidden encounter and a missing id.
+    const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.declareAoeTemplate(id, body, user, role);
   }
 
@@ -577,7 +577,7 @@ export class EncountersController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.updateAoeTemplate(id, templateId, body, user, role);
   }
 
@@ -591,7 +591,7 @@ export class EncountersController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.removeAoeTemplate(id, templateId, user, role);
   }
 
