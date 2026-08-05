@@ -1134,16 +1134,26 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(workspace.movement?.maxFt).toBe(25);
     });
 
-    it('a legacy combatant with no snapshot falls back to the linked character live speed', async () => {
+    // Issue #1910 review (Devin, PR #1980, round 4): a combatant with `speed: null`
+    // does NOT fall through to the linked character's live speed — that would be
+    // ambiguous between "this row predates the speed column" and "the character
+    // genuinely had null speed at add time" (Character.speed defaults to null, so
+    // the second case is every character until someone sets a value), and a live
+    // fallback resolves both identically, reintroducing the retroactive-change bug
+    // the snapshot exists to prevent. The adapter default is the only safe
+    // resolution for a null snapshot, matching pre-#1910 behavior (every combatant
+    // reported the hardcoded adapter constant) — see the sibling test below that
+    // proves this for the realistic "genuinely null at add time" case specifically.
+    it('a combatant with a null snapshot (whether legacy or genuinely unset) resolves to the adapter default, never the character live speed', async () => {
       dataDir = makeTempDataDir();
       const { orm, service } = build();
       const { encounterId, c1 } = seed(orm);
       const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
       orm.update(characters).set({ speed: 35 }).where(eq(characters.id, c1row.characterId!)).run();
-      // combatant.speed stays null (as if added before the column existed).
+      // combatant.speed stays null — indistinguishable from a genuinely-unset add.
 
       const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
-      expect(movementMax(workspace)).toBe(35);
+      expect(movementMax(workspace)).toBe(30);
     });
 
     it('a mid-fight sheet edit does not retroactively change a running encounter movement budget', async () => {
@@ -1195,6 +1205,46 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
 
       const after = await service.getTurnWorkspace(created.id, player1, 'player');
       expect(movementMax(after)).toBe(25);
+    });
+
+    // Devin review on PR #1980 (round 4): the sibling test above proves the
+    // invariant for a character that ALREADY had a real speed at add time (25).
+    // The overwhelmingly common case is the opposite — Character.speed defaults
+    // to null, so most PCs are added with NO speed set at all. That combatant's
+    // snapshot is also null, indistinguishable at the DB level from a legacy
+    // pre-#1910 row, and — before this fix — getTurnWorkspace's fallback-to-live-
+    // character-speed treated both cases the same way, so filling in the sheet
+    // mid-fight (the realistic sequence: a DM realizes they forgot to set speed
+    // and adds it once combat has already started) silently changed the running
+    // encounter's movement budget, reproducing the exact bug the snapshot exists
+    // to prevent. This is the sequence that must stay frozen.
+    it('a character with NO speed set at add time (the common case) does not retroactively pick up a mid-fight sheet edit', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Null Speed Campaign', createdAt: ts, updatedAt: ts }).returning().all();
+      const [character] = orm
+        .insert(characters)
+        // speed omitted entirely -> the schema default, null. This is the ordinary
+        // shape of a freshly-created character, not a contrived edge case.
+        .values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Blank Slate PC', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const created = await service.create(campaign.id, { name: 'Ambush', hidden: false }, dmUser, 'dm');
+      expect(created.combatants).toHaveLength(1);
+      const combatantId = created.combatants[0].id;
+      orm.update(encounters).set({ status: 'running', currentCombatantId: combatantId }).where(eq(encounters.id, created.id)).run();
+
+      const before = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(before)).toBe(30); // adapter default — speed was never set
+
+      // The DM fills in the sheet mid-encounter — the frozen (null) snapshot must
+      // NOT pick this up.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, character.id)).run();
+
+      const after = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(after)).toBe(30); // still the adapter default, NOT 40
     });
   });
 

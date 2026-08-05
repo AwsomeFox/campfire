@@ -7238,24 +7238,24 @@ export class EncountersService {
     const model = actionEconomyForAdapter(adapter);
     const used = current.turnState.used;
     const movementSlot = model.slots.find((s) => s.kind === 'movement');
-    // Issue #1910: resolve the real per-combatant movement max instead of always
-    // reporting the adapter's flat constant. Priority: the combatant's own add-time
-    // speed snapshot (frozen so a mid-fight sheet edit never retroactively changes a
-    // running encounter's movement budget) -> the linked character's live speed
-    // (covers combatants added before this column existed) -> the adapter's
-    // movement-slot max as the last resort (e.g. 30 ft for 5e).
+    // Issue #1910 review (Devin, PR #1980, round 4): resolve the per-combatant
+    // movement max as the combatant's own add-time speed snapshot, or — full
+    // stop — the adapter's movement-slot max (e.g. 30 ft for 5e). Deliberately
+    // NOT falling through to the linked character's live speed when the
+    // snapshot is null: `combatant.speed === null` is unavoidably ambiguous
+    // between "this row predates the speed column" and "the linked character
+    // had no speed set at add time" (Character.speed defaults to null, so the
+    // second case is every character until someone fills in a value) — the two
+    // cases are indistinguishable at the DB level without a discriminator
+    // column, and a live-character fallback resolves BOTH the same way,
+    // reintroducing exactly the retroactive-change bug this snapshot exists to
+    // prevent for the (overwhelmingly common) second case. Falling through to
+    // the adapter default instead costs nothing relative to pre-PR behavior —
+    // every combatant reported the hardcoded adapter constant before this
+    // column existed, which for 5e is the same 30 the default resolves to now.
     let resolvedMovementMax = movementSlot?.max ?? 0;
-    if (movementSlot) {
-      if (current.speed != null) {
-        resolvedMovementMax = current.speed;
-      } else if (current.kind === 'character' && current.characterId !== null) {
-        const [characterSpeedRow] = await this.db
-          .select({ speed: characters.speed })
-          .from(characters)
-          .where(eq(characters.id, current.characterId))
-          .limit(1);
-        if (characterSpeedRow?.speed != null) resolvedMovementMax = characterSpeedRow.speed;
-      }
+    if (movementSlot && current.speed != null) {
+      resolvedMovementMax = current.speed;
     }
     const actionEconomy = model.slots.map((slot) => ({
       key: slot.key,

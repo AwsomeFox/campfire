@@ -22,22 +22,22 @@ interface PlayerVitalsHeaderProps {
 }
 
 /**
- * Movement speed shown in the sticky vitals header (issue #1910). Mirrors the SAME
- * resolution order the server uses in getTurnWorkspace (encounters.service.ts):
- * combatant add-time snapshot first (frozen so a mid-fight sheet edit never shows a
- * different number here than the turn panel enforces), then the character sheet's
- * live speed (covers a combatant added before this column existed), then the
- * caller-supplied adapter default. Returns `null` — not a fabricated 0 — when the
- * campaign's adapter has no movement slot at all; the caller must not render a
- * fabricated speed for a system that doesn't have one.
+ * Movement speed shown in the sticky vitals header (issue #1910). Matches the SAME
+ * resolution the server uses in getTurnWorkspace (encounters.service.ts) EXACTLY:
+ * the combatant's add-time snapshot, or — full stop — the caller-supplied adapter
+ * default. Deliberately does NOT fall through to the character sheet's live speed
+ * when the snapshot is null (round 4 review finding on PR #1980, applied here too):
+ * `combatant.speed === null` is ambiguous between "predates the column" and "the
+ * character had no speed set at add time" (the common case — Character.speed
+ * defaults to null), and a live-character fallback would show a DIFFERENT number
+ * here than getTurnWorkspace enforces for that same ambiguous case, reintroducing
+ * the exact client/server disagreement this component's precedence fix (combatant-
+ * before-character) was written to close. Returns `null` — not a fabricated 0 —
+ * when the campaign's adapter has no movement slot at all; the caller must not
+ * render a fabricated speed for a system that doesn't have one.
  */
-export function vitalsSpeedFor(
-  character: Character | undefined,
-  combatant: Combatant,
-  movementDefault: number | undefined,
-): number | null {
+export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | undefined): number | null {
   if (combatant.speed != null) return combatant.speed;
-  if (character?.speed != null) return character.speed;
   return movementDefault ?? null;
 }
 
@@ -63,7 +63,7 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
-        const speed = vitalsSpeedFor(char, c, movementDefault);
+        const speed = vitalsSpeedFor(c, movementDefault);
         const spellSaveDc = (char?.stats as any)?.spellSaveDc ?? (char?.stats as any)?.spell_save_dc ?? '—';
         const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
         

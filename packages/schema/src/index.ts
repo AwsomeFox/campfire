@@ -588,12 +588,16 @@ export const Character = z.object({
   kac: z.number().int().nullable().default(null),
   // Issue #1910: movement speed in the adapter's movement unit (feet for 5e/PF2e; no
   // 5e-specific naming since a future adapter may use meters/squares). Nullable, default
-  // null rather than a baked-in 30 — null means "unset", so the turn workspace's movement
-  // slot resolution (combatant snapshot -> this field -> adapter movement-slot max) can
-  // tell "a 30-speed PC" apart from "no speed on file yet" and still supply the adapter's
-  // own default (e.g. DND5E_ACTION_ECONOMY's movement max) rather than writing a guessed
-  // 30 onto every existing row. min(0): a homebrew "speed 0" (e.g. petrified) is valid;
-  // negative is not.
+  // null rather than a baked-in 30 — null means "unset", so this field itself can tell
+  // "a 30-speed PC" apart from "no speed on file yet". This value is snapshotted onto
+  // Combatant.speed at add time; getTurnWorkspace resolves the turn-economy movement
+  // max from THAT snapshot (falling to the adapter's own default, e.g. DND5E_ACTION_
+  // ECONOMY's movement max, when the snapshot is null) rather than reading this field
+  // live — a null combatant snapshot can't distinguish "predates the column" from "the
+  // character had no speed set at add time" (the common case, since this field defaults
+  // null), so the turn workspace never falls through to this live value once a fight is
+  // running (round 4 review finding on PR #1980; see Combatant.speed's own doc). min(0):
+  // a homebrew "speed 0" (e.g. petrified) is valid; negative is not.
   speed: z.number().int().min(0).nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(0).default(10),
@@ -10185,9 +10189,14 @@ export const Combatant = z.object({
   // Issue #1910: add-time snapshot of the linked character's speed, mirroring the
   // hp/death-state snapshot convention above — a mid-fight sheet edit must not
   // retroactively change a running encounter's movement budget. Populated only for
-  // kind==='character' combatants at addCombatant time; monsters/NPCs and combatants
-  // added before this column existed keep it null, in which case getTurnWorkspace
-  // falls back to the linked character's live speed, then the adapter's movement max.
+  // kind==='character' combatants at addCombatant time; monsters/NPCs, combatants
+  // added before this column existed, AND a character with no speed set at add
+  // time (the common case — Character.speed defaults to null) all keep it null.
+  // getTurnWorkspace resolves a null snapshot straight to the adapter's movement
+  // max (e.g. 30 ft for 5e) — deliberately NOT falling through to the linked
+  // character's live speed, which would be unable to tell those cases apart from
+  // "genuinely unset at add time" and would silently un-freeze the snapshot for
+  // the common case (round 4 review finding on PR #1980).
   speed: z.number().int().min(0).nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.

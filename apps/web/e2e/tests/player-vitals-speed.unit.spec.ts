@@ -1,62 +1,25 @@
 import { expect, test } from '@playwright/test';
-import type { Character, Combatant } from '@campfire/schema';
+import type { Combatant } from '@campfire/schema';
 import { vitalsSpeedFor } from '../../src/features/encounters/PlayerVitalsHeader';
 
 /**
  * Issue #1910 — PlayerVitalsHeader's speed display used to guess at an untyped
  * `(stats as any).speed`, which never resolved against the real (typed) schema
  * field and always fell through to a hardcoded '30' string. `vitalsSpeedFor`
- * replaces that guess with the real character/combatant `speed` fields, in the
- * SAME precedence order the server's getTurnWorkspace resolution uses (PR #1980
- * review — Devin/Codex finding: the client and server previously disagreed, so a
- * mid-fight sheet edit showed one number in the header and a different one in the
- * turn panel): combatant snapshot first, then the character's live speed, then the
- * caller-supplied adapter default (no more hardcoded 30 — Copilot/Codex finding).
+ * matches the server's getTurnWorkspace resolution EXACTLY (PR #1980 round 4
+ * review): the combatant's add-time snapshot, or the caller-supplied adapter
+ * default — full stop, no character-sheet fallback. An earlier version of this
+ * function fell through to the character's live speed when the snapshot was
+ * null (Devin/Codex round 1: fixed the precedence when the snapshot IS set —
+ * combatant before character), but a live-character fallback for a NULL
+ * snapshot reintroduces the identical class of bug: `combatant.speed === null`
+ * is ambiguous between "predates the column" and "the character had no speed
+ * set at add time" (the common case, since Character.speed itself defaults to
+ * null), and the server never falls through to the live character for that
+ * ambiguous case either (see encounters.service.ts's getTurnWorkspace) — so
+ * this component must not either, or the header would show a different number
+ * than the turn panel enforces for that same combatant.
  */
-
-function character(overrides: Partial<Character> = {}): Character {
-  return {
-    id: 1,
-    campaignId: 1,
-    ownerUserId: null,
-    name: 'Ari',
-    species: '',
-    className: '',
-    level: 1,
-    xp: 0,
-    background: '',
-    status: 'active',
-    stats: {},
-    ac: null,
-    eac: null,
-    kac: null,
-    speed: null,
-    hpCurrent: 10,
-    hpMax: 10,
-    spCurrent: 0,
-    spMax: 0,
-    rpCurrent: 0,
-    rpMax: 0,
-    hpTemp: 0,
-    deathState: 'none',
-    deathSaveSuccesses: 0,
-    deathSaveFailures: 0,
-    conditions: [],
-    conditionInstances: [],
-    saveProficiencies: [],
-    skills: {},
-    actions: [],
-    spellSlots: {},
-    resources: {},
-    portraitUrl: null,
-    ddbId: null,
-    notes: '',
-    dmSecret: '',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    ...overrides,
-  };
-}
 
 function combatant(overrides: Partial<Combatant> = {}): Combatant {
   return {
@@ -108,28 +71,24 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
 }
 
 test.describe('vitalsSpeedFor (issue #1910)', () => {
-  test('the combatant add-time snapshot wins over the character sheet, matching the server precedence exactly (Devin B / Codex)', () => {
-    // A mid-fight sheet edit (character.speed 40) must NOT override the frozen
-    // combatant snapshot (25) — this is the exact inversion Devin/Codex flagged:
-    // the header used to show 40 here while the turn panel enforced 25.
-    expect(vitalsSpeedFor(character({ speed: 40 }), combatant({ speed: 25 }), 30)).toBe(25);
+  test('the combatant add-time snapshot wins when set (Devin B / Codex round 1)', () => {
+    expect(vitalsSpeedFor(combatant({ speed: 25 }), 30)).toBe(25);
   });
 
-  test('the character live speed is the fallback when the combatant has no snapshot', () => {
-    expect(vitalsSpeedFor(character({ speed: 35 }), combatant({ speed: null }), 30)).toBe(35);
-  });
-
-  test('falls back to the caller-supplied adapter default (not a hardcoded 30) when neither has a speed set', () => {
-    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: null }), 30)).toBe(30);
-    expect(vitalsSpeedFor(undefined, combatant({ speed: null }), 25)).toBe(25);
+  // Round 4 review (Devin): a null snapshot must resolve to the adapter default,
+  // NEVER a live character lookup — there is no character parameter to fall
+  // through to any more, which is itself the fix. This pins the null case
+  // directly rather than only exercising the (already-fixed) non-null case.
+  test('a null snapshot resolves to the adapter default, matching the server (no character fallback exists)', () => {
+    expect(vitalsSpeedFor(combatant({ speed: null }), 30)).toBe(30);
+    expect(vitalsSpeedFor(combatant({ speed: null }), 25)).toBe(25);
   });
 
   test('returns null (not a fabricated 0) when the adapter has no movement slot at all (Copilot finding)', () => {
-    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: null }), undefined)).toBeNull();
+    expect(vitalsSpeedFor(combatant({ speed: null }), undefined)).toBeNull();
   });
 
   test('speed 0 (e.g. a homebrew immobilized state) is a real value, not treated as unset', () => {
-    expect(vitalsSpeedFor(character({ speed: 0 }), combatant({ speed: null }), 30)).toBe(0);
-    expect(vitalsSpeedFor(character({ speed: 40 }), combatant({ speed: 0 }), 30)).toBe(0);
+    expect(vitalsSpeedFor(combatant({ speed: 0 }), 30)).toBe(0);
   });
 });
