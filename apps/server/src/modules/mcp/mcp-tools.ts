@@ -34,6 +34,7 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantRemoveRequest, CombatantRemoveUndo,
+  CombatantResourceAdjust,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
@@ -4586,6 +4587,42 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    // Issue #1909: the delta-based, transactional counterpart to update_combatant's
+    // `statblock` field above — flipping one Ki pip or one spell-slot checkbox no longer
+    // requires this tool (or a human via REST) to resend the ENTIRE statblock/character
+    // JSON, which raced last-writer-wins against a second writer (another DM tab, a
+    // concurrent MCP call) and silently reverted their unrelated edits.
+    this.writeTool(
+      server,
+      user,
+      'adjust_combatant_resource',
+      'Spend or restore ONE bounded resource or spell-slot level on a combatant mid-fight — a character-linked ' +
+        'combatant OR a monster/NPC combatant with an inline statblock. Exactly one of `key` (feature resource) or ' +
+        '`spellLevel` (1-9); `delta` is relative to the resource\'s current `used` (default +1). Spending past 0 or ' +
+        'restoring past `max` FAILS with a 400 — never a silent clamp — so success can be trusted as "the resource ' +
+        'was actually spent/restored." dm may adjust any combatant; a player only a combatant linked to a character ' +
+        'they own; a statblock combatant (no linked character) is dm-only, matching update_combatant\'s statblock ' +
+        'rule. Records a resource_changed encounter event. `idempotencyKey`: a lost-response retry with the SAME ' +
+        'key replays the original outcome instead of double-spending.',
+      // CombatantResourceAdjust is a ZodEffects (.superRefine requiring exactly one of
+      // key|spellLevel), so it has no `.shape` to spread — list the wire fields here and
+      // re-validate with .parse below, matching adjust_character_condition_level's pattern.
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Combatant id — from get_encounter'),
+        key: z.string().min(1).max(80).optional().describe('Feature resource key (exactly one of key or spellLevel required)'),
+        spellLevel: z.number().int().min(1).max(9).optional().describe('Spell slot level 1-9 (exactly one of key or spellLevel required)'),
+        delta: z.number().int().optional().describe('Relative to current used; +1 spends, -1 restores (default +1)'),
+        idempotencyKey: IdempotencyKey.describe('Client-minted intent key; reuse for retries of this exact spend/restore'),
+      },
+      async ({ encounterId, combatantId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = CombatantResourceAdjust.parse(fields);
+        return this.encounters.adjustCombatantResource(encounterId as number, combatantId as number, validated, user, role);
       },
     );
 

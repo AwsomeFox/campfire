@@ -10367,6 +10367,47 @@ export const CombatantUpdate = z.object({
 });
 
 /**
+ * Body for `POST /encounters/:id/combatants/:cid/resources` (issue #1909) — spend or
+ * restore ONE bounded resource or spell-slot level on a combatant mid-fight, whether it is
+ * linked to a character sheet or an inline monster/NPC statblock. This is the delta-based,
+ * transactional counterpart to `CombatantUpdate.statblock` above: flipping one Ki pip or one
+ * spell-slot checkbox no longer requires PATCHing the whole statblock/character JSON built
+ * from whatever the client last saw, which raced last-writer-wins across the ENTIRE blob
+ * with a second writer (another tab, an MCP-driven AI DM) and silently reverted their
+ * unrelated edits.
+ *
+ * `key` (a feature resource) and `spellLevel` (1–9) are alternatives, never both/neither.
+ * `delta` is relative to the resource's current `used` (default +1, matching a single pip
+ * click); 0 is rejected as a no-op that would still mint a `resource_changed` event for
+ * nothing. Spending past 0 or restoring past `max` is a 400, never a silent clamp, matching
+ * every other bounded-resource write in this schema (`ResourcePatch`/`SpellSlotPatch`).
+ * `idempotencyKey` reuses the issue #580 convention `CombatantUpdate.idempotencyKey`
+ * documents just above: this is a RELATIVE write, so a lost-response retry must replay the
+ * original outcome rather than double-spend the resource.
+ */
+export const CombatantResourceAdjust = z
+  .object({
+    key: z.string().min(1).max(80).optional(),
+    spellLevel: z.number().int().min(1).max(9).optional(),
+    delta: z.number().int().optional().default(1),
+    idempotencyKey: IdempotencyKey,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.key !== undefined) === (value.spellLevel !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide exactly one of key or spellLevel',
+        path: ['key'],
+      });
+    }
+    if (value.delta === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'delta must not be 0', path: ['delta'] });
+    }
+  });
+export type CombatantResourceAdjust = z.infer<typeof CombatantResourceAdjust>;
+
+/**
  * Body for the server-authoritative death-save action (issue #1462). The caller supplies
  * no die face: the server rolls exactly one d20, applies that same face, and writes it to
  * the shared dice log. An explicit contract prevents REST and MCP from drifting into

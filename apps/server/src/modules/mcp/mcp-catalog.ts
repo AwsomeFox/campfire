@@ -195,6 +195,7 @@ export const MCP_TOOL_NAMES = [
   'attach_generated_map',
   'add_combatant',
   'update_combatant',
+  'adjust_combatant_resource',
   'roll_death_save',
   'roll_combatant_initiative',
   'remove_combatant',

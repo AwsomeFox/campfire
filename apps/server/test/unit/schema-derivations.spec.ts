@@ -7,6 +7,7 @@ import {
   XpAward,
   CombatantRemoveRequest,
   CombatantUpdate,
+  CombatantResourceAdjust,
 } from '@campfire/schema';
 
 /**
@@ -124,5 +125,38 @@ describe('schema — direct encounter damage metadata (issue #605)', () => {
 describe('schema — combatant removal retries', () => {
   it('keeps the idempotency key optional for parity between REST and MCP', () => {
     expect(CombatantRemoveRequest.parse({})).toEqual({});
+  });
+});
+
+describe('schema — CombatantResourceAdjust (issue #1909)', () => {
+  it('requires exactly one of key or spellLevel — rejects both and neither', () => {
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints' }).success).toBe(true);
+    expect(CombatantResourceAdjust.safeParse({ spellLevel: 2 }).success).toBe(true);
+    expect(CombatantResourceAdjust.safeParse({}).success).toBe(false);
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', spellLevel: 2 }).success).toBe(false);
+  });
+
+  it('defaults delta to +1 (one pip click) when omitted', () => {
+    expect(CombatantResourceAdjust.parse({ key: 'kiPoints' }).delta).toBe(1);
+  });
+
+  it('rejects a delta of 0 — a no-op that would still mint a resource_changed event', () => {
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', delta: 0 }).success).toBe(false);
+  });
+
+  it('rejects a non-integer or out-of-range spellLevel', () => {
+    expect(CombatantResourceAdjust.safeParse({ spellLevel: 0 }).success).toBe(false);
+    expect(CombatantResourceAdjust.safeParse({ spellLevel: 10 }).success).toBe(false);
+    expect(CombatantResourceAdjust.safeParse({ spellLevel: 2.5 }).success).toBe(false);
+  });
+
+  it('accepts an optional idempotencyKey, reusing the shared #580 convention', () => {
+    const parsed = CombatantResourceAdjust.parse({ key: 'kiPoints', delta: -1, idempotencyKey: 'click-123' });
+    expect(parsed.idempotencyKey).toBe('click-123');
+    expect(CombatantResourceAdjust.parse({ key: 'kiPoints' }).idempotencyKey).toBeUndefined();
+  });
+
+  it('rejects an unknown field (.strict())', () => {
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', used: 3 }).success).toBe(false);
   });
 });

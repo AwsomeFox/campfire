@@ -4012,6 +4012,91 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect((denied.content as TextContent[])[0].text).toContain('403');
     });
 
+    // Issue #1909: adjust_combatant_resource — the delta-based, transactional counterpart
+    // to update_combatant's whole-statblock write, extended (unlike adjust_spell_slots/
+    // adjust_character_resource above) to a monster/NPC statblock combatant with no linked
+    // character sheet at all.
+    it('adjust_combatant_resource spends and restores a statblock combatant\'s feature resource and spell slot, records a resource_changed event, and REST reads back the same statblock', async () => {
+      const client = await mcpClient(dmToken);
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Monster Fight' });
+      const encounterId = encRes.body.id as number;
+
+      const addResult = await client.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        },
+      });
+      expect(addResult.isError).toBeFalsy();
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const spent = parseResult(
+        await client.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        }),
+      ) as { statblock: { resources: Record<string, { used: number }> } };
+      expect(spent.statblock.resources.kiPoints.used).toBe(1);
+
+      const slotSpent = parseResult(
+        await client.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, spellLevel: 2, delta: 1 },
+        }),
+      ) as { statblock: { spellSlots: Record<string, { used: number }> } };
+      expect(slotSpent.statblock.spellSlots['2'].used).toBe(1);
+
+      // Overspend is a real error, not a clamp — same rule every other bounded resource
+      // write in this schema follows (spell slots, character resources).
+      const overspend = await client.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 100 },
+      });
+      expect(overspend.isError).toBe(true);
+
+      // REST reads back the SAME statblock the MCP tool wrote — one domain behind both surfaces.
+      const restEncounter = await dmAgent.get(`/api/v1/encounters/${encounterId}`);
+      const restCombatant = (restEncounter.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === combatantId,
+      );
+      expect(restCombatant?.statblock.resources.kiPoints.used).toBe(1);
+
+      const events = await dmAgent.get(`/api/v1/encounters/${encounterId}/events`);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('adjust_combatant_resource: a statblock combatant is dm-only — a viewer-scoped PAT is refused', async () => {
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Viewer Denied' });
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Viewer-Denied Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const viewerClient = await mcpClient(viewerToken);
+      const denied = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
     // Issue #1643 — "verify what already works first": before this PR, exhaustion was
     // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
     // the level on a character sheet — set_character_conditions only adds/removes a bare

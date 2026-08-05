@@ -9,6 +9,7 @@ import { expect, test } from '@playwright/test';
 import { ruleSystemAdapter, restOptionsForAdapter } from '@campfire/schema';
 import {
   canEditCharacterResource,
+  combatantResourceAdjustBody,
   hasTrackedResources,
   resourcePatchBody,
   restRequestBody,
@@ -80,6 +81,21 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('spellSlotPatchBody accepts undefined expectedUpdatedAt honestly, without a caller-side cast', () => {
     const body = spellSlotPatchBody(2, 0, 1, undefined);
     expect(body).toEqual({ level: 2, delta: 1, expectedUpdatedAt: undefined });
+  });
+
+  // Issue #1909: body for POST .../combatants/:cid/resources — a monster/NPC statblock
+  // pip click, relative delta, no CAS token (the server reads the combatant row fresh
+  // inside its own transaction).
+  test('combatantResourceAdjustBody sends { key, delta } for a feature resource, relative to current used', () => {
+    // Spending: used 0 -> 1 is delta +1.
+    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 0, 1)).toEqual({ key: 'kiPoints', delta: 1 });
+    // Restoring: used 2 -> 0 is delta -2.
+    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 2, 0)).toEqual({ key: 'kiPoints', delta: -2 });
+  });
+
+  test('combatantResourceAdjustBody sends { spellLevel, delta } for a spell slot, relative to current used', () => {
+    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 0, 1)).toEqual({ spellLevel: 2, delta: 1 });
+    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 1, 0)).toEqual({ spellLevel: 2, delta: -1 });
   });
 
   test('gating matrix: DM edits any character; owning player edits only their own; others read-only', () => {
@@ -188,27 +204,45 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(reconcileCalls.length).toBe(3);
   });
 
-  // Sixth-round finding (devin): statblockMutation PATCHes the ENTIRE saved statblock
-  // object, composed from `c.statblock` as it currently sits in the encounter query
-  // cache. Without reconciling the response, a second click on the SAME monster (even
-  // just after the first settled, before invalidate()'s async refetch lands) rebuilt
-  // the statblock from pre-write data and silently reverted the first saved change.
-  // `reconcileCombatant` is the statblock-side equivalent of `reconcileCharacter`.
-  test('ResourceTrackerPanel reconciles statblockMutation\'s response into the encounter cache, so two clicks on the same monster never revert each other', () => {
+  // Issue #1909: `combatantResourceMutation` replaced the whole-statblock PATCH
+  // (`statblockMutation`) with the delta-based, combatant-scoped
+  // POST .../combatants/:cid/resources. Without reconciling the response, a second click
+  // on the SAME monster (even just after the first settled, before invalidate()'s async
+  // refetch lands) would read a pre-write `c.statblock` snapshot. `reconcileCombatant` is
+  // the statblock-side equivalent of `reconcileCharacter`.
+  test('ResourceTrackerPanel reconciles combatantResourceMutation\'s response into the encounter cache, so two clicks on the same monster never revert each other', () => {
     const src = readFileSync(PANEL, 'utf8');
-    expect(src).toMatch(/api\.patch<Combatant>\(`\$\{API\}\/encounters\/\$\{encounterId\}\/combatants\/\$\{combatantId\}`/);
+    expect(src).toMatch(/api\.post<Combatant>\(\s*\n\s*`\$\{API\}\/encounters\/\$\{encounterId\}\/combatants\/\$\{combatantId\}\/resources`/);
     expect(src).toMatch(/const reconcileCombatant = \(updated: Combatant\) => \{/);
     expect(src).toMatch(/queryClient\.setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(encounterId\)/);
     expect(src).toMatch(/reconcileCombatant\(updated\);/);
   });
 
-  // Rework finding E (copilot): statblockMutation backs both resource and spell-slot
-  // writes for statblock-only combatants; onError must not always blame "resource".
+  // No whole-statblock PATCH remains (issue #1909 acceptance criterion) — the old
+  // combatant-object-rebuilding merge branches are gone.
+  test('ResourceTrackerPanel no longer PATCHes the whole statblock object', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).not.toMatch(/api\.patch<Combatant>\(`\$\{API\}\/encounters\/\$\{encounterId\}\/combatants\/\$\{combatantId\}`/);
+    expect(src).not.toMatch(/statblockMutation/);
+    expect(src).not.toMatch(/\.\.\.c\.statblock,/);
+  });
+
+  // Rework finding E (copilot): combatantResourceMutation backs both resource and
+  // spell-slot writes for statblock-only combatants; onError must not always blame
+  // "resource".
   test('ResourceTrackerPanel picks the slot vs resource error key by mutation kind, not a single hardcoded fallback', () => {
     const src = readFileSync(PANEL, 'utf8');
     expect(src).toMatch(/variables\.kind === 'slot'/);
     expect(src).toMatch(/kind: 'resource'/);
     expect(src).toMatch(/kind: 'slot'/);
+  });
+
+  // Issue #1909: a statblock pip click sends delta = clicked − current used through the
+  // combatant-scoped endpoint, not an absolute rebuilt statblock.
+  test('ResourceTrackerPanel sends delta = clicked minus current used for a statblock pip, via the combatant-scoped endpoint', () => {
+    const src = readFileSync(PANEL, 'utf8');
+    expect(src).toMatch(/combatantResourceMutation\.mutate\(\{ combatantId: c\.id, target: \{ key \}, currentUsed: res\.used, nextUsed: val, kind: 'resource' \}\);/);
+    expect(src).toMatch(/combatantResourceMutation\.mutate\(\{ combatantId: c\.id, target: \{ spellLevel: Number\(level\) \}, currentUsed: slot\.used, nextUsed: val, kind: 'slot' \}\);/);
   });
 
   // Rework finding F (copilot + devin, independently): the Party Rest shortcut must be an
@@ -322,17 +356,25 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   // a rest/resource write and a spell-slot write on the SAME character could race past
   // each other — the second one's `expectedUpdatedAt` (captured before the first
   // committed) is stale by the time it lands, rejected with a self-inflicted "someone
-  // else changed this". `pendingTargetKey` collapses ALL of a character's controls (or
-  // ALL of a statblock combatant's pips) to ONE key, serializing them against each other,
-  // while a DIFFERENT character/combatant stays fully independent.
-  test('pendingTargetKey serializes every control on the SAME character, but keeps different characters independent', () => {
+  // else changed this". `pendingTargetKey` collapses ALL of a character's controls to ONE
+  // key, serializing them against each other, while a DIFFERENT character/combatant stays
+  // fully independent.
+  //
+  // Issue #1909: a statblock combatant used to share ONE encounter-wide pending key across
+  // every monster/NPC in the fight, because the whole-statblock PATCH it replaced carried
+  // the ENCOUNTER's own `updatedAt` as its CAS token. The new delta-based
+  // POST .../combatants/:cid/resources drops that token entirely (reads the row fresh
+  // inside its own transaction), so each statblock combatant now maps to its OWN key —
+  // spending one monster's Ki pip no longer disables every other monster's pips.
+  test('pendingTargetKey serializes every control on the SAME character or statblock combatant, but keeps different targets independent', () => {
     // Same character (1): a rest write and a resource write share ONE key.
     expect(pendingTargetKey({ characterId: 1 })).toBe(pendingTargetKey({ characterId: 1 }));
     // Different characters never collide.
     expect(pendingTargetKey({ characterId: 1 })).not.toBe(pendingTargetKey({ characterId: 2 }));
-    // Statblock combatants share the encounter-wide pending key so concurrent statblock writes
-    // do not race against the shared encounter.updatedAt CAS token.
-    expect(pendingTargetKey({ combatantId: 7 })).toBe(pendingTargetKey({ combatantId: 8 }));
+    // Same statblock combatant (7): a resource write and a spell-slot write share ONE key.
+    expect(pendingTargetKey({ combatantId: 7 })).toBe(pendingTargetKey({ combatantId: 7 }));
+    // Different statblock combatants never collide — no more shared encounter-wide key.
+    expect(pendingTargetKey({ combatantId: 7 })).not.toBe(pendingTargetKey({ combatantId: 8 }));
     // A character-linked target and a statblock target never collide even with the same
     // numeric id, since the two scopes are namespaced separately.
     expect(pendingTargetKey({ characterId: 7 })).not.toBe(pendingTargetKey({ combatantId: 7 }));
@@ -489,19 +531,16 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/for \(const \[key, wasAmbiguous\] of releasing\) if \(wasAmbiguous\) setAmbiguousResolvedFor\(key\);/);
   });
 
-  // Fourteenth-round finding (codex P1 + devin, same root cause): `statblockMutation`'s CAS
-  // token is the ENCOUNTER's `updatedAt`, which its own `Combatant` response cannot refresh
-  // (`reconcileCombatant` only writes the combatant into the encounter cache, not the
-  // encounter's own `updatedAt`). Releasing the control immediately on SUCCESS (the same as
-  // every other mutation) meant a second click before the async `invalidate()` refetch landed
-  // resent the now-stale encounter revision and got a self-inflicted 409 — reproducible by
-  // just clicking a monster's pip twice in a row. `statblockMutation` must force the same
-  // reconcile-before-release path the other three mutations only take on ambiguous/stale
-  // errors.
-  test('ResourceTrackerPanel forces statblockMutation to reconcile before releasing even on success, since its CAS token is not in its own response', () => {
+  // Issue #1909: the whole-statblock PATCH `statblockMutation` replaced needed
+  // `forceReconcile: true` because its CAS token was the ENCOUNTER's `updatedAt`, which
+  // its own `Combatant` response could not refresh. `combatantResourceMutation`'s
+  // POST .../combatants/:cid/resources sends no CAS token at all (the server reads the
+  // row fresh inside its own transaction), so it passes `forceReconcile: false` — the
+  // default reconcile-only-on-ambiguous/stale-write path other mutations already use.
+  test('ResourceTrackerPanel does not force-reconcile combatantResourceMutation on success — its endpoint carries no external CAS token', () => {
     const src = readFileSync(PANEL, 'utf8');
-    // Round 23: a 4th arg (`false`) now says this target doesn't need campaignCharacters.
-    expect(src).toMatch(/endPendingAfterReconciling\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\), error, true, false\)/);
+    // Round 23-style 4th arg: `needsCharacters: false`, but `forceReconcile` is `false` too.
+    expect(src).toMatch(/endPendingAfterReconciling\(pendingTargetKey\(\{ combatantId: vars\.combatantId \}\), error, false, false\)/);
   });
 
   /**
@@ -561,24 +600,27 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(src).toMatch(/<ErrorNote message=\{error\.message\} onDismiss=\{\(\) => setError\(null\)\}/);
   });
 
-  // Twelfth-round finding (P1, devin): a whole-statblock PATCH (spent on a monster's resource
-  // or spell-slot pip) sent no CAS token at all, so a stale cached combatant snapshot could
-  // silently clobber another client's concurrent edit to the SAME statblock. `updateCombatant`
-  // already validates `expectedUpdatedAt` against the ENCOUNTER row (there is no per-combatant
-  // revision field) — thread the encounter's own `updatedAt` through, matching every other
-  // `expectedUpdatedAt`-bearing combatant PATCH in the app.
-  test('ResourceTrackerPanel sends expectedUpdatedAt (the encounter revision) on every statblock pip write', () => {
+  // Issue #1909: the whole-statblock PATCH (a monster's resource or spell-slot pip) sent
+  // no CAS token at all, so a stale cached combatant snapshot could silently clobber
+  // another client's concurrent edit to the SAME statblock — that PATCH, and the
+  // `encounterUpdatedAt` prop it needed as a workaround, are both gone. The delta-based
+  // POST .../combatants/:cid/resources needs no client-supplied revision: the server reads
+  // the combatant row fresh inside its own transaction, so two concurrent single-pip
+  // writes to DIFFERENT resources on the SAME combatant both persist without a CAS token.
+  test('ResourceTrackerPanel no longer threads an encounterUpdatedAt CAS token for statblock pips', () => {
     const src = readFileSync(PANEL, 'utf8');
-    expect(src).toMatch(/encounterUpdatedAt: string \| undefined;/);
-    expect(src).toMatch(/expectedUpdatedAt,\s*\n\s*\}: \{\s*\n\s*combatantId: number;/);
-    expect(src).toMatch(/\{ statblock, expectedUpdatedAt \}/);
-    // Both call sites (resource pip and spell-slot pip) actually pass it — advertising the
-    // field on the mutation without every call site supplying it would silently degrade back
-    // to the unconditional write for whichever site forgot.
-    const statblockMutateCalls = src.match(/statblockMutation\.mutate\(\{[\s\S]*?\}\);/g) ?? [];
-    expect(statblockMutateCalls.length).toBe(2);
-    for (const call of statblockMutateCalls) {
-      expect(call).toMatch(/expectedUpdatedAt: encounterUpdatedAt/);
+    expect(src).not.toMatch(/encounterUpdatedAt/);
+
+    const runSessionSrc = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(runSessionSrc).not.toMatch(/encounterUpdatedAt/);
+
+    // Both call sites (resource pip and spell-slot pip) go through the new endpoint with a
+    // computed delta, not an expectedUpdatedAt CAS token.
+    const combatantResourceMutateCalls = src.match(/combatantResourceMutation\.mutate\(\{[^;]*\}\);/g) ?? [];
+    expect(combatantResourceMutateCalls.length).toBe(2);
+    for (const call of combatantResourceMutateCalls) {
+      expect(call).toMatch(/currentUsed: .*\.used, nextUsed: val/);
+      expect(call).not.toMatch(/expectedUpdatedAt/);
     }
   });
 

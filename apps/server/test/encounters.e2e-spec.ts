@@ -6048,6 +6048,127 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.status).toBe(403);
   });
 
+  describe('POST .../combatants/:cid/resources (issue #1909)', () => {
+    it("dm spends and restores a statblock combatant's feature resource and spell slot by delta, recording a resource_changed event", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Monster Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({
+          kind: 'monster',
+          name: 'REST Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        });
+      expect(addRes.status).toBe(201);
+      const rCombatantId = addRes.body.id;
+
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+      expect(spent.body.statblock.resources.kiPoints.used).toBe(1);
+
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(restored.status).toBe(201);
+      expect(restored.body.statblock.resources.kiPoints.used).toBe(0);
+
+      const slotSpent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ spellLevel: 2, delta: 1 });
+      expect(slotSpent.status).toBe(201);
+      expect(slotSpent.body.statblock.spellSlots['2'].used).toBe(1);
+
+      const events = await request(server).get(`/api/v1/encounters/${rEncounterId}/events`).set(dm);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('a non-dm (player or viewer) is forbidden from adjusting a statblock combatant — it has no owning player', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Role Matrix' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Role-Matrix Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const byPlayer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byPlayer.status).toBe(403);
+
+      const byViewer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byViewer.status).toBe(403);
+    });
+
+    it('a player adjusts their own character combatant; a different player is forbidden', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Owner Fight' });
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server).patch(`/api/v1/characters/${ownedCharacterId}`).set(dm).send({ resources: { secondWind: { max: 1, used: 0, name: 'Second Wind', recharge: 'short-rest' } } });
+
+      const byOwner = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOwner.status).toBe(201);
+
+      const byOther = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(otherPlayer)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOther.status).toBe(403);
+    });
+
+    it('overspend and below-zero restore return typed 400 with nothing written', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Bounds Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Bounds Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 1, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const overspend = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 5 });
+      expect(overspend.status).toBe(400);
+
+      const belowZero = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(belowZero.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+  });
+
   describe('fog of war + server-side token redaction', () => {
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();

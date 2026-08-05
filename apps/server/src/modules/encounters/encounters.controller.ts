@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -604,6 +604,31 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.updateCombatant(id, cid, body, user, role);
+  }
+
+  @Post(':id/combatants/:cid/resources')
+  @ApiOperation({
+    summary: 'Spend or restore one combatant resource or spell-slot level (issue #1909)',
+    description:
+      'dm or the owning player (of a character-linked combatant); a statblock combatant (no linked character) is ' +
+      'dm-only, matching PATCH .../combatants/:cid\'s statblock rule. Exactly one of `key` (feature resource) or ' +
+      '`spellLevel` (1-9) plus a `delta` (default +1). Delta-based and transactional: unlike a whole-statblock or ' +
+      'whole-character PATCH built from a stale client read, this reads the row fresh inside the write, so two ' +
+      'concurrent single-pip spends on DIFFERENT resources on the SAME sheet/statblock both persist. Records a ' +
+      '`resource_changed` encounter event.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated combatant.' })
+  @ApiResponse({ status: 400, description: 'Overspend/over-restore outside [0, max], or the combatant has no sheet/inline-statblock resources.' })
+  @ApiResponse({ status: 403, description: 'Not the dm or the owning player, or a non-dm targeting a statblock combatant.' })
+  async adjustCombatantResource(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantResourceAdjustDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.adjustCombatantResource(id, cid, body, user, role);
   }
 
   @Post(':id/combatants/:cid/death-save')

@@ -52,6 +52,7 @@ export type EncounterOperation =
   | 'combatant.update'
   | 'combatant.death_save_roll'
   | 'combatant.roll_initiative'
+  | 'combatant.resource_adjust'
   | 'turn.advance';
 
 // The drizzle transaction handle and the DB handle are structurally identical for the

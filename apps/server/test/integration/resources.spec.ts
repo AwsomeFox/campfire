@@ -1,6 +1,6 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
-import { characters, combatants, encounters, encounterEvents, campaigns } from '../../src/db/schema';
+import { characters, combatants, encounters, encounterEvents, campaigns, auditLog } from '../../src/db/schema';
 import { CharactersService } from '../../src/modules/characters/characters.service';
 import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
 import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
@@ -357,5 +357,217 @@ describe('inline spell slots & character resources (issue #422)', () => {
     // Verify encounter events recorded resource_changed
     const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
     expect(events.some((e: any) => e.type === 'resource_changed')).toBe(true);
+
+    // Issue #1909: the audit-every-domain-write invariant — the character branch never
+    // called audit.log before this issue. `String(r.actor).startsWith(...)` tolerates
+    // `auditActor`'s numeric-id-as-text quirk with this file's `id: 1` fixture (real
+    // `RequestUser.id` is always a string) without pinning to that incidental format.
+    const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
+    expect(rows.some((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor).startsWith(String(user.id)))).toBe(true);
+  });
+
+  it("issue #1909: a player adjusts their own character combatant; a different player is forbidden", async () => {
+    const owner = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const otherPlayer = { id: '2', username: 'other', displayName: 'Other', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Role Matrix Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Ezren',
+        ownerUserId: '1',
+        resources: JSON.stringify({ arcaneRecovery: { max: 1, used: 0, name: 'Arcane Recovery', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Role Matrix Fight', status: 'running', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Ezren', sortOrder: 1 })
+      .returning()
+      .all();
+
+    // The owning player may adjust their own combatant.
+    const updated = await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, owner, 'player');
+    expect(updated).toBeTruthy();
+    const cAfter = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(cAfter.resources)['arcaneRecovery'].used).toBe(1);
+
+    // A different player (not the owner, not the dm) is forbidden.
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, otherPlayer, 'player'),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  describe('issue #1909: statblock combatants', () => {
+    async function seedStatblockEncounter() {
+      const user = { id: '1', username: 'dm_user', displayName: 'DM', serverRole: 'user' as const };
+      const ts = new Date().toISOString();
+      const [camp] = db
+        .insert(campaigns)
+        .values({ name: 'Statblock Combat Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const [enc] = db
+        .insert(encounters)
+        .values({ campaignId: camp.id, name: 'Monster Fight', status: 'running', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const [comb] = db
+        .insert(combatants)
+        .values({
+          encounterId: enc.id,
+          kind: 'monster',
+          characterId: null,
+          name: 'Monk Boss',
+          sortOrder: 1,
+          statblockJson: JSON.stringify({
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          }),
+        })
+        .returning()
+        .all();
+
+      return { user, camp, enc, comb };
+    }
+
+    it("DM adjusts a statblock combatant's feature resource and spell slot by delta, recording a resource_changed event and an audit row", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const afterResource = await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm');
+      expect(afterResource.statblock.resources['kiPoints'].used).toBe(1);
+
+      const afterSlot = await encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1 }, user, 'dm');
+      expect(afterSlot.statblock.spellSlots['2'].used).toBe(1);
+
+      const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+      expect(events.filter((e: any) => e.type === 'resource_changed').length).toBe(2);
+
+      const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
+      expect(rows.filter((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor) === '1').length).toBe(2);
+    });
+
+    it('a non-DM (player or viewer) may not adjust a statblock combatant — it has no owning player', async () => {
+      const { enc, comb } = await seedStatblockEncounter();
+      const other = { id: '2', username: 'other_user', displayName: 'Other', serverRole: 'user' as const };
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, other, 'player'),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, other, 'viewer'),
+      ).rejects.toThrow(ForbiddenException);
+
+      // Nothing written on the rejected attempts.
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
+    });
+
+    it('two interleaved single-pip writes to two DIFFERENT statblock resources both persist (lost-update regression)', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      // Simulates two racing writers (a DM tab + an MCP-driven AI DM) each spending a
+      // DIFFERENT resource on the SAME statblock combatant. A whole-statblock PATCH built
+      // from a stale client snapshot would have let the second writer's PATCH revert the
+      // first's change; this delta-based endpoint reads the row fresh inside its own
+      // transaction, so both persist regardless of ordering.
+      await Promise.all([
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1 }, user, 'dm'),
+      ]);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      const statblock = JSON.parse(row.statblockJson!);
+      expect(statblock.resources.kiPoints.used).toBe(1);
+      expect(statblock.spellSlots['2'].used).toBe(1);
+    });
+
+    it('statblock overspend and below-zero restore return typed 400 with nothing written', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      // Overspend: kiPoints max is 3, already at 0 — restoring (delta -1) would go below 0.
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: -1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      // Spend past max: 4 successive +1s on a max-3 pool.
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 3 }, user, 'dm');
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      // Still exactly 3 (the successful spend), not 4 — the rejected 4th write left nothing behind.
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(3);
+    });
+
+    it('a non-character combatant with no inline statblock resources still 400s', async () => {
+      const user = { id: '1', username: 'dm_user', displayName: 'DM', serverRole: 'user' as const };
+      const ts = new Date().toISOString();
+      const [camp] = db
+        .insert(campaigns)
+        .values({ name: 'No Statblock Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+      const [enc] = db
+        .insert(encounters)
+        .values({ campaignId: camp.id, name: 'HP-only Fight', status: 'running', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+      const [comb] = db
+        .insert(combatants)
+        .values({ encounterId: enc.id, kind: 'monster', characterId: null, name: 'Plain Goblin', sortOrder: 1 })
+        .returning()
+        .all();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('a retried idempotencyKey replays the original outcome instead of double-spending', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const first = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-1' },
+        user,
+        'dm',
+      );
+      expect(first.statblock.resources['kiPoints'].used).toBe(1);
+
+      const replay = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-1' },
+        user,
+        'dm',
+      );
+      expect(replay.statblock.resources['kiPoints'].used).toBe(1);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(1);
+
+      const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
+      expect(rows.filter((r: any) => r.action === 'encounter.combatant.resource').length).toBe(1);
+    });
   });
 });
