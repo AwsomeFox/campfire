@@ -1043,6 +1043,49 @@ describe('inline spell slots & character resources (issue #422)', () => {
       ).rejects.toThrow(ConflictException);
     });
 
+    // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome
+    // even if the combatant was removed since the original commit — an ordinary post-action
+    // roster change (the DM removing the monster this pip was just spent on) must not break
+    // replay for a request whose effect already landed. The outer `getCombatantRowOrThrow`
+    // would otherwise 404 before the idempotency check is ever reached.
+    it("a retried idempotencyKey replays its already-committed outcome even after the combatant has since been removed, while a FRESH write in the same state still 404s", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const first = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-removed-combatant' },
+        user,
+        'dm',
+      );
+      expect(first.statblock.resources['kiPoints'].used).toBe(1);
+
+      // Simulate another actor removing the combatant between the original call and this
+      // retry — a real DELETE, exactly what removeCombatant performs.
+      db.delete(combatants).where(eq(combatants.id, comb.id)).run();
+
+      const replay = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-removed-combatant' },
+        user,
+        'dm',
+      );
+      expect(replay.statblock.resources['kiPoints'].used).toBe(1);
+
+      // A genuinely FRESH write (a new key) against the same now-removed combatant still
+      // 404s — only an already-committed replay is exempt from requiring a live row.
+      await expect(
+        encountersService.adjustCombatantResource(
+          enc.id,
+          comb.id,
+          { key: 'kiPoints', delta: 1, idempotencyKey: 'fresh-key-after-removal' },
+          user,
+          'dm',
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
     // Review finding (Devin + Copilot, same defect): the unit spec on the shared primitives
     // (encounter-idempotency-race.spec.ts) proves `recordEncounterOp` throws
     // `EncounterOpRaceMarker` on a colliding insert and that `readEncounterOpAfterRace`

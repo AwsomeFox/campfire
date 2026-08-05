@@ -8655,19 +8655,6 @@ export class EncountersService {
     // fails immediately here; a keyed one instead hits the identical `assertMutable` check
     // inside each transaction below, AFTER the replay lookup finds nothing to replay.
     if (!patch.idempotencyKey) this.assertMutable(encounter);
-    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
-
-    const isDm = role === 'dm';
-    if (combatant.characterId !== null) {
-      if (!isDm) {
-        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
-        if (!character || character.ownerUserId !== user.id) {
-          throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
-        }
-      }
-    } else if (!isDm) {
-      throw new ForbiddenException('Only dm may adjust a statblock combatant\'s resources');
-    }
 
     const delta = patch.delta ?? 1;
 
@@ -8675,7 +8662,9 @@ export class EncountersService {
     // use above: `delta` is a RELATIVE write, so a retry after a lost response must replay
     // the ORIGINAL committed combatant rather than spend/restore a second time. Scoped to
     // its own operation name so a key reused for a different action still 409s instead of
-    // silently replaying the wrong result.
+    // silently replaying the wrong result. Built from fields alone (no combatant row
+    // needed) so it can be checked before requiring one to exist — see the early replay
+    // check just below.
     const opClaim: EncounterOpClaim | null = patch.idempotencyKey
       ? {
           actorId: user.id,
@@ -8688,7 +8677,6 @@ export class EncountersService {
       : null;
     let replayed: Combatant | null = null;
     let eventDetail = '';
-    let row: typeof combatants.$inferSelect = combatant;
 
     // Issue #1909 review (Devin/Codex secrecy finding): a stored response was rendered for
     // the ROLE that committed it — a DM-only projection (exact fog-hidden token position,
@@ -8703,7 +8691,9 @@ export class EncountersService {
     // is handled the same defensive way as those siblings anyway — fall through to a FRESH
     // role-filtered read (`getWithCombatantsOrThrow`) rather than trust the stored
     // projection. This never re-runs the effect a second time; only the returned VIEW is
-    // re-derived.
+    // re-derived. Deliberately does NOT require the combatant to still exist when a stored
+    // body is being replayed verbatim — only the fresh-read fallback path does, and only
+    // because it has no other way to answer "what is the combatant now".
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
       const body = prior.response as Combatant | null;
       if (body && prior.responseRole === role) return body;
@@ -8712,6 +8702,40 @@ export class EncountersService {
       if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       return found;
     };
+
+    // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome
+    // even if the combatant was removed (a real DELETE, not soft) since the original commit
+    // — the same "the effect already happened, only the response was lost" guarantee every
+    // other keyed encounter mutation provides. The transactional `findPriorEncounterOp`
+    // check inside each branch below runs AFTER `getCombatantRowOrThrow`, which throws 404
+    // unconditionally the moment the combatant is gone — so an ordinary post-action roster
+    // change (the DM removing a defeated monster, say) landing between the original commit
+    // and a lost-response retry would otherwise break replay for a request that already
+    // succeeded. This is a plain, transaction-free SELECT purely as a short-circuit for
+    // that case; it does not replace the race-safe `findPriorEncounterOp`/`recordEncounterOp`
+    // pair still run inside each branch's own transaction for a genuinely FRESH write —
+    // that pair is what actually protects against two concurrent requests with the SAME key
+    // racing each other, and is untouched by this early check finding nothing.
+    if (opClaim) {
+      const earlyPrior = findPriorEncounterOp(this.db, opClaim, Date.now());
+      if (earlyPrior) return resolveReplay(earlyPrior);
+    }
+
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    let row: typeof combatants.$inferSelect = combatant;
+
+    const isDm = role === 'dm';
+    if (combatant.characterId !== null) {
+      if (!isDm) {
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
+        }
+      }
+    } else if (!isDm) {
+      throw new ForbiddenException('Only dm may adjust a statblock combatant\'s resources');
+    }
+
     let priorClaim: EncounterOpPrior | null = null;
 
     if (combatant.characterId !== null) {
