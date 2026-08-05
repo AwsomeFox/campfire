@@ -933,7 +933,7 @@ export function BattleMap({
     const point = pointerToPercent(e, true);
     if (!point) return;
     const captureTarget = e.currentTarget;
-    const targetable = targeting?.legalIds.includes(c.id) ?? false;
+    const targetable = (targeting?.legalIds.includes(c.id) ?? false) && !targeting?.declared;
     if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
