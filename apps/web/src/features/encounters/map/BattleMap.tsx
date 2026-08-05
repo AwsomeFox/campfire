@@ -2413,7 +2413,10 @@ export function BattleMap({
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => {
-                        if (legalTarget) e.stopPropagation();
+                        if (legalTarget) {
+                          e.stopPropagation();
+                          return;
+                        }
                         onTokenPointerDown(e, c);
                       }}
                       onClick={(event) => {

@@ -3536,7 +3536,7 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
-          targeting={pendingActionUse ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, onToggle: toggleActionTarget } : null}
+          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, onToggle: toggleActionTarget } : null}
           impactTargetIds={actionImpactTargetIds}
         />
       )}
@@ -4013,7 +4013,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
-                  targeting={pendingActionUse ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), onToggle: () => toggleActionTarget(c.id) } : null}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}
