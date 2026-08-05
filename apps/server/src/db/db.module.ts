@@ -1156,6 +1156,10 @@ function migrateCombatantsTableForNpcId(sqlite: Database.Database): void {
 }
 
 function migrateCombatantsTableForNpcIdentitySource(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL creates the column.
   const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
   if (!columns.some((c) => c.name === 'npc_identity_source_id')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_identity_source_id INTEGER');
   sqlite.exec('UPDATE combatants SET npc_identity_source_id = npc_id WHERE npc_identity_source_id IS NULL AND npc_id IS NOT NULL');
