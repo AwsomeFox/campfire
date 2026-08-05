@@ -2215,10 +2215,13 @@ export class EncountersService {
     input: AoeTemplateDeclareInput,
     user: RequestUser,
     role: Role,
+    /** MCP upsert retries/moves retain the original declarer; REST create remains conflict-only. */
+    upsert = false,
   ): Promise<AoeTemplateType> {
     const template = AoeTemplateDeclare.parse(input);
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
     let declared: AoeTemplateType | undefined;
+    let action: 'encounter.aoe.declare' | 'encounter.aoe.update' = 'encounter.aoe.declare';
 
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
@@ -2228,16 +2231,25 @@ export class EncountersService {
       this.assertMutable(fresh);
 
       const current = parseAoe(fresh.aoe);
-      if (current.some((candidate) => candidate.id === template.id)) {
-        throw new ConflictException(`AoE template ${template.id} already exists`);
+      const existingIndex = current.findIndex((candidate) => candidate.id === template.id);
+      if (existingIndex >= 0) {
+        if (!upsert) throw new ConflictException(`AoE template ${template.id} already exists`);
+        const existing = current[existingIndex];
+        if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+          throw new ForbiddenException('Players may modify only their own AoE templates.');
+        }
+        declared = AoeTemplate.parse({ ...existing, ...template, declaredByUserId: existing.declaredByUserId });
+        current[existingIndex] = declared;
+        action = 'encounter.aoe.update';
+      } else {
+        if (current.length >= 50) {
+          throw new ConflictException('An encounter may have at most 50 AoE templates');
+        }
+        declared = { ...template, declaredByUserId: user.id };
+        current.push(declared);
       }
-      if (current.length >= 50) {
-        throw new ConflictException('An encounter may have at most 50 AoE templates');
-      }
-
-      declared = { ...template, declaredByUserId: user.id };
       tx.update(encounters)
-        .set({ aoe: toJsonText([...current, declared]), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(encounters.id, encounterId))
         .run();
       emittedEncounter = fresh;
@@ -2247,7 +2259,7 @@ export class EncountersService {
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
-      action: 'encounter.aoe.declare',
+      action,
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounter.campaignId,

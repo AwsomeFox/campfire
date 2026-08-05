@@ -39,6 +39,7 @@ import {
   CombatantUpdate,
   DifficultyBand,
   EncounterShape,
+  AoeTemplateDeclare,
   EncounterUpdate,
   EncounterEndTurn,
   EncounterNextTurn,
@@ -1363,6 +1364,51 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.getAftermath(encounterId as number, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'declare_aoe_template',
+      'Declare or move an area-of-effect template in an encounter (issue #1913). Any DM or player may call this. ' +
+        'On first use, the server stamps the authenticated caller as declarer; calling again with the same templateId ' +
+        'updates that caller’s own template. A DM may update any template but never changes its original declarer. ' +
+      'Callers cannot supply declarer identity. Player templates remain visible only to their owner and DMs in unrevealed fog.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id: a repeated id upserts this template'),
+        ...AoeTemplateDeclare.omit({ id: true }).shape,
+      },
+      async ({ encounterId, templateId, ...template }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Keep the hidden encounter’s 404 behavior inside EncountersService, after
+        // membership/writability but before its player role floor, just like REST.
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+        return this.encounters.declareAoeTemplate(
+          encounterId as number,
+          AoeTemplateDeclare.parse({ ...template, id: templateId }),
+          user,
+          role,
+          true,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'remove_aoe_template',
+      'Remove an area-of-effect template (issue #1913). A player may remove only their own declaration; a DM may remove any template. ' +
+        'Hidden encounter, archived campaign, and ended encounter protections match declare_aoe_template and REST.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        templateId: z.string().min(1).max(40).describe('AoE template id supplied when it was declared'),
+      },
+      async ({ encounterId, templateId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+        return this.encounters.removeAoeTemplate(encounterId as number, templateId as string, user, role);
       },
     );
 

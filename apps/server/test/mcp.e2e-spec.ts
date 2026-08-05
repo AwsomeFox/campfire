@@ -1202,6 +1202,38 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('declare_aoe_template upserts without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
+    const client = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Player AoE', hidden: false } }),
+    ) as { id: number };
+    const declaration = { encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+
+    const created = parseResult(await client.callTool({ name: 'declare_aoe_template', arguments: declaration })) as {
+      id: string;
+      x: number;
+      declaredByUserId: string | null;
+    };
+    expect(created).toMatchObject({ id: 'mcp-cone', x: 20 });
+    expect(created.declaredByUserId).not.toBeNull();
+
+    const moved = parseResult(
+      await client.callTool({ name: 'declare_aoe_template', arguments: { ...declaration, x: 60 } }),
+    ) as { id: string; x: number; declaredByUserId: string | null };
+    expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, declaredByUserId: created.declaredByUserId });
+
+    const spoof = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { ...declaration, declaredByUserId: 'somebody-else' },
+    });
+    expect(spoof.isError).toBe(true);
+    expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+    expect(
+      parseResult(await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone' } })),
+    ).toEqual({ ok: true });
+  });
+
   it('roll_death_save replays the original MCP outcome for a lost-response retry', async () => {
     const character = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)

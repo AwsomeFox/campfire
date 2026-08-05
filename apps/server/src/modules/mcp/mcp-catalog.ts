@@ -187,6 +187,8 @@ export const MCP_TOOL_NAMES = [
   'create_encounter',
   'commit_encounter',
   'update_encounter',
+  'declare_aoe_template',
+  'remove_aoe_template',
   'reveal_map_region',
   'generate_map',
   'generate_ai_map',
