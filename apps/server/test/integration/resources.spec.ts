@@ -551,6 +551,71 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(resources.layOnHands.used).toBe(0);
   });
 
+  // Issue #1909 review (Devin, thirteenth finding): the statblock branch got a malformed-
+  // entry guard and its character twin did not — the same one-of-two-symmetric-branches
+  // omission as the twelfth finding. `character.resources`/`spellSlots` are read with a bare
+  // `fromJsonText` carrying a claimed type and no runtime validation, so a legacy or
+  // imported row can hold a non-numeric `used`/`max`. Every NaN comparison is false, so the
+  // bounds check passes in BOTH directions and persists `used: NaN` → `null`. These two are
+  // the character-branch counterparts to the statblock tests in the describe block below —
+  // the asymmetry survived precisely because only one side had coverage.
+  async function seedCharacterCombatant(resources: string, spellSlots = '{}') {
+    const user = { id: '1', username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Malformed Entry Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({ campaignId: camp.id, name: 'Seelah', ownerUserId: '1', resources, spellSlots, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [enc] = db.insert(encounters).values({ campaignId: camp.id, name: 'Malformed Fight', status: 'running', createdAt: ts, updatedAt: ts }).returning().all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1 })
+      .returning()
+      .all();
+    return { user, c, enc, comb };
+  }
+
+  it("a character resource entry missing `used` 400s naming it, instead of silently persisting used: NaN (Devin review)", async () => {
+    const { user, c, enc, comb } = await seedCharacterCombatant(JSON.stringify({ layOnHands: { max: 3, name: 'Lay on Hands' } }));
+
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1 }, user, 'dm'),
+    ).rejects.toThrow(BadRequestException);
+
+    // The corruption this prevents: `undefined + 1` is NaN, `NaN < 0 || NaN > 3` is false
+    // both ways, so pre-fix this resolved and wrote `used: null` to the sheet.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources).layOnHands.used).toBeUndefined();
+  });
+
+  it("a character resource entry with a non-numeric `max` 400s instead of silently disabling the upper bound (Devin review)", async () => {
+    const { user, c, enc, comb } = await seedCharacterCombatant(JSON.stringify({ layOnHands: { max: 'three', used: 0, name: 'Lay on Hands' } }));
+
+    // Without the guard `nextUsed > 'three'` is false for ANY nextUsed, so a huge overspend
+    // silently succeeds instead of 400ing.
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1000 }, user, 'dm'),
+    ).rejects.toThrow(BadRequestException);
+
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources).layOnHands.used).toBe(0);
+  });
+
+  it("a character spell-slot entry with a non-numeric `max` 400s, since `'three' <= 0` does not catch it (Devin review)", async () => {
+    const { user, c, enc, comb } = await seedCharacterCombatant('{}', JSON.stringify({ '2': { max: 'three', used: 0 } }));
+
+    // The pre-existing `!slot || slot.max <= 0` check is NOT a substitute: a string `max`
+    // compares false against 0 and sails straight through to the arithmetic.
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1000 }, user, 'dm'),
+    ).rejects.toThrow(BadRequestException);
+
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.spellSlots)['2'].used).toBe(0);
+  });
+
   // Issue #1909 review (Codex P2): for a character-linked combatant the resource lives on
   // the CHARACTER row, not the combatant — `Combatant` has no resources/spellSlots field at
   // all, so the response cannot show the committed value regardless of freshness. Pins the

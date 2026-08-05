@@ -8958,6 +8958,22 @@ export class EncountersService {
             if (!slot || slot.max <= 0) {
               throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
             }
+            // Issue #1909 review (Devin, thirteenth finding): the statblock branch got this
+            // malformed-entry guard and its character twin did not — the same
+            // one-of-two-symmetric-branches omission as the twelfth finding's missing
+            // `encounterId` check, in this same method. `character.spellSlots` is read with a
+            // bare `fromJsonText` carrying a CLAIMED type and no runtime validation, so a
+            // legacy/imported row can hold a non-numeric `used`/`max`. The check just above
+            // does NOT catch it: `'three' <= 0` is false, so a string `max` sails through.
+            // Then every NaN comparison is false, so `nextUsed < 0 || nextUsed > slot.max`
+            // passes in BOTH directions and persists `used: NaN`, which serializes to `null`
+            // and leaves the tracker unusable — the exact contradiction of the "never a
+            // silent clamp" contract this PR's own REST and MCP docs state for both
+            // branches. Placed before the CAS below so a malformed entry reports what is
+            // actually wrong instead of a misleading STALE_WRITE.
+            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
+              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
+            }
             // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
             // ("set this slot's used to N") converted to a relative delta against whatever
             // `used` the caller last rendered. The transactional fresh-row read above
@@ -9012,6 +9028,15 @@ export class EncountersService {
             const res = resources[patch.key];
             if (!res) {
               throw new BadRequestException(`No such resource '${patch.key}'`);
+            }
+            // Issue #1909 review (Devin, thirteenth finding): character-branch counterpart to
+            // the statblock branch's identical guard. `character.resources` gets the same
+            // unvalidated `fromJsonText` treatment as `spellSlots` above, and here there is
+            // no prior check at all to lean on — a missing `used` reaches the arithmetic
+            // directly. A string `max` additionally disables the upper bound outright, since
+            // `nextUsed > 'three'` is false for any number.
+            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
+              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
             }
             // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
             // spell-slot branch above.
