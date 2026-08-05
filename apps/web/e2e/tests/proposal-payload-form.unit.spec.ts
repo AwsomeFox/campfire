@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { QuestCreate, QuestUpdate, CharacterCreate } from '@campfire/schema';
+import { QuestCreate, QuestUpdate, CharacterCreate, EncounterGenerate } from '@campfire/schema';
 import {
   buildProposalDraftPayload,
   computeGuidedProposalPreview,
@@ -8,6 +8,7 @@ import {
   humanizeFieldKey,
   initProposalFieldBool,
   initProposalFieldText,
+  computeProposalPreviewFromData,
   jsonFieldKeys,
   schemaForProposal,
   validateProposalPayload,
@@ -311,5 +312,56 @@ test.describe('proposalPayloadForm: computeGuidedProposalPreview (end-to-end)', 
     const preview = computeGuidedProposalPreview([], [], {}, {}, { foo: 'bar' }, null);
     expect(preview.normalized).toEqual({ foo: 'bar' });
     expect(preview.changedKeys).toEqual([]);
+  });
+});
+
+test.describe('proposalPayloadForm: server-contract alignment (issue #769 review)', () => {
+  test('an encounter proposal resolves the GENERATOR schema the server validates against, not EncounterCreate', () => {
+    // The server maps `encounter` to `EncounterGenerate.strict()` for BOTH create and
+    // update (proposals.service.ts): an encounter proposal's payload is the seeded
+    // generator request, and approving re-runs generate_encounter. Mapping it to
+    // Encounter{Create,Update} rendered controls for fields the payload never has while
+    // dropping `difficulty`/`seed`/`party`/`filters`, so approve 400d on the missing
+    // required `difficulty`.
+    expect(schemaForProposal('encounter', 'create')).toBe(EncounterGenerate);
+    expect(schemaForProposal('encounter', 'update')).toBe(EncounterGenerate);
+
+    // The generator params must therefore survive a round-trip rather than being stripped.
+    const payload = { difficulty: 'hard', seed: 42, count: 3 };
+    const preview = computeProposalPreviewFromData(payload, payload, EncounterGenerate);
+    expect(preview.normalized).toMatchObject({ difficulty: 'hard', seed: 42, count: 3 });
+  });
+
+  test('`campaign` is not a proposable entity type, so it falls back to raw JSON', () => {
+    // ProposableEntityType has no `campaign` member — the server could never receive one.
+    // Claiming to know its schema would have shown a guided editor for a proposal that
+    // cannot exist.
+    expect(schemaForProposal('campaign', 'create')).toBeNull();
+  });
+
+  test('a key the shared schema does not declare SURVIVES validation instead of being stripped', () => {
+    // Zod 3 strips unknown keys. Returning the parsed object as the submitted payload
+    // deleted content the proposer wrote — the exact "invisible drop until a DM approves
+    // an emptier-than-intended entity" the server applies `.strict()` to prevent. Unknown
+    // keys must reach the server so its strict check can surface a misnamed key as a 400.
+    const payload = { title: 'Quest', someUndeclaredKey: 'must survive' };
+    const preview = computeProposalPreviewFromData(payload, payload, QuestUpdate);
+    expect(preview.normalized).toMatchObject({ title: 'Quest', someUndeclaredKey: 'must survive' });
+  });
+
+  test('presence is judged against the working payload, so an explicit raw-mode value is honoured', () => {
+    // After a round-trip through advanced mode the omit-vs-explicit decision must consult
+    // what the user is actually working from, not the proposal as originally submitted.
+    // Judging against the original would delete an explicit `hidden: false` typed in raw
+    // mode — flipping an intended-public quest back to DM-only-by-default.
+    const original = { title: 'Quest' };
+    const working = { title: 'Quest', hidden: false };
+    const fields = describeProposalFields(QuestUpdate);
+    const jsonKeys = jsonFieldKeys(QuestUpdate);
+    const text = initProposalFieldText(fields, jsonKeys, working);
+    const bool = initProposalFieldBool(fields, working);
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, bool, original, working);
+    expect('hidden' in data).toBe(true);
+    expect(data.hidden).toBe(false);
   });
 });

@@ -26,12 +26,9 @@
  */
 import { z } from 'zod';
 import {
-  CampaignCreate,
-  CampaignUpdate,
   CharacterCreate,
   CharacterUpdate,
-  EncounterCreate,
-  EncounterUpdate,
+  EncounterGenerate,
   FactionCreate,
   FactionUpdate,
   LocationCreate,
@@ -55,8 +52,14 @@ const PROPOSAL_SCHEMAS: Partial<Record<ProposalEntityType, { create: z.AnyZodObj
   location: { create: LocationCreate, update: LocationUpdate },
   character: { create: CharacterCreate, update: CharacterUpdate },
   session: { create: SessionCreate, update: SessionUpdate },
-  campaign: { create: CampaignCreate, update: CampaignUpdate },
-  encounter: { create: EncounterCreate, update: EncounterUpdate },
+  // An encounter proposal's payload is the seeded GENERATOR request, not a persisted
+  // encounter row — approving re-runs `generate_encounter` (issue #313). The server
+  // validates it with `EncounterGenerate.strict()` for BOTH create and update
+  // (`proposals.service.ts` CREATE_SCHEMAS/UPDATE_SCHEMAS), so mapping it to
+  // Encounter{Create,Update} here rendered controls for fields the payload does not have
+  // while silently dropping the ones it does (`difficulty`, `seed`, `party`, `filters`),
+  // and the approve then 400d on the missing required `difficulty` (issue #769 review).
+  encounter: { create: EncounterGenerate, update: EncounterGenerate },
 };
 
 /** The Create/Update schema for a known proposal entity type, or null (falls back to raw JSON). */
@@ -338,14 +341,14 @@ export function buildProposalDraftPayload(
       // therefore stay OMITTED, not be coerced to an explicit `false` just because a
       // checkbox always renders some boolean. Checking it True, or a key that was
       // already explicitly present (any value), is always sent explicitly.
-      if (!checked && f.optional && !(f.key in originalPayload)) {
+      if (!checked && f.optional && !(f.key in passthroughBase)) {
         delete data[f.key];
       } else {
         data[f.key] = checked;
       }
       continue;
     }
-    applyScalarField(f, text[f.key] ?? '', data, fieldErrors, f.key in originalPayload);
+    applyScalarField(f, text[f.key] ?? '', data, fieldErrors, f.key in passthroughBase);
   }
 
   for (const key of jsonKeys) {
@@ -440,12 +443,28 @@ export function computeProposalPreviewFromData(
       normalized: null,
     };
   }
+  // Zod 3 object parsing STRIPS keys the schema does not declare, and `validated.data` was
+  // being returned as the submitted payload — so a key the proposer wrote but this shared
+  // schema doesn't know about was silently deleted on approve (issue #769 review, Devin).
+  //
+  // That is precisely the failure the server guards against: proposal payloads are not
+  // validated when filed (only on approve/revise), so a stored payload can legitimately
+  // carry undeclared keys, and `proposals.service.ts` applies `.strict()` specifically
+  // because "the proposal path is where silent key-stripping was WORST (an invisible drop
+  // until a DM approves an emptier-than-intended entity)". Stripping them client-side
+  // reintroduced exactly that, one layer up, and additionally hid it from the server's
+  // strict check.
+  //
+  // Re-applying the validated (normalized, defaulted) values OVER the draft keeps unknown
+  // keys intact so they reach the server, where a genuinely misnamed key now surfaces as a
+  // visible 400 rather than vanishing.
+  const normalized = { ...data, ...validated.data };
   return {
     draft: data,
     fieldErrors: {},
     formError: null,
-    changedKeys: diffProposalChangedKeys(originalPayload, validated.data),
-    normalized: validated.data,
+    changedKeys: diffProposalChangedKeys(originalPayload, normalized),
+    normalized,
   };
 }
 
