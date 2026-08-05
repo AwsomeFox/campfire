@@ -237,7 +237,9 @@
       "toggleCollapse": "Collapse rules quick lookup",
       "show": "Show",
       "hide": "Hide",
-      "loading": "Searching…"
+      "loading": "Searching…",
+      "typeToSearch": "Start typing to search rules & homebrew…",
+      "searchError": "Failed to search rules."
     }
   }
 }

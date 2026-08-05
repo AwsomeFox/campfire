@@ -7,6 +7,7 @@ import {
   getInitialCollapsedState,
   mergeRulesAndHomebrew,
   resolvePackName,
+  resolvePackSlug,
   updateRecentLookups,
 } from '../../src/features/encounters/RulesLookupPanel';
 
@@ -50,15 +51,16 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     expect(emptyQuery.get('pack')).toBe('open5e-srd');
   });
 
-  test('filterHomebrewEntries filters homebrew by name, summary, or body', () => {
+  test('filterHomebrewEntries returns empty array when query is empty and filters homebrew when active', () => {
     const hb1 = dummyRule(101, 'Custom Grapple', 'condition');
     const hb2 = dummyRule(102, 'Super Poison', 'condition');
     hb2.summary = 'Inflicts customized toxicity';
     const hbList = [hb1, hb2];
 
+    expect(filterHomebrewEntries(hbList, '')).toEqual([]);
+    expect(filterHomebrewEntries(hbList, '   ')).toEqual([]);
     expect(filterHomebrewEntries(hbList, 'grapple')).toEqual([hb1]);
     expect(filterHomebrewEntries(hbList, 'toxicity')).toEqual([hb2]);
-    expect(filterHomebrewEntries(hbList, '')).toEqual([hb1, hb2]);
     expect(filterHomebrewEntries(hbList, 'nonexistent')).toEqual([]);
   });
 
@@ -105,10 +107,8 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     const merged = [searchItem];
     const recents = [recentItem];
 
-    // When expandedEntryId is null, displayedResults is identical to merged
     expect(getDisplayedResults(merged, recents, null)).toEqual([searchItem]);
 
-    // When expandedEntryId is 99 (recentItem), it prepends recentItem to displayedResults
     const displayed = getDisplayedResults(merged, recents, 99);
     expect(displayed).toHaveLength(2);
     expect(displayed[0]).toEqual(recentItem);
@@ -116,20 +116,28 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
   });
 
   test('collapse persistence reads sessionStorage values correctly', () => {
-    expect(getInitialCollapsedState(null)).toBe(true); // default collapsed
+    expect(getInitialCollapsedState(null)).toBe(true);
     expect(getInitialCollapsedState('true')).toBe(true);
     expect(getInitialCollapsedState('false')).toBe(false);
   });
 
-  test('resolvePackName resolves pack name for unscoped search chips', () => {
-    const packMap = new Map<number, string>([
+  test('resolvePackName and resolvePackSlug resolve pack information correctly', () => {
+    const packNameMap = new Map<number, string>([
       [1, '5e SRD'],
       [2, 'PF2e SRD'],
     ]);
+    const packSlugMap = new Map<number, string>([
+      [1, 'open5e-srd'],
+      [2, 'pf2e-srd'],
+    ]);
 
-    expect(resolvePackName(1, packMap)).toBe('5e SRD');
-    expect(resolvePackName(2, packMap)).toBe('PF2e SRD');
-    expect(resolvePackName(99, packMap)).toBeNull();
-    expect(resolvePackName(undefined, packMap)).toBeNull();
+    expect(resolvePackName(1, packNameMap)).toBe('5e SRD');
+    expect(resolvePackName(99, packNameMap)).toBeNull();
+    expect(resolvePackName(undefined, packNameMap)).toBeNull();
+
+    expect(resolvePackSlug(1, packSlugMap)).toBe('open5e-srd');
+    expect(resolvePackSlug(2, packSlugMap)).toBe('pf2e-srd');
+    expect(resolvePackSlug(99, packSlugMap)).toBeNull();
+    expect(resolvePackSlug(undefined, packSlugMap)).toBeNull();
   });
 });
