@@ -1754,6 +1754,26 @@ function migrateAiDmSeatsTableForStylePresets1049(sqlite: Database.Database): vo
   sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN style_presets TEXT DEFAULT '{}'");
 }
 
+/**
+ * Issue #874: comprehension profile (reading complexity / paragraph length / sensory intensity /
+ * choice count) on the AI-DM seat. Same one-JSON-column shape as #1049's `style_presets` above,
+ * for the same reason: the whole block is read and written as one value. Defaults to '{}', which
+ * zod fills with the all-`default` profile, meaning an upgraded seat renders the same fixed
+ * baseline `## Comprehension` section (see driver-comprehension.ts) it would render anyway — no
+ * per-axis lines until a DM chooses one.
+ */
+function migrateAiDmSeatsTableForComprehensionProfile874(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'comprehension_profile')) return;
+
+  sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN comprehension_profile TEXT DEFAULT '{}'");
+}
+
 function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): void {
   const hasTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
@@ -5103,10 +5123,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
+  { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
   // #851 shared-instance governance: organizer eligibility flag + the creation
-  // request/approval table.
-  { name: '0162_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
-  { name: '0163_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
+  // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
+  // (eca15e17) and #1502 has 0163 reserved ahead of this branch, so both take the next free
+  // ordinals as a deliberate pre-merge step. Neither has run against a real database under
+  // its earlier name, so no installation can have recorded the old numbers.
+  { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
+  { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
 ];
 
 /**

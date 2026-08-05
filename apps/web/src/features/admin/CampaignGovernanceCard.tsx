@@ -97,7 +97,16 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
         maxTotalCampaignsPerUser: inputToLimit(maxTotalPerUser),
         maxActiveCampaignsServerWide: inputToLimit(maxActiveServerWide),
         maxTotalCampaignsServerWide: inputToLimit(maxTotalServerWide),
-        defaultCampaignStorageQuotaBytes: mbInputToBytes(defaultQuotaMb),
+        // An UNTOUCHED box must send back exactly what was stored (review). The display
+        // rounds bytes to whole MB, and save() always patches every field, so a quota
+        // configured precisely over the API or MCP — 5,000,000 bytes, say — rendered as "5"
+        // and would have been rewritten to 5,242,880 the first time an admin saved an
+        // unrelated setting on this card. Comparing against the rendered form of the stored
+        // value is what makes "unchanged" mean unchanged rather than "round-trips to itself".
+        defaultCampaignStorageQuotaBytes:
+          defaultQuotaMb === bytesToMbInput(settings?.defaultCampaignStorageQuotaBytes ?? null)
+            ? (settings?.defaultCampaignStorageQuotaBytes ?? null)
+            : mbInputToBytes(defaultQuotaMb),
       };
       // Refuse the whole save rather than sending a limit the admin did not ask for. Nothing
       // partial: a governance setting must never move because a neighbouring box was mistyped.

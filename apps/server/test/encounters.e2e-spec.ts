@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
@@ -6473,6 +6473,311 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.status).toBe(403);
   });
 
+  describe('POST .../combatants/:cid/resources (issue #1909)', () => {
+    it("dm spends and restores a statblock combatant's feature resource and spell slot by delta, recording a resource_changed event", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Monster Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({
+          kind: 'monster',
+          name: 'REST Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        });
+      expect(addRes.status).toBe(201);
+      const rCombatantId = addRes.body.id;
+
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+      expect(spent.body.statblock.resources.kiPoints.used).toBe(1);
+
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(restored.status).toBe(201);
+      expect(restored.body.statblock.resources.kiPoints.used).toBe(0);
+
+      const slotSpent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ spellLevel: 2, delta: 1 });
+      expect(slotSpent.status).toBe(201);
+      expect(slotSpent.body.statblock.spellSlots['2'].used).toBe(1);
+
+      const events = await request(server).get(`/api/v1/encounters/${rEncounterId}/events`).set(dm);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('a non-dm (player or viewer) is forbidden from adjusting a statblock combatant — it has no owning player', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Role Matrix', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Role-Matrix Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const byPlayer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byPlayer.status).toBe(403);
+
+      const byViewer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byViewer.status).toBe(403);
+    });
+
+    it('a player adjusts their own character combatant; a different player is forbidden', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Owner Fight', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server).patch(`/api/v1/characters/${ownedCharacterId}`).set(dm).send({ resources: { secondWind: { max: 1, used: 0, name: 'Second Wind', recharge: 'short-rest' } } });
+
+      const byOwner = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOwner.status).toBe(201);
+
+      const byOther = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(otherPlayer)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOther.status).toBe(403);
+    });
+
+    it('overspend and below-zero restore return typed 400 with nothing written', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Bounds Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Bounds Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 1, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const overspend = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 5 });
+      expect(overspend.status).toBe(400);
+
+      const belowZero = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(belowZero.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): a hidden/prep encounter auto-adds combatants for existing
+    // characters, so the OWNING PLAYER branch (character-linked, ownerUserId matches) can
+    // reach and mutate a combatant in an encounter that is otherwise wholesale invisible to
+    // them — GET /encounters/:id, /difficulty, /events all 404 a non-DM for a hidden
+    // encounter (issue #262/#869). A 403 here would itself leak the encounter's existence
+    // (distinguishable from "doesn't exist"), so the gate must match the sibling read/roll
+    // paths exactly: 404, not 403.
+    it("a player's own combatant in a HIDDEN encounter is invisible (404), not adjustable, matching GET's secrecy", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server)
+        .patch(`/api/v1/characters/${ownedCharacterId}`)
+        .set(dm)
+        .send({ resources: { hiddenFightResource: { max: 1, used: 0, name: 'Hidden Fight Resource', recharge: 'short-rest' } } });
+
+      // GET already 404s the owning player wholesale (issue #262) — the new endpoint must match.
+      expect((await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(player)).status).toBe(404);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(res.status).toBe(404);
+
+      // The DM (who can see the hidden encounter) is unaffected by the gate.
+      const dmRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(dmRes.status).toBe(201);
+    });
+
+    // Review finding (Devin, catching that the player-only test above did not close the
+    // gap): `requireRole(..., 'player')` 403s a viewer BEFORE the service's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets, which is the
+    // enumeration oracle hidden-entity secrecy exists to close. The controller now
+    // pre-checks visibility at the viewer floor before ever reaching the player-role gate,
+    // mirroring POST .../death-save and POST .../roll-initiative.
+    it("a viewer gets 404 for a HIDDEN encounter's real combatant id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Viewer Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const viewerRealId = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerRealId.status).toBe(404);
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const viewerNonexistent = await request(server)
+        .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerNonexistent.status).toBe(404);
+
+      // Nothing written.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): the controller's viewer-floor visibility precheck above
+    // called `requireRole(..., 'viewer')` with NO `allowArchived` option, so on a
+    // paused/completed campaign `assertWritable` throws 403 for EVERY member (any role,
+    // hidden or not) before the `isVisibleTo` gate is ever reached — reopening exactly the
+    // oracle that gate exists to close, but keyed on campaign archival instead of role: a
+    // hidden encounter that EXISTS gets 403 on an archived campaign, while a NONEXISTENT
+    // encounter id still gets 404 (`getRowOrThrow` throws before any role/archive check
+    // runs) — two different statuses for two cases a non-DM must not be able to tell
+    // apart. Fixed by mirroring `rollDeathSave`/`rollCombatantInitiative`'s existing
+    // pattern exactly: `allowArchived: true` on the viewer-visibility precheck and the
+    // player-role gate, deferring the actual archived-campaign write rejection to the
+    // service's own transactional `assertCampaignWritableInTx` (added in an earlier review
+    // round of this same PR).
+    it("a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id, instead of leaking existence via 403 (Codex review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Archived Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Archived Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerRealId = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+        const viewerNonexistent = await request(server)
+          .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+
+        // Indistinguishable — both cases must return the identical status, matching every
+        // other hidden-entity gate in this file.
+        expect(viewerRealId.status).toBe(404);
+        expect(viewerNonexistent.status).toBe(404);
+        expect(viewerRealId.status).toBe(viewerNonexistent.status);
+
+        // The DM (who CAN see this hidden encounter) reaches the service, whose own
+        // transactional archived-campaign check still correctly rejects a fresh write —
+        // loosening the controller gate must not reopen the archived-write hole itself.
+        const dmRes = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(dm)
+          .send({ key: 'kiPoints', delta: 1 });
+        expect(dmRes.status).toBe(403);
+      } finally {
+        expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
+    // Review finding (Devin + Copilot, same defect): there is no per-combatant revision
+    // column — `PATCH /encounters/:id/combatants/:cid`'s `expectedUpdatedAt` validates
+    // against the ENCOUNTER's own `updatedAt`. A whole-statblock PATCH (e.g. from
+    // CombatantStatblockEditor, or a stale client) must be rejected once a resource-adjust
+    // pip write has landed since the caller's token was read — otherwise a second writer
+    // holding a pre-spend token can silently revert the spend.
+    it("a pip spend advances the encounter's CAS token, so a stale whole-statblock PATCH is rejected instead of silently reverting it", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST CAS Fight' });
+      const rEncounterId = encRes.body.id;
+      const staleToken = encRes.body.updatedAt as string;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST CAS Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      // Someone spends a pip through the new endpoint — the encounter's own `updatedAt`
+      // must move even though this write never touches an encounter-level field directly.
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+
+      // A second writer — a stale CombatantStatblockEditor tab that read the encounter
+      // BEFORE the spend — PATCHes the whole statblock with that pre-spend token.
+      const staleWrite = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}`)
+        .set(dm)
+        .send({
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+          expectedUpdatedAt: staleToken,
+        });
+      expect(staleWrite.status).toBe(409);
+
+      // The spend survived: still 1, not reverted to 0 by the rejected stale PATCH.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(1);
+    });
+  });
+
   describe('fog of war + server-side token redaction', () => {
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
@@ -6678,6 +6983,10 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
+      const { declaredByUserId: _serverOwnedDeclarer, ...playerDeclaration } = ownedAoe;
+      expect(
+        (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerDeclaration)).status,
+      ).toBe(201);
       await request(server)
         .patch(`/api/v1/encounters/${encounterId}`)
         .set(dm)
@@ -6973,6 +7282,254 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     // role floor and not some unrelated breakage.
     const stillPlayer = await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 51, y: 51 });
     expect(stillPlayer.status).toBe(201);
+  });
+});
+
+describe('encounters — player-declared AoE templates (issue #1913)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Player AoE Campaign' })).body.id;
+    encounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Visible Player AoE', hidden: false })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('stamps the caller, rejects spoofing, enforces ownership, and audits/SSEs writes', async () => {
+    const server = ctx.app.getHttpServer();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const spoof = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ ...declaration, declaredByUserId: 'dev:p-2' });
+      expect(spoof.status).toBe(400);
+
+      const created = await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration);
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ ...declaration, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status,
+      ).toBe(403);
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player).send({ declaredByUserId: 'dev:p-2' })).status,
+      ).toBe(400);
+
+      const playerMoved = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(player)
+        .send({ x: 40 });
+      expect(playerMoved.status).toBe(200);
+      expect(playerMoved.body).toMatchObject({ x: 40, angleDeg: 45, color: '#663399' });
+
+      const dmUpdated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(dm)
+        .send({ x: 60, angleDeg: 90 });
+      expect(dmUpdated.status).toBe(200);
+      expect(dmUpdated.body).toMatchObject({ id: 'player-cone', x: 60, angleDeg: 90, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer)).status,
+      ).toBe(403);
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player)).status).toBe(200);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
+        .map((row) => row.action)
+        .filter((action) => action.startsWith('encounter.aoe.'));
+      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.update', 'encounter.aoe.remove']);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(4);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps player attribution immutable through the legacy DM whole-list AoE patch', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerTemplate = { ...declaration, id: 'legacy-player' };
+    expect(
+      (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerTemplate)).status,
+    ).toBe(201);
+
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({
+        aoe: [
+          { ...playerTemplate, declaredByUserId: 'dev:p-2' },
+          { ...declaration, id: 'legacy-dm', declaredByUserId: 'dev:p-2' },
+        ],
+      });
+
+    expect(patched.status).toBe(200);
+    expect(patched.body.aoe).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'legacy-player', declaredByUserId: 'dev:p-1' }),
+      expect.objectContaining({ id: 'legacy-dm', declaredByUserId: null }),
+    ]));
+  });
+
+  it('rejects scoped AoE writes without rewriting malformed saved templates or emitting side effects', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const protectedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Malformed saved AoE', hidden: false })
+    ).body.id;
+    const savedAoe = JSON.stringify([
+      { ...declaration, id: 'surviving-template', declaredByUserId: null },
+      { id: 'invalid-template', shape: 'not-a-shape' },
+    ]);
+    await db.update(encountersTable).set({ aoe: savedAoe }).where(eq(encountersTable.id, protectedId));
+    const before = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      expect((await request(server).post(`/api/v1/encounters/${protectedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+      const after = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+      expect(after?.aoe).toBe(savedAoe);
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+      expect(
+        (await db.select().from(auditLog).where(eq(auditLog.entityId, protectedId))).filter((row) => row.action.startsWith('encounter.aoe.')),
+      ).toEqual([]);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === protectedId)).toEqual([]);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Hidden Player AoE', hidden: true })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(viewer).send(declaration)).status).toBe(403);
+
+    const endedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Player AoE', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended', endedAt: new Date().toISOString() }).where(eq(encountersTable.id, endedId));
+    expect((await request(server).post(`/api/v1/encounters/${endedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const capId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'AoE cap', hidden: false })
+    ).body.id;
+    const fifty = Array.from({ length: 50 }, (_, index) => ({ ...declaration, id: `cap-${index}` }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(fifty) }).where(eq(encountersTable.id, capId));
+    expect((await request(server).post(`/api/v1/encounters/${capId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const playerCapId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Player AoE cap', hidden: false })
+    ).body.id;
+    const tenPlayerTemplates = Array.from({ length: 10 }, (_, index) => ({ ...declaration, id: `player-cap-${index}`, declaredByUserId: 'dev:p-1' }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(tenPlayerTemplates) }).where(eq(encountersTable.id, playerCapId));
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(dm).send({ ...declaration, id: 'dm-after-player-cap' })).status).toBe(201);
+
+    const fogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Fogged player AoE', hidden: false })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${fogId}`).set(dm).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(player).send(declaration)).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(dm)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
+    // A template hidden by fog cannot be distinguished from a missing id through
+    // any player mutation route, including REST's create-only declaration path.
+    expect((await request(server).patch(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(otherPlayer).send(declaration)).status).toBe(404);
+
+    const invalidFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Invalid fog AoE visibility', hidden: false })
+    ).body.id;
+    await db.update(encountersTable).set({
+      aoe: JSON.stringify([{ ...declaration, id: 'invalid-fog-other', declaredByUserId: 'dev:p-2' }]),
+      fog: '{malformed',
+    }).where(eq(encountersTable.id, invalidFogId));
+    expect((await request(server).get(`/api/v1/encounters/${invalidFogId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player)).status).toBe(404);
+
+    const siblingFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog source', hidden: false })
+    ).body.id;
+    const siblingTargetId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog AoE visibility', hidden: false })
+    ).body.id;
+    const sharedMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', MINIMAL_PNG_1X1, { filename: 'shared-fog-map.png', contentType: 'image/png' });
+    expect(sharedMap.status).toBe(201);
+    await db.update(encountersTable).set({ mapAttachmentId: sharedMap.body.id, fog: JSON.stringify({ enabled: true, revealed: [] }) }).where(eq(encountersTable.id, siblingFogId));
+    await db.update(encountersTable).set({
+      mapAttachmentId: sharedMap.body.id,
+      aoe: JSON.stringify([{ ...declaration, id: 'sibling-fog-other', declaredByUserId: 'dev:p-2' }]),
+    }).where(eq(encountersTable.id, siblingTargetId));
+    expect((await request(server).get(`/api/v1/encounters/${siblingTargetId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player)).status).toBe(404);
+
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);
+    // Archive enforcement must not run before hidden visibility: a player probing
+    // this still-hidden encounter receives the same 404 as for a missing id.
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).patch(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player)).status).toBe(404);
   });
 });
 
@@ -8678,6 +9235,17 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     const { encounterId, ariaId, monsterId } = await seedRunningFight();
     const server = ctx.app.getHttpServer();
 
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog: { enabled: true, revealed: [] } });
+    expect(
+      (await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ id: 'end-turn-owner-aoe', shape: 'circle', x: 20, y: 20, sizeFt: 10 })).status,
+    ).toBe(201);
+
     const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(before.body.currentCombatantId).toBe(ariaId);
 
@@ -8687,6 +9255,29 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .send({ expectedCurrentCombatantId: ariaId });
     expect(res.status).toBe(201);
     expect(res.body.currentCombatantId).toBe(monsterId);
+    expect(res.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'end-turn-owner-aoe', declaredByUserId: 'dev:p-1' })]));
+  });
+
+  it('replays a player end-turn receipt after the active turn advances (#1971)', async () => {
+    const { encounterId, ariaId, monsterId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+    const body = { expectedCurrentCombatantId: ariaId, idempotencyKey: 'player-end-turn-replay-1971' };
+    const first = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(first.status).toBe(201);
+    expect(first.body.currentCombatantId).toBe(monsterId);
+
+    const replay = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+
+    const otherActor = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(otherPlayer).send(body);
+    expect(otherActor.status).toBe(403);
+
+    const changed = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/end-turn`)
+      .set(player)
+      .send({ ...body, expectedCurrentCombatantId: monsterId });
+    expect(changed.status).toBe(403);
   });
 
   it('player POST /end-turn is forbidden when it is not their turn', async () => {

@@ -7772,6 +7772,119 @@ export const AI_DM_STYLE_PRESET_AXES = [
   { key: 'npcDepth', label: 'NPC depth' },
 ] as const;
 
+/**
+ * COMPREHENSION PROFILE (issue #874).
+ *
+ * A DIFFERENT axis from {@link AiDmStylePresets}. Style is a taste preference (voice, tone);
+ * this is an ACCESSIBILITY preference — how readable a turn's narration is for the humans at
+ * THIS table, independent of what voice the DM likes. Same mechanism as #1049 on purpose: a
+ * closed, bounded set of dropdowns that complement the freeform `instructions` textarea rather
+ * than replace it, and `'default'` on every axis states no preference.
+ *
+ * Its COST is not #1049's, and the difference matters for prompt-budget expectations (review).
+ * Table style renders nothing at all until a DM opts in. This section always renders: its
+ * baseline IS the issue's stated default behaviour, owed to every table whether or not anyone
+ * has visited the settings page. So an all-`'default'` profile costs the baseline section, and
+ * it is only the four per-axis LINES that are zero-cost while left on `'default'`. The whole
+ * section is bounded by `AI_DM_COMPREHENSION_SECTION_MAX_TOKENS`.
+ *
+ * The four axes are exactly the issue's acceptance criteria: how complex the vocabulary/sentence
+ * structure may be, how long a paragraph runs before breaking, how much sensory description to
+ * layer in, and how many suggested actions to close a turn with. All four are prompt GUIDANCE —
+ * see driver-comprehension.ts, the pure renderer, for the baseline behaviour (chunking, the
+ * "What changed" / "What can you do" ending, non-exclusive suggestions alongside free-form
+ * input, and support for a player's Simplify/Recap/Explain requests) that applies REGARDLESS of
+ * these axis choices, matching the issue's title: none of this ever narrows what a player may
+ * type back.
+ */
+export const AiDmReadingComplexity = z.enum(['default', 'simple', 'standard', 'rich']);
+export type AiDmReadingComplexity = z.infer<typeof AiDmReadingComplexity>;
+
+export const AiDmParagraphLength = z.enum(['default', 'short', 'standard', 'long']);
+export type AiDmParagraphLength = z.infer<typeof AiDmParagraphLength>;
+
+export const AiDmSensoryIntensity = z.enum(['default', 'minimal', 'standard', 'vivid']);
+export type AiDmSensoryIntensity = z.infer<typeof AiDmSensoryIntensity>;
+
+/** How many non-exclusive suggested actions should close a turn (baseline default is 2-4). */
+export const AiDmChoiceCount = z.enum(['default', 'two', 'three', 'four']);
+export type AiDmChoiceCount = z.infer<typeof AiDmChoiceCount>;
+
+export const AI_DM_COMPREHENSION_PROFILE_DEFAULTS = {
+  readingComplexity: 'default',
+  paragraphLength: 'default',
+  sensoryIntensity: 'default',
+  choiceCount: 'default',
+} as const;
+
+export const AiDmComprehensionProfile = z
+  .object({
+    readingComplexity: AiDmReadingComplexity.default('default'),
+    paragraphLength: AiDmParagraphLength.default('default'),
+    sensoryIntensity: AiDmSensoryIntensity.default('default'),
+    choiceCount: AiDmChoiceCount.default('default'),
+  })
+  .default({ ...AI_DM_COMPREHENSION_PROFILE_DEFAULTS });
+export type AiDmComprehensionProfile = z.infer<typeof AiDmComprehensionProfile>;
+
+/**
+ * Ceiling for the WHOLE rendered `## Comprehension` section — its fixed baseline (see
+ * driver-comprehension.ts) PLUS whatever optional per-axis lines a DM's choices add on top.
+ * Mirrors {@link AI_DM_STYLE_SECTION_MAX_TOKENS} for the same reason: a closed enum for the
+ * optional axes gives a compile-time worst case, asserted by a unit test, so this section can
+ * share a prompt with elastic consumers without crowding them. Unlike the style section this
+ * ceiling is never zero-cost — the baseline alone is a real, unconditional per-turn cost — so
+ * the unit test also pins the baseline-only figure to keep it a reviewable number on its own.
+ *
+ * Held at 290 through review. Subordinating the ending shape to the session phase direction
+ * was first written as its own bullet, which took the worst case to ~321 and the COMBINED
+ * #1038 x #1049 x #874 budget past half a 4k context window. The guards caught it, so the
+ * qualification was folded into the ending-shape line instead of the ceiling being raised.
+ */
+export const AI_DM_COMPREHENSION_SECTION_MAX_TOKENS = 290;
+
+const AI_DM_COMPREHENSION_LABELS = {
+  readingComplexity: {
+    default: 'Default (no preference)',
+    simple: 'Simple — plain words, short sentences',
+    standard: 'Standard — everyday vocabulary',
+    rich: 'Rich — fuller vocabulary, longer sentences',
+  },
+  paragraphLength: {
+    default: 'Default (no preference)',
+    short: 'Short — 1-2 sentences per beat',
+    standard: 'Standard — a few sentences per beat',
+    long: 'Long — fuller paragraphs, fewer breaks',
+  },
+  sensoryIntensity: {
+    default: 'Default (no preference)',
+    minimal: 'Minimal — only what a player needs to act',
+    standard: 'Standard — a moderate amount of detail',
+    vivid: 'Vivid — rich sensory description',
+  },
+  choiceCount: {
+    default: 'Default (2-4, at the AI’s judgement)',
+    two: 'Two suggestions',
+    three: 'Three suggestions',
+    four: 'Four suggestions',
+  },
+} as const;
+
+export const AI_DM_COMPREHENSION_PROFILE_OPTIONS = {
+  readingComplexity: styleOptions(AiDmReadingComplexity.options, AI_DM_COMPREHENSION_LABELS.readingComplexity),
+  paragraphLength: styleOptions(AiDmParagraphLength.options, AI_DM_COMPREHENSION_LABELS.paragraphLength),
+  sensoryIntensity: styleOptions(AiDmSensoryIntensity.options, AI_DM_COMPREHENSION_LABELS.sensoryIntensity),
+  choiceCount: styleOptions(AiDmChoiceCount.options, AI_DM_COMPREHENSION_LABELS.choiceCount),
+} as const;
+
+/** Axis order + field labels for the seat-config form, matching {@link AI_DM_STYLE_PRESET_AXES}. */
+export const AI_DM_COMPREHENSION_PROFILE_AXES = [
+  { key: 'readingComplexity', label: 'Reading complexity' },
+  { key: 'paragraphLength', label: 'Paragraph length' },
+  { key: 'sensoryIntensity', label: 'Sensory intensity' },
+  { key: 'choiceCount', label: 'Suggested choices' },
+] as const;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
@@ -7794,6 +7907,8 @@ export const AiDmSeat = z.object({
   proactiveSettings: AiDmProactiveSettings.default({}),
   /** Structured table style (#1049) — prompt guidance, not enforcement. See AiDmStylePresets. */
   stylePresets: AiDmStylePresets.default({ ...AI_DM_STYLE_PRESET_DEFAULTS }),
+  /** Comprehension profile (#874) — prompt guidance, not enforcement. See AiDmComprehensionProfile. */
+  comprehensionProfile: AiDmComprehensionProfile.default({ ...AI_DM_COMPREHENSION_PROFILE_DEFAULTS }),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   /**
    * Which fields on THIS seat came from the server defaults rather than from a DM's own
@@ -7930,6 +8045,9 @@ export const AI_DM_SEAT_NON_INHERITED_FIELDS = {
   // house style is ever wanted, the change is to add it to AiDmSeatDefaults and move this key
   // into AI_DM_SEAT_INHERITED_FIELDS — the two are deliberately one edit apart.
   stylePresets: 'No server-wide default exists to inherit from; AiDmSeatDefaults has no style field.',
+  // #874 — same reasoning as stylePresets immediately above: pure prompt guidance, and there is
+  // no server-wide comprehension default to inherit FROM (AiDmSeatDefaults has no such field).
+  comprehensionProfile: 'No server-wide default exists to inherit from; AiDmSeatDefaults has no comprehension field.',
   tokensUsed: 'Per-campaign meter reading — spend belongs to the campaign that spent it.',
   tokensReserved: 'Per-campaign meter reading — in-flight capacity held by this campaign alone.',
   tokensRefunded: 'Per-campaign meter reading — refunds settle against this campaign only.',
@@ -7953,6 +8071,7 @@ export const AiDmSeatUpdate = z.object({
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
   proactiveSettings: AiDmProactiveSettings.optional(),
   stylePresets: AiDmStylePresets.optional(),
+  comprehensionProfile: AiDmComprehensionProfile.optional(),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;
@@ -9282,6 +9401,33 @@ export const AoeTemplate = z.object({
 export type AoeTemplate = z.infer<typeof AoeTemplate>;
 
 /**
+ * A caller-supplied template declaration (issue #1913). The server sets the
+ * declarer from the authenticated identity, so accepting `declaredByUserId`
+ * here would let a player impersonate another template owner. `.strict()` is
+ * therefore an authorization boundary, not merely DTO hygiene.
+ */
+export const AoeTemplateDeclare = AoeTemplate.omit({ declaredByUserId: true }).strict();
+export type AoeTemplateDeclare = z.infer<typeof AoeTemplateDeclare>;
+
+/**
+ * Fields a caller may change on an existing AoE template (issue #1913). Its
+ * route supplies the template id; ownership and declarer attribution always
+ * remain server-controlled.
+ */
+// This intentionally does not derive from `AoeTemplateDeclare.partial()`: Zod
+// defaults on the declaration schema would materialize omitted `angleDeg` and
+// `color` keys, turning a one-field PATCH into an accidental reset.
+export const AoeTemplateUpdate = z.object({
+  shape: AoeShape.optional(),
+  x: z.number().min(0).max(100).optional(),
+  y: z.number().min(0).max(100).optional(),
+  sizeFt: z.number().positive().max(1000).optional(),
+  angleDeg: z.number().min(-360).max(360).optional(),
+  color: z.string().max(24).nullable().optional(),
+}).strict();
+export type AoeTemplateUpdate = z.infer<typeof AoeTemplateUpdate>;
+
+/**
  * A transient "look here" ping broadcast over SSE (issue #238). Not persisted — it rides the
  * campaign event stream as a one-shot signal that every open client renders for a moment and
  * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
@@ -10547,6 +10693,61 @@ export const CombatantUpdate = z.object({
   // Reusing one key for a DIFFERENT patch is a 409 IDEMPOTENCY_KEY_REUSE.
   idempotencyKey: IdempotencyKey,
 });
+
+/**
+ * Body for `POST /encounters/:id/combatants/:cid/resources` (issue #1909) — spend or
+ * restore ONE bounded resource or spell-slot level on a combatant mid-fight, whether it is
+ * linked to a character sheet or an inline monster/NPC statblock. This is the delta-based,
+ * transactional counterpart to `CombatantUpdate.statblock` above: flipping one Ki pip or one
+ * spell-slot checkbox no longer requires PATCHing the whole statblock/character JSON built
+ * from whatever the client last saw, which raced last-writer-wins across the ENTIRE blob
+ * with a second writer (another tab, an MCP-driven AI DM) and silently reverted their
+ * unrelated edits.
+ *
+ * `key` (a feature resource) and `spellLevel` (1–9) are alternatives, never both/neither.
+ * `delta` is relative to the resource's current `used` (default +1, matching a single pip
+ * click); 0 is rejected as a no-op that would still mint a `resource_changed` event for
+ * nothing. Spending past 0 or restoring past `max` is a 400, never a silent clamp, matching
+ * every other bounded-resource write in this schema (`ResourcePatch`/`SpellSlotPatch`).
+ * `idempotencyKey` reuses the issue #580 convention `CombatantUpdate.idempotencyKey`
+ * documents just above: this is a RELATIVE write, so a lost-response retry must replay the
+ * original outcome rather than double-spend the resource.
+ *
+ * `expectedUsed` (issue #1909 review, Codex P2) closes a DIFFERENT race than the delta
+ * mechanics above protect against: a pip click represents an ABSOLUTE intent ("set this
+ * pip to used=1"), converted to a relative `delta` against whatever `used` this caller last
+ * rendered. If two callers both last rendered `used: 0` and both click the first pip, both
+ * send `delta: 1` — the transactional fresh-row read prevents the WHOLE-BLOB lost-update
+ * this endpoint replaced (issue #1909's headline bug), but does nothing to stop the SECOND
+ * delta from applying on top of the FIRST's fresh result (`used: 0 -> 1`, then `1 -> 2`),
+ * silently landing on a value neither caller intended. Optional so a caller with a purely
+ * relative intent (an AI DM's "restore 2 charges", or any caller not tracking a rendered
+ * baseline) is unaffected; when present, the server verifies it against the FRESH `used`
+ * inside the same transaction that computes `delta` and 409s on a mismatch instead of
+ * applying a delta computed from a baseline that has since moved.
+ */
+export const CombatantResourceAdjust = z
+  .object({
+    key: z.string().min(1).max(80).optional(),
+    spellLevel: z.number().int().min(1).max(9).optional(),
+    delta: z.number().int().optional().default(1),
+    expectedUsed: z.number().int().min(0).optional(),
+    idempotencyKey: IdempotencyKey,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.key !== undefined) === (value.spellLevel !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide exactly one of key or spellLevel',
+        path: ['key'],
+      });
+    }
+    if (value.delta === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'delta must not be 0', path: ['delta'] });
+    }
+  });
+export type CombatantResourceAdjust = z.infer<typeof CombatantResourceAdjust>;
 
 /**
  * Body for the server-authoritative death-save action (issue #1462). The caller supplies
@@ -13067,4 +13268,3 @@ export type EncounterTemplateRosterEntry = z.infer<typeof EncounterTemplateRoste
 
 export const EncounterTemplateRoster = z.array(EncounterTemplateRosterEntry);
 export type EncounterTemplateRoster = z.infer<typeof EncounterTemplateRoster>;
-

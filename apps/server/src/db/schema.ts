@@ -1,5 +1,5 @@
 import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
-import type { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
+import type { AiDmComprehensionProfile, AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -1849,6 +1849,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
    *  One JSON column rather than five scalars, matching `proactive_settings` above — the whole
    *  block is read, written and (for #1070's cross-campaign reuse) copied as one value. */
   stylePresets: text('style_presets', { mode: 'json' }).$type<AiDmStylePresets>().default({} as any),
+  /** Comprehension profile (#874): reading complexity/paragraph length/sensory intensity/choice
+   *  count, JSON-encoded. Same one-JSON-column shape as `style_presets` above, for the same
+   *  reason — read, written and copied as one value. */
+  comprehensionProfile: text('comprehension_profile', { mode: 'json' }).$type<AiDmComprehensionProfile>().default({} as any),
   /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
   actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),

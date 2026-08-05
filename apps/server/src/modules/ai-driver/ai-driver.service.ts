@@ -68,6 +68,7 @@ import {
   renderRecentHistorySection,
 } from './driver-history';
 import { renderTableStyleSection } from './driver-style';
+import { renderComprehensionSection } from './driver-comprehension';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -1520,6 +1521,15 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // rather than a silent clamp — a tool that fails open on "no slots left" would have made
   // unlimited casting look sanctioned instead of merely unmodelled.
   'adjust_spell_slots',
+  // #1909 review (Codex, ninth finding): the delta-based combatant resource/spell-slot
+  // spend this issue built specifically so a live-play pip click never clobbers a whole
+  // statblock. Omitting it here left AI live play with no way to reach it at all — the
+  // model would fall back to whole-statblock `update_combatant` for a resource spend,
+  // reintroducing exactly the clobber this PR exists to prevent, specifically for driver
+  // sessions. Same safety shape as `adjust_spell_slots` just above: overspend/over-restore
+  // is a hard typed error (never a silent clamp), so granting it does not sanction an
+  // unbounded spend the way a fails-open tool would.
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   // #1041 — rest is core live play, and these REPLACE a long chain of raw HP/slot/condition
@@ -1545,6 +1555,10 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'generate_ai_map',
   'refine_ai_map',
   'update_encounter',
+  // Player-declared AoE templates (#1913) are narrow, server-authorized map state:
+  // the encounter service enforces visibility, lifecycle, creator ownership, and limits.
+  'declare_aoe_template',
+  'remove_aoe_template',
   // private information delivery (#1023)
   'whisper_to_player',
   // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
@@ -1613,10 +1627,13 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
  *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
  *    apply_action, undo_action, undo_remove_combatant, update_character_hp, set_character_conditions,
- *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
+ *    adjust_spell_slots, adjust_combatant_resource, award_xp, level_up_character, long_rest,
+ *    short_rest);
  *  - it is a scene/world-state nudge with no economy or disclosure blast radius
  *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
- *    set_location_discovery, whisper_to_player, add_note).
+ *    set_location_discovery, declare_aoe_template, remove_aoe_template, whisper_to_player,
+ *    add_note). AoE template ownership, secrecy, encounter lifecycle, and size limits are
+ *    enforced by EncountersService rather than needing driver-specific argument shaping.
  */
 export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_dice',
@@ -1646,6 +1663,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_character_hp',
   'set_character_conditions',
   'adjust_spell_slots',
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   'long_rest',
@@ -1655,6 +1673,8 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_npc_disposition',
   'set_faction_reputation',
   'set_location_discovery',
+  'declare_aoe_template',
+  'remove_aoe_template',
   'whisper_to_player',
   'add_note',
   'add_session_recap',
@@ -7626,6 +7646,12 @@ export class AiDriverService {
     // subordination does not depend on where it happens to sit.
     const tableStyle = renderTableStyleSection(seat.stylePresets);
     if (tableStyle) parts.push(tableStyle);
+    // #874 — comprehension profile, immediately after table style: both are standing DM
+    // preferences about how the table is run, but this one carries the issue's stated DEFAULT
+    // (chunking, the "What changed" / "What can you do" ending, non-exclusive suggestions
+    // alongside free text, rules kept apart from prose, and Simplify/Recap/Explain support), so
+    // — unlike table style — it is never skipped even on an all-`default` seat.
+    parts.push(renderComprehensionSection(seat.comprehensionProfile));
 
     const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
     parts.push(buildNarrationLanguageContract(language, provenance));
