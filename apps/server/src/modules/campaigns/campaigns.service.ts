@@ -3561,6 +3561,15 @@ export class CampaignsService {
       );
     }
 
+    // The SAME pre-check the attachment loop below applies (review). Without it the manifest
+    // was the one entry that got only post-decompression accounting: an archive whose sole
+    // content is a highly compressible campaign.json forces its full expansion into memory —
+    // multi-gigabyte, from a <=128 MiB upload — before the cap is ever consulted. That is the
+    // exact zip-bomb shape the attachment pre-check exists to close, left open on the entry
+    // that is read first, and campaign-import-preflight.spec.ts already asserts the intent.
+    const declaredManifestBytes = declaredUncompressedBytes(manifestFile);
+    if (declaredManifestBytes !== null) accumulateImportUncompressedBytes(0, declaredManifestBytes);
+
     let manifestText: string;
     try {
       manifestText = await manifestFile.async('string');

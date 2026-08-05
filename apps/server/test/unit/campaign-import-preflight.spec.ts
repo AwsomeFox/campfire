@@ -84,3 +84,14 @@ describe('#851 review — the cap must fire BEFORE the allocation', () => {
     expect(() => accumulateImportUncompressedBytes(afterHonestDeclaration, 4_000, 1_000)).toThrow(/uncompressed size/i);
   });
 });
+
+describe('#851 review — the manifest is not exempt from the pre-check', () => {
+  it('rejects a declared manifest size over the cap, the same way an attachment entry is rejected', () => {
+    // campaign.json is read FIRST and was the one entry getting only post-decompression
+    // accounting, so an archive whose sole content is a highly compressible manifest could
+    // force its full expansion into memory before any cap fired. Same accumulator, same cap —
+    // the guard has to cover both branches, not just the loop that came second.
+    expect(() => accumulateImportUncompressedBytes(0, 4_000, 1_000)).toThrow(/uncompressed size/i);
+  });
+});
+
