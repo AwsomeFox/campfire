@@ -13,6 +13,7 @@ import {
   participantSupportPreferences,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -363,17 +364,26 @@ export class MembersService {
   ): void {
     if (previousCharacterId === nextCharacterId) return;
     const ownerUserId = String(userId);
+    // Issue #1902 rework (round 15, codex P2 sweep): PER CHARACTER, read fresh here — not
+    // the shared `updatedAt` param callers pass in — for the same reason every other
+    // `characters` table writer in this rework needs it: this column is the CAS token
+    // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every writer,
+    // and `previousCharacterId`/`nextCharacterId` are two DIFFERENT rows (guaranteed by the
+    // early return above), so a single shared timestamp for both is the same class of bug
+    // as the multi-character writers fixed elsewhere.
     if (previousCharacterId != null) {
+      const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, previousCharacterId)).get();
       tx
         .update(characters)
-        .set({ ownerUserId: null, updatedAt })
+        .set({ ownerUserId: null, updatedAt: nextUpdatedAt(current?.updatedAt ?? updatedAt) })
         .where(and(eq(characters.id, previousCharacterId), eq(characters.ownerUserId, ownerUserId)))
         .run();
     }
     if (nextCharacterId != null) {
+      const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, nextCharacterId)).get();
       tx
         .update(characters)
-        .set({ ownerUserId, updatedAt })
+        .set({ ownerUserId, updatedAt: nextUpdatedAt(current?.updatedAt ?? updatedAt) })
         .where(eq(characters.id, nextCharacterId))
         .run();
     }
@@ -976,10 +986,18 @@ export class MembersService {
           ),
         )
         .run();
-      tx.update(characters)
-        .set({ ownerUserId: null, updatedAt: nowIso() })
+      // Issue #1902 rework (round 15, codex P2 sweep): per character, not one shared
+      // `nowIso()` for every character this (removed) member owned in this campaign —
+      // restructured from a single bulk UPDATE into a read-then-per-row-write, matching
+      // every other multi-character `characters` writer in this rework.
+      const ownedRows = tx
+        .select({ id: characters.id, updatedAt: characters.updatedAt })
+        .from(characters)
         .where(and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(row.member.userId))))
-        .run();
+        .all();
+      for (const owned of ownedRows) {
+        tx.update(characters).set({ ownerUserId: null, updatedAt: nextUpdatedAt(owned.updatedAt) }).where(eq(characters.id, owned.id)).run();
+      }
       return row.member;
     });
 
