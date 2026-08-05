@@ -323,6 +323,20 @@
       "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
       "dismiss": "Dismiss",
       "dismissKillPrompt": "Dismiss the statblock reveal prompt"
+    },
+    "whisper": {
+      "button": "Whisper",
+      "buttonLabel": "Whisper to {{name}}",
+      "panelTitle": "Quick Whisper to Player",
+      "recipientLabel": "Recipient",
+      "selectRecipient": "Select a player…",
+      "messageLabel": "Whisper message",
+      "title": "Whisper to {{name}}",
+      "placeholder": "Type a private whisper…",
+      "send": "Send whisper",
+      "cancel": "Cancel",
+      "sent": "Whisper sent to {{name}}",
+      "error": "Couldn't send whisper."
     }
   }
 }

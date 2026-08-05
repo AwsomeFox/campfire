@@ -52,6 +52,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
+import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
@@ -1715,7 +1716,7 @@ export default function RunSessionPage() {
   const membersQuery = useQuery({
     queryKey: queryKeys.campaignMembers(cid),
     queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`),
-    enabled: encounter?.mapAttachmentId != null,
+    enabled: Number.isFinite(cid),
   });
   const aoeDeclarerNames = useMemo(
     () => new Map((membersQuery.data ?? []).map((member) => [String(member.userId), member.displayName || member.username || String(member.userId)])),
@@ -4182,6 +4183,8 @@ export default function RunSessionPage() {
                   // not `canEdit` (Devin review finding): every write-control consumer inside
                   // CombatantRow must consult BOTH this and `syncBlocked`, and the old name read
                   // as if permission alone were sufficient.
+                  isDm={isDm}
+                  myUserId={myUserId}
                   canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
@@ -4324,7 +4327,12 @@ export default function RunSessionPage() {
           the resulting prompt above via CheckRequestPrompts. */}
       <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
 
-      {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
+      {canDmWrite && (
+        <>
+          <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />
+          <EncounterQuickWhisperPanel campaignId={cid} myUserId={myUserId} onError={surfaceActionError} />
+        </>
+      )}
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 
