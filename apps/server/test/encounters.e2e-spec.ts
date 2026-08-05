@@ -9258,6 +9258,28 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     expect(res.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'end-turn-owner-aoe', declaredByUserId: 'dev:p-1' })]));
   });
 
+  it('replays a player end-turn receipt after the active turn advances (#1971)', async () => {
+    const { encounterId, ariaId, monsterId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+    const body = { expectedCurrentCombatantId: ariaId, idempotencyKey: 'player-end-turn-replay-1971' };
+    const first = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(first.status).toBe(201);
+    expect(first.body.currentCombatantId).toBe(monsterId);
+
+    const replay = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+
+    const otherActor = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(otherPlayer).send(body);
+    expect(otherActor.status).toBe(403);
+
+    const changed = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/end-turn`)
+      .set(player)
+      .send({ ...body, expectedCurrentCombatantId: monsterId });
+    expect(changed.status).toBe(403);
+  });
+
   it('player POST /end-turn is forbidden when it is not their turn', async () => {
     const { encounterId, ariaId } = await seedRunningFight();
     const server = ctx.app.getHttpServer();

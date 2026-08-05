@@ -75,6 +75,7 @@ import {
   backfillEncounterOpResponse,
   encounterOpFingerprint,
   EncounterOpRaceMarker,
+  findExactPriorEncounterOp,
   findPriorEncounterOp,
   readEncounterOpAfterRace,
   recordEncounterOp,
@@ -6741,6 +6742,25 @@ export class EncountersService {
       throw new BadRequestException('No combatant currently has the turn');
     }
     const isDm = role === 'dm';
+    const currentRole = role;
+    // A successful player write changes the active combatant, so replay an exact,
+    // actor-bound receipt after rechecking campaign authority but before active-owner
+    // validation. Changed arguments fall through to the normal authorization path.
+    if (!isDm && input.idempotencyKey) {
+      const claim: EncounterOpClaim = {
+        actorId: user.id,
+        operation: 'turn.advance',
+        key: input.idempotencyKey,
+        encounterId,
+        campaignId: encounterRow.campaignId,
+        fingerprint: encounterOpFingerprint({ auditAction: 'encounter.end_turn', expectedCurrentCombatantId: input.expectedCurrentCombatantId ?? null }),
+      };
+      const prior = this.db.transaction((tx) => findExactPriorEncounterOp(tx, claim, Date.now()));
+      if (prior && prior.responseRole === currentRole) {
+        if (prior.response) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, currentRole, user.id);
+      }
+    }
     const [campaign] = await this.db
       .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
       .from(campaigns)
@@ -7191,7 +7211,7 @@ export class EncountersService {
     // retry gets the turn pointer THIS call produced, not merely "some current state".
     // Best-effort by construction: the claim (the part that prevents a second advance) is
     // already durable, and a replay that finds no body falls back to fresh truth.
-    if (opClaim && role === 'dm') await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
+    if (opClaim) await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
     return view;
   }
 

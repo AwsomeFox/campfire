@@ -1591,6 +1591,44 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: encounter.id } });
   });
 
+  it('player end_turn replays its own receipt after advancing (issue #1971)', async () => {
+    const user = await dmAgent.post('/api/v1/users').send({ username: 'mcp-1971-player', password: 'player-password-1', serverRole: 'user' });
+    expect(user.status).toBe(201);
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: user.body.id, role: 'player' });
+    const character = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'MCP Replay Hero', hpMax: 20, hpCurrent: 20, ownerUserId: String(user.body.id) });
+    const playerAgent = request.agent(ctx.app.getHttpServer());
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1971-player', password: 'player-password-1' });
+    const token = await playerAgent.post('/api/v1/tokens').send({ name: 'mcp-1971-player', scope: 'player', writeScope: 'direct', campaignId });
+    const playerClient = await mcpClient(token.body.token);
+    const dmClient = await mcpClient(dmToken);
+    let createdEncounterId: number | undefined;
+    try {
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
+      const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
+      createdEncounterId = encounter.id;
+      const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
+      const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
+      for (const c of encounter.combatants) {
+        await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: c.id, initiative: 0 } });
+      }
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: hero.id, initiative: 99 } });
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 50 } });
+      await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } });
+      const args = { encounterId: encounter.id, expectedCurrentCombatantId: hero.id, idempotencyKey: 'mcp-player-end-turn-1971' };
+      const first = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(first.isError).toBeFalsy();
+      expect((parseResult(first) as { currentCombatantId: number | null }).currentCombatantId).toBe(monster.id);
+      const replay = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(replay.isError).toBeFalsy();
+      expect(parseResult(replay)).toEqual(parseResult(first));
+    } finally {
+      if (createdEncounterId) {
+        await dmClient.callTool({ name: 'delete_encounter', arguments: { encounterId: createdEncounterId } }).catch(() => {});
+      }
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: true, dmControlsTurns: true });
+    }
+  });
+
   it('get_encounter redacts monster HP for a non-DM viewer PAT (issue #256)', async () => {
     // DM seeds an encounter with a monster carrying exact HP.
     const dmC = await mcpClient(dmToken);
