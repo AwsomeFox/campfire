@@ -3533,6 +3533,39 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(crossEncounter.status).toBe(400);
   });
 
+  it('masks a quick-roll actor as well as its action label when the NPC is hidden later', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Later Hidden NPC', hidden: false })
+    ).body.id;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Late identity reveal', hidden: false });
+    const combatantId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, hpMax: 10 })
+    ).body.id;
+    const quickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/quick-roll`)
+      .set(dm)
+      .send({ combatantId, actionName: 'Late strike', kind: 'to-hit', expr: '+3', mode: 'flat' });
+    expect(quickRoll.status).toBe(201);
+    expect(quickRoll.body.roll.actor).toBe('Later Hidden NPC');
+    expect((await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id)).toMatchObject({
+      actor: UNKNOWN_COMBATANT_LABEL,
+      label: `${UNKNOWN_COMBATANT_LABEL} · Late strike (to-hit)`,
+    });
+    expect(JSON.stringify(playerRolls.body)).not.toMatch(/Later Hidden NPC/);
+  });
+
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);

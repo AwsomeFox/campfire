@@ -300,11 +300,11 @@ export class RollsService implements OnApplicationBootstrap {
       // mask was supposed to withhold. Null it out alongside the label, same as the
       // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
       // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
-      const { npcId: _npcId, ...withoutNpcId } = r;
+      const { npcId: _npcId, actor: _actor, ...withoutIdentity } = r;
       const originalLabel = r.label ?? '';
       const separator = originalLabel.indexOf(' · ');
       const suffix = separator >= 0 ? originalLabel.slice(separator + 3) : originalLabel;
-      return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · ${suffix}` };
+      return { ...withoutIdentity, actor: UNKNOWN_COMBATANT_LABEL, label: `${UNKNOWN_COMBATANT_LABEL} · ${suffix}` };
     });
   }
 
