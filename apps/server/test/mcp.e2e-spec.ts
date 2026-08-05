@@ -731,7 +731,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.check.modifier).toBe(3);
     expect(rolled.check.breakdownText).toBe('DEX +3 = +3');
     expect(rolled.roll.expr).toBe('1d20+3');
-    expect(rolled.mode).toBe('flat');
+    // #1867 (merged into main after this spec was written) renamed the catalog roll-mode
+    // enum's default from 'flat' to 'normal' — CheckRollRequest.shape.mode carries a zod
+    // `.default('normal')`, which the MCP arg parser applies before this call ever reaches
+    // characters.service#rollCheck, so an omitted `mode` here is genuinely 'normal' now.
+    expect(rolled.mode).toBe('normal');
     expect(typeof rolled.roll.success).toBe('boolean');
   });
 
