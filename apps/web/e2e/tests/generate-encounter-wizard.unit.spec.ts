@@ -66,4 +66,22 @@ test.describe('Generate-encounter wizard surface (issue #412)', () => {
     const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: Record<string, unknown> };
     expect(en.encounters?.generate).toBe('Generate encounter');
   });
+
+  // Issue #1928: a registered non-5e rule system has no encounter-difficulty math of its own
+  // (the existing `unsupported-system` warning already covers that), but the target band still
+  // sizes the roster via the internal 5e-shaped count/CR heuristic — that must be labelled
+  // 'heuristic', not silently presented as this system's own math.
+  test('labels the target band "heuristic" when difficultySupport is heuristic (issue #1928)', () => {
+    const src = readFileSync(WIZARD, 'utf8');
+    expect(src).toMatch(/preview\.difficultySupport === 'heuristic'/);
+    expect(src).toMatch(/t\(['"]encounters\.wizard\.heuristicDifficultyBadge['"]/);
+    const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { wizard?: Record<string, unknown> } };
+    expect(en.encounters?.wizard?.heuristicDifficultyBadge).toBe('Target band: heuristic');
+    const ar = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/ar/encounters.json'), 'utf8')) as {
+      encounters?: { wizard?: Record<string, unknown> };
+    };
+    // Real Arabic copy, not an English passthrough (the ar catalog otherwise leaves some
+    // pre-existing strings untranslated, but new strings must not add to that debt).
+    expect(ar.encounters?.wizard?.heuristicDifficultyBadge).not.toBe(en.encounters?.wizard?.heuristicDifficultyBadge);
+  });
 });

@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, rulePacks, ruleEntries } from '../src/db/schema';
+import { auditLog, rulePacks, ruleEntries, campaigns } from '../src/db/schema';
 
 /**
  * Issue #414 — structured action resolver at the HTTP API layer (real Nest app + SQLite).
@@ -133,6 +133,11 @@ describe('action resolver (e2e HTTP)', () => {
     expect(resolveRes.status).toBe(200);
     expect(resolveRes.body.applied).toBe(true);
     expect(resolveRes.body.policy).toBe('automatic');
+    // Issue #1928: this campaign never set a ruleSystem, so it falls back to the 5e adapter —
+    // the same fallback the combat math already uses — and the resolver's own maths (this is
+    // exactly that maths) is honestly reported as audited for it.
+    expect(resolveRes.body.systemMathSupported).toBe(true);
+    expect(resolveRes.body.mathProfile).toBe('d20-ascending-ac-5e-proficiency');
     const target = resolveRes.body.resolution.targets[0];
     expect(target.outcome).toBe('failure'); // DC 21 always fails vs a +0 save
     expect(target.totalDamage).toBe(6); // flat 6 fire, no resistance
@@ -460,5 +465,75 @@ describe('action resolver (e2e HTTP)', () => {
       .from(auditLog)
       .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.apply_rejected')));
     expect(rejected.some((row) => JSON.parse(row.detail).reason === 'stale_preview_turn_version' && JSON.parse(row.detail).chainId === preview.body.chainId)).toBe(true);
+  });
+});
+
+/**
+ * Issue #1928 — resolve honesty for a registered non-5e rule system. The resolver's OWN
+ * maths (d20 roll, ascending-AC comparison, 5e-shaped proficiency) is unaudited outside 5e;
+ * `systemMathSupported`/`mathProfile` must say so WITHOUT refusing the resolve — label, don't
+ * block. A dedicated app instance keeps this from disturbing the shared 5e fixture's turn
+ * state above.
+ */
+describe('action resolver honesty (issue #1928): a registered non-5e rule system', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let actorId: number;
+  let targetId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Resolver Campaign' });
+    campaignId = campRes.body.id;
+
+    // Set the campaign's rule system directly (mirrors characters.e2e-spec.ts): 'pf2e' is a
+    // registered adapter family id, not an installed-pack slug, so it bypasses the REST
+    // ruleSystem-must-be-an-installed-pack validation exercised in campaigns.e2e-spec.ts.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, campaignId));
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'PF2e Fight', hidden: false });
+    expect(encRes.status).toBe(201);
+    encounterId = encRes.body.id;
+
+    const actorRes = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Attacker', hpMax: 20 });
+    expect(actorRes.status).toBe(201);
+    actorId = actorRes.body.id;
+    const targetRes = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Defender', hpMax: 20 });
+    expect(targetRes.status).toBe(201);
+    targetId = targetRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('resolves (and, under commit:true, still applies) with systemMathSupported:false and mathProfile:null — never refused', async () => {
+    const server = ctx.app.getHttpServer();
+    // The DM may resolve any actor's action inline (no character sheet needed) — a fixed-DC
+    // save, so the result is deterministic without depending on the (still 5e-shaped) attack
+    // roll math this issue is about labelling, not fixing.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(dm)
+      .send({
+        actorCombatantId: actorId,
+        spec: {
+          mode: 'save',
+          save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+          cost: { slot: 'action', count: 1 },
+          targets: { count: 1, allow: 'any' },
+          outcomes: { failure: { damage: [{ flat: 4, type: 'force' }] }, success: { halfDamage: true } },
+        },
+        targetIds: [targetId],
+        commit: true,
+      });
+    expect(res.status).toBe(200); // never refused — label, don't block
+    expect(res.body.applied).toBe(true); // commit still executes despite the unaudited system
+    expect(res.body.systemMathSupported).toBe(false);
+    expect(res.body.mathProfile).toBeNull();
   });
 });

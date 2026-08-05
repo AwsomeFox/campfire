@@ -196,7 +196,8 @@
       "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
     },
     "actionFlow": {
-      "noTargets": "No legal targets."
+      "noTargets": "No legal targets.",
+      "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
     },
     "checks": {
       "requestCheck": "Request a check",
@@ -216,7 +217,9 @@
       "step3": "3. Save encounter",
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
-      "noStatblock": "No statblock detail — HP/CR may be incomplete."
+      "noStatblock": "No statblock detail — HP/CR may be incomplete.",
+      "heuristicDifficultyBadge": "Target band: heuristic",
+      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own."
     },
     "duplicate": "Duplicate",
     "duplicateCombatant": "Duplicate {{name}}",

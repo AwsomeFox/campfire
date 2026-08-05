@@ -1,9 +1,15 @@
 import {
+  ActionResolveResult,
   ActionSpec,
+  Archmage13aAdapter,
   CharacterAction,
   Dnd5eAdapter,
+  OsrAdapter,
+  Pathfinder1eAdapter,
   Pf2eAdapter,
+  RESOLVER_MATH_D20_5E,
   Sf2eAdapter,
+  StarfinderAdapter,
   BasicFantasyAdapter,
   OldSchoolEssentialsAdapter,
   OpenLegendAdapter,
@@ -18,6 +24,7 @@ import {
   dnd5eProficiencyBonus,
   pf2eProficiencyBonus,
   resolveAttackForAdapter,
+  resolverImplementsSystemMath,
   halveDamage,
   inferActionSpecFromText,
   isResolvableSpec,
@@ -272,6 +279,91 @@ describe('checkProficiencyBonusForAdapter — issue #1599', () => {
     expect(checkProficiencyBonusForAdapter(OldSchoolEssentialsAdapter, 5)).toBe(0);
     expect(checkProficiencyBonusForAdapter(OpenLegendAdapter, 5)).toBe(0);
     expect(defaultCheckProficiencyBonus()).toBe(0);
+  });
+});
+
+describe('resolverImplementsSystemMath — issue #1928 (systemMathSupported honesty)', () => {
+  it('5e is the only adapter that declares the resolver math profile', () => {
+    expect(Dnd5eAdapter.resolverMath).toBe(RESOLVER_MATH_D20_5E);
+    expect(resolverImplementsSystemMath(Dnd5eAdapter)).toBe(true);
+  });
+
+  // Table-driven across every registered adapter family (mirrors the same set
+  // encounter-difficulty-adapters.spec.ts uses for #429): none of them has audited the
+  // resolver's own d20/AC/proficiency maths, so every one must withhold — the resolver still
+  // executes (label, don't block), it just may not claim the numbers are this system's own.
+  describe.each([
+    ['Pathfinder 2e', Pf2eAdapter],
+    ['Starfinder 2e', Sf2eAdapter],
+    ['Pathfinder 1e', Pathfinder1eAdapter],
+    ['Starfinder 1e', StarfinderAdapter],
+    ['Open Legend', OpenLegendAdapter],
+    ['13th Age', Archmage13aAdapter],
+    ['OSR (Basic Fantasy)', BasicFantasyAdapter],
+    ['OSR (Old-School Essentials)', OldSchoolEssentialsAdapter],
+    ['OSR (default)', OsrAdapter],
+  ] as const)('%s (unaudited)', (_name, adapter) => {
+    it('does not declare resolverMath and resolverImplementsSystemMath returns false', () => {
+      expect(adapter.resolverMath).toBeUndefined();
+      expect(resolverImplementsSystemMath(adapter)).toBe(false);
+    });
+  });
+
+  it('an adapter with no resolverMath field at all (Pick-typed caller) is treated as unsupported', () => {
+    expect(resolverImplementsSystemMath({})).toBe(false);
+  });
+});
+
+describe('ActionResolveResult — systemMathSupported/mathProfile schema defaults (issue #1928)', () => {
+  const minimalResolution = {
+    actorCombatantId: 1,
+    actorName: 'Test Actor',
+    actionName: 'Test Action',
+    mode: 'attack' as const,
+  };
+
+  it('defaults systemMathSupported:true and mathProfile:null — a pre-#1928 payload keeps parsing', () => {
+    // No systemMathSupported/mathProfile at all, matching every resolve response that ever
+    // existed before this issue — every one of them WAS run through the 5e-shaped maths this
+    // flag now names, so defaulting to true/(implicit 5e) rather than false/null is the
+    // honest default for an omitted field, not merely a permissive one.
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-1',
+    });
+    expect(parsed.systemMathSupported).toBe(true);
+    expect(parsed.mathProfile).toBeNull();
+  });
+
+  it('accepts an explicit false/null pair (the unaudited-system shape)', () => {
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-2',
+      systemMathSupported: false,
+      mathProfile: null,
+    });
+    expect(parsed.systemMathSupported).toBe(false);
+    expect(parsed.mathProfile).toBeNull();
+  });
+
+  it('accepts an explicit true/profile pair (the audited-5e shape)', () => {
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-3',
+      systemMathSupported: true,
+      mathProfile: RESOLVER_MATH_D20_5E,
+    });
+    expect(parsed.systemMathSupported).toBe(true);
+    expect(parsed.mathProfile).toBe('d20-ascending-ac-5e-proficiency');
   });
 });
 
