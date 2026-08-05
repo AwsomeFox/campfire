@@ -939,8 +939,12 @@ export default function RunSessionPage() {
         ruleSystem,
       );
       const pendingTargetIds = new Set([...optimisticQueue.operations.values()].map(({ combatantId }) => combatantId));
+      const suppressedTargetIds = new Set([
+        ...pendingTargetIds,
+        ...[...bulkHpFeedbackOperationsRef.current.values()].flatMap((operation) => [...operation.targets]),
+      ]);
       const events = diffHpFeedback(previous.combatants, encounter.combatants)
-        .filter((event) => !pendingTargetIds.has(event.combatantId));
+        .filter((event) => !suppressedTargetIds.has(event.combatantId));
       const nextSnapshot = withOptimisticHpFeedbackTargets(encounter.combatants, optimisticCombatants, pendingTargetIds);
       hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: nextSnapshot };
       appendHpFeedbackEvents(events);
@@ -1899,7 +1903,10 @@ export default function RunSessionPage() {
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
-      const previousCombatant = previous?.combatants.find((combatant) => combatant.id === combatantId);
+      const queuedBase = optimisticHpQueueRef.current;
+      const previousCombatant = queuedBase.encounterId === eid && queuedBase.base
+        ? queuedBase.base.combatants.find((combatant) => combatant.id === combatantId)
+        : previous?.combatants.find((combatant) => combatant.id === combatantId);
       // Defence data lives in the server's authoritative statblock.  Do not briefly
       // show an incorrect local HP total when damage rules are active; refetch settles it.
       if (

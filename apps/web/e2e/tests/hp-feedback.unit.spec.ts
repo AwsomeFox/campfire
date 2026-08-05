@@ -136,8 +136,11 @@ test.describe('encounter HP feedback diff (issue #1907)', () => {
     expect(source).toContain('bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);');
     expect(source).toContain('optimisticQueue.operations.size > 0');
     expect(source).toContain('const feedbackBefore = hpFeedbackSnapshotRef.current?.encounterId === eid');
+    expect(source).toContain('const queuedBase = optimisticHpQueueRef.current;');
+    expect(source).toContain('queuedBase.base.combatants.find((combatant) => combatant.id === combatantId)');
     expect(source).toContain('appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot([feedbackBefore]), [optimisticCombatant]))');
-    expect(source).toContain('.filter((event) => !pendingTargetIds.has(event.combatantId));');
+    expect(source).toContain('const suppressedTargetIds = new Set([');
+    expect(source).toContain('!suppressedTargetIds.has(event.combatantId)');
     expect(source).toContain('const optimisticTargets = [...pendingTargets]');
     expect(source).toContain('const queuedCombatants = queue.encounterId === eid && queue.base && queue.operations.size > 0');
     expect(source).toContain('const feedbackBaseline = hpFeedbackSnapshotRef.current?.encounterId === eid');
