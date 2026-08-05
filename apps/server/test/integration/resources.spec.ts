@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
-import { characters, combatants, encounters, encounterEvents, campaigns, auditLog } from '../../src/db/schema';
+import { characters, combatants, encounters, encounterEvents, campaigns, auditLog, attachments } from '../../src/db/schema';
 import { CharactersService } from '../../src/modules/characters/characters.service';
 import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
 import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
@@ -806,6 +806,93 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(JSON.parse(character.resources)['layOnHands'].used).toBe(2); // fresh (1) + keyed (1)
   });
 
+  // Issue #1909 review (Codex, sixth finding): the fog-redaction fix above only checked
+  // THIS encounter's own fog, mirroring `getWithCombatantsOrThrow`'s per-encounter check
+  // but omitting its async SIBLING-map check (`isFogProtectedEncounterMap`) — when this
+  // encounter's own fog is absent or fully revealed but a SIBLING encounter sharing the
+  // same `mapAttachmentId` still conceals it, the shared map's tokens must stay masked
+  // here too. Proves both the fresh write's own response AND a same-role keyed replay's
+  // STORED body are redacted — not merely that the field is absent for a DM.
+  it("a non-DM owning player's write is redacted when a SIBLING encounter sharing the map still conceals it, even though THIS encounter has no concealing fog of its own (Codex review)", async () => {
+    const player = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Sibling Fog Secrecy Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [map] = db
+      .insert(attachments)
+      .values({
+        campaignId: camp.id,
+        uploaderUserId: '1',
+        kind: 'map',
+        filename: 'shared-map.png',
+        mime: 'image/png',
+        size: 1,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Kyra',
+        ownerUserId: '1',
+        resources: JSON.stringify({ channelEnergy: { max: 3, used: 0, name: 'Channel Energy', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    // THIS encounter shares the map but has NO concealing fog of its own (null fog).
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Sibling Fog Fight', status: 'running', mapAttachmentId: map.id, fog: null, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    // The SIBLING encounter shares the same map and STILL conceals pixels via its own fog.
+    db.insert(encounters)
+      .values({
+        campaignId: camp.id,
+        name: 'Sibling Fog Fight (protecting sibling)',
+        status: 'running',
+        mapAttachmentId: map.id,
+        fog: JSON.stringify({ enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .run();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Kyra', sortOrder: 1, tokenX: 10, tokenY: 10 })
+      .returning()
+      .all();
+
+    const fresh = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'channelEnergy', delta: 1 }, player, 'player',
+    );
+    expect(fresh.tokenX).toBeNull();
+    expect(fresh.tokenY).toBeNull();
+    expect(fresh.tokenHiddenByFog).toBe(true);
+
+    // A same-role replay of a KEYED write must ALSO come back redacted, proving the
+    // STORED claim body was itself redacted at write time.
+    const replayed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'channelEnergy', delta: 1, idempotencyKey: 'sibling-fog-secrecy' }, player, 'player',
+    );
+    expect(replayed.tokenX).toBeNull();
+    expect(replayed.tokenY).toBeNull();
+    const replayedAgain = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'channelEnergy', delta: 1, idempotencyKey: 'sibling-fog-secrecy' }, player, 'player',
+    );
+    expect(replayedAgain.tokenX).toBeNull();
+    expect(replayedAgain.tokenY).toBeNull();
+    expect(replayedAgain.tokenHiddenByFog).toBe(true);
+  });
+
   // Issue #1909 review (Codex P2, secrecy): the `encounter.updated` SSE nudge used to gate
   // on the OUTER `encounter.hidden` value, read before the write. If another DM hides the
   // encounter in the window between that read and the emit, the id would still reach the
@@ -918,6 +1005,41 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
       const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
       expect(rows.filter((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor) === '1').length).toBe(2);
+    });
+
+    // Issue #1909 review (Devin, seventh finding): the statblock branch's `encounterEvents`
+    // insert used the PRE-TRANSACTION `combatant` snapshot's name/id instead of the
+    // in-transaction re-read (`row`, reassigned after the write) — the character branch
+    // already uses the fresh re-read for exactly this reason (a name change in the window
+    // between the outer read and the transaction must not be lost). Renames the combatant
+    // as a side effect of the in-transaction combatant re-read (the same spy technique used
+    // for the concurrent-hide and SSE tests above), then asserts the logged actor is the
+    // NEW name, not the stale one — the two names are deliberately distinct so the
+    // assertion cannot pass by matching either.
+    it("renaming a statblock combatant in the window between the outer read and the transaction logs the resource_changed event under the NEW name, not the stale pre-transaction snapshot (Devin review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      expect(comb.name).toBe('Monk Boss');
+
+      // Simulate the rename landing AFTER the outer `getCombatantRowOrThrow` snapshot is
+      // taken but BEFORE the transaction's own fresh re-read — the same spy-side-effect
+      // technique used for the concurrent-hide and SSE tests above.
+      const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+      const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+        const result = await original(...(args as [number, number]));
+        db.update(combatants).set({ name: 'Renamed Mid-Flight Boss' }).where(eq(combatants.id, comb.id)).run();
+        return result;
+      });
+
+      try {
+        await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm');
+      } finally {
+        spy.mockRestore();
+      }
+
+      const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+      const resourceEvent = events.find((e: any) => e.type === 'resource_changed');
+      expect(resourceEvent?.actor).toBe('Renamed Mid-Flight Boss');
+      expect(resourceEvent?.actorId).toBe(comb.id);
     });
 
     it('a non-DM (player or viewer) may not adjust a statblock combatant — it has no owning player', async () => {

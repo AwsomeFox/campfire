@@ -8778,24 +8778,40 @@ export class EncountersService {
     }
 
     let priorClaim: EncounterOpPrior | null = null;
+    // Issue #1909 review (Codex, sixth finding): `getWithCombatantsOrThrow`'s own token
+    // redaction doesn't stop at THIS encounter's fog — when this encounter's own fog is
+    // absent or fully revealed but a SIBLING encounter sharing the same `mapAttachmentId`
+    // still conceals it (`isFogProtectedEncounterMap`), every token on the shared map is
+    // still masked. That check is async (it queries sibling encounters), so it cannot run
+    // inside the synchronous better-sqlite3 transaction below — awaited ONCE here, before
+    // any transaction opens, since it depends only on `mapAttachmentId`/campaignId and
+    // sibling encounters' fog, none of which THIS write touches. A sibling's fog could in
+    // principle change between this read and the eventual commit; erring toward redaction
+    // (a stale `true` still redacts) is the safe direction — a redaction that turns out to
+    // have been momentarily unnecessary costs a caller one extra read, a missed one is the
+    // disclosure this finding is about.
+    const siblingFogProtects =
+      role !== 'dm' &&
+      encounter.mapAttachmentId != null &&
+      !fogConcealsPixels(parseFog(encounter.fog)) &&
+      (await this.attachmentsService.isFogProtectedEncounterMap(encounter.mapAttachmentId, encounter.campaignId));
     // Issue #1909 review (Codex P1, secrecy): `combatantToDomain(row)` is the RAW row —
     // unlike `getWithCombatantsOrThrow`'s role-filtered projection, it never withholds a
     // fog-hidden token's exact position. A non-DM owning player adjusting their own
     // character-linked combatant would otherwise learn (via THIS response, and via a
     // same-role replay of the stored claim body) exactly where their token sits even when
-    // fog conceals it from every other read path. Redact synchronously here, using ONLY
-    // this encounter's own fog (never the async sibling-map-protection check
-    // `getWithCombatantsOrThrow` also applies — that requires an awaited DB call this
-    // synchronous better-sqlite3 transaction cannot make; a documented, narrower scope than
-    // the full read-path redaction, closing the specific leak this finding describes).
-    // Applied identically to the STORED claim body (so a same-role replay never surfaces
-    // the raw position either) and to the fresh-write's own returned value — never only on
-    // the way out, which a future caller of the stored body could too easily miss.
+    // fog conceals it from every other read path. Redacts using this encounter's own fog
+    // PLUS the pre-computed `siblingFogProtects` boolean above — together the same two
+    // conditions `getWithCombatantsOrThrow` applies, computed synchronously (own fog) and
+    // once-awaited-up-front (sibling) rather than inside the transaction. Applied
+    // identically to the STORED claim body (so a same-role replay never surfaces the raw
+    // position either) and to the fresh-write's own returned value — never only on the way
+    // out, which a future caller of the stored body could too easily miss.
     const redactForRole = (c: Combatant, encounterFogJson: string | null): Combatant => {
       if (role === 'dm') return c;
       const fog = parseFog(encounterFogJson);
       const invalidFog = encounterFogJson !== null && fog === null;
-      if (invalidFog) return redactTokenInFog(c, { enabled: true, revealed: [] });
+      if (invalidFog || siblingFogProtects) return redactTokenInFog(c, { enabled: true, revealed: [] });
       if (fog?.enabled) return redactTokenInFog(c, fog);
       return c;
     };
@@ -9136,13 +9152,19 @@ export class EncountersService {
               .run();
           }
 
+          // Issue #1909 review (Devin, seventh finding): use the in-transaction re-read
+          // (`row`, reassigned to `updated` just above), not the pre-transaction
+          // `combatant` snapshot — a combatant renamed in the window between the outer
+          // fetch and this transaction must not be logged under its stale name. Matches
+          // the character branch above (`actor: row.name`), which already does this and
+          // documents why; this branch had drifted from it.
           tx.insert(encounterEvents)
             .values({
               encounterId,
               round: freshEncounter.round,
               type: 'resource_changed',
-              actor: combatant.name,
-              actorId: combatant.id,
+              actor: row.name,
+              actorId: row.id,
               target: null,
               targetId: null,
               detail: eventDetail,
