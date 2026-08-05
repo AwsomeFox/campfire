@@ -613,7 +613,7 @@ export class ActionResolverService {
           resolvable: isResolvableSpec(spec),
           spec,
           // Issue #1901: tag which equipped item granted this action; empty for a sheet action.
-          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : '',
+          source: itemName ? `equipped: ${itemName}`.slice(0, 220) : '',
         });
       });
     }
