@@ -7,10 +7,14 @@ import {
   nextTurnGateReason,
   rollInitiativeGateReason,
   startGateReason,
+  startRosterHintReason,
   syncOnlyGateReason,
   undoTurnGateReason,
   type LifecycleGateReason,
 } from './lifecycleGate';
+
+/** Ties the Start button to its standing roster instruction for assistive tech. */
+const START_ROSTER_HINT_ID = 'start-roster-hint';
 
 export type Props = {
   canDmWrite: boolean;
@@ -103,20 +107,32 @@ export function DmLifecycleHeader({
             // sighted DM who never hovers, and a touch user who never taps a disabled
             // button, see an unexplained greyed-out Start. Keep the paragraph, source it
             // from the SAME run.gate.* string GatedControl uses so the two can never drift.
-            const showStandingHint =
-              startReasonKey === 'needsCombatantsToStart' || startReasonKey === 'needsInitiativeToStart';
+            //
+            // Second review round: it must come from `startRosterHintReason`, NOT from
+            // `startGateReason`'s single winning key. The gate resolver is a priority
+            // question ("what would the server reject first"), so a safety hold or a sync
+            // outage outranks the roster and the paragraph disappeared during exactly the
+            // states where the DM most needs to know what setup step is still owed. The
+            // roster condition is unchanged by either transient gate, so it is resolved
+            // independently and rendered alongside whichever transient reason the tooltip
+            // is showing.
+            const standingHintKey = startRosterHintReason({ hasNoCombatants, needsInitiativeCount });
+            const standingHint = gateReasonText(standingHintKey, t);
             return (
               <div className="flex flex-col gap-0.5 items-stretch">
                 <GatedControl reason={startReason}>
                   <Btn
                     disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
                     onClick={onStart}
+                    aria-describedby={standingHint ? START_ROSTER_HINT_ID : undefined}
                   >
                     {t('encounters.run.start')}
                   </Btn>
                 </GatedControl>
-                {showStandingHint && (
-                  <p className="text-muted text-xs m-0 max-w-[14rem]">{startReason}</p>
+                {standingHint && (
+                  <p id={START_ROSTER_HINT_ID} className="text-muted text-xs m-0 max-w-[14rem]">
+                    {standingHint}
+                  </p>
                 )}
               </div>
             );

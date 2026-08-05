@@ -29,6 +29,29 @@ export function rollInitiativeGateReason(input: {
   return null;
 }
 
+/**
+ * The STANDING roster setup step, independent of the transient gates.
+ *
+ * `startGateReason` below answers "why is Start disabled right now", which is a priority
+ * question — a safety hold or a sync outage outranks the roster because those are what the
+ * server would reject on first. But the roster condition is a different kind of statement:
+ * a permanently-displayed "here is the setup step you still owe" instruction, which stays
+ * true (and stays the DM's next action) throughout an outage or a hold. Deriving the
+ * paragraph from the single winning gate key made it vanish exactly when a DM with an empty
+ * roster had a greyed-out Start and no visible explanation at all (issue #1933 review).
+ *
+ * Returns only the two roster keys, never `safetyHold`/`syncBlocked` — those are transient
+ * and belong in the tooltip, not in a standing paragraph.
+ */
+export function startRosterHintReason(input: {
+  hasNoCombatants: boolean;
+  needsInitiativeCount: number;
+}): Extract<LifecycleGateReason, 'needsCombatantsToStart' | 'needsInitiativeToStart'> | null {
+  if (input.hasNoCombatants) return 'needsCombatantsToStart';
+  if (input.needsInitiativeCount > 0) return 'needsInitiativeToStart';
+  return null;
+}
+
 /** Start — safety-hold guarded (`assertNoSafetyHold` in `EncountersService.start`). */
 export function startGateReason(input: {
   safetyHoldActive: boolean;
@@ -38,9 +61,9 @@ export function startGateReason(input: {
 }): LifecycleGateReason {
   if (input.safetyHoldActive) return 'safetyHold';
   if (input.riskyBlocked) return 'syncBlocked';
-  if (input.hasNoCombatants) return 'needsCombatantsToStart';
-  if (input.needsInitiativeCount > 0) return 'needsInitiativeToStart';
-  return null;
+  // Same roster rule as the standing hint, so the tooltip and the paragraph can never
+  // disagree about WHICH roster step is outstanding.
+  return startRosterHintReason(input);
 }
 
 /** Undo turn — safety-hold guarded (`EncountersService.undoTurn`). */

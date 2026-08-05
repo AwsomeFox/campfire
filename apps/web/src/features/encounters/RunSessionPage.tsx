@@ -1507,6 +1507,12 @@ export default function RunSessionPage() {
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      // Issue #1933 review: handling the delivered `safety.hold` frame is not enough on
+      // its own — a hold activated or released WHILE the stream was down produces no
+      // frame to deliver on reconnect. safetyHoldActive now gates Start/Next/Undo/End
+      // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
+      // useTableSafety's 20s poll happens to land.
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1515,6 +1521,7 @@ export default function RunSessionPage() {
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
