@@ -88,6 +88,7 @@ type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type AoeTemplateUpdateInput = z.infer<typeof AoeTemplateUpdate>;
+const MAX_PLAYER_DECLARED_AOE_TEMPLATES = 10;
 type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -2291,6 +2292,9 @@ export class EncountersService {
         if (operation === 'update') throw new NotFoundException(`AoE template ${templateId} not found`);
         if (current.length >= 50) {
           throw new ConflictException('An encounter may have at most 50 AoE templates');
+        }
+        if (role !== 'dm' && current.filter((template) => template.declaredByUserId === user.id).length >= MAX_PLAYER_DECLARED_AOE_TEMPLATES) {
+          throw new ConflictException(`A player may declare at most ${MAX_PLAYER_DECLARED_AOE_TEMPLATES} AoE templates per encounter`);
         }
         declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: role === 'dm' ? null : user.id };
         current.push(declared);

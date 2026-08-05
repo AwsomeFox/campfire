@@ -48,6 +48,10 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(BATTLE_MAP).toContain('else updatePlayerAoeFromDraft(t.id, { x: next.x, y: next.y });');
   });
 
+  test('players only receive movable handles for their own AoE templates', () => {
+    expect(BATTLE_MAP).toContain('aoeTemplates.filter((template) => canEditAoe(template)).map((template) => {');
+  });
+
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {
     const damageBar = RUN_SESSION.slice(RUN_SESSION.indexOf('<ApplyDamageBar'));
     expect(damageBar).not.toContain('onDeclareAoe');

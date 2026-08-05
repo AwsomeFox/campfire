@@ -7419,6 +7419,17 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
     await db.update(encountersTable).set({ aoe: JSON.stringify(fifty) }).where(eq(encountersTable.id, capId));
     expect((await request(server).post(`/api/v1/encounters/${capId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
 
+    const playerCapId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Player AoE cap', hidden: false })
+    ).body.id;
+    const tenPlayerTemplates = Array.from({ length: 10 }, (_, index) => ({ ...declaration, id: `player-cap-${index}`, declaredByUserId: 'dev:p-1' }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(tenPlayerTemplates) }).where(eq(encountersTable.id, playerCapId));
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(dm).send({ ...declaration, id: 'dm-after-player-cap' })).status).toBe(201);
+
     const fogId = (
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/encounters`)

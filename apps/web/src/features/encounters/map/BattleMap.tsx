@@ -2735,7 +2735,7 @@ export function BattleMap({
                   </svg>
                 )}
                 {(effectiveCanDmWrite || effectiveCanDeclareAoe) && canAoe &&
-                  aoeTemplates.map((template) => {
+                  aoeTemplates.filter((template) => canEditAoe(template)).map((template) => {
                     const drag = aoeDrag && aoeDrag.id === template.id ? aoeDrag : null;
                     const x = drag ? drag.x : template.x;
                     const y = drag ? drag.y : template.y;
