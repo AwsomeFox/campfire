@@ -5761,23 +5761,28 @@ export class EncountersService {
       const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }> | null | undefined;
       return candidate?.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
     };
-    // Issue #1904 review finding: the stored response's `combatant` half was rendered for
-    // the ROLE that committed it. If the caller's role has since changed within the replay
-    // window (e.g. a DM demoted to player/viewer), replaying that stored projection verbatim
-    // would leak whatever the DM saw — exact monster HP, an unmasked hidden-NPC name — to a
-    // lower-privileged caller. The `roll` half carries no such sensitivity: it is masked at
-    // WRITE time (see the hidden-NPC label fix above) and every campaign member already reads
-    // the identical shared dice log via GET /campaigns/:id/rolls, so only `combatant` needs
-    // re-deriving. The roll already committed either way — this re-renders CURRENT state for
-    // the caller's role rather than re-running the effect, mirroring the turn-advance
-    // precedent (issue #580) of falling through to fresh server truth on a role mismatch.
+    // Issue #1904 review finding: the stored response was rendered for the ROLE that
+    // committed it. If the caller's role has since changed within the replay window (e.g. a
+    // DM demoted to player/viewer), replaying that stored projection verbatim would leak
+    // whatever the DM saw — exact monster HP, an unmasked hidden-NPC name or npcId, an
+    // un-redacted dice-log label — to a lower-privileged caller. BOTH halves need
+    // re-deriving on a mismatch: `combatant` via a fresh role-filtered read (below), and
+    // `roll` via RollsService.redactRollForRole — the dice log itself is no longer
+    // universally identical across roles (it gets the SAME read-time redaction
+    // listForCampaign applies), so reusing the stored `roll` verbatim would bypass exactly
+    // the read-time check that redaction exists for. The roll already committed either way
+    // — this re-renders CURRENT state for the caller's role rather than re-running the
+    // effect, mirroring the turn-advance precedent (issue #580) of falling through to fresh
+    // server truth on a role mismatch.
     const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
       if (prior.responseRole === role) return parsed;
       const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
       const found = snapshot.combatants.find((c) => c.id === combatantId);
-      return found ? { combatant: found, roll: parsed.roll } : null;
+      if (!found) return null;
+      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+      return { combatant: found, roll };
     };
     const findPrior = (): EncounterOpPrior | null => {
       let prior: EncounterOpPrior | null = null;

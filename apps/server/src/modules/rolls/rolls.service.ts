@@ -174,15 +174,52 @@ export class RollsService implements OnApplicationBootstrap {
    * was already persisted, so a non-DM role re-checks CURRENT visibility on every read.
    */
   async listForCampaign(campaignId: number, limit = DEFAULT_ROLL_LIST_LIMIT, role?: Role): Promise<DiceRoll[]> {
+    if (role === undefined || role === 'dm') {
+      const rows = await this.db
+        .select()
+        .from(diceRolls)
+        .where(eq(diceRolls.campaignId, campaignId))
+        .orderBy(desc(diceRolls.id))
+        .limit(limit);
+      return rows.map(toDomain);
+    }
+    // Issue #1904 review finding: applying the DB LIMIT before redaction can hand a non-DM
+    // caller a short (or empty) page while older VISIBLE rolls exist just past the cutoff —
+    // the newest `limit` rows might happen to be exactly the ones redaction then drops.
+    // Fetch a wider CANDIDATE window, redact THAT, and only then take the requested page —
+    // never the other way around. The candidate window covers the durable retention ceiling
+    // when it is finite (in the common case that already IS the whole per-campaign table,
+    // since the background sweep keeps it pruned to that size) and falls back to the
+    // platform default as a query-cost safety net when retention is configured unbounded
+    // (0/negative — "keep everything" is a deliberate operator choice about durable history,
+    // not license for an unbounded per-request query).
+    const retention = resolveDiceRollsRetention();
+    const candidateLimit = Math.max(limit, retention > 0 ? retention : DEFAULT_DICE_ROLLS_RETENTION);
     const rows = await this.db
       .select()
       .from(diceRolls)
       .where(eq(diceRolls.campaignId, campaignId))
       .orderBy(desc(diceRolls.id))
-      .limit(limit);
-    const rolls = rows.map(toDomain);
-    if (role === undefined || role === 'dm') return rolls;
-    return this.redactForRole(rolls);
+      .limit(candidateLimit);
+    const redacted = await this.redactForRole(rows.map(toDomain));
+    return redacted.slice(0, limit);
+  }
+
+  /**
+   * Issue #1904 review finding: redacts a SINGLE previously-recorded roll for a role that may
+   * differ from the one it was originally rendered for. Used by EncountersService's idempotent
+   * per-combatant initiative-roll replay, which otherwise reuses the roll payload verbatim
+   * across a role change (e.g. the DM who rolled for a visible NPC is demoted after the NPC
+   * is hidden, then replays the same idempotency key) — exactly the gap `listForCampaign`
+   * closes for the shared feed, but the replay path returns one roll directly rather than
+   * going through that list. Delegates to `redactForRole` so both paths share one masking
+   * rule; `null` covers the (encounter-hidden) case where redaction would drop the row
+   * entirely — the caller falls back to omitting the roll rather than showing a half object.
+   */
+  async redactRollForRole(roll: DiceRoll, role: Role): Promise<DiceRoll | null> {
+    if (role === 'dm') return roll;
+    const [redacted] = await this.redactForRole([roll]);
+    return redacted ?? null;
   }
 
   /**
@@ -222,7 +259,18 @@ export class RollsService implements OnApplicationBootstrap {
 
     return rolls
       .filter((r) => r.encounterId === undefined || !hiddenEncounterIds.has(r.encounterId))
-      .map((r) => (r.npcId !== undefined && hiddenNpcIds.has(r.npcId) ? { ...r, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` } : r));
+      .map((r) => {
+        if (r.npcId === undefined || !hiddenNpcIds.has(r.npcId)) return r;
+        // Issue #1904 review finding (reported 3x): masking the LABEL is not enough while
+        // `npcId` survives the object spread — a stable id is exactly what lets a player
+        // correlate this roll with a later reveal of the same NPC ("the creature that
+        // rolled initiative back then IS this one"), reconstructing the identity the label
+        // mask was supposed to withhold. Null it out alongside the label, same as the
+        // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
+        // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
+        const { npcId: _npcId, ...withoutNpcId } = r;
+        return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` };
+      });
   }
 
   /**

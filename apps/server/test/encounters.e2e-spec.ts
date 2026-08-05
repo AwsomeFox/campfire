@@ -5317,10 +5317,118 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(false);
     // ...but the row itself is not (the encounter is still visible — only the NPC's identity
     // is secret, same as the roster/combat-log masking rule this mirrors).
-    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+    const masked = (afterHide.body as Array<{ label?: string; npcId?: number }>).find(
+      (r) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`,
+    );
+    expect(masked).toBeDefined();
+    // Issue #1904 review finding (reported 3x): the label alone is not enough — npcId is a
+    // stable handle that would let a player correlate this roll with a LATER reveal of the
+    // same NPC. It must be nulled out, not just the display name.
+    expect(masked?.npcId).toBeUndefined();
 
     const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
     expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
+    // The DM still gets the real npcId — this is a non-DM redaction, not data loss.
+    expect(dmView.body.some((r: { npcId?: number }) => r.npcId === npcId)).toBe(true);
+  });
+
+  // Issue #1904 review finding (P1): the idempotent replay's `roll` half was reused verbatim
+  // across a role change — the SAME gap the `combatant` half was already fixed for. A DM
+  // rolls for a visible NPC, the NPC is later hidden, the DM is demoted, and a replay of the
+  // same idempotency key must come back re-redacted for the caller's CURRENT role, not the
+  // stale unmasked label the original DM roll produced.
+  it('a replayed idempotency key is re-redacted for the demoted caller — the dice-log label too, not just the combatant', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Replay Redact NPC', hidden: false })
+    ).body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Replay Redact NPC', hpMax: 15 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+    const idempotencyKey = 'replay-redact-after-hide-and-demote';
+
+    // DM rolls while the NPC is still visible — the raw label/npcId are legitimately part of
+    // the DM's own committed response at this moment.
+    const dmRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(dmRoll.status).toBe(201);
+    expect(dmRoll.body.roll.label).toContain('Replay Redact NPC');
+    expect(dmRoll.body.roll.npcId).toBe(npcId);
+
+    // Hide the NPC, then replay the SAME key as the SAME identity demoted to player (dev-auth's
+    // role header is the effective role per request — same #1636 pattern used elsewhere here).
+    const hide = await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+    const demotedDm = { 'x-dev-role': 'player', 'x-dev-user': 'dm-1' };
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(demotedDm)
+      .send({ idempotencyKey });
+    expect(replay.status).toBe(201);
+    // The core regression: the replay's roll payload is re-redacted for the CURRENT
+    // (demoted) role, not reused verbatim from the original DM-rendered response.
+    expect(replay.body.roll.label).not.toContain('Replay Redact NPC');
+    expect(replay.body.roll.label).toBe(`${UNKNOWN_COMBATANT_LABEL} · Initiative`);
+    expect(replay.body.roll.npcId).toBeUndefined();
+  });
+
+  // Issue #1904 review finding (P2 + duplicate): applying the SQL LIMIT before redaction can
+  // hand back a short page while older VISIBLE rolls exist just past the cutoff. Force that
+  // shape directly: the newest rolls in the campaign are all tied to a combatant whose NPC
+  // gets hidden, an OLDER roll stays visible, and a tight limit must still surface it.
+  it('a tight limit still returns a visible roll when the ABSOLUTE NEWEST row gets redacted out entirely (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // An older, permanently-visible roll — establishes that SOMETHING visible exists in the
+    // campaign before the newest row (below) gets hidden out from under a tight limit.
+    const olderEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Limit Test Older Encounter', hidden: false });
+    const olderMonster = await request(server)
+      .post(`/api/v1/encounters/${olderEncounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Limit Test Older Monster', hpMax: 5 });
+    const olderRoll = await request(server)
+      .post(`/api/v1/encounters/${olderEncounter.body.id}/combatants/${olderMonster.body.id}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'limit-test-older-roll' });
+    expect(olderRoll.status).toBe(201);
+
+    // The newest roll in the whole campaign — the one a naive "LIMIT before redaction" query
+    // would fetch for a limit=1 request. Hiding its encounter drops the row ENTIRELY (unlike
+    // the NPC-hidden case above, which only masks the label and keeps the row) — this is the
+    // shape that can turn a limit=1 request into an EMPTY page pre-fix, not just a short one.
+    const newestEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Limit Test Newest Encounter', hidden: false });
+    const newestMonster = await request(server)
+      .post(`/api/v1/encounters/${newestEncounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Limit Test Newest Monster', hpMax: 5 });
+    const newestRoll = await request(server)
+      .post(`/api/v1/encounters/${newestEncounter.body.id}/combatants/${newestMonster.body.id}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'limit-test-newest-roll' });
+    expect(newestRoll.status).toBe(201);
+
+    const hide = await request(server).patch(`/api/v1/encounters/${newestEncounter.body.id}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    // A tight limit of 1: before this fix, the DB-level LIMIT applied BEFORE redaction would
+    // fetch exactly the newest row (now hidden), redaction would drop it, and the response
+    // would be an empty array despite the older roll still being visible. After this fix, the
+    // candidate window is redacted FIRST and the page is taken from what survives.
+    const limited = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=1`).set(player);
+    expect(limited.status).toBe(200);
+    expect(limited.body).toHaveLength(1);
+    expect(limited.body[0].id).not.toBe(newestRoll.body.roll.id); // the hidden one must not leak through
   });
 });
 
