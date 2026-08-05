@@ -131,7 +131,18 @@ export async function fetchPlayerDisplayProjection(
     return { campaignId, summary, encounter: null };
   }
 
-  const detail = await fetchers.getEncounter(live.id, signal);
+  let detail: EncounterWithCombatants;
+  try {
+    detail = await fetchers.getEncounter(live.id, signal);
+  } catch (error) {
+    // The running list can win the race immediately before the DM ends the
+    // fight. Player Display detail endpoints intentionally 404 non-running
+    // encounters, which means there is no live initiative rail to paint.
+    if (error instanceof ApiError && error.status === 404) {
+      return { campaignId, summary, encounter: null };
+    }
+    throw error;
+  }
   throwIfAborted(signal);
 
   // End-during-load: a detail body can still arrive after the DM ends combat.

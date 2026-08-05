@@ -330,13 +330,8 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
     });
   });
 
-  test('persistent 404 after summary keeps cast and drops only the rail', async () => {
+  test('End during load: detail 404 means no live rail', async () => {
     const sequencer = new PlayerDisplayLoadSequencer();
-    const prior: PlayerDisplayProjection = {
-      campaignId: 7,
-      summary: summaryFor(7, 'Ashfall'),
-      encounter: detailFor(9, 7, 2),
-    };
     const freshSummary = summaryFor(7, 'Ashfall Renewed');
     const fetchers: PlayerDisplayFetchers = {
       getSummary: async () => freshSummary,
@@ -348,25 +343,9 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
 
     const result = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: true });
     expect(result).toMatchObject({
-      kind: 'failed',
-      keepLastKnown: false,
-      transient: false,
-      message: 'Encounter not found',
-      summary: freshSummary,
+      kind: 'ok',
+      projection: { campaignId: 7, summary: freshSummary, encounter: null },
     });
-    // Page applies this helper when keepLastKnown is false — rail drops, cast stays.
-    expect(
-      projectionAfterLoadFailure(prior, 7, { keepLastKnown: false, summary: result.kind === 'failed' ? result.summary : null }),
-    ).toEqual({
-      campaignId: 7,
-      summary: freshSummary,
-      encounter: null,
-    });
-    // Transient path still leaves the prior paint untouched.
-    expect(projectionAfterLoadFailure(prior, 7, { keepLastKnown: true })).toBe(prior);
-    // Other campaign's paint is left alone when this campaign has no summary to keep.
-    const other = { ...prior, campaignId: 99 };
-    expect(projectionAfterLoadFailure(other, 7, { keepLastKnown: false, summary: null })).toBe(other);
   });
 
   test('persistent summary 404 clears projection (full-screen path)', async () => {
