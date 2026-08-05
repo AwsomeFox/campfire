@@ -1,5 +1,32 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
+import { MAIN_CONTENT_ID, SKIP_TO_MAIN_ID } from '../../src/app/routeFocus';
+
+/**
+ * Milliseconds used to override the production recovery window for these specs (see
+ * `routeFocus.ts`'s `graceMs` option and `RouteChangeFocus.tsx`'s e2e bridge). The real
+ * window is `API_READ_BUDGET.overallMs` (tens of seconds) — a flat multi-second constant
+ * that can only be exercised by actually waiting it out is effectively untested in CI,
+ * which is how the boundary would silently rot later (review finding: coordinator). A
+ * small injected value lets both sides of the boundary — inside the window, and after it
+ * — run in well under a second instead.
+ */
+const TEST_GRACE_MS = 300;
+
+/**
+ * Seeds `window.__CAMPFIRE_E2E__.routeFocusGraceMs` before the app loads, gated the same
+ * way as the Announcer e2e bridge (issue #434): read only under `navigator.webdriver`,
+ * never in normal production browsing.
+ */
+async function installGraceMsOverride(page: Page, graceMs: number) {
+  await page.addInitScript((ms) => {
+    const w = window as Window & { __CAMPFIRE_E2E__?: { routeFocusGraceMs?: number } };
+    if (typeof w.__CAMPFIRE_E2E__ !== 'object' || w.__CAMPFIRE_E2E__ == null) {
+      w.__CAMPFIRE_E2E__ = {};
+    }
+    w.__CAMPFIRE_E2E__.routeFocusGraceMs = ms;
+  }, graceMs);
+}
 
 /**
  * Issue #591 regression (found via PR #1950's CI on `layout-skip-nav-a11y.spec.ts:75`,
@@ -17,10 +44,21 @@ import { seed, stateFor } from './seed';
  * throttling, no timing luck) by gating the summary response well past that 2-frame window;
  * it does not touch the existing `layout-skip-nav-a11y.spec.ts` file or weaken any of its
  * assertions.
+ *
+ * A permanently-live recovery window has its own problems (see PR #1957 review), so
+ * `focusMainDestination` bounds it to `FALLBACK_UPGRADE_GRACE_MS` and cancels it the moment
+ * the user acts (a skip-link activation, a click, a tab, or a non-focus-moving key like an
+ * arrow or PageDown) rather than leaving focus perpetually up for grabs. The tests below
+ * cover those edges: a late heading must never claw focus back from a user who already moved
+ * on — whether or not that action itself moved DOM focus — and a heading arriving after the
+ * grace window must not claw focus away either (bounding the watcher's lifetime the same way
+ * a route that never renders an h1 at all would).
  */
 test.use({ storageState: stateFor('dm') });
 
 test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
   await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
@@ -42,10 +80,276 @@ test('back-navigation focus recovers onto a slow-to-render Dashboard heading (#5
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
 
-  // Give the fallback a comfortable margin past its ~2-frame window to give up and settle
-  // on <main> before the gated summary (and therefore the real h1) arrives.
-  await page.waitForTimeout(200);
+  // Wait on the observable outcome — the fallback has settled on <main> — instead of a fixed
+  // sleep (issue #1954's anti-pattern): this both avoids flaking on slow runners and confirms
+  // the gated summary really is racing the fallback rather than beating it.
+  await expect(page.locator(`#${MAIN_CONTENT_ID}`)).toBeFocused();
+
+  // Release comfortably inside the injected recovery window — this is the case the fix
+  // exists for: a supported (not failing) slow read whose heading arrives after the fallback
+  // has already settled must still claim focus.
+  await page.waitForTimeout(TEST_GRACE_MS / 3);
   releaseSummary();
 
-  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused();
+});
+
+test('a late heading does not claw focus back from a user who already activated the skip link (#591)', async ({
+  page,
+}) => {
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  // The fallback settles on <main> first, same as the test above.
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // The user explicitly reactivates the skip link before the real h1 shows up — landing
+  // focus on the exact same <main> element the fallback already used, which is precisely
+  // the case a plain `activeElement === main` check cannot tell apart from "untouched
+  // fallback" (PR #1957 review, P2 codex finding).
+  const skip = page.locator(`#${SKIP_TO_MAIN_ID}`);
+  await skip.focus();
+  await skip.click();
+  await expect(main).toBeFocused();
+
+  // Now let the real heading arrive. It must not steal focus away from the user's explicit
+  // skip-link activation.
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
+  // Give the (buggy, pre-fix) late-upgrade path the two animation frames it schedules itself
+  // on — mirroring `focusMainDestination`'s own `scheduleFrame` — rather than an arbitrary
+  // sleep, then confirm focus is still exactly where the user put it.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(main).toBeFocused();
+});
+
+test('a late heading does not claw focus away after a non-focus-moving key press (#591)', async ({ page }) => {
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  // The fallback settles on <main> first, same as the tests above.
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Arrow keys typically just scroll the page — DOM focus never moves off <main> — which is
+  // exactly the gap a focus-change-only listener cannot see (PR #1957 review, P2 codex
+  // finding): `document.activeElement` still reads as `main`, so a plain equality check would
+  // let the late h1 steal focus even though the user has clearly moved on.
+  await expect(main).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(main).toBeFocused();
+
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(main).toBeFocused();
+});
+
+test('a late heading does not steal focus from an open dialog (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  // The fallback settles on <main> first, same as the tests above.
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Make `isModalDialogOpen(document)` true without going through any real user gesture:
+  // clicking, tabbing to, or otherwise activating any real dialog (the notification panel
+  // included) fires a capturing pointerdown/focusin first, which `handleUserTookOver` already
+  // treats as the user taking over and tears the fallback watch down *before* the modal-guard
+  // code in `upgradeFromFallback` is ever reached — so a test that opens a dialog that way
+  // stays green even with both `isModalDialogOpen` checks deleted, and proves nothing about
+  // them (PR #1957 review, P2 codex finding). Injecting the dialog node directly — without
+  // moving focus or dispatching any pointer/key event — isolates the modal guard from the
+  // takeover tracking already covered by the tests above: `main` stays the active element,
+  // `settledOnMainFallback` stays true, and only `isModalDialogOpen(document)` changes.
+  await page.evaluate(() => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Injected test dialog');
+    document.body.appendChild(dialog);
+  });
+  await expect(main).toBeFocused();
+
+  // Now let the real heading arrive. Without the modal guard this would move focus to it
+  // (as the first test in this file demonstrates happens in the absence of a dialog); with
+  // it, `upgradeFromFallback` must see the injected dialog and refuse.
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect(main).toBeFocused();
+});
+
+test('a readiness-anchored extension still claims focus past the flat window (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Simulate the route-level Suspense fallback (`SkeletonRoute`, data-testid="skeleton-route"
+  // — the signal `checkRouteReadiness` watches for) being present, then removed. An actual
+  // slow `lazy()` chunk load is impractical to reproduce deterministically in e2e, so this
+  // drives the same DOM signal directly. The removal re-anchors the recovery deadline to a
+  // fresh base grace period from that moment (PR #1957 review, P2 codex finding: a flat
+  // multiple of navigation time cannot account for an independently-timed chunk load ahead
+  // of the read — e.g. a 35s chunk load plus a 26s read outliving a flat 60s window).
+  await page.evaluate((mainId) => {
+    const skeleton = document.createElement('div');
+    skeleton.setAttribute('data-testid', 'skeleton-route');
+    document.getElementById(mainId)?.appendChild(skeleton);
+  }, MAIN_CONTENT_ID);
+
+  // Still comfortably inside the flat window (2x the override) when the skeleton is removed.
+  await page.waitForTimeout(TEST_GRACE_MS + 200);
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="skeleton-route"]')?.remove();
+  });
+
+  // This crosses the ORIGINAL flat ceiling (2x the override, from settle) — without the
+  // readiness-anchored extension the recovery window would already be closed by now, and the
+  // heading below would land on a torn-down `settledOnMainFallback`.
+  await page.waitForTimeout(150);
+  releaseSummary();
+
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused();
+});
+
+test('a heading arriving after the recovery grace window does not claw focus away (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Let the injected focus-recovery window (armed for double the override — see
+  // `settleOnTarget`'s arm site) fully elapse without ever releasing the summary — the same
+  // watcher lifetime a route that never renders an h1 at all relies on to stop moving focus
+  // forever (PR #1957 review, Devin and Copilot findings). A real wall-clock wait is
+  // unavoidable here: the behavior under test is itself wall-clock-bounded, so there is no
+  // faster observable event to wait on instead — but overriding the window down to
+  // `TEST_GRACE_MS` keeps that wait well under a second instead of needing the real
+  // multi-second production budget.
+  await page.waitForTimeout(TEST_GRACE_MS * 2 + 200);
+
+  // Only now does the real heading show up — after the focus-recovery window already closed.
+  releaseSummary();
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
+
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  // Focus stays put — but title-sync is a separate, longer-lived concern (see
+  // `teardownFallbackWatch`'s doc comment) and must still have updated to the real heading.
+  await expect(main).toBeFocused();
+  await expect(page).toHaveTitle(/E2E — Cinderhaven/);
 });

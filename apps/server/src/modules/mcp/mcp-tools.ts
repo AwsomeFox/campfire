@@ -1549,7 +1549,8 @@ export class McpToolsService {
       'get_turn',
       'Get the current-turn workspace (issue #413): the active combatant, round, next actor, and — for the DM or the ' +
         'current combatant\'s owner — the adapter-defined action-economy slots (with usage + plain-language help), ' +
-        'movement / reaction / concentration / active effects, suggested actions from the sheet or statblock, and the ' +
+        'movement / reaction / concentration / active effects, suggested actions from the sheet, EQUIPPED inventory ' +
+        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, and the ' +
         'start/end-of-turn prompts to resolve before advancing. Read-only. The detailed workspace is withheld from ' +
         'other viewers (a monster\'s abilities/effects never leak to players).',
       { encounterId: Id.describe('Encounter id — from list_encounters') },
@@ -1566,8 +1567,10 @@ export class McpToolsService {
       'List a combatant\'s usable structured actions (issue #414): each sheet action with its mode (attack/save/check), ' +
         'the structured spec, and a `resolvable` flag — false means the action lacks enough structure to auto-resolve, ' +
         'so fall back to its freeform statblock (toHit/damage/notes) rather than inventing numbers. The freeform text is ' +
-        'always returned. A player may list only their own character\'s actions; the DM may list any combatant\'s. Feed ' +
-        'the chosen action name/index into resolve_action.',
+        'always returned. For a character, sheet actions come first, then any EQUIPPED inventory item\'s authored ' +
+        'action appended after (issue #1326) — an equipped-item row\'s `source` reads "equipped: <item name>" (issue ' +
+        '#1901); a sheet action\'s `source` is empty. A player may list only their own character\'s actions; the DM ' +
+        'may list any combatant\'s. Feed the chosen action name/index into resolve_action.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), combatantId: Id.describe('Combatant id — from get_encounter') },
       async ({ encounterId, combatantId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
