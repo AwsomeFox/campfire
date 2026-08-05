@@ -11,6 +11,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
+import { eq } from 'drizzle-orm';
 import { campaigns, characters, npcs } from '../../src/db/schema';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
@@ -367,5 +368,71 @@ describe('EncountersService unit coverage tests', () => {
 
     expect(recordedActor).toBe(UNKNOWN_COMBATANT_LABEL);
     expect(recordedLabel).toBe(`${UNKNOWN_COMBATANT_LABEL} · Dark Blast (to-hit)`);
+  });
+
+  it('rejects updateCombatant when the campaign is archived, even if the encounter is running', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Running Fight', hidden: false }, dmActor, 'dm');
+    const goblin = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Goblin', kind: 'monster', hpMax: 10 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    const running = await encountersService.start(enc.id, dmActor, 'dm');
+    expect(running.status).toBe('running');
+
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
+
+    await expect(
+      encountersService.updateCombatant(
+        enc.id,
+        goblin.id,
+        { hpDelta: -1, idempotencyKey: 'archived-campaign-guard' },
+        dmActor,
+        'dm',
+      ),
+    ).rejects.toThrow(/read-only/);
+  });
+
+  it('re-derives a keyed updateCombatant replay through a role-filtered read on responseRole mismatch', async () => {
+    const [char] = await db
+      .insert(characters)
+      .values({
+        campaignId,
+        ownerUserId: dmActor.id,
+        name: 'Hero',
+        hpCurrent: 20,
+        hpMax: 20,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      })
+      .returning();
+
+    const enc = await encountersService.create(campaignId, { name: 'Role Replay', hidden: false }, dmActor, 'dm');
+    const hero = enc.combatants.find((c) => c.characterId === char.id)!;
+    expect(hero).toBeDefined();
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+
+    const key = 'role-replay-key';
+    const dmResult = await encountersService.updateCombatant(enc.id, hero.id, { hpDelta: -2, idempotencyKey: key }, dmActor, 'dm');
+    expect(dmResult.hpCurrent).toBe(18);
+
+    const spy = jest.spyOn(encountersService, 'getWithCombatantsOrThrow').mockResolvedValueOnce({
+      combatants: [{ ...dmResult, name: 'Redacted' }],
+    } as any);
+
+    const playerResult = await encountersService.updateCombatant(
+      enc.id,
+      hero.id,
+      { hpDelta: -2, idempotencyKey: key },
+      dmActor,
+      'player',
+    );
+
+    expect(playerResult.name).toBe('Redacted');
+    expect(spy).toHaveBeenCalledWith(enc.id, 'player');
+    spy.mockRestore();
   });
 });
