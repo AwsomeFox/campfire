@@ -128,5 +128,11 @@ test.describe('turnEndStandingReason (issue #1933) — standing, not transient',
     expect(code).toMatch(/const tooltipReason = gateReasonKey === standingKey \? undefined : gateReason;/);
     expect(code).toMatch(/<GatedControl reason=\{tooltipReason\}>/);
     expect(code).toMatch(/aria-describedby=\{standingReason \? TURN_END_STANDING_ID : undefined\}/);
+    // The child's own `disabled` must cover permission independently. GatedControl only
+    // swallows the click while a reason is present, and the dedupe above deliberately passes
+    // undefined — so relying on the wrapper to block the write leaves the button live for a
+    // player who may never end their turn (issue #1933 review). The wrapper is an affordance,
+    // not an authorization.
+    expect(code).toMatch(/disabled=\{controlsDisabled \|\| !turn\.canEndTurn\}/);
   });
 });
