@@ -144,6 +144,15 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "AoE",
+        "addCircle": "Add a circular burst",
+        "addCone": "Add a cone",
+        "addLine": "Add a line",
+        "clearPlayers": "Clear player templates",
+        "clearPlayersHint": "Remove every player-declared template",
+        "declaredBy": "Declared by {{name}}"
       }
     },
     "workspace": {

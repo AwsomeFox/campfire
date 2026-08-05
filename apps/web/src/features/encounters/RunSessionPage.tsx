@@ -2699,6 +2699,30 @@ export default function RunSessionPage() {
   }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+  // Player declarations use scoped routes so the server, not the browser, owns
+  // declarer attribution and per-template authorization (#1913).
+  const declareAoeTemplate = useCallback(async (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+    setActionError(null);
+    await api.post(`${API}/encounters/${eid}/aoe-templates`, template);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+    setActionError(null);
+    await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const removeAoeTemplate = useCallback(async (templateId: string) => {
+    setActionError(null);
+    await api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const clearPlayerAoeTemplates = useCallback(async () => {
+    const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
+    if (playerTemplates.length === 0) return;
+    setActionError(null);
+    await Promise.all(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    invalidateEncounter(queryClient, eid);
+  }, [eid, encounter?.aoe, queryClient]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
@@ -3529,6 +3553,11 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
+          canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
+          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(surfaceActionError); }}
+          onUpdateAoe={(templateId, patch) => { void updateAoeTemplate(templateId, patch).catch(surfaceActionError); }}
+          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(surfaceActionError); }}
+          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(surfaceActionError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={

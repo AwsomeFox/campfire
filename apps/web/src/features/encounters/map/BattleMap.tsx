@@ -182,6 +182,11 @@ export type BattleMapProps = {
   onSetFog: (fog: FogState | null) => void;
   pendingFog?: FogState | null;
   onSetAoe: (aoe: AoeTemplate[]) => void;
+  canDeclareAoe?: boolean;
+  onDeclareAoe?: (template: Omit<AoeTemplate, 'declaredByUserId'>) => void;
+  onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void;
+  onRemoveAoe?: (templateId: string) => void;
+  onClearPlayerAoe?: () => void;
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
@@ -219,6 +224,11 @@ export function BattleMap({
   onSetFog,
   pendingFog,
   onSetAoe,
+  canDeclareAoe = false,
+  onDeclareAoe = () => undefined,
+  onUpdateAoe = () => undefined,
+  onRemoveAoe = () => undefined,
+  onClearPlayerAoe,
   onGenerateMap,
   onImportMap,
   showGuidance,
@@ -238,6 +248,7 @@ export function BattleMap({
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
+  const effectiveCanDeclareAoe = isCast ? false : canDeclareAoe;
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -1197,7 +1208,7 @@ export function BattleMap({
     }
     if (gesture.kind === 'aoe') {
       const point = finalPoint ?? gesture.point;
-      onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
+      updateAoe(gesture.templateId, { x: point.x, y: point.y });
       return;
     }
     if (gesture.kind === 'calibrate') {
@@ -1293,7 +1304,7 @@ export function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canDmWrite) return;
+    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canEditAoe(t)) return;
     e.currentTarget.focus();
     setSelectedAoeId(t.id);
     e.preventDefault();
@@ -1340,7 +1351,7 @@ export function BattleMap({
       e.preventDefault();
       e.stopPropagation();
       const next = nudgeMapPoint({ x: t.x, y: t.y }, e);
-      onSetAoe(aoeTemplates.map((item) => (item.id === t.id ? { ...item, x: next.x, y: next.y } : item)));
+      updateAoe(t.id, { x: next.x, y: next.y });
       announce(`${t.shape} template moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
       return;
     }
@@ -1352,19 +1363,27 @@ export function BattleMap({
     }
   }
 
-  // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
+  function canEditAoe(t: AoeTemplate): boolean {
+    return effectiveCanDmWrite || (effectiveCanDeclareAoe && t.declaredByUserId === viewerUserId);
+  }
+
+  // DMs retain the whole-list PATCH workflow; players use the scoped endpoints so
+  // their ownership remains server-enforced (issue #1913).
   function addAoe(shape: AoeShape) {
     const sizeFt = shape === 'circle' ? (gridScale ?? 5) * 2 : (gridScale ?? 5) * BASE_AOE_LENGTH_MULT;
     const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null, declaredByUserId: null };
     setSelectedAoeId(t.id);
-    onSetAoe([...aoeTemplates, t]);
+    if (effectiveCanDmWrite) onSetAoe([...aoeTemplates, t]);
+    else onDeclareAoe(t);
   }
-  function updateAoe(id: string, patch: Partial<AoeTemplate>) {
-    onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
+    if (effectiveCanDmWrite) onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    else onUpdateAoe(id, patch);
   }
   function removeAoe(id: string) {
     if (selectedAoeId === id) setSelectedAoeId(null);
-    onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    if (effectiveCanDmWrite) onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    else onRemoveAoe(id);
   }
 
   // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
@@ -1671,12 +1690,15 @@ export function BattleMap({
               </>
             )}
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {effectiveCanDmWrite && canAoe && (
+            {effectiveCanDeclareAoe && canAoe && (
               <>
-                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters:map.aoe.label')}:</span>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
+                {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
+                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters:map.aoe.clearPlayers')}</button>
+                )}
               </>
             )}
             <div style={{ flex: 1 }} />
@@ -1797,8 +1819,8 @@ export function BattleMap({
             </div>
           )}
 
-          {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {!isCast && effectiveCanDmWrite && selectedAoe && canAoe && (
+          {/* Selected AoE editor: players only receive controls for their own templates. */}
+          {!isCast && selectedAoe && canAoe && canEditAoe(selectedAoe) && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -2604,7 +2626,8 @@ export function BattleMap({
                       const lengthPx = (t.sizeFt / gridScale!) * cellPx;
                       if (lengthPx <= 0) return null;
                       const selected = t.id === selectedAoeId;
-                      const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                      const playerDeclared = t.declaredByUserId != null;
+                      const stroke = selected ? 'rgba(56,189,248,.95)' : playerDeclared ? 'rgba(99,102,241,.9)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
                         if (gridType === 'hex' && calibrationPx) {
@@ -2613,24 +2636,24 @@ export function BattleMap({
                           return (
                             <g key={t.id}>
                               {hexPolys.map((pts, i) => (
-                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />
                               ))}
                             </g>
                           );
                         }
-                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                     })}
                   </svg>
                 )}
-                {effectiveCanDmWrite && canAoe &&
+                {(effectiveCanDmWrite || effectiveCanDeclareAoe) && canAoe &&
                   aoeTemplates.map((t) => {
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;
                     const y = drag ? drag.y : t.y;
-                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}`;
+                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}${t.declaredByUserId ? ` · ${t.declaredByUserId}` : ''}`;
                     return (
                       <div
                         key={t.id}
@@ -2650,7 +2673,7 @@ export function BattleMap({
                           background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' && !viewportPan ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan && canEditAoe(t) ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,
