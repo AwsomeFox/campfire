@@ -9804,6 +9804,14 @@ export const EncounterSuggestion = z.object({
   seed: z.number().int().nonnegative(), // reproduce with this seed; re-roll with a new one
   // True when the produced band matches the target; false when the compendium couldn't
   // field a group in the requested band (a best-effort closest group is still returned).
+  //
+  // Issue #1928: this reflects the ROSTER-SIZING pass only, which is always 5e-shaped, and is
+  // NOT a claim about `difficulty`. When `difficultySupport` is `'heuristic'`, `difficulty`
+  // is `unsupported` with a null band while this can still be `true` — meaning "the 5e-shaped
+  // sizing heuristic hit the band you asked for", not "this system says the fight is that
+  // hard". Read it together with `difficultySupport`; it is deliberately not derived from the
+  // reported band, because forcing it false for a non-5e system would misreport a sizing pass
+  // that genuinely did match.
   matchedBand: z.boolean(),
   /** Issue #1928: whether `difficulty` is the system's own audited math or a 5e-shaped heuristic. */
   difficultySupport: DifficultySupport,
@@ -9955,6 +9963,8 @@ export const EncounterPreview = z.object({
   totalXp: z.number().int().nonnegative(),
   shape: EncounterShape,
   seed: z.number().int().nonnegative(),
+  // Issue #1928: sizing-pass only — see the note on EncounterSuggestion.matchedBand. Can be
+  // `true` alongside an `unsupported` `difficulty`; read it with `difficultySupport`.
   matchedBand: z.boolean(),
   party: z.array(z.number().int()),
   warnings: z.array(EncounterWarning),

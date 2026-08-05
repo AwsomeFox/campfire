@@ -8121,6 +8121,17 @@ describe('encounters — issue #1928: generator/preview difficulty honesty for a
     // (heuristic) total that actually sized this roster; `difficulty`/`difficultySupport`
     // alone carry the "not this system's own math" signal.
     expect(res.body.totalXp).toBeGreaterThan(0);
+    // Devin review (#1981): `matchedBand` describes the 5e-shaped roster-SIZING pass, so it may
+    // legitimately be `true` beside `difficulty.band: null`. That pairing is only honest while
+    // the interpretive signal travels with it — a consumer seeing `matchedBand` MUST also see
+    // `difficultySupport` to know the match is about sizing, not about this system rating the
+    // fight. Pin that: whenever the reported band is absent, `difficultySupport` must be
+    // present and 'heuristic', so `matchedBand` can never be read as an achieved difficulty
+    // without the qualifier beside it.
+    expect(typeof res.body.matchedBand).toBe('boolean');
+    if (res.body.difficulty.band === null) {
+      expect(res.body.difficultySupport).toBe('heuristic');
+    }
   });
 
   it('preview reports the same unsupported band + difficultySupport for the identical roster, and a positive totalXp', async () => {

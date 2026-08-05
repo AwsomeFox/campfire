@@ -1608,6 +1608,10 @@ export class McpToolsService {
         'audited XP/CR math when `difficultySupport:\'supported\'` (5e and an empty/homebrew slug); a registered ' +
         'non-5e system (PF2e, OSR, …) returns `difficultySupport:\'heuristic\'` with `difficulty.status:\'unsupported\'` ' +
         '— issue #1928, label don\'t block: the roster is still valid, judge its balance yourself for that system. ' +
+        '`matchedBand` describes the ROSTER-SIZING pass only (always 5e-shaped) and is NOT a claim about the ' +
+        'reported `difficulty`: under `difficultySupport:\'heuristic\'` it can be `true` while `difficulty.band` is ' +
+        'null, meaning "the 5e-shaped sizing hit the band you asked for", NOT "this system rates the fight that ' +
+        'hard". Do not report a matched band as an achieved difficulty for a heuristic system. ' +
         'Party is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional ' +
         'filters: creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
         'monsters) bound the group. Reproduce a group by passing back its `seed`; re-roll by changing/omitting it. ' +
@@ -1665,7 +1669,9 @@ export class McpToolsService {
       'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
         'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
         'just a band), a `difficultySupport` flag (\'supported\' for 5e/homebrew, \'heuristic\' for a registered ' +
-        'non-5e system whose reported difficulty is 5e-shaped rather than that system\'s own math — issue #1928), ' +
+        'non-5e system whose reported difficulty is 5e-shaped rather than that system\'s own math — issue #1928; ' +
+        '`matchedBand` refers to the 5e-shaped roster-SIZING pass and can be `true` beside an `unsupported` ' +
+        'difficulty, so never report it as an achieved difficulty when `difficultySupport` is \'heuristic\'), ' +
         'actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
         'unsupported-system math, swinginess), and actionable fallbacks when the compendium is empty or the system ' +
         'lacks budget math. First call with just `difficulty` (+ optional party/filters/shape/count/seed) to generate; ' +
