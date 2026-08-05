@@ -308,7 +308,7 @@ export function CombatantRow({
       }}
       onClick={(event) => {
         if (!targeting?.legal || targeting.declared) return;
-        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]');
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"]');
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
       }}

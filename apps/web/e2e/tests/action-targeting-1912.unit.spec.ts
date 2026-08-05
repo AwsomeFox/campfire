@@ -31,6 +31,11 @@ test('movable target touch jitter stays a target tap inside the shared CSS-pixel
   expect(mapSource).toContain('mapPingTapExceededSlop(gesture, e.clientX, e.clientY)');
 });
 
+test('target row convenience ignores label and summary interactions', async () => {
+  const rosterSource = await readFile(resolve(process.cwd(), 'src/features/encounters/combat/CombatantRow.tsx'), 'utf8');
+  expect(rosterSource).toContain('button, input, select, textarea, a, label, summary, [role="button"]');
+});
+
 test('legal target affordances support repeated pointer and keyboard selection', async () => {
   const [mapSource, rosterSource] = await Promise.all([
     readFile(resolve(process.cwd(), 'src/features/encounters/map/BattleMap.tsx'), 'utf8'),
