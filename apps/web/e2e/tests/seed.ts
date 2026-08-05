@@ -166,10 +166,17 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
     }
 
     // Reset each seed combatant's HP / initiative / condition / death-save / turn state.
-    for (const c of [
+    // NOTE: initiative must be reset here, BEFORE the round/turn rewind below, so the
+    // rewind loop's sort order converges on `bossId` deterministically. The
+    // `conditionInstances` reset is repeated a second time AFTER the rewind (see below) —
+    // `/undo-turn` can restore an expired condition from its turn-tick snapshot
+    // (`applyConditionTickDelta` in encounters.service.ts), which would otherwise silently
+    // undo this reset and leak stale conditions into the next test.
+    const seedCombatants = [
       { id: bossId, hpSet: 30, initiative: 18 },
       { id: skirmisherId, hpSet: 12, initiative: 7 },
-    ]) {
+    ];
+    for (const c of seedCombatants) {
       const patchRes = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
         data: {
           hpSet: c.hpSet,
@@ -186,9 +193,14 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
           `patch seed combatant ${c.id} -> ${patchRes.status()}: ${await readError(patchRes)}`,
         );
       }
-      await dm.post(`/api/v1/encounters/${encounterId}/combatants/${c.id}/turn-state`, {
+      const turnRes = await dm.post(`/api/v1/encounters/${encounterId}/combatants/${c.id}/turn-state`, {
         data: { resetTurn: true },
-      }).catch(() => undefined);
+      });
+      if (!turnRes.ok()) {
+        throw new Error(
+          `reset seed combatant turn-state ${c.id} -> ${turnRes.status()}: ${await readError(turnRes)}`,
+        );
+      }
     }
 
     if (status === 'preparing') {
@@ -216,6 +228,22 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
     }
     if (!finalState || finalState.round !== 1 || finalState.currentCombatantId !== bossId) {
       throw new Error(`seed encounter turn did not rewind to round 1 / boss (got ${JSON.stringify(finalState)})`);
+    }
+
+    // Re-clear conditionInstances now that the rewind above has settled: each `/undo-turn`
+    // call can restore an expired condition from its turn-tick snapshot (issue #1445 —
+    // `applyConditionTickDelta` in encounters.service.ts), so a condition cleared by the
+    // reset pass earlier can reappear partway through the rewind loop. Repeating the clear
+    // here, after the loop, is the only way to guarantee a clean seed state.
+    for (const c of seedCombatants) {
+      const reclearRes = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+        data: { conditionInstances: [] },
+      });
+      if (!reclearRes.ok()) {
+        throw new Error(
+          `re-clear seed combatant conditions ${c.id} -> ${reclearRes.status()}: ${await readError(reclearRes)}`,
+        );
+      }
     }
 
     // Keep the dedicated ended fixture ended if a prior test revived it.

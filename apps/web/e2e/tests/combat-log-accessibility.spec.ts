@@ -191,7 +191,15 @@ test.describe('combat log accessibility — remote clients', () => {
       const refreshed = await dmPage.request.patch(`/api/v1/encounters/${fixture.encounterId}`, { data: { gridSnap: false } });
       expect(refreshed.ok()).toBe(true);
       await expect.poll(() => eventReads).toBeGreaterThan(readsBefore);
-      await expect.poll(async () => (await announcements(viewerPage)).filter((message) => message.includes('Outcome: took 1 damage')).length).toBe(1);
+      // `expect.poll` evaluates its callback immediately: the count is already 1 from the
+      // first damage announcement above, so polling for `=== 1` right away would pass
+      // trivially, before the refetch this test exists to cover could ever push a second,
+      // duplicate announcement. Give the refetch's response time to be processed (matching
+      // the settle pattern used elsewhere in this file, e.g. the mid-history scroll below)
+      // before asserting the count is still exactly 1 — a genuine duplicate has to have a
+      // chance to appear for its absence to mean anything.
+      await viewerPage.waitForTimeout(100);
+      expect((await announcements(viewerPage)).filter((message) => message.includes('Outcome: took 1 damage'))).toHaveLength(1);
 
       const conditioned = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,

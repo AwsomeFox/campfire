@@ -73,21 +73,27 @@ test.describe('encounter API error paths (#1465)', () => {
     await expect(nextTurnBtn).toBeEnabled();
   });
 
-  test('displays actionable error banner on 500 STALE_WRITE server error and re-enables controls', async ({ page }) => {
+  test('displays actionable error banner on 500 internal error and re-enables controls', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
 
     const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
     await expect(nextTurnBtn).toBeEnabled();
 
-    // Mock 500 Internal Server Error
+    // Mock 500 Internal Server Error. NOTE: `STALE_WRITE` is a real, specifically-409 code
+    // (see `isStaleWrite` in api.ts) with its own translated copy ("Someone else saved
+    // changes...") that does not mention "stale/write/internal" — pairing it with a 500
+    // here would assert against text the banner never actually shows. `internal_error` is
+    // one of `translateApiError`'s GENERIC_HTTP_CODES, so it skips code-specific i18n and
+    // renders the server's own `message` verbatim, which is what a real, unclassified 500
+    // looks like from the client's perspective.
     await page.route(`**/api/v1/encounters/${encounterId}/next-turn`, async (route) => {
       await route.fulfill({
         status: 500,
         contentType: 'application/json',
         body: JSON.stringify({
           statusCode: 500,
-          code: 'STALE_WRITE',
+          code: 'internal_error',
           message: 'Internal server error while writing turn state.',
         }),
       });
@@ -97,6 +103,7 @@ test.describe('encounter API error paths (#1465)', () => {
 
     const errorNote = page.getByTestId('error-note');
     await expect(errorNote).toBeVisible();
+    await expect(errorNote).toContainText(/internal server error/i);
 
     await expect(nextTurnBtn).toBeEnabled();
   });

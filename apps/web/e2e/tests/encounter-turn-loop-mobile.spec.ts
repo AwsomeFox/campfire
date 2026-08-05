@@ -42,26 +42,33 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
       await nextTurnBtn.click();
       await checkOverflow('next turn');
 
-      // Step 3: Damage / HP adjustment
-      const hpButton = page.getByTestId('combatant-hp-button').first();
-      if (await hpButton.isVisible()) {
-        await hpButton.click();
-        await checkOverflow('damage modal/drawer open');
-        // Apply 5 damage
-        const applyBtn = page.getByRole('button', { name: /Apply|Submit|Confirm/i }).first();
-        if (await applyBtn.isVisible()) {
-          await applyBtn.click().catch(() => undefined);
-        }
-      }
+      // Step 3: Damage / HP adjustment. The real control is the `hp-steppers` group
+      // (CombatantRow.tsx) — `combatant-hp-button` does not exist anywhere in the app, so
+      // this step is required visible (not isVisible()-guarded) and its click is confirmed
+      // via the PATCH response, so a broken HP control fails the test instead of silently
+      // skipping the step.
+      const hpSteppers = page.getByTestId('hp-steppers').first();
+      await expect(hpSteppers).toBeVisible();
+      const reduceHpBtn = hpSteppers.getByRole('button', { name: /Reduce/ }).first();
+      await expect(reduceHpBtn).toBeVisible();
+      const [hpPatchResponse] = await Promise.all([
+        page.waitForResponse(
+          (res) => /\/combatants\/\d+$/.test(new URL(res.url()).pathname) && res.request().method() === 'PATCH',
+        ),
+        reduceHpBtn.click(),
+      ]);
+      expect(hpPatchResponse.ok(), 'HP stepper click must apply the damage').toBe(true);
       await checkOverflow('after damage');
 
-      // Step 4: Condition editor
-      const conditionTrigger = page.getByTestId('add-condition-trigger').first();
-      if (await conditionTrigger.isVisible()) {
-        await conditionTrigger.click();
-        await checkOverflow('condition editor expanded');
-      }
-      await checkOverflow('condition step');
+      // Step 4: Condition editor. The real toggle is `add-condition-toggle-${combatantId}`
+      // (CombatantRow.tsx) — `add-condition-trigger` does not exist anywhere in the app.
+      const conditionTrigger = page.locator('[data-testid^="add-condition-toggle-"]').first();
+      await expect(conditionTrigger).toBeVisible();
+      await conditionTrigger.click();
+      // Clicking the toggle mounts the condition-name field inline in the same row —
+      // confirm the editor actually expanded before checking overflow.
+      await expect(page.locator('input[id^="condition-name-"]').first()).toBeVisible();
+      await checkOverflow('condition editor expanded');
 
       // Step 5: End turn / cycle
       await nextTurnBtn.click();

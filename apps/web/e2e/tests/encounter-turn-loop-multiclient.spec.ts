@@ -109,6 +109,17 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
       // Player screen should automatically receive SSE update giving turn back to Hero.
       await expect(playerPage.getByTestId('workspace-end-turn')).toBeVisible();
 
+      // The DM page must ALSO have applied its own Step B advance before the race below —
+      // `.click()` only awaits the DOM event dispatch, not the mutation's response, so the
+      // DM's local `encounter.currentCombatantId` (which the Next Turn mutation reads to
+      // build `expectedCurrentCombatantId`) could still read stale Goblin here. Racing from
+      // that stale state would 409 on a mismatched expected-combatant rather than exercising
+      // the same-current-combatant double-advance guard the race exists to prove.
+      await expect(dmPage.getByTestId(`combatant-row-${heroCombatant.id}`)).toHaveAttribute(
+        'data-current-turn',
+        'true',
+      );
+
       // Step C: Concurrent race test — DM Next turn and Player End turn fired together.
       const playerEndBtn = playerPage.getByTestId('workspace-end-turn');
       const dmNextBtn = dmPage.getByTestId('encounter-header-next-turn');

@@ -662,12 +662,47 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);
 
-    const createCamp = parseResult(
-      await dmClient.callTool({
-        name: 'create_campaign',
-        arguments: { name: 'MCP Archmage Table', ruleSystem: 'archmage' },
-      }),
-    ) as { id: number };
+    // `ruleSystem` must name an INSTALLED rule-pack slug (CampaignsService.validateRuleSystem)
+    // — this suite's beforeAll only installs the Open5e (5e) pack, so 'archmage' must be
+    // installed here first or every campaign write below 400s.
+    const archmagePackUpload = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'archmage', name: 'MCP 13th Age Fixtures', version: '1', license: 'CC0' },
+      entries: [{ slug: 'mcp-archmage-fixture', name: 'MCP Archmage Fixture Monster', type: 'monster', body: '13th Age fixture monster.' }],
+    });
+    expect(archmagePackUpload.status).toBe(202);
+    const archmageJobId = archmagePackUpload.body.id as string;
+    const archmageJobStart = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${archmageJobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - archmageJobStart > 10_000) throw new Error(`archmage pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // `create_campaign` only accepts { name, description } and discards any other argument
+    // (`CampaignCreate.parse({ name, ...description })` never sees `ruleSystem`), so it
+    // cannot make this an Archmage campaign directly. `update_campaign` DOES validate and
+    // persist `ruleSystem` — use it, and assert success, so the rest of this test genuinely
+    // runs against a 13th Age campaign instead of silently exercising the default 5e adapter's
+    // error path.
+    const createCampRaw = await dmClient.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Archmage Table' },
+    });
+    expect(createCampRaw.isError).toBeFalsy();
+    const createCamp = parseResult(createCampRaw) as { id: number };
+
+    const setRuleSystemRaw = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: createCamp.id, ruleSystem: 'archmage' },
+    });
+    expect(setRuleSystemRaw.isError).toBeFalsy();
+    const updatedCampaign = parseResult(setRuleSystemRaw) as { ruleSystem: string };
+    expect(updatedCampaign.ruleSystem).toBe('archmage');
 
     const enc = parseResult(
       await dmClient.callTool({
@@ -683,14 +718,21 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
     await dmClient.callTool({ name: 'start_encounter', arguments: { encounterId: enc.id } });
 
-    // DM can update escalation die
-    const setRes = parseResult(
-      await dmClient.callTool({
-        name: 'set_escalation_die',
-        arguments: { encounterId: enc.id, held: true, override: 5 },
-      }),
-    ) as Record<string, unknown>;
-    expect(setRes).toBeTruthy();
+    // DM can update escalation die — assert the write actually succeeded and returned the
+    // requested override, not just that the (possibly-error) JSON payload is truthy.
+    const setResRaw = await dmClient.callTool({
+      name: 'set_escalation_die',
+      arguments: { encounterId: enc.id, held: true, override: 5 },
+    });
+    expect(setResRaw.isError).toBeFalsy();
+    const setRes = parseResult(setResRaw) as {
+      escalationDie: number;
+      escalationDieHeld: boolean;
+      escalationDieOverride: number | null;
+    };
+    expect(setRes.escalationDieOverride).toBe(5);
+    expect(setRes.escalationDie).toBe(5);
+    expect(setRes.escalationDieHeld).toBe(true);
 
     // Non-DM is refused
     const denied = await viewerClient.callTool({

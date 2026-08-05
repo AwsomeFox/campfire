@@ -18,15 +18,15 @@ test.describe('13th Age ruleset encounter panel (#1465)', () => {
     await expect(panel).toBeVisible();
     await expect(panel).toContainText(/Escalation die/i);
 
-    // Override input or buttons inside panel
-    const overrideInput = panel.locator('input[type="number"]');
-    if (await overrideInput.isVisible()) {
-      await overrideInput.fill('4');
-      const setBtn = panel.getByRole('button', { name: /Set|Override|Save/i }).first();
-      if (await setBtn.isVisible()) {
-        await setBtn.click();
-      }
-      await expect(panel).toContainText('+4');
-    }
+    // The override control is a plain-text `TextInput` (inputMode="numeric", no
+    // `type="number"`) — RunSessionPage.tsx renders it with
+    // `aria-label="Escalation die override"`. Require it visible (rather than
+    // conditionally skipping) so a broken override control fails this test instead of
+    // silently passing.
+    const overrideInput = panel.getByLabel('Escalation die override');
+    await expect(overrideInput).toBeVisible();
+    await overrideInput.fill('4');
+    await panel.getByRole('button', { name: 'Override' }).click();
+    await expect(panel).toContainText('+4');
   });
 });
