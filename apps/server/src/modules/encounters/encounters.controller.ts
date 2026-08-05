@@ -57,8 +57,14 @@ export class CampaignEncountersController {
   @ApiOperation({
     summary: 'Generate an encounter from the compendium (issue #304)',
     description:
-      'Assembles a balanced monster group from installed rule packs to hit a target 5e difficulty band for the ' +
-      'party (issue #58 math). Deterministic — pass `seed` to reproduce, omit it to get a fresh group (the seed is ' +
+      'Assembles a balanced monster group from installed rule packs, SIZED by a 5e-shaped count/CR ' +
+      'heuristic (issue #58 math) toward the target band you pass — for every rule system. The band ' +
+      'is accepted and used for sizing regardless of system, but the REPORTED `difficulty` is only ' +
+      'that system\'s own audited math when `difficultySupport` is `supported` (5e or an ' +
+      'empty/homebrew slug). A registered non-5e system (PF2e, OSR, …) returns ' +
+      '`difficultySupport: \'heuristic\'` with `difficulty.status: \'unsupported\'` and a null band — ' +
+      'the ABSENCE of a rating, not a 5e-shaped one, so do not report a band for it (issue #1928). ' +
+      'Deterministic — pass `seed` to reproduce, omit it to get a fresh group (the seed is ' +
       'returned so you can re-roll or reproduce). Party is inferred from the campaign\'s active PCs unless `party` ' +
       '(explicit PC levels) is given. Read-only by default (200, requires membership — any member/AI may preview): ' +
       'nothing is persisted, so commit the returned monsters via POST /encounters + add-combatant (the normal write ' +
@@ -66,7 +72,14 @@ export class CampaignEncountersController {
       'and lands a hidden, `preparing` encounter (issue #262).',
   })
   @ApiQuery({ name: 'commit', required: false, type: Boolean, description: 'When true, persist the suggestion as a real (hidden, preparing) encounter — requires dm + write mode.' })
-  @ApiResponse({ status: 200, description: 'Read-only suggestion (monster lines + difficulty + seed), OR { encounter, suggestion } when commit=true.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Read-only suggestion (monster lines + difficulty + `difficultySupport` + `matchedBand` + seed), ' +
+      'OR { encounter, suggestion } when commit=true. `matchedBand` describes the 5e-shaped SIZING ' +
+      'pass only and can be true beside an `unsupported` difficulty — never report it as an achieved ' +
+      'difficulty when `difficultySupport` is `heuristic`.',
+  })
   @ApiResponse({ status: 403, description: 'commit=true requires the dm role.' })
   async generate(
     @Param('campaignId', ParseIntPipe) campaignId: number,
@@ -902,9 +915,21 @@ export class EncountersController {
       'monster/NPC action is DM-only) but may target anyone — so a player can finish an attack against a monster ' +
       'end-to-end. Pass `commit: true` to apply atomically in the same call when the campaign policy permits (automatic); ' +
       'otherwise the result is a declaration the DM applies (dm-confirmed / player-declares). An unsupported action shape ' +
-      'is a 400 (fall back to its statblock — never silent math).',
+      'is a 400 (fall back to its statblock — never silent math). Every response carries ' +
+      '`systemMathSupported` and `mathProfile` (issue #1928): the flag is false whenever this ' +
+      'campaign’s rule system has NOT been audited end-to-end against the resolver’s maths, and it ' +
+      'does NOT tell you which maths ran — OSR and Open Legend supply their own `resolveAttack` ' +
+      '(descending-AC comparison, exploding dice pools) and are still reported false. Read ' +
+      '`mathProfile` for what actually executed: it names the audited profile in force, or is null. ' +
+      'Label, don’t block — resolution still runs and, under `commit: true`, still applies.',
   })
-  @ApiResponse({ status: 200, description: 'The resolution preview (and applied result + undo token when committed).' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'The resolution preview (and applied result + undo token when committed), including ' +
+      '`systemMathSupported` / `mathProfile` — see the operation description before presenting a ' +
+      'result as system-correct.',
+  })
   @ApiResponse({ status: 400, description: 'The action has no resolvable structured spec, or a target has no known AC/DC.' })
   @ApiResponse({ status: 403, description: 'A player resolving a monster/NPC action or another player’s character.' })
   @HttpCode(200)
