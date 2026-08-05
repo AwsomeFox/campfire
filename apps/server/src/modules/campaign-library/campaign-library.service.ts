@@ -13,7 +13,7 @@ import {
   LibraryBulkRequest, LibraryBulkResult,
   QuestStatus, FactionStanding, LocationStatus,
   CampaignLibraryTemplate, CampaignLibraryTemplateSave, CampaignLibraryTemplateInstantiate,
-  EncounterTemplateRoster, EncounterTemplateRosterEntry, defaultCombatantStatblock, TokenSize,
+  EncounterTemplateRoster, defaultCombatantStatblock, TokenSize,
   LibraryEntityType,
   type LibraryEntitySummary,
   type Role,
