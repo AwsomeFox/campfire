@@ -101,3 +101,44 @@ export function buildFormDraftEnvelope<T>(
     data,
   };
 }
+
+/**
+ * Normalizes a restored draft against a baseline instance (issue #1986).
+ * Fills any missing or undefined top-level keys in storedData with values from baseline.
+ * Performs a shallow merge on nested object properties as well, ensuring no newly-added
+ * field in typed state silently restores as `undefined`.
+ */
+export function normalizeDraft<T>(storedData: unknown, baseline: T): T {
+  if (storedData == null || typeof storedData !== 'object' || typeof baseline !== 'object' || baseline == null) {
+    return (storedData ?? baseline) as T;
+  }
+
+  if (Array.isArray(baseline)) {
+    return (Array.isArray(storedData) ? storedData : baseline) as T;
+  }
+
+  const result: Record<string, unknown> = {
+    ...(baseline as Record<string, unknown>),
+    ...(storedData as Record<string, unknown>),
+  };
+
+  for (const key of Object.keys(baseline as Record<string, unknown>)) {
+    const baseVal = (baseline as Record<string, unknown>)[key];
+    const storedVal = result[key];
+
+    if (storedVal === undefined) {
+      result[key] = baseVal;
+    } else if (
+      baseVal != null &&
+      typeof baseVal === 'object' &&
+      !Array.isArray(baseVal) &&
+      storedVal != null &&
+      typeof storedVal === 'object' &&
+      !Array.isArray(storedVal)
+    ) {
+      result[key] = { ...(baseVal as Record<string, unknown>), ...(storedVal as Record<string, unknown>) };
+    }
+  }
+
+  return result as T;
+}

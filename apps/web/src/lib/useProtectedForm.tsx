@@ -11,6 +11,7 @@ import {
   clearFormDraft,
   formDraftStorageKey,
   isFormDraftStale,
+  normalizeDraft,
   readFormDraft,
   writeFormDraft,
   type FormDraftEnvelope,
@@ -36,6 +37,7 @@ export type UseProtectedFormOptions<T> = {
   /** Baseline snapshot used to decide whether a stored draft is worth offering. */
   baseline: T;
   isDraftEqual?: (a: T, b: T) => boolean;
+  normalizeDraft?: (storedData: unknown, baseline: T) => T;
   onRestoreDraft: (data: T) => void;
   /** Called after discard from the leave prompt (before navigation proceeds). */
   onDiscard?: () => void;
@@ -67,12 +69,14 @@ export function useProtectedForm<T>({
   serverUpdatedAt,
   baseline,
   isDraftEqual = defaultDraftEqual,
+  normalizeDraft: customNormalizeDraft,
   onRestoreDraft,
   onDiscard,
   onSave,
   unsavedWorkId,
   storage,
 }: UseProtectedFormOptions<T>): UseProtectedFormResult {
+  const normalize = customNormalizeDraft ?? normalizeDraft;
   const storageKey =
     userId != null && Number.isFinite(campaignId)
       ? formDraftStorageKey(userId, campaignId, formId)
@@ -112,6 +116,8 @@ export function useProtectedForm<T>({
   }, [storage, storageKey]);
 
   // Offer a stored draft once per open cycle when it differs from the baseline.
+  // Issue #1986: normalize the restored draft data against baseline so newly-added
+  // fields are defaulted rather than restoring as undefined into typed form state.
   useEffect(() => {
     if (!active || !storageKey || restoreDismissedRef.current) {
       if (!active) restoreDismissedRef.current = false;
@@ -119,12 +125,17 @@ export function useProtectedForm<T>({
     }
     const stored = readFormDraft<T>(storageKey, storage);
     setHasStoredDraft(stored != null);
-    if (!stored || isDraftEqual(stored.data, baseline)) {
+    if (!stored) {
       setPendingRestore(null);
       return;
     }
-    setPendingRestore(stored);
-  }, [active, baseline, isDraftEqual, storage, storageKey]);
+    const normalizedData = normalize(stored.data, baseline);
+    if (isDraftEqual(normalizedData, baseline)) {
+      setPendingRestore(null);
+      return;
+    }
+    setPendingRestore({ ...stored, data: normalizedData });
+  }, [active, baseline, isDraftEqual, normalize, storage, storageKey]);
 
   // Persist while dirty; clear once the form matches the server baseline again.
   useEffect(() => {
