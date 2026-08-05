@@ -110,10 +110,6 @@
     },
     "workspace": {
       "yourTurn": "It's your turn.",
-      "turnOf": "Turn: {{name}}",
-      "condition": "Condition",
-      "noConditions": "No conditions",
-      "exhaustion": "Exhaustion",
       "readiedPlaceholder": "What is readied and what is the trigger?",
       "setReady": "Set ready",
       "clearReady": "Clear ready",
@@ -127,12 +123,6 @@
       "suggestedActions": "Suggested actions",
       "searchActions": "Search actions…",
       "searchActionsAria": "Search suggested actions",
-      "tabs": {
-        "attacks": "Attacks",
-        "spells": "Spells",
-        "features": "Features",
-        "utility": "Utility"
-      },
       "targets": "{{count}} target",
       "targets_other": "{{count}} targets",
       "aoe": "AoE",

@@ -451,8 +451,8 @@ export function TurnWorkspace({
               id="turn-readied-input"
               type="text"
               className="input cf-target-44"
-              placeholder="Ready action trigger…"
-              aria-label="Readied action trigger"
+              placeholder={t('encounters.workspace.readiedPlaceholder')}
+              aria-label={t('encounters.workspace.readiedPlaceholder')}
               value={readiedDraft}
               disabled={controlsDisabled}
               maxLength={200}
