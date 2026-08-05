@@ -19,7 +19,7 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
   test('tokens are focusable buttons with keyboard movement, targeting, and announced position', () => {
     expect(src).toMatch(/role="button"/);
     expect(src).toMatch(/tabIndex=\{movable \|\| targetClickable \? 0 : -1\}/);
-    expect(src).toMatch(/legalTarget && targetAvailable && !targeting\?\.declared && \(e\.key === 'Enter' \|\| e\.key === ' '\)/);
+    expect(src).toMatch(/legalTarget && targetAvailable && !targeting\?\.declared && !e\.repeat && \(e\.key === 'Enter' \|\| e\.key === ' '\)/);
     expect(src).not.toMatch(/else if \(targetClickable\) e\.stopPropagation\(\);/);
     expect(src).toMatch(/onKeyDown=\{onViewportKeyDown\}/);
     expect(src).toMatch(/onTokenKeyDown\(e, c\);/);
