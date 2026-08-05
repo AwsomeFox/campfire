@@ -199,7 +199,7 @@ describe('allowlist projection (#586)', () => {
       campaignId: 1,
       name: 'Ended fight',
       status: 'ended',
-      combatants: [{ id: 1, encounterId: 1, kind: 'npc', npcId: 1, npcDispositionSnapshot: 'hostile', name: 'Bandit', hpMax: 10 }],
+      combatants: [{ id: 1, encounterId: 1, kind: 'npc', npcId: null, npcIdentitySourceId: 1, npcDispositionSnapshot: 'hostile', name: 'Bandit', hpMax: 10 }],
     }];
 
     const publish = projectExport(raw, resolveExportPolicy('publish')).data.encounters as Array<Record<string, unknown>>;
@@ -217,9 +217,11 @@ describe('allowlist projection (#586)', () => {
       resolveExportPolicy('publish', { includePlayedState: true, includeDmSecrets: true }),
     ).data.encounters as Array<Record<string, unknown>>;
     expect((publishWithPlayedStateAndDmSecrets[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBe('hostile');
+    expect((publishWithPlayedStateAndDmSecrets[0].combatants as Array<Record<string, unknown>>)[0].npcIdentitySourceId).toBe(1);
 
     const handoff = projectExport(raw, resolveExportPolicy('handoff')).data.encounters as Array<Record<string, unknown>>;
     expect((handoff[0].combatants as Array<Record<string, unknown>>)[0].npcDispositionSnapshot).toBe('hostile');
+    expect((handoff[0].combatants as Array<Record<string, unknown>>)[0].npcIdentitySourceId).toBe(1);
   });
 
   it("session-zero lines/veils are participant-authored and follow the player-content option", () => {

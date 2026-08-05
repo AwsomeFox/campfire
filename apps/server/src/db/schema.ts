@@ -101,6 +101,8 @@ export const characters = sqliteTable('characters', {
   ac: integer('ac'),
   eac: integer('eac'),
   kac: integer('kac'),
+  // Issue #1910: movement speed. Nullable — see @campfire/schema's Character.speed doc.
+  speed: integer('speed'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
   spCurrent: integer('sp_current').notNull().default(0),
@@ -2050,6 +2052,7 @@ export const combatants = sqliteTable('combatants', {
   kind: text('kind').notNull(), // 'character' | 'monster' | 'npc'
   characterId: integer('character_id'), // set when kind='character' — links back to characters.id
   npcId: integer('npc_id'), // set when kind='npc' — links back to npcs.id (identity). Added by migration on older DBs.
+  npcIdentitySourceId: integer('npc_identity_source_id'), // internal redaction source for unlinked duplicate NPCs
   npcDispositionSnapshot: text('npc_disposition_snapshot'), // encounter-time NPC disposition; nullable for legacy rows
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
@@ -2066,6 +2069,9 @@ export const combatants = sqliteTable('combatants', {
   rpMax: integer('rp_max').notNull().default(0),
   eac: integer('eac'),
   kac: integer('kac'),
+  // Issue #1910: add-time snapshot of the linked character's speed. Nullable — see
+  // @campfire/schema's Combatant.speed doc.
+  speed: integer('speed'),
   // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
   // see db/db.module.ts migrateCombatantsTableForHpModel().
   hpTemp: integer('hp_temp').notNull().default(0),

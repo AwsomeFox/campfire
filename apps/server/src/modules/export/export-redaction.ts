@@ -56,6 +56,11 @@ function fieldsFor(kind: EntityKind, policy: ResolvedExportPolicy): string[] {
   if (policy.playedState && policy.dmSecrets && kind === 'combatant') {
     fields.push('npcDispositionSnapshot');
   }
+  // Hidden NPC staging travels only with DM secrets. Its duplicate combatants need
+  // this internal source id to remain redacted after a handoff/import round trip.
+  if (policy.dmSecrets && kind === 'combatant') {
+    fields.push('npcIdentitySourceId');
+  }
   if (policy.playerContent && kind in PLAYER_CONTENT_FIELDS) {
     fields.push(...PLAYER_CONTENT_FIELDS[kind as keyof typeof PLAYER_CONTENT_FIELDS]);
   }
