@@ -814,10 +814,16 @@ function MyProposalCard({
     // Same schema-validated, focus-on-error path as the DM's edit-before-approve
     // (issue #769) — bail out silently on a failed local validation; the editor has
     // already focused the offending control.
+    //
+    // Clear the network error BEFORE that bail-out (review). It used to be cleared only
+    // after validation passed, so a message from an earlier failed PATCH stayed on screen
+    // when the next attempt was stopped locally — the proposer read a stale server reason
+    // beside the real field error, with no way to tell which applied. Cancelling the edit
+    // already clears it for the same reason.
+    setEditError(null);
     const payload = editorRef.current?.submit();
     if (!payload) return;
     setSaving(true);
-    setEditError(null);
     try {
       await api.patch(`${API}/proposals/${proposal.id}`, { payload });
       setEditing(false);
