@@ -1298,6 +1298,22 @@ describe('characters (e2e)', () => {
       expect(res.body.stats).toEqual({});
     });
 
+    // Issue #1910 review (Codex, PR #1980, round 5): a { name, speed } create must be
+    // treated as combat data, the same as an { name, ac } create — not silently downgraded
+    // to a draft with 0/0 HP (which would then be skipped by encounter auto-add).
+    it('a speed-only create is active with default HP, matching an ac-only create (issue #1910)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Fleet Foot', speed: 40 });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('active');
+      expect(res.body.hpMax).toBe(10);
+      expect(res.body.hpCurrent).toBe(10);
+      expect(res.body.speed).toBe(40);
+    });
+
     it('explicit template payload stays draft until marked active', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)
