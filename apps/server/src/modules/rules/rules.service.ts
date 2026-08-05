@@ -2580,8 +2580,18 @@ export class RulesService implements OnModuleInit {
     }
 
     const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
-    if (params.pack && (!packFilter || packFilter.length === 0)) return empty();
-    const packId = packFilter?.[0]?.id;
+    const packRequestedButMissing = Boolean(params.pack) && (!packFilter || packFilter.length === 0);
+    // Issue #1898 review: `campaign.ruleSystem` is free-text (never validated against
+    // installed packs), and the picker always forwards it as `pack` alongside
+    // `campaignId`. Short-circuiting to fully empty here — as the no-campaignId path
+    // still correctly does — would drop the campaign's own homebrew too, even though
+    // homebrew was never scoped to the requested (non-existent) pack in the first
+    // place. With campaignId present, fall through with a packId that can never match
+    // any real row (rule_packs.id is an AUTOINCREMENT PK starting at 1, so 0 is a safe
+    // "no pack" sentinel) — the global half of the scope then correctly returns
+    // nothing while the campaign homebrew half is unaffected.
+    if (packRequestedButMissing && params.campaignId === undefined) return empty();
+    const packId = packRequestedButMissing ? 0 : packFilter?.[0]?.id;
     const packSlug = packFilter?.[0]?.slug;
 
     if (!params.q.trim()) {

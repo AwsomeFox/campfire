@@ -284,5 +284,30 @@ describe('RulesService unit coverage tests', () => {
     const postArchiveNames = postArchiveSearch.items.map((i) => i.name);
     expect(postArchiveNames).toContain('Goblin');
     expect(postArchiveNames).not.toContain('Shadow Goblin');
+
+    // 9. A `pack` slug naming a rule system with no matching INSTALLED pack must not
+    // drop the campaign's own (still-live, not archived) homebrew too (issue #1898
+    // review): campaign.ruleSystem is free-text, never validated against installed
+    // packs, and the picker always forwards it. Re-create a live homebrew entry since
+    // step 8 archived the prior one.
+    await rulesService.createCampaignHomebrew(
+      campaignId,
+      { slug: 'still-live-goblin', name: 'Still Live Goblin', type: 'monster', summary: '', body: '' },
+      adminActor,
+    );
+    const missingPackSearch = await rulesService.search(
+      { q: 'Goblin', pack: 'no-such-installed-pack-slug', campaignId },
+      10,
+      adminActor,
+    );
+    const missingPackNames = missingPackSearch.items.map((i) => i.name);
+    expect(missingPackNames).toContain('Still Live Goblin');
+    expect(missingPackNames).not.toContain('Goblin'); // the global entry belongs to a REAL pack, not the missing one
+    expect(missingPackNames).not.toContain('Shadow Goblin'); // archived — stays excluded regardless
+
+    // Regression: without campaignId, a missing pack still short-circuits to fully empty
+    // (unchanged behavior for the plain global search).
+    const missingPackGlobalSearch = await rulesService.search({ q: 'Goblin', pack: 'no-such-installed-pack-slug' });
+    expect(missingPackGlobalSearch.items).toHaveLength(0);
   });
 });
