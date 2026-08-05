@@ -137,9 +137,10 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
   // encounter event happens to invalidate the turn workspace.
   test('RunSessionPage.tsx invalidates the turn workspace on character.updated, reconnect, and stream recovery', () => {
     const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    const characterUpdatedStart = src.indexOf('if (shouldInvalidateInlineCharacters(event))');
     const characterUpdatedBranch = src.slice(
-      src.indexOf('if (shouldInvalidateInlineCharacters(event))'),
-      src.indexOf('if (shouldInvalidateInlineCharacters(event))') + 900,
+      characterUpdatedStart,
+      src.indexOf('// Issue #415:', characterUpdatedStart),
     );
     expect(characterUpdatedBranch).toContain("event.type === 'character.updated'");
     expect(characterUpdatedBranch).toContain('queryKeys.encounterTurn(eid)');
