@@ -2474,10 +2474,11 @@ export default function RunSessionPage() {
       || turnBeat.combatantId !== currentCombatantId
       || !currentCombatant
     ) return;
+    const nextBeatKey = ++turnBeatSequence.current;
     setTurnBeat((previous) => previous?.pending && previous.combatantId === currentCombatant.id
       ? {
           ...previous,
-          key: ++turnBeatSequence.current,
+          key: nextBeatKey,
           pending: false,
           name: currentCombatant.name,
           identityBackground: tokenIdentityBackground(currentCombatant),
@@ -2494,11 +2495,12 @@ export default function RunSessionPage() {
       || turnBeat.combatantId !== currentCombatantId
       || turnBeat.kind === 'your-turn'
     ) return;
-    triggerOwnedTurnFeedback(turnBeat.key);
+    const nextBeatKey = ++turnBeatSequence.current;
+    triggerOwnedTurnFeedback(nextBeatKey);
     setTurnBeat((previous) => previous && previous.combatantId === currentCombatantId
       ? {
           ...previous,
-          key: ++turnBeatSequence.current,
+          key: nextBeatKey,
           kind: 'your-turn',
           pending: false,
           name: currentCombatant?.name ?? previous.name,

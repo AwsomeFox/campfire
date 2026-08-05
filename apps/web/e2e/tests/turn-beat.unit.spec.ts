@@ -135,6 +135,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(!prefersReducedMotion\(\)\) \{\s*setTurnPulse\(true\);/);
     expect(source).toMatch(/querySelector<HTMLElement>\('\[data-testid="turn-workspace"\]'\)\?\.scrollIntoView\(\{/);
     expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{\s*triggerOwnedTurnFeedback\(beatKey\);/);
-    expect(source).toMatch(/turnBeat\.kind === 'your-turn'\s*\) return;\s*triggerOwnedTurnFeedback\(turnBeat\.key\);/);
+    expect(source).toMatch(/turnBeat\.kind === 'your-turn'\s*\) return;\s*const nextBeatKey = \+\+turnBeatSequence\.current;\s*triggerOwnedTurnFeedback\(nextBeatKey\);/);
+    expect(source).not.toMatch(/setTurnBeat\(\(previous\) =>[\s\S]*key: \+\+turnBeatSequence\.current/);
   });
 });
