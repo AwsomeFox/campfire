@@ -1283,6 +1283,11 @@ export default function RunSessionPage() {
             if (kind === 'your-turn' && combatant) {
               triggerOwnedTurnFeedback(beatKey);
             }
+          } else if (kind) {
+            // A same-round lair action has no viewer-safe name to announce.
+            // Still replace the previous beat so an owned takeover cannot
+            // outlive the turn that just ended.
+            setTurnBeat(null);
           }
           invalidateEncounter(queryClient, eid);
           void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
