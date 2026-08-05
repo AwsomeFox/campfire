@@ -101,6 +101,31 @@
       "openTable": "Open full table"
     },
     "map": {
+      "tokenDetails": {
+        "label": "تفاصيل الرمز",
+        "full": "كاملة",
+        "minimal": "مختصرة",
+        "off": "إيقاف",
+        "hp": "الصحة: {{state}}",
+        "hpStates": {
+          "healthy": "بصحة جيدة",
+          "bloodied": "ينزف",
+          "critical": "حرج",
+          "down": "سقط"
+        },
+        "currentTurn": "الدور الحالي",
+        "dying": "يحتضر",
+        "dead": "ميت",
+        "concentration": "التركيز: {{effect}}",
+        "conditions": "حالات {{name}}: {{conditions}}",
+        "moreConditions": "{{count}} حالات إضافية لـ {{name}}",
+        "moreConditions_zero": "لا حالات إضافية لـ {{name}}",
+        "moreConditions_one": "حالة إضافية واحدة لـ {{name}}",
+        "moreConditions_two": "حالتان إضافيتان لـ {{name}}",
+        "moreConditions_few": "{{count}} حالات إضافية لـ {{name}}",
+        "moreConditions_many": "{{count}} حالة إضافية لـ {{name}}",
+        "moreConditions_other": "{{count}} حالة إضافية لـ {{name}}"
+      },
       "derivatives": {
         "processing": "Preparing faster map sizes — showing the full-size board for now.",
         "stale": "Showing an optimised copy made before this map last changed.",

@@ -12,6 +12,8 @@ import {
 } from '../../src/i18n/locale';
 import { pseudoLocalizeCatalog, pseudoLocalizeString } from '../../src/i18n/pseudo';
 import commonEn from '../../src/i18n/locales/en/common.json';
+import encountersAr from '../../src/i18n/locales/ar/encounters.json';
+import encountersEn from '../../src/i18n/locales/en/encounters.json';
 import inventoryAr from '../../src/i18n/locales/ar/inventory.json';
 
 class MemoryStorage implements LocaleStorage {
@@ -76,5 +78,22 @@ test.describe('shipped translation catalogs (#629)', () => {
     expect(i18n.dir('ar')).toBe('rtl');
     await i18n.changeLanguage('en');
     expect(i18n.dir('en')).toBe('ltr');
+  });
+
+  test('condition overflow labels use singular and Arabic plural forms', async () => {
+    const translator = i18n.createInstance();
+    await translator.init({
+      resources: {
+        en: { translation: encountersEn },
+        ar: { translation: encountersAr },
+      },
+      lng: 'en',
+      fallbackLng: 'en',
+    });
+    expect(translator.t('encounters.map.tokenDetails.moreConditions', { count: 1, name: 'Boss' })).toBe('1 more condition for Boss');
+    expect(translator.t('encounters.map.tokenDetails.moreConditions', { count: 2, name: 'Boss' })).toBe('2 more conditions for Boss');
+    await translator.changeLanguage('ar');
+    expect(translator.t('encounters.map.tokenDetails.moreConditions', { count: 1, name: 'Boss' })).toBe('حالة إضافية واحدة لـ Boss');
+    expect(translator.t('encounters.map.tokenDetails.moreConditions', { count: 2, name: 'Boss' })).toBe('حالتان إضافيتان لـ Boss');
   });
 });

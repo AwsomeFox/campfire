@@ -74,7 +74,15 @@ test.describe('Player Display battle map (issue #484)', () => {
       aoe,
       combatants: [
         combatant({ id: 1, name: 'Hidden', tokenX: 10, tokenY: 10 }),
-        combatant({ id: 2, name: 'Visible', tokenX: 80, tokenY: 80 }),
+        combatant({
+          id: 2,
+          name: 'Visible',
+          tokenX: 80,
+          tokenY: 80,
+          hpCurrent: 75,
+          hpMax: 100,
+          turnState: { concentration: 'Bless' } as Combatant['turnState'],
+        }),
       ],
     });
 
@@ -84,7 +92,13 @@ test.describe('Player Display battle map (issue #484)', () => {
       tokenY: null,
       tokenHiddenByFog: true,
     });
-    expect(safe.combatants.find((c) => c.id === 2)?.tokenX).toBe(80);
+    expect(safe.combatants.find((c) => c.id === 2)).toMatchObject({
+      tokenX: 80,
+      hpCurrent: null,
+      hpMax: null,
+      hpBand: 'healthy',
+      turnState: { concentration: null, used: {}, movementUsedFt: 0, pendingConcentrationChecks: [], delaying: false, readied: null },
+    });
     expect(safe.aoe?.map((t) => t.id)).toEqual(['lit']);
   });
 });

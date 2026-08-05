@@ -8,7 +8,7 @@ import { api, API, translateApiError } from '../../../lib/api';
 import { reconcileFogSyncState } from '../fogSyncState';
 import { initials as tokenInitials } from '../../../lib/avatarText';
 import { Card, TextInput } from '../../../components/ui';
-import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, playerDisplayEncounterMapUrl, uploadAttachment } from '../../../components/ImageUpload';
 import { MapReplaceDialog, type MapReplaceAlignment } from '../../../components/MapReplaceDialog';
 import { useDerivativeManifest } from '../../../components/useAttachmentDerivatives';
 import { planEncounterMapResponsive } from '../../../components/attachmentSrcSet';
@@ -31,6 +31,17 @@ import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, ma
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
 import { tokenDiameterPx } from '../tokenFootprint';
 import { tokenIdentityBackground } from '../tokenIdentity';
+import {
+  readTokenDetailMode,
+  tokenArcGeometry,
+  tokenBadgePlacements,
+  tokenConditionBadges,
+  tokenDeathMarker,
+  tokenHpFraction,
+  tokenHpTone,
+  writeTokenDetailMode,
+  type TokenDetailMode,
+} from '../tokenStateBadges';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
 export const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
 
@@ -221,6 +232,15 @@ export function BattleMap({
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const [dmTokenDetailMode, setDmTokenDetailMode] = useState<TokenDetailMode>(() =>
+    readTokenDetailMode(typeof localStorage === 'undefined' ? null : localStorage),
+  );
+  const tokenDetailMode: TokenDetailMode = effectiveIsDm ? dmTokenDetailMode : 'full';
+  const reducedMotion = prefersReducedMotion();
+  const setTokenDetailMode = (mode: TokenDetailMode) => {
+    setDmTokenDetailMode(mode);
+    writeTokenDetailMode(mode, typeof localStorage === 'undefined' ? null : localStorage);
+  };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
@@ -403,7 +423,9 @@ export function BattleMap({
       ? null
       : castToken
         ? castEncounterMapUrl(castToken, encounter.id, encounter.updatedAt)
-        : encounterMapUrl(encounter.id, encounter.updatedAt);
+        : isCast
+          ? playerDisplayEncounterMapUrl(campaignId, encounter.id, encounter.updatedAt)
+          : encounterMapUrl(encounter.id, encounter.updatedAt);
   // Issue #604 — responsive battle map. The board used to load at full resolution on
   // every device; the derivative ladder lets the browser pick a rung that fits the
   // surface. Both the manifest and every srcset URL go through the ROLE-SAFE
@@ -422,6 +444,7 @@ export function BattleMap({
     encounterId: encounter.id,
     mapAttachmentId: encounter.mapAttachmentId,
     castToken,
+    isCastProjection: isCast,
     canDmWrite: effectiveCanDmWrite,
   });
   const mapDerivatives = useDerivativeManifest(mapResponsive.manifestUrl, mapResponsive.retryUrl);
@@ -1351,6 +1374,27 @@ export function BattleMap({
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
+  // Condition chips already carry their detailed title/metadata in the roster. A
+  // token badge is a shortcut to that same accessible detail rather than a second
+  // condition UI, so it cannot drift from the server-shaped combatant data.
+  const focusTokenConditionDetails = (combatantId: number) => {
+    // Let the badge's pointer/click cycle settle before looking up a roster row.
+    // This also handles a roster element React replaces as the latest encounter
+    // state commits, so focus always lands on the live detailed condition row.
+    const focusDetails = () => {
+      const details = document.getElementById(`combatant-${combatantId}-conditions`);
+      if (!details) return false;
+      details.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
+      details.focus({ preventScroll: true });
+      return true;
+    };
+    requestAnimationFrame(() => {
+      // A data refresh can commit after this frame, so retry once after the
+      // replacement roster row has had a chance to mount.
+      if (!focusDetails()) window.setTimeout(focusDetails, 50);
+    });
+  };
+
   useEffect(() => {
     setTokenEdit(
       selectedToken
@@ -1598,6 +1642,23 @@ export function BattleMap({
               </>
             )}
             <div style={{ flex: 1 }} />
+            {effectiveIsDm && (
+              <label className="flex items-center gap-1 text-muted" style={{ fontSize: 11 }}>
+                <span>{t('encounters.map.tokenDetails.label')}</span>
+                <select
+                  className="cf-map-tool"
+                  data-testid="map-token-detail-mode"
+                  aria-label={t('encounters.map.tokenDetails.label')}
+                  value={dmTokenDetailMode}
+                  onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
+                  style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
+                >
+                  <option value="full">{t('encounters.map.tokenDetails.full')}</option>
+                  <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
+                  <option value="off">{t('encounters.map.tokenDetails.off')}</option>
+                </select>
+              </label>
+            )}
             {effectiveCanDmWrite && (
               <button
                 type="button"
@@ -2256,6 +2317,25 @@ export function BattleMap({
                         });
                   const selectedForBatch = selectedTokenIds.has(c.id);
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedForBatch ? ', selected' : ''}`;
+                  const hpFraction = tokenHpFraction(c);
+                  const hpTone = tokenHpTone(hpFraction);
+                  const arc = tokenArcGeometry(sizePx);
+                  const deathMarker = tokenDeathMarker(c);
+                  const showTokenState = tokenDetailMode !== 'off';
+                  const showExtendedTokenState = tokenDetailMode === 'full';
+                  const conditionControlCapacity = Math.max(1, Math.min(3, Math.floor(sizePx / 18)));
+                  const conditionBadges = showExtendedTokenState ? tokenConditionBadges(c.conditions, conditionControlCapacity) : { visible: [], overflow: 0 };
+                  const conditionControlCount = conditionBadges.visible.length + (conditionBadges.overflow > 0 ? 1 : 0);
+                  const conditionPlacements = tokenBadgePlacements(sizePx, conditionControlCount);
+                  const conditionOverflowPlacement = conditionPlacements.at(-1);
+                  // In map tools other than Move, the surface owns pointer gestures.
+                  // The cast projection has no roster to focus, and a small token
+                  // keeps its centre free for drag/selection instead of exposing a
+                  // sub-18px detail control.
+                  const conditionDetailsInteractive =
+                    !isCast && tool === 'move' && !viewportPan && conditionPlacements.every((placement) => placement.targetSize >= 18);
+                  const hasConcentration = showExtendedTokenState && !!c.turnState?.concentration;
+                  const isCurrentTurn = showTokenState && encounter.status === 'running' && encounter.currentCombatantId === c.id;
                   return (
                     <div
                       key={c.id}
@@ -2284,24 +2364,79 @@ export function BattleMap({
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                       }}
                     >
-                      <span
-                        style={{
-                          display: 'grid',
-                          placeItems: 'center',
-                          width: sizePx,
-                          height: sizePx,
-                          borderRadius: '50%',
-                          fontSize: Math.max(9, Math.round(sizePx * 0.34)),
-                          fontWeight: 700,
-                          color: '#fff',
-                          background: tokenIdentityBackground(c),
-                          border: '2px solid rgba(15,23,42,.85)',
-                          boxShadow: '0 1px 3px rgba(0,0,0,.5)',
-                          pointerEvents: 'none',
-                        }}
-                      >
-                        {tokenInitials(c.name)}
-                      </span>
+                      <div style={{ position: 'relative', width: sizePx, height: sizePx }}>
+                        <span
+                          style={{
+                            display: 'grid', placeItems: 'center', width: sizePx, height: sizePx, borderRadius: '50%',
+                            fontSize: Math.max(9, Math.round(sizePx * 0.34)), fontWeight: 700, color: '#fff',
+                            background: tokenIdentityBackground(c), border: '2px solid rgba(15,23,42,.85)',
+                            boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                            filter: showTokenState && deathMarker === 'dead' ? 'grayscale(1)' : undefined,
+                            opacity: showTokenState && deathMarker === 'dead' ? 0.58 : undefined, pointerEvents: 'none',
+                          }}
+                        >
+                          {tokenInitials(c.name)}
+                        </span>
+                        {showTokenState && hpFraction != null && hpTone != null && (
+                          <svg data-testid={`map-token-hp-arc-${c.id}`} width={sizePx} height={sizePx} viewBox={`0 0 ${sizePx} ${sizePx}`}
+                            aria-label={t('encounters.map.tokenDetails.hp', { state: t(`encounters.map.tokenDetails.hpStates.${hpTone}`) })}
+                            role="img" style={{ position: 'absolute', inset: 0, overflow: 'visible', pointerEvents: 'none', transform: 'rotate(-90deg)' }}>
+                            <circle cx={sizePx / 2} cy={sizePx / 2} r={arc.radius} fill="none" stroke="rgba(15,23,42,.58)" strokeWidth={arc.strokeWidth} />
+                            <circle cx={sizePx / 2} cy={sizePx / 2} r={arc.radius} fill="none"
+                              stroke={hpTone === 'healthy' ? '#22c55e' : hpTone === 'bloodied' ? '#f59e0b' : '#ef4444'} strokeWidth={arc.strokeWidth}
+                              strokeLinecap="round" strokeDasharray={arc.circumference} strokeDashoffset={arc.circumference * (1 - hpFraction)} />
+                          </svg>
+                        )}
+                        {isCurrentTurn && (
+                          <span data-testid={`map-token-current-turn-${c.id}`} aria-label={t('encounters.map.tokenDetails.currentTurn')} role="img"
+                            className={reducedMotion ? undefined : 'cf-token-state-pulse'}
+                            style={{ position: 'absolute', inset: -4, border: '2px solid var(--color-accent)', borderRadius: '50%', pointerEvents: 'none' }} />
+                        )}
+                        {showTokenState && deathMarker && (
+                          <span data-testid={`map-token-death-${c.id}`} aria-label={t(`encounters.map.tokenDetails.${deathMarker}`)} role="img"
+                            className={deathMarker === 'dying' && !reducedMotion ? 'cf-token-state-pulse' : undefined}
+                            style={{ position: 'absolute', inset: deathMarker === 'dying' ? -2 : 0, display: 'grid', placeItems: 'center', border: deathMarker === 'dying' ? '2px solid #ef4444' : undefined, borderRadius: '50%', color: '#fff', pointerEvents: 'none' }}>
+                            <GameIcon slug="death-skull" size={Math.max(12, Math.round(sizePx * 0.42))} />
+                          </span>
+                        )}
+                        {hasConcentration && (
+                          <span data-testid={`map-token-concentration-${c.id}`} aria-label={t('encounters.map.tokenDetails.concentration', { effect: c.turnState?.concentration })} role="img"
+                            style={{ position: 'absolute', left: -5, top: -5, display: 'grid', placeItems: 'center', width: Math.max(16, Math.round(sizePx * 0.42)), height: Math.max(16, Math.round(sizePx * 0.42)), borderRadius: '50%', background: 'rgba(49,46,129,.94)', color: '#fff', border: '1px solid rgba(255,255,255,.75)', pointerEvents: 'none' }}>
+                            <GameIcon slug="spiral-shell" size={Math.max(12, Math.round(sizePx * 0.28))} />
+                          </span>
+                        )}
+                        {(conditionBadges.visible.length > 0 || conditionBadges.overflow > 0) && (
+                          <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
+                            {conditionBadges.visible.map((badge, index) => {
+                              const placement = conditionPlacements[index];
+                              if (!placement) return null;
+                              return (
+                                <button key={badge.condition} type="button" data-testid={`map-token-condition-${c.id}-${index}`}
+                                  tabIndex={conditionDetailsInteractive ? 0 : -1}
+                                  aria-label={t('encounters.map.tokenDetails.conditions', { name: c.name, conditions: badge.condition })} title={badge.condition}
+                                  onPointerDown={conditionDetailsInteractive ? (event) => { event.preventDefault(); event.stopPropagation(); } : undefined}
+                                  onKeyDown={(event) => event.stopPropagation()}
+                                  onClick={(event) => { if (!conditionDetailsInteractive) return; event.stopPropagation(); focusTokenConditionDetails(c.id); }}
+                                  style={{ position: 'absolute', left: `${placement.left}%`, top: `${placement.top}%`, transform: 'translate(-50%, -50%)', width: placement.targetSize, height: placement.targetSize, display: 'grid', placeItems: 'center', padding: 0, border: 0, background: 'transparent', color: '#fff', cursor: 'pointer', pointerEvents: conditionDetailsInteractive ? 'auto' : 'none' }}>
+                                  <span aria-hidden="true" style={{ width: placement.visualSize, height: placement.visualSize, display: 'grid', placeItems: 'center', borderRadius: '50%', background: 'rgba(15,23,42,.92)', border: '1px solid rgba(255,255,255,.78)', fontSize: Math.max(9, Math.round(placement.visualSize * 0.72)), lineHeight: 1 }}>
+                                    {badge.glyph ? <GameIcon slug={badge.glyph} size={Math.max(10, placement.visualSize - 3)} fallback={badge.fallback} /> : badge.fallback}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                            {conditionBadges.overflow > 0 && conditionOverflowPlacement && (
+                              <button type="button" data-testid={`map-token-condition-overflow-${c.id}`} tabIndex={conditionDetailsInteractive ? 0 : -1}
+                                aria-label={t('encounters.map.tokenDetails.moreConditions', { name: c.name, count: conditionBadges.overflow })} title={t('encounters.map.tokenDetails.moreConditions', { name: c.name, count: conditionBadges.overflow })}
+                                onPointerDown={conditionDetailsInteractive ? (event) => { event.preventDefault(); event.stopPropagation(); } : undefined}
+                                onKeyDown={(event) => event.stopPropagation()}
+                                onClick={(event) => { if (!conditionDetailsInteractive) return; event.stopPropagation(); focusTokenConditionDetails(c.id); }}
+                                style={{ position: 'absolute', left: `${conditionOverflowPlacement.left}%`, top: `${conditionOverflowPlacement.top}%`, transform: 'translate(-50%, -50%)', width: conditionOverflowPlacement.targetSize, height: conditionOverflowPlacement.targetSize, display: 'grid', placeItems: 'center', padding: 0, borderRadius: '50%', border: '1px solid rgba(255,255,255,.78)', background: 'rgba(15,23,42,.92)', color: '#fff', fontSize: 9, fontWeight: 700, cursor: 'pointer', pointerEvents: conditionDetailsInteractive ? 'auto' : 'none' }}>
+                                +{conditionBadges.overflow}
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </div>
                       {/* Unplace control (issue #271): remove the token from the board without
                           deleting the combatant. Only offered to whoever may move this token, and
                           only in move mode. stopPropagation on pointer-down so tapping it never
@@ -2376,10 +2511,10 @@ export function BattleMap({
                             </g>
                           );
                         }
-                        return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                      return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
                     })}
                   </svg>
                 )}
