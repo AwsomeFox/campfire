@@ -3769,7 +3769,7 @@ export default function RunSessionPage() {
                           name: duplicateCombatantName(c.name, encounter.combatants.map((combatant) => combatant.name)),
                           ruleEntryId: c.ruleEntryId ?? undefined,
                           statblock: c.statblock ?? undefined,
-                          hpMax: c.hpMax,
+                          hpMax: c.hpMax > 0 ? c.hpMax : undefined,
                           initMod: c.initMod,
                           tokenSize: c.tokenSize,
                         }).then(() => invalidateEncounter(queryClient, eid)).catch(reportError);

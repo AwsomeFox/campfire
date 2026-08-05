@@ -1354,7 +1354,8 @@ export function CombatantRow({
           disabled={busy || syncBlocked}
           onClick={onDuplicate}
           aria-label={t('encounters.duplicateCombatant', { name: combatant.name })}
-          title={t('encounters.duplicate')}
+          aria-describedby={syncBlockedDescribedBy}
+          title={syncBlockedReason ?? t('encounters.duplicate')}
         >
           <UIIcon name="add" size="xs" />
         </button>

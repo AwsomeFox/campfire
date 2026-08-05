@@ -1693,7 +1693,7 @@ export class EncountersService {
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
       // here we sever the identity link (null npcId) and mask the name — the token still shows
       // in initiative (its position matters to play) but not who it is.
-      const linkedNpcIds = list.map((c) => c.npcId).filter((n): n is number => n !== null);
+      const linkedNpcIds = combatantRows.map((c) => c.npcIdentitySourceId ?? c.npcId).filter((n): n is number => n !== null);
       if (linkedNpcIds.length > 0) {
         const hiddenRows = await this.db
           .select({ id: npcs.id })
@@ -1701,9 +1701,12 @@ export class EncountersService {
           .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
         const hiddenIds = new Set(hiddenRows.map((r) => r.id));
         if (hiddenIds.size > 0) {
-          list = list.map((c) =>
-            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL } : c,
-          );
+          list = list.map((c) => {
+            const source = combatantRows.find((row) => row.id === c.id);
+            return source && hiddenIds.has(source.npcIdentitySourceId ?? source.npcId ?? -1)
+              ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL }
+              : c;
+          });
         }
       }
       // Fog of war (issue #40 / #463): withhold the position of any token in an
@@ -3637,6 +3640,7 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let npcIdentitySourceId: number | null = null;
     let npcDispositionSnapshot: string | null = null;
     let spCurrent = 0;
     let spMax = 0;
@@ -3645,6 +3649,18 @@ export class EncountersService {
     let eac: number | null = null;
     let kac: number | null = null;
     let statblockJson: string | null = null;
+
+    if (input.duplicateOfCombatantId !== undefined) {
+      const [source] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, input.duplicateOfCombatantId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!source || (source.kind !== 'monster' && source.kind !== 'npc')) {
+        throw new BadRequestException('Duplicate source must be a monster or NPC in this encounter');
+      }
+      npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
+    }
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
     // it as the default name. HP/initiative still come from a linked statblock
@@ -3898,6 +3914,7 @@ export class EncountersService {
             conditions: characterId !== null ? characterConditions : '[]',
             conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
+            npcIdentitySourceId,
             tokenSize: input.tokenSize ?? 'medium',
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,

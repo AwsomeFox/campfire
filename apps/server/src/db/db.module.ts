@@ -1155,6 +1155,12 @@ function migrateCombatantsTableForNpcId(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_id INTEGER');
 }
 
+function migrateCombatantsTableForNpcIdentitySource(sqlite: Database.Database): void {
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'npc_identity_source_id')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_identity_source_id INTEGER');
+  sqlite.exec('UPDATE combatants SET npc_identity_source_id = npc_id WHERE npc_identity_source_id IS NULL AND npc_id IS NOT NULL');
+}
+
 /**
  * Migration for DBs created before hex grids + shared AoE templates (issue #238):
  * `encounters` gained `grid_type` (NOT NULL DEFAULT 'square' — existing encounters backfill to
@@ -4995,6 +5001,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
   // safely acquire this later ALTER in place.
   { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
+  { name: '0145b_combatants_npc_identity_source_1924', run: migrateCombatantsTableForNpcIdentitySource },
   { name: '0146_action_pending_turn_version_1316', run: migrateActionPendingTurnVersion1316 },
   // 0146 is now owned by #1316; this never-shipped combatant snapshot follows it.
   { name: '0147_combatants_npc_disposition_snapshot_1454', run: migrateCombatantsTableForNpcDispositionSnapshot },

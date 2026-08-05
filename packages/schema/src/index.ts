@@ -10260,6 +10260,7 @@ export type SavedTokenFormation = z.infer<typeof SavedTokenFormation>;
 
 export const CombatantCreate = z.object({
   kind: CombatantKind,
+  duplicateOfCombatantId: Id.optional(),
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
   npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)

@@ -7,5 +7,6 @@ export function duplicateCombatantName(name: string, rosterNames: readonly strin
     const found = suffix.exec(candidate.trim());
     return found ? Math.max(highest, Number(found[1] ?? 1)) : highest;
   }, 1);
-  return `${base} ${max + 1}`.slice(0, 120);
+  const suffixText = ` ${max + 1}`;
+  return `${base.slice(0, 120 - suffixText.length)}${suffixText}`;
 }
