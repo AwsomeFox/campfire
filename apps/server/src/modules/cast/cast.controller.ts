@@ -139,6 +139,8 @@ export class CampaignPlayerDisplayController {
     private readonly access: CampaignAccessService,
   ) {}
 
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
   @Get('summary')
   @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display summary', description: 'Requires campaign membership. The response is always projected as a viewer for the table-facing display.' })
   @ApiResponse({ status: 200, description: 'Viewer-safe campaign summary.' })
@@ -147,6 +149,8 @@ export class CampaignPlayerDisplayController {
     return this.cast.playerDisplaySummary(campaignId);
   }
 
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
   @Get('encounters')
   @ApiOperation({ summary: 'List server-redacted running encounters for the authenticated Player Display preview', description: 'Requires campaign membership. Only running encounters are part of the table-facing display.' })
   @ApiResponse({ status: 200, description: 'Viewer-safe running encounter list.' })
@@ -162,6 +166,8 @@ export class CampaignPlayerDisplayController {
     return this.cast.playerDisplayRunningEncounters(campaignId);
   }
 
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
   @Get('encounters/:encounterId')
   @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display encounter', description: 'Requires campaign membership. Only running, viewer-safe encounters are returned.' })
   @ApiResponse({ status: 200, description: 'Viewer-safe running encounter with combatants.' })

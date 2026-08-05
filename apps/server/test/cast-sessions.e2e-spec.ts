@@ -240,6 +240,8 @@ describe('Player Display cast sessions (e2e)', () => {
 
     const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/player-display/summary`).set(dm);
     expect(summary.status).toBe(200);
+    expect(summary.headers['cache-control']).toBe('private, no-store');
+    expect(summary.headers['referrer-policy']).toBe('no-referrer');
     expect(JSON.stringify(summary.body)).not.toContain('Ember is the heir');
     expect(JSON.stringify(summary.body)).not.toContain('The duke is a lich');
 
@@ -248,12 +250,16 @@ describe('Player Display cast sessions (e2e)', () => {
       .query({ status: 'running' })
       .set(dm);
     expect(list.status).toBe(200);
+    expect(list.headers['cache-control']).toBe('private, no-store');
+    expect(list.headers['referrer-policy']).toBe('no-referrer');
     expect(list.body).toEqual([expect.objectContaining({ id: encounterId, status: 'running' })]);
 
     const display = await request(server)
       .get(`/api/v1/campaigns/${campaignId}/player-display/encounters/${encounterId}`)
       .set(dm);
     expect(display.status).toBe(200);
+    expect(display.headers['cache-control']).toBe('private, no-store');
+    expect(display.headers['referrer-policy']).toBe('no-referrer');
     const monster = display.body.combatants.find((c: { id: number }) => c.id === monsterId);
     expect(monster).toEqual(expect.objectContaining({ hpCurrent: null, hpMax: null, hpBand: 'healthy' }));
     expect(monster.turnState).toEqual({
