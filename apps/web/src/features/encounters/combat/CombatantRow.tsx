@@ -117,6 +117,7 @@ export type CombatantRowProps = {
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
+  onDuplicate?: () => void;
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
@@ -165,6 +166,7 @@ export function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
+  onDuplicate,
   onRemove,
 }: CombatantRowProps) {
   const { t } = useTranslation();
@@ -1344,6 +1346,18 @@ export function CombatantRow({
             </button>
           </div>
         </div>
+      )}
+      {onDuplicate && (
+        <button
+          className="btn btn-icon btn-ghost cf-target-44"
+          style={{ width: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          onClick={onDuplicate}
+          aria-label={t('encounters.duplicateCombatant', { name: combatant.name })}
+          title={t('encounters.duplicate')}
+        >
+          <UIIcon name="copy" size="xs" />
+        </button>
       )}
       {canRemove && (
         <button

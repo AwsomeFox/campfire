@@ -10266,6 +10266,7 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  tokenSize: TokenSize.optional(),
   // OSR group-initiative side label (issue #765). When the campaign adapter uses group
   // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
   // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.

@@ -3898,6 +3898,7 @@ export class EncountersService {
             conditions: characterId !== null ? characterConditions : '[]',
             conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
+            tokenSize: input.tokenSize ?? 'medium',
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })

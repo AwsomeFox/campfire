@@ -6030,6 +6030,16 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.body.tokenSize).toBe('huge');
   });
 
+  it('accepts tokenSize when adding a combatant and defaults omitted size to medium', async () => {
+    const server = ctx.app.getHttpServer();
+    const sized = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Large Ogre', hpMax: 59, tokenSize: 'large' });
+    const defaulted = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Medium Ogre', hpMax: 59 });
+    expect(sized.status).toBe(201);
+    expect(sized.body.tokenSize).toBe('large');
+    expect(defaulted.status).toBe(201);
+    expect(defaulted.body.tokenSize).toBe('medium');
+  });
+
   it('an invalid token size is rejected (400)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)

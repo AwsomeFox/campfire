@@ -2,6 +2,7 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
@@ -3761,6 +3762,19 @@ export default function RunSessionPage() {
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
                   canRemove={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => {
+                        void api.post(`${API}/encounters/${eid}/combatants`, {
+                          kind: c.kind,
+                          name: duplicateCombatantName(c.name, encounter.combatants.map((combatant) => combatant.name)),
+                          ruleEntryId: c.ruleEntryId ?? undefined,
+                          statblock: c.statblock ?? undefined,
+                          hpMax: c.hpMax,
+                          initMod: c.initMod,
+                          tokenSize: c.tokenSize,
+                        }).then(() => invalidateEncounter(queryClient, eid)).catch(reportError);
+                      }
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={
