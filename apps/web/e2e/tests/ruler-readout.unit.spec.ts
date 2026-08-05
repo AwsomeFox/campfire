@@ -16,7 +16,7 @@ import {
   rulerDistanceFeet,
 } from '../../src/features/encounters/rulerReadout';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 const BASE = {
   cells: 2.4,
@@ -66,8 +66,8 @@ test.describe('ruler readout units (issue #477)', () => {
 
 test.describe('RunSessionPage wires ruler readout helpers (issue #477)', () => {
   test('imports shared formatter instead of hard-coded sq copy', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/from ['"]\.\/rulerReadout['"]/);
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    expect(source).toMatch(/from ['"]\.\.\/rulerReadout['"]/);
     expect(source).toMatch(/formatRulerReadout/);
     expect(source).toMatch(/measureToolHelp/);
     expect(source).not.toMatch(/\.toFixed\(1\)\} sq ·/);

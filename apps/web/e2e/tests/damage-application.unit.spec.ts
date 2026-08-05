@@ -67,7 +67,10 @@ test.describe('direct damage apply controls (issue #605)', () => {
   });
 
   test('gates damage controls and metadata on the adapter capability', () => {
-    const source = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const source = [
+      readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8'),
+      readFileSync(resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx'), 'utf8'),
+    ].join('\n');
     expect(source).toContain('supportsDirectDamageRules === true');
     expect(source).toContain("mode === 'damage' && supportsDamageRules");
     expect(source).toContain('disabled={diceTotal === undefined}');
