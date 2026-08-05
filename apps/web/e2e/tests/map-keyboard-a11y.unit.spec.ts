@@ -9,11 +9,11 @@ import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const INDEX_CSS = resolve(__dirname, '../../src/index.css');
 
 test.describe('battle map keyboard accessibility (issue #419)', () => {
-  const src = readFileSync(RUN_SESSION_PAGE, 'utf8');
+  const src = readFileSync(BATTLE_MAP, 'utf8');
   const css = readFileSync(INDEX_CSS, 'utf8');
 
   test('tokens are focusable buttons with keyboard movement and announced position', () => {

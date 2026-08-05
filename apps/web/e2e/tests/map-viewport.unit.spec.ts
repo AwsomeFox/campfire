@@ -21,7 +21,7 @@ import {
   zoomByFactor,
 } from '../../src/features/encounters/mapViewport';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const VIEWPORT_MODULE = resolve(__dirname, '../../src/features/encounters/mapViewport.ts');
 
 const SURFACE = { w: 800, h: 450 };
@@ -87,8 +87,8 @@ test.describe('mapViewport math (issue #712)', () => {
 
 test.describe('RunSessionPage wires viewport navigation (issue #712)', () => {
   test('imports mapViewport helpers and exposes a separate viewport toolbar', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/from ['"]\.\/mapViewport['"]/);
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    expect(source).toMatch(/from ['"]\.\.\/mapViewport['"]/);
     expect(source).toMatch(/data-testid="map-viewport-toolbar"/);
     expect(source).toMatch(/data-testid="battle-map-viewport"/);
     expect(source).toMatch(/viewportTransformStyle/);
