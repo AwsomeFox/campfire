@@ -7211,7 +7211,7 @@ export class EncountersService {
     // retry gets the turn pointer THIS call produced, not merely "some current state".
     // Best-effort by construction: the claim (the part that prevents a second advance) is
     // already durable, and a replay that finds no body falls back to fresh truth.
-    if (opClaim && role === 'dm') await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
+    if (opClaim) await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
     return view;
   }
 
