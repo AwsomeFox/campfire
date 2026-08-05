@@ -1520,6 +1520,15 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // rather than a silent clamp — a tool that fails open on "no slots left" would have made
   // unlimited casting look sanctioned instead of merely unmodelled.
   'adjust_spell_slots',
+  // #1909 review (Codex, ninth finding): the delta-based combatant resource/spell-slot
+  // spend this issue built specifically so a live-play pip click never clobbers a whole
+  // statblock. Omitting it here left AI live play with no way to reach it at all — the
+  // model would fall back to whole-statblock `update_combatant` for a resource spend,
+  // reintroducing exactly the clobber this PR exists to prevent, specifically for driver
+  // sessions. Same safety shape as `adjust_spell_slots` just above: overspend/over-restore
+  // is a hard typed error (never a silent clamp), so granting it does not sanction an
+  // unbounded spend the way a fails-open tool would.
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   // #1041 — rest is core live play, and these REPLACE a long chain of raw HP/slot/condition
@@ -1613,7 +1622,8 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
  *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
  *    apply_action, undo_action, undo_remove_combatant, update_character_hp, set_character_conditions,
- *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
+ *    adjust_spell_slots, adjust_combatant_resource, award_xp, level_up_character, long_rest,
+ *    short_rest);
  *  - it is a scene/world-state nudge with no economy or disclosure blast radius
  *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
  *    set_location_discovery, whisper_to_player, add_note).
@@ -1646,6 +1656,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_character_hp',
   'set_character_conditions',
   'adjust_spell_slots',
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   'long_rest',

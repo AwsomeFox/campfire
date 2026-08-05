@@ -1665,8 +1665,14 @@ export class EncountersService {
    * gets monster HP replaced with a coarse band. Omit it (or pass `dm`) only for
    * DM-facing returns — the DM always sees exact HP.
    */
-  async getWithCombatantsOrThrow(id: number, viewerRole?: Role, viewerUserId?: string): Promise<EncounterWithCombatants> {
-    const row = await this.getRowOrThrow(id);
+  // Issue #1909 review (Devin, tenth finding): `includeDeleted` defaults to `false` —
+  // identical default to `getRowOrThrow`'s own — so every EXISTING caller (roughly two
+  // dozen across this service plus the controller/cast/export/scribe/MCP-tools call
+  // sites) is completely unaffected; only a caller that explicitly opts in (currently
+  // just `adjustCombatantResource`'s role-mismatch keyed-replay fallback, below) can ever
+  // see a soft-deleted (trashed) encounter's projection through this method.
+  async getWithCombatantsOrThrow(id: number, viewerRole?: Role, viewerUserId?: string, includeDeleted = false): Promise<EncounterWithCombatants> {
+    const row = await this.getRowOrThrow(id, includeDeleted);
     // Entity-level secrecy (issue #262): a hidden encounter (DM prep) must be
     // indistinguishable from a nonexistent one for a non-DM — 404 (not 403), so its
     // very existence + roster aren't leaked. Mirrors QuestsService.getOrThrow. undefined
@@ -8699,6 +8705,37 @@ export class EncountersService {
 
     const delta = patch.delta ?? 1;
 
+    // Issue #1909 review (Codex P1, secrecy): `combatantToDomain(row)` is the RAW row —
+    // unlike `getWithCombatantsOrThrow`'s role-filtered projection, it never withholds a
+    // fog-hidden token's exact position. A non-DM owning player adjusting their own
+    // character-linked combatant would otherwise learn (via THIS response, and via a
+    // same-role replay of the stored claim body) exactly where their token sits even when
+    // fog conceals it from every other read path. Redacts using this encounter's own fog
+    // PLUS the given `siblingProtects` boolean — together the same two conditions
+    // `getWithCombatantsOrThrow` applies. `siblingProtects` is an explicit parameter
+    // (issue #1909 review, Codex eighth finding), not a closed-over value, precisely
+    // because the WRITE path (computed at write time, see `siblingFogProtectsAtWrite`
+    // below) and the REPLAY path (recomputed fresh at replay time, see `resolveReplay`
+    // below) legitimately need DIFFERENT answers to the same question asked at different
+    // moments. Applied identically to the STORED claim body (so a same-role replay never
+    // surfaces the raw position either) and to the fresh-write's own returned value —
+    // never only on the way out, which a future caller of the stored body could too
+    // easily miss. Declared here, BEFORE `resolveReplay` (issue #1909 review, Devin's
+    // ninth-finding-adjacent fix): `resolveReplay` can be invoked from the EARLY,
+    // transaction-free replay check below, which runs before the write path's own
+    // `siblingFogProtectsAtWrite` computation — a pure function with no closed-over
+    // dependency on that value has no such ordering constraint, so it is declared as
+    // early as its one real dependency (`role`, a parameter available from the top of
+    // this method) allows.
+    const redactForRole = (c: Combatant, encounterFogJson: string | null, siblingProtects: boolean): Combatant => {
+      if (role === 'dm') return c;
+      const fog = parseFog(encounterFogJson);
+      const invalidFog = encounterFogJson !== null && fog === null;
+      if (invalidFog || siblingProtects) return redactTokenInFog(c, { enabled: true, revealed: [] });
+      if (fog?.enabled) return redactTokenInFog(c, fog);
+      return c;
+    };
+
     // Issue #580 — per-intent idempotency, same mechanism `updateCombatant`/`rollDeathSave`
     // use above: `delta` is a RELATIVE write, so a retry after a lost response must replay
     // the ORIGINAL committed combatant rather than spend/restore a second time. Scoped to
@@ -8735,10 +8772,61 @@ export class EncountersService {
     // re-derived. Deliberately does NOT require the combatant to still exist when a stored
     // body is being replayed verbatim — only the fresh-read fallback path does, and only
     // because it has no other way to answer "what is the combatant now".
+    //
+    // Issue #1909 review (Codex, eighth finding): a SAME-role match is not sufficient to
+    // trust the stored body VERBATIM for a NON-DM viewer — the stored body was redacted
+    // against the fog/sibling-map state as it stood at the ORIGINAL commit, not as it
+    // stands now. If a DM has since enabled fog, or a sibling encounter's fog now protects
+    // a previously-unprotected shared map, the stored body can still carry raw `tokenX`/
+    // `tokenY` that `GET /encounters/:id` would withhold at THIS moment — the role hasn't
+    // changed, but the world has. A stored replay response is a snapshot of an
+    // AUTHORIZATION decision, not just of data, and that snapshot can go stale exactly like
+    // the data it wraps. For a same-role NON-DM match, re-derive the redaction decision
+    // fresh (below) rather than either trusting the stored body outright or falling all the
+    // way through to `getWithCombatantsOrThrow` — the latter would require the COMBATANT to
+    // still exist, which is not the question this finding is about and would undo the
+    // replay-survives-combatant-removal/encounter-trash guarantees above for a non-DM
+    // caller. The only per-role projection this endpoint's own `redactForRole` ever applies
+    // is fog-based token concealment (its scope comment says so explicitly) — HP banding and
+    // hidden-NPC-identity masking are never in a Combatant this method returns in the first
+    // place (statblock writes are DM-only; character writes carry no HP field on the
+    // combatant row) — so re-deriving just that one projection against CURRENT fog/sibling
+    // state is sufficient, not a narrowing of what the previous fix already covered.
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
       const body = prior.response as Combatant | null;
-      if (body && prior.responseRole === role) return body;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      if (body && prior.responseRole === role) {
+        if (role === 'dm') return body;
+        const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
+        const freshSiblingProtects =
+          freshEncounterForReplay.mapAttachmentId != null &&
+          !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
+          (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
+        return redactForRole(body, freshEncounterForReplay.fog, freshSiblingProtects);
+      }
+      // Role MISMATCH (or a missing body, which cannot happen for THIS implementation
+      // since the claim and its body are written in the same transaction, but handled the
+      // same defensive way as the sibling keyed mutations that guard on this): mirrors
+      // `rollCombatantInitiative`/`advanceCurrentTurn`/`undoTurn`'s own
+      // `prior.responseRole === role` guard — fall through to a FULL fresh, role-filtered
+      // read (`getWithCombatantsOrThrow`), since a role change can affect more projections
+      // than fog alone (e.g. a demoted co-DM). This never re-runs the effect a second time;
+      // only the returned VIEW is re-derived. Unlike the same-role branch above, THIS path
+      // does require the combatant to still exist — it has no other way to answer "what is
+      // the combatant now" for an unknown/changed role; a real combatant removal since the
+      // original commit still 404s here, same as before this finding.
+      //
+      // Issue #1909 review (Devin, tenth finding): this fallback used to call
+      // `getWithCombatantsOrThrow(encounterId, role)` with its default `includeDeleted =
+      // false`, so it 404ed on a role-MISMATCHED replay against an encounter TRASHED since
+      // the original commit — the exact class of gap the round-7 fix (the outer
+      // `getRowOrThrow(encounterId, true)` plus the early transaction-free
+      // `findPriorEncounterOp` short-circuit) closed for the SAME-role path, but this
+      // second exit of the same function had the identical defect. `includeDeleted: true`
+      // makes this fallback tolerate a trashed encounter exactly like the same-role branch
+      // above and the early replay check do — a role-mismatched replay of an
+      // already-committed outcome must survive the encounter having since been trashed
+      // just as much as a same-role one does.
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
       const found = snapshot.combatants.find((c) => c.id === combatantId);
       if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       return found;
@@ -8790,31 +8878,18 @@ export class EncountersService {
     // (a stale `true` still redacts) is the safe direction — a redaction that turns out to
     // have been momentarily unnecessary costs a caller one extra read, a missed one is the
     // disclosure this finding is about.
-    const siblingFogProtects =
+    // Issue #1909 review (Codex, eighth finding): computing this ONCE here and closing
+    // over it (as the original version of this fix did) is exactly right for the WRITE
+    // path just below (the sibling state at write time is what the write's own response
+    // should reflect), but is the WRONG value for a REPLAY read that happens later — see
+    // `resolveReplay`'s own fresh recomputation below, which intentionally does NOT reuse
+    // this closed-over value. `siblingFogProtectsAtWrite` is named accordingly so a future
+    // reader does not accidentally reach for it from the replay path.
+    const siblingFogProtectsAtWrite =
       role !== 'dm' &&
       encounter.mapAttachmentId != null &&
       !fogConcealsPixels(parseFog(encounter.fog)) &&
       (await this.attachmentsService.isFogProtectedEncounterMap(encounter.mapAttachmentId, encounter.campaignId));
-    // Issue #1909 review (Codex P1, secrecy): `combatantToDomain(row)` is the RAW row —
-    // unlike `getWithCombatantsOrThrow`'s role-filtered projection, it never withholds a
-    // fog-hidden token's exact position. A non-DM owning player adjusting their own
-    // character-linked combatant would otherwise learn (via THIS response, and via a
-    // same-role replay of the stored claim body) exactly where their token sits even when
-    // fog conceals it from every other read path. Redacts using this encounter's own fog
-    // PLUS the pre-computed `siblingFogProtects` boolean above — together the same two
-    // conditions `getWithCombatantsOrThrow` applies, computed synchronously (own fog) and
-    // once-awaited-up-front (sibling) rather than inside the transaction. Applied
-    // identically to the STORED claim body (so a same-role replay never surfaces the raw
-    // position either) and to the fresh-write's own returned value — never only on the way
-    // out, which a future caller of the stored body could too easily miss.
-    const redactForRole = (c: Combatant, encounterFogJson: string | null): Combatant => {
-      if (role === 'dm') return c;
-      const fog = parseFog(encounterFogJson);
-      const invalidFog = encounterFogJson !== null && fog === null;
-      if (invalidFog || siblingFogProtects) return redactTokenInFog(c, { enabled: true, revealed: [] });
-      if (fog?.enabled) return redactTokenInFog(c, fog);
-      return c;
-    };
     let committedFogJson: string | null = null;
 
     if (combatant.characterId !== null) {
@@ -8960,7 +9035,7 @@ export class EncountersService {
           // the combatant is still actually present before either the event or this claim
           // body references it.
           committedFogJson = freshEncounter.fog;
-          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog), role });
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog, siblingFogProtectsAtWrite), role });
         });
         if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
@@ -9176,7 +9251,7 @@ export class EncountersService {
           // `redactForRole` is a no-op here in practice (this branch is DM-only, and a DM's
           // response is never redacted) but applied for consistency with the character
           // branch above rather than special-cased away.
-          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog), role });
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog, siblingFogProtectsAtWrite), role });
         });
         if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
@@ -9225,7 +9300,7 @@ export class EncountersService {
 
     // Issue #1909 review (Codex P1, secrecy): redact using the fog state committed inside
     // the transaction above, not a value read before it — see `redactForRole`'s own comment.
-    return redactForRole(combatantToDomain(row), committedFogJson);
+    return redactForRole(combatantToDomain(row), committedFogJson, siblingFogProtectsAtWrite);
   }
 
   async listTokenFormations(campaignId: number, _role: Role) {

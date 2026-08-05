@@ -736,6 +736,135 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(JSON.parse(character.resources)['layOnHands'].used).toBe(1);
   });
 
+  // Issue #1909 review (Devin, tenth finding): the round-7 fix that let a keyed replay
+  // survive a TRASHED encounter (the outer `getRowOrThrow(encounterId, true)` plus the
+  // early `findPriorEncounterOp` short-circuit) only ever got pinned by a SAME-role replay
+  // test. `resolveReplay` has a SECOND exit — the role-MISMATCH fallback, which used to call
+  // `getWithCombatantsOrThrow` with its default `includeDeleted: false` — so a role-
+  // mismatched replay against a since-trashed encounter 404ed even though the same-role path
+  // for the identical scenario succeeded. Commits under one role, trashes the encounter, then
+  // replays the SAME key under a DIFFERENT role — the committed outcome must still replay.
+  it("a retried idempotencyKey under a DIFFERENT role replays its already-committed outcome even after the encounter has since been trashed (Devin review)", async () => {
+    const user = { id: '1', username: 'dm_and_owner', displayName: 'DM', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Mismatched-Role Trashed-Encounter Replay Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Valeros',
+        ownerUserId: '1',
+        resources: JSON.stringify({ secondWind: { max: 1, used: 0, name: 'Second Wind', recharge: 'short-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Mismatched-Role Trash Fight', status: 'running', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Valeros', sortOrder: 1 })
+      .returning()
+      .all();
+
+    // Original commit as 'dm'.
+    const first = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'secondWind', delta: 1, idempotencyKey: 'mismatched-role-trash-replay' }, user, 'dm',
+    );
+    expect(first).toBeTruthy();
+
+    // Another actor trashes the encounter (soft delete) before the retry.
+    db.update(encounters).set({ deletedAt: new Date().toISOString() }).where(eq(encounters.id, enc.id)).run();
+
+    // SAME key, DIFFERENT role ('player') — this must still replay the committed outcome
+    // instead of 404ing. Under the pre-fix code, the role mismatch (`dm` !== `player`) sent
+    // this through `getWithCombatantsOrThrow(encounterId, role)`'s default
+    // `includeDeleted: false`, which itself 404ed on the trashed encounter before the
+    // combatant projection was ever built.
+    const replayed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'secondWind', delta: 1, idempotencyKey: 'mismatched-role-trash-replay' }, user, 'player',
+    );
+    expect(replayed).toBeTruthy();
+
+    // The replay did not re-run the effect: still used: 1 (the first commit), not 2.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['secondWind'].used).toBe(1);
+  });
+
+  // Issue #1909 review (Codex, eighth finding): a SAME-role replay is not automatically
+  // safe either — the stored body was redacted against the fog state as it stood at the
+  // ORIGINAL commit, not as it stands at replay time. If a DM enables fog AFTER the
+  // original commit, a later same-role replay must still come back redacted against the
+  // CURRENT fog, not the stored (then-unredacted) raw position.
+  it("a same-role replay is redacted against CURRENT fog even though the ORIGINAL commit had no fog to redact against (Codex review)", async () => {
+    const player = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Fog-Enabled-After-Commit Secrecy Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Merisiel',
+        ownerUserId: '1',
+        resources: JSON.stringify({ sneakAttack: { max: 1, used: 0, name: 'Sneak Attack Die', recharge: 'short-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    // NO fog at all at the time of the original commit — nothing to redact against yet.
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'No-Fog-Yet Fight', status: 'running', fog: null, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Merisiel', sortOrder: 1, tokenX: 10, tokenY: 10 })
+      .returning()
+      .all();
+
+    // Original commit: no fog yet, so the (correctly, at the time) unredacted position is
+    // stored in the idempotency claim's response body.
+    const first = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'sneakAttack', delta: 1, idempotencyKey: 'fog-enabled-after-commit' }, player, 'player',
+    );
+    expect(first.tokenX).toBe(10);
+    expect(first.tokenY).toBe(10);
+
+    // A DM enables fog AFTER the original commit, concealing the combatant's position.
+    db.update(encounters)
+      .set({ fog: JSON.stringify({ enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] }) })
+      .where(eq(encounters.id, enc.id))
+      .run();
+
+    // SAME actor, SAME role ('player'), SAME key — a same-role replay must NOT return the
+    // stored (now-stale) unredacted body; it must re-derive redaction against the CURRENT
+    // fog and come back concealed.
+    const replayed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'sneakAttack', delta: 1, idempotencyKey: 'fog-enabled-after-commit' }, player, 'player',
+    );
+    expect(replayed.tokenX).toBeNull();
+    expect(replayed.tokenY).toBeNull();
+    expect(replayed.tokenHiddenByFog).toBe(true);
+
+    // The replay did not re-run the effect: still used: 1 (the first commit), not 2.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['sneakAttack'].used).toBe(1);
+  });
+
   // Issue #1909 review (Codex P1, secrecy): the finding above only ever exercised a ROLE
   // MISMATCH between the committing call and the replay. This test proves the deeper half:
   // a non-DM owning player's OWN fresh write — and a SAME-ROLE replay of it — must never
