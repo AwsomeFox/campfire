@@ -33,7 +33,7 @@ export function CombatantActionsList({
   disabledReason?: string;
   onUseAction: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   
   const { data: actions = [] } = useQuery({
     queryKey: [...queryKeys.encounter(encounterId), 'actions', combatantId],

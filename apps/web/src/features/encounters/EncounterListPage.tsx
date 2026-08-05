@@ -59,7 +59,7 @@ function encounterListUrl(campaignId: number, status: StatusFilter, query: strin
 }
 
 export default function EncounterListPage() {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
@@ -315,7 +315,7 @@ function EncounterCard({
   encounter: Encounter;
   showHidden?: boolean;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   return (
     <Card
       to={`/c/${campaignId}/encounters/${encounter.id}`}
@@ -354,7 +354,7 @@ type NamedRow = { id: number; name?: string; title?: string; number?: number };
 const defaultEncounterName = () => `Untitled encounter - ${new Date().toISOString().slice(0, 10)}`;
 
 function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCancel: () => void }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [name, setName] = useState(defaultEncounterName);
   const [saving, setSaving] = useState(false);

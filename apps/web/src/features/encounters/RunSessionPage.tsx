@@ -540,7 +540,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSave: (patch: Record<string, number | null>) => Promise<void>;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
@@ -1040,7 +1040,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function RunSessionPage() {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
   const cid = Number(campaignId);
   const eid = Number(encounterId);
@@ -2979,7 +2979,7 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('run.rollInitiative')}
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('encounters.run.rollInitiative')}
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
@@ -3019,7 +3019,7 @@ export default function RunSessionPage() {
             {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
-                    keep {t('run.rollInitiative')} reachable so the DM can fill them (issue #54).
+                    keep {t('encounters.run.rollInitiative')} reachable so the DM can fill them (issue #54).
                     Already-set initiatives are left untouched server-side. Once every
                     combatant has a value, disable the control rather than firing a no-op
                     roll (issue #702), and surface how many still need rolling. */}
@@ -3029,7 +3029,7 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('run.rollInitiative')}
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : t('encounters.run.rollInitiative')}
                 </Btn>
                 <Btn
                   data-testid="encounter-header-next-turn"
@@ -3038,7 +3038,7 @@ export default function RunSessionPage() {
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
                   title={`Next turn${nextTurnShortcut.titleSuffix}`}
                 >
-                  {t('run.nextTurn')}
+                  {t('encounters.run.nextTurn')}
                 </Btn>
               </>
             )}
@@ -3800,10 +3800,10 @@ export default function RunSessionPage() {
 
       {confirmEnd && (
         <ConfirmDialog
-          title={t('run.endDialog.title')}
-          body={t('run.endDialog.body')}
-          confirmLabel={t('run.endDialog.confirm')}
-          pendingLabel={t('run.endDialog.pending')}
+          title={t('encounters.run.endDialog.title')}
+          body={t('encounters.run.endDialog.body')}
+          confirmLabel={t('encounters.run.endDialog.confirm')}
+          pendingLabel={t('encounters.run.endDialog.pending')}
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -3811,15 +3811,15 @@ export default function RunSessionPage() {
       )}
       {confirmReopen && (
         <ConfirmDialog
-          title={t('run.reopenDialog.title')}
+          title={t('encounters.run.reopenDialog.title')}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <p style={{ margin: 0 }}>
-                {t('run.reopenDialog.body')}
+                {t('encounters.run.reopenDialog.body')}
               </p>
               {hpSyncConflicts.length === 0 ? (
                 <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                  {t('run.reopenDialog.noConflicts')}
+                  {t('encounters.run.reopenDialog.noConflicts')}
                 </p>
               ) : (
                 <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -3870,8 +3870,8 @@ export default function RunSessionPage() {
               )}
             </div>
           }
-          confirmLabel={t('run.reopenDialog.confirm')}
-          pendingLabel={t('run.reopenDialog.pending')}
+          confirmLabel={t('encounters.run.reopenDialog.confirm')}
+          pendingLabel={t('encounters.run.reopenDialog.pending')}
 
           busy={runControl.isPending}
           confirmDisabled={!reopenChoicesComplete}
@@ -4117,7 +4117,7 @@ export function BattleMap({
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const announce = useAnnounce();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
@@ -7020,7 +7020,7 @@ function CombatantRow({
   onReleaseLegendary?: () => void;
   onRemove: () => void;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
@@ -8306,7 +8306,7 @@ function AddCombatantPanel({
   rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [tab, setTab] = useState<AddTab>('manual');
   const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
@@ -8685,14 +8685,14 @@ function AddCombatantPanel({
       }}
       onDrop={(event: React.DragEvent<HTMLElement>) => void addDroppedRuleEntry(event)}
     >
-      <span className="card-kicker">{t('run.addCombatant')}</span>
+      <span className="card-kicker">{t('encounters.run.addCombatant')}</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
-        {t('run.addCombatantHint')}
+        {t('encounters.run.addCombatantHint')}
       </p>
       <div
         className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
-        aria-label={t('run.addCombatant')}
+        aria-label={t('encounters.run.addCombatant')}
         data-testid="add-combatant-tabs"
       >
         {ADD_TAB_ORDER.map((t) => {

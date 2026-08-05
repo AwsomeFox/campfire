@@ -73,7 +73,7 @@ export function ActionUsePanel({
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
 }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>('targets');
