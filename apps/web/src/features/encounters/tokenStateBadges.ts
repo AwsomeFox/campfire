@@ -120,11 +120,16 @@ export type TokenBadgePlacement = {
  * below 18px.
  */
 export function tokenBadgePlacements(sizePx: number, count: number): TokenBadgePlacement[] {
-  const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
-  const targetSize = Math.max(18, visualSize);
+  // A small token cannot host an 18px control below its centre without covering
+  // the primary drag zone. Keep its marker visible but compact/decorative; a
+  // full target is enabled only where it fits below the centre line.
+  const maxTargetBelowCentre = Math.max(8, sizePx / 2 - 1);
+  const targetSize = Math.min(18, maxTargetBelowCentre);
+  const visualSize = Math.min(Math.max(8, Math.min(18, Math.round(sizePx * 0.38))), targetSize);
   const inset = Math.min(50, (targetSize / sizePx) * 50);
   const slots = Math.max(0, Math.min(4, Math.floor(count)));
-  const anchors = slots <= 1
+  if (slots === 0) return [];
+  const anchors = slots === 1
     ? [50]
     : Array.from({ length: slots }, (_, index) => inset + ((100 - 2 * inset) * index) / (slots - 1));
   return anchors.map((left) => ({

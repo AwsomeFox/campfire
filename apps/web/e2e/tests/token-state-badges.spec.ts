@@ -14,7 +14,7 @@ async function placeTokenStateFixture(request: APIRequestContext) {
   expect(encounter.ok()).toBeTruthy();
   for (const [id, x, y] of [[bossId, 30, 40], [skirmisherId, 70, 60]] as const) {
     const placed = await request.patch(`/api/v1/encounters/${encounterId}/combatants/${id}`, {
-      data: { tokenX: x, tokenY: y },
+      data: { tokenX: x, tokenY: y, ...(id === bossId ? { tokenSize: 'large' } : {}) },
     });
     expect(placed.ok()).toBeTruthy();
   }
@@ -50,9 +50,7 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerBoss).not.toContainText('30');
     await expect(playerBoss).not.toContainText('12');
     const overflowCondition = playerPage.getByTestId(`map-token-condition-overflow-${bossId}`);
-    // Grid-off medium tokens have room for the single overflow control, but no
-    // individual condition controls. Keep that compact marker visible.
-    await expect(overflowCondition).toHaveText('+4');
+    await expect(overflowCondition).toHaveText('+2');
     await expect(playerPage.getByTestId(`map-token-concentration-${bossId}`)).toBeVisible();
     const conditionBox = await overflowCondition.boundingBox();
     expect(conditionBox?.width).toBeGreaterThanOrEqual(18);

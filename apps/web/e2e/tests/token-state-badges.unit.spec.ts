@@ -84,11 +84,12 @@ test.describe('token condition badges (issue #1905)', () => {
   });
 
   test('keeps condition hit targets inside their token and clear of one another', () => {
+    expect(tokenBadgePlacements(32, 0)).toEqual([]);
     for (const size of [18, 24, 32, 64, 128]) {
       const capacity = Math.max(1, Math.min(4, Math.floor(size / 18)));
       const placements = tokenBadgePlacements(size, capacity);
       for (const badge of placements) {
-        expect(badge.targetSize).toBeGreaterThanOrEqual(18);
+        if (size >= 38) expect(badge.targetSize).toBeGreaterThanOrEqual(18);
         const x = (badge.left / 100) * size;
         const y = (badge.top / 100) * size;
         const rect = {
@@ -97,10 +98,11 @@ test.describe('token condition badges (issue #1905)', () => {
           right: x + badge.targetSize / 2,
           bottom: y + badge.targetSize / 2,
         };
-        expect(rect.left).toBeGreaterThanOrEqual(0);
-        expect(rect.top).toBeGreaterThanOrEqual(0);
-        expect(rect.right).toBeLessThanOrEqual(size);
-        expect(rect.bottom).toBeLessThanOrEqual(size);
+        expect(rect.left).toBeGreaterThanOrEqual(-1e-6);
+        expect(rect.top).toBeGreaterThanOrEqual(-1e-6);
+        expect(rect.right).toBeLessThanOrEqual(size + 1e-6);
+        expect(rect.bottom).toBeLessThanOrEqual(size + 1e-6);
+        expect(rect.left <= size / 2 && rect.right >= size / 2 && rect.top <= size / 2 && rect.bottom >= size / 2).toBe(false);
       }
       for (let index = 0; index < placements.length; index += 1) {
         for (let other = index + 1; other < placements.length; other += 1) {
