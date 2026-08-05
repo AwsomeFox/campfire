@@ -660,6 +660,7 @@ export default function RunSessionPage() {
   } | null>(null);
   const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
   const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
+  const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -3536,6 +3537,7 @@ export default function RunSessionPage() {
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
           targeting={pendingActionUse ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, onToggle: toggleActionTarget } : null}
+          impactTargetIds={actionImpactTargetIds}
         />
       )}
 
@@ -3819,6 +3821,10 @@ export default function RunSessionPage() {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
             setPendingActionUse(null);
+            if (!prefersReducedMotion()) {
+              setActionImpactTargetIds(actionTargetIds);
+              window.setTimeout(() => setActionImpactTargetIds([]), 250);
+            }
             setActionTargetIds([]);
             setActionTargetsDeclared(false);
             if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;

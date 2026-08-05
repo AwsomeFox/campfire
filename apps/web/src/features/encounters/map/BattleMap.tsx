@@ -196,6 +196,7 @@ export type BattleMapProps = {
   hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
   targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; onToggle: (id: number) => void } | null;
+  impactTargetIds?: readonly number[];
 };
 
 export function BattleMap({
@@ -232,6 +233,7 @@ export function BattleMap({
   hpFeedbackByCombatant = new Map(),
   ruleSystem,
   targeting = null,
+  impactTargetIds = [],
 }: BattleMapProps) {
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
@@ -2368,6 +2370,7 @@ export function BattleMap({
                   const selectedForBatch = selectedTokenIds.has(c.id);
                   const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
                   const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
                   const hpTone = tokenHpTone(hpFraction);
@@ -2435,6 +2438,7 @@ export function BattleMap({
                           {tokenInitials(c.name)}
                         </span>
                         {selectedTarget && <span aria-hidden="true" data-testid={`map-target-crosshair-${c.id}`} style={{ position: 'absolute', inset: -7, display: 'grid', placeItems: 'center', color: 'var(--color-accent)', fontSize: Math.max(14, Math.round(sizePx * .45)), pointerEvents: 'none' }}>⌖</span>}
+                        {impactTarget && <span aria-hidden="true" data-testid={`map-target-impact-${c.id}`} className="cf-target-impact-ring" />}
                         {showTokenState && hpFraction != null && hpTone != null && (
                           <svg data-testid={`map-token-hp-arc-${c.id}`} width={sizePx} height={sizePx} viewBox={`0 0 ${sizePx} ${sizePx}`}
                             aria-label={t('encounters.map.tokenDetails.hp', { state: t(`encounters.map.tokenDetails.hpStates.${hpTone}`) })}
