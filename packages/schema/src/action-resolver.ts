@@ -1100,7 +1100,7 @@ export function inferActionSpecFromText(
 ): ActionSpec | undefined {
   const toHitText = (toHit ?? '').trim();
   const damageText = (damage ?? '').trim();
-  const kindText = (kind ?? '').trim().toLowerCase();
+  const _kindText = (kind ?? '').trim().toLowerCase();
 
   if (!toHitText && !damageText) return undefined;
 
