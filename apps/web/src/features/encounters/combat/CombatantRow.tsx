@@ -308,7 +308,7 @@ export function CombatantRow({
       }}
       onClick={(event) => {
         if (!targeting?.legal || targeting.declared) return;
-        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock]');
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
       }}
@@ -1144,15 +1144,17 @@ export function CombatantRow({
             stays scannable; lazily fetched on first expand. */}
         {statblock && <div data-combatant-statblock>{statblock}</div>}
         {onUseMonsterAction && (
-          <CombatantActionsList
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            combatantName={combatant.name}
-            campaignId={campaignId}
-            enabled
-            disabledReason={syncBlockedReason}
-            onUseAction={onUseMonsterAction}
-          />
+          <div data-combatant-detail>
+            <CombatantActionsList
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              combatantName={combatant.name}
+              campaignId={campaignId}
+              enabled
+              disabledReason={syncBlockedReason}
+              onUseAction={onUseMonsterAction}
+            />
+          </div>
         )}
         {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
           <details className="mt-2">
@@ -1167,22 +1169,24 @@ export function CombatantRow({
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
-          <CharacterStatCard
-            character={character}
-            ruleSystem={ruleSystem}
-            defaultOpen={openCardByDefault}
-            openOnActiveTurn={openCardOnActiveTurn}
-            /* Click-to-roll only from an active owned card, or any card for the DM. */
-            campaignId={campaignId}
-            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
-               actions) — mounting this card already implies DM-or-owner (see the `character`
-               prop gate above), matching listUsableActions' own authorization. */
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            onError={onRollError}
-            onApplyDamage={onApplyDamage}
-            onUseAction={onUseAction}
-          />
+          <div data-combatant-detail>
+            <CharacterStatCard
+              character={character}
+              ruleSystem={ruleSystem}
+              defaultOpen={openCardByDefault}
+              openOnActiveTurn={openCardOnActiveTurn}
+              /* Click-to-roll only from an active owned card, or any card for the DM. */
+              campaignId={campaignId}
+              /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+                 actions) — mounting this card already implies DM-or-owner (see the `character`
+                 prop gate above), matching listUsableActions' own authorization. */
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              onError={onRollError}
+              onApplyDamage={onApplyDamage}
+              onUseAction={onUseAction}
+            />
+          </div>
         )}
       </div>
       <div style={{ minWidth: 140, flex: 'none' }}>
