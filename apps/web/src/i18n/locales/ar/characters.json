@@ -1,5 +1,9 @@
 {
   "characters": {
+    "actions": {
+      "oneTapReady": "جاهز بنقرة واحدة",
+      "textOnly": "نص فقط"
+    },
     "conditionLevel": {
       "raise": "زيادة",
       "lower": "خفض",
