@@ -3720,7 +3720,11 @@ export default function RunSessionPage() {
           // after a preview produced a bare server conflict instead of the gate reason.
           // Scoped to Apply: the server keeps `resolve` (the preview) open during a hold,
           // so the roll/preview controls in this panel stay as they were.
-          applyDisabled={riskyBlocked || safetyHoldActive}
+          // Deliberately NOT `|| safetyHoldActive`: this prop also feeds the panel's
+          // QuickRollButtons, and `/quick-roll` carries no hold guard server-side (only
+          // `apply` does). Folding the hold in here would disable a control the server
+          // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
+          applyDisabled={riskyBlocked}
           applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}

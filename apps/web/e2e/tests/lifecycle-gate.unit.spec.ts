@@ -205,7 +205,12 @@ test.describe('actionApplyGateReason (issue #1933)', () => {
       'utf8',
     );
     expect(page).toMatch(/applyGateReason=\{gateReasonText\(actionApplyGateReason\(\{ safetyHoldActive, riskyBlocked \}\), t\)\}/);
-    expect(page).toMatch(/applyDisabled=\{riskyBlocked \|\| safetyHoldActive\}/);
+    // `applyDisabled` must stay riskyBlocked-only: it also feeds the panel's
+    // QuickRollButtons, and `/quick-roll` carries no server-side hold guard (only `apply`
+    // does), so folding the hold in here would disable a control the server allows. The
+    // hold reaches Apply alone, through `applyGateReason` (issue #1933 review).
+    expect(page).toMatch(/applyDisabled=\{riskyBlocked\}/);
+    expect(page).not.toMatch(/applyDisabled=\{riskyBlocked \|\| safetyHoldActive\}/);
 
     const flow = readFileSync(
       resolve(__dirname, '../../src/features/encounters/ActionUseFlow.tsx'),
@@ -216,6 +221,9 @@ test.describe('actionApplyGateReason (issue #1933)', () => {
     expect(flow).toMatch(/data-testid="action-use-apply"/);
     const quickRolls = flow.slice(flow.indexOf('<QuickRollButtons'), flow.indexOf('<QuickRollButtons') + 400);
     expect(quickRolls).not.toMatch(/applyGateReason/);
+    // ...and the Apply-only blocker lives on the Apply button itself, not in the shared
+    // `applyDisabled` that QuickRollButtons reads.
+    expect(flow).toMatch(/applyDisabled \|\| applyGateReason != null/);
   });
 });
 

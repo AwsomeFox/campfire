@@ -3,6 +3,8 @@
  * sync gate, and the `dmControlsTurns` setting are true at once, without a browser.
  */
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { turnEndGateReason } from '../../src/features/encounters/turnEndGate';
 
 const BASE = {
@@ -68,5 +70,22 @@ test.describe('turnEndGateReason (issue #1933)', () => {
     expect(
       turnEndGateReason({ ...BASE, canEndTurn: false, dmControlsTurns: true, syncBlocked: true }),
     ).toBe('dmControlsTurns');
+  });
+});
+
+/**
+ * The resolver is pure and knows nothing about in-flight requests, so the busy suppression
+ * lives at the adoption site — and a pure test cannot see a component that forgets it
+ * (issue #1933 review). `showButton` must keep keying off the UNsuppressed reason, or an
+ * in-flight request would make the button vanish for a player who had one.
+ */
+test.describe('TurnWorkspace adoption (issue #1933)', () => {
+  test('the end-turn reason is suppressed while busy, but applicability is not', () => {
+    const code = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'),
+      'utf8',
+    );
+    expect(code).toMatch(/const gateReason = gateReasonKey && !busy \? t\(`run\.gate\.\$\{gateReasonKey\}`\) : undefined;/);
+    expect(code).toMatch(/const showButton = turn\.canEndTurn \|\| gateReasonKey != null;/);
   });
 });

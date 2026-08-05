@@ -324,7 +324,12 @@ export function ActionUsePanel({
               >
                 <Btn
                   data-testid="action-use-apply"
-                  disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
+                  // `applyGateReason != null` is the Apply-ONLY blocker (currently the
+                  // safety hold). It must not live in `applyDisabled`, which also feeds
+                  // QuickRollButtons above — `/quick-roll` is not hold-guarded server-side.
+                  disabled={
+                    applyDisabled || applyGateReason != null || commit.isPending || commitSubmitted || preview.applied
+                  }
                   onClick={() => {
                     if (commitSubmitted || commit.isPending) return;
                     commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });

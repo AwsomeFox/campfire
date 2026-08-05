@@ -125,7 +125,12 @@ export function DmLifecycleHeader({
                     it shrinks to the button's content and Start stops matching the hint
                     paragraph's width (issue #1933 review). */}
                 <GatedControl reason={startReason} className="w-full">
+                  {/* `w-full` on BOTH: the wrapper stretches to the column, and the Btn —
+                      a flex item of that inline-flex wrapper with default `flex: 0 1 auto`
+                      — has to be told to fill it, or it sizes to its text and the fix is
+                      only half a fix (issue #1933 review, second round on this line). */}
                   <Btn
+                    className="w-full"
                     disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
                     onClick={onStart}
                     aria-describedby={standingHint ? START_ROSTER_HINT_ID : undefined}
