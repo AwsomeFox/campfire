@@ -2,7 +2,7 @@
  * Form draft storage and shape validation (issue #1986) unit test suite.
  */
 import { expect, test } from '@playwright/test';
-import { normalizeDraft, buildFormDraftEnvelope, readFormDraft, isFormDraftStale } from '../../src/lib/formDraftStorage';
+import { normalizeDraft } from '../../src/lib/formDraftStorage';
 
 test.describe('normalizeDraft (issue #1986)', () => {
   test('fills missing top-level fields from baseline for non-character-sheet forms', () => {
