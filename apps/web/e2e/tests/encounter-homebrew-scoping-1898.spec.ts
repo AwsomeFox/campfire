@@ -125,7 +125,13 @@ test.describe('encounter homebrew scoping (issue #1898)', () => {
     await expect(statblockToggle).toBeVisible();
     await statblockToggle.click();
     await expect(page.getByText("Couldn't load the statblock.")).not.toBeVisible();
-    await expect(page.getByRole('region', { name: 'Creature statblock' })).toBeVisible();
-    await expect(page.getByText('33', { exact: false })).toBeVisible();
+    const statblockRegion = page.getByRole('region', { name: 'Creature statblock' });
+    await expect(statblockRegion).toBeVisible();
+    // Scoped to the statblock region itself — the page also shows "33" elsewhere (the
+    // initiative strip's and the combatant row's own current/max HP), which made an
+    // unscoped page-wide getByText('33') ambiguous (strict-mode violation) even though
+    // the statblock had genuinely rendered.
+    await expect(statblockRegion.getByText('Hit Points', { exact: false })).toBeVisible();
+    await expect(statblockRegion).toContainText('33');
   });
 });
