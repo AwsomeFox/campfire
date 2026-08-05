@@ -1699,12 +1699,12 @@ export function BattleMap({
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
             {effectiveCanDeclareAoe && canAoe && (
               <>
-                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters:map.aoe.label')}:</span>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
+                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters.map.aoe.label')}:</span>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
                 {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
-                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters:map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters:map.aoe.clearPlayers')}</button>
+                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters.map.aoe.clearPlayers')}</button>
                 )}
               </>
             )}
@@ -2656,16 +2656,16 @@ export function BattleMap({
                   </svg>
                 )}
                 {(effectiveCanDmWrite || effectiveCanDeclareAoe) && canAoe &&
-                  aoeTemplates.map((t) => {
-                    const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                    const x = drag ? drag.x : t.x;
-                    const y = drag ? drag.y : t.y;
-                    const declarerName = t.declaredByUserId == null ? null : (aoeDeclarerNames.get(t.declaredByUserId) ?? t.declaredByUserId);
-                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}${declarerName ? ` · ${declarerName}` : ''}`;
+                  aoeTemplates.map((template) => {
+                    const drag = aoeDrag && aoeDrag.id === template.id ? aoeDrag : null;
+                    const x = drag ? drag.x : template.x;
+                    const y = drag ? drag.y : template.y;
+                    const declarerName = template.declaredByUserId == null ? null : (aoeDeclarerNames.get(template.declaredByUserId) ?? template.declaredByUserId);
+                    const aoeLabel = `${template.shape} template · ${template.sizeFt} ${gridUnit}${template.shape !== 'circle' ? ` · ${template.angleDeg}°` : ''}${declarerName ? ` · ${t('encounters.map.aoe.declaredBy', { name: declarerName })}` : ''}`;
                     return (
                       <div
-                        key={t.id}
-                        data-testid={`map-aoe-${t.id}`}
+                        key={template.id}
+                        data-testid={`map-aoe-${template.id}`}
                         role="button"
                         tabIndex={tool === 'move' ? 0 : -1}
                         aria-label={aoeLabel}
@@ -2678,17 +2678,17 @@ export function BattleMap({
                           width: 14,
                           height: 14,
                           borderRadius: '50%',
-                          background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                          background: template.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' && !viewportPan && canEditAoe(t) ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan && canEditAoe(template) ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,
                         }}
-                        onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                        onKeyDown={(e) => onAoeHandleKeyDown(e, t)}
-                        onFocus={() => setSelectedAoeId(t.id)}
+                        onPointerDown={(e) => onAoeHandlePointerDown(e, template)}
+                        onKeyDown={(e) => onAoeHandleKeyDown(e, template)}
+                        onFocus={() => setSelectedAoeId(template.id)}
                         title={`${aoeLabel} — drag to move, click to edit`}
                       />
                     );

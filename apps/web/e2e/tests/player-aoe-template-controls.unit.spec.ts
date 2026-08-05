@@ -20,7 +20,8 @@ test.describe('player AoE template controls (issue #1913)', () => {
   test('player declarations are visibly attributed and the DM can clear only player templates', () => {
     expect(BATTLE_MAP).toContain("strokeDasharray={playerDeclared ? '6 4' : undefined}");
     expect(BATTLE_MAP).toContain('declaredByUserId != null');
-    expect(BATTLE_MAP).toContain('aoeDeclarerNames.get(t.declaredByUserId)');
+    expect(BATTLE_MAP).toContain('aoeDeclarerNames.get(template.declaredByUserId)');
+    expect(BATTLE_MAP).toContain("t('encounters.map.aoe.declaredBy'");
     expect(BATTLE_MAP).toContain('onClearPlayerAoe');
     expect(RUN_SESSION).toContain('clearPlayerAoeTemplates');
     expect(RUN_SESSION).toContain('queryKeys.campaignMembers(cid)');
