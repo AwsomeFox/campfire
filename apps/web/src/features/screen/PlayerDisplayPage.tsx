@@ -1858,36 +1858,52 @@ const SCREEN_CSS = `
 }
 .cf-screen.centered { display: flex; align-items: center; justify-content: center; }
 
-/* Operator control stack (issue #595 wiring preserved verbatim). */
+/* Operator control stack (issue #595 wiring preserved verbatim). Base
+   z-index: 20 -- NOT auto. This stack (position: fixed) shares a stacking
+   context with sibling content this route renders after it in the DOM (the
+   stage: intermission/blackout/party/combat views, several of which are
+   themselves position: absolute|fixed with no z-index of their own, e.g.
+   .cf-blackout). Two position:*, z-index:auto siblings stack by DOM order,
+   and this div is emitted BEFORE that content -- so leaving it at auto (as
+   round 12 did, to get it under the curtain) let the stage paint on TOP of
+   it, silently covering and disabling every operator button on BOTH routes
+   (round 13 finding: broken controls are worse than the curtain-coverage
+   gap round 12 was chasing). 20 is comfortably above ordinary in-flow/stage
+   content and, just as importantly, comfortably BELOW --cf-layer-dialog
+   (50): on the authenticated route this keeps the stack under the safety
+   curtain, same as every other authenticated control, without needing an
+   auto/no-z-index fallback to get there. */
 .cf-screen .cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
   width: min(460px, calc(100vw - 28px));
+  z-index: 20;
   opacity: 1;
   pointer-events: auto;
   transition: opacity 0.4s ease;
 }
-/* z-index sits ABOVE --cf-layer-dialog (issue #1908) -- but ONLY on the
-   cast/kiosk route (data-cast-mode="true"), and only for what actually
-   renders there: the Exit-kiosk button and the fullscreen/wake-lock
-   notices. role !== 'dm' in cast mode, so the DM cockpit block below never
-   renders here regardless. The safety curtain (.cf-safety-display, same
-   tier as every other dialog) is also this page's fail-safe DEFAULT before
-   the first /safety poll succeeds, and can persist indefinitely if that
-   poll keeps failing. On the cast/kiosk route "Exit kiosk" is the ONLY
-   affordance a touch-only shared TV has -- a curtain that outranks it
-   would strand the device with no way to leave kiosk mode without a
-   second device. .cf-exit-pin (the PIN dialog this stack opens) sits one
-   tier higher still, so it in turn is never trapped under this stack once
-   open.
+/* On the cast/kiosk route ONLY (data-cast-mode="true"), raise ABOVE
+   --cf-layer-dialog (issue #1908) instead of the baseline 20 above -- and
+   only for what actually renders there: the Exit-kiosk button and the
+   fullscreen/wake-lock notices (role !== 'dm' in cast mode, so the DM
+   cockpit block below never renders here regardless). The safety curtain
+   (.cf-safety-display, same tier as every other dialog) is also this
+   page's fail-safe DEFAULT before the first /safety poll succeeds, and can
+   persist indefinitely if that poll keeps failing. On the cast/kiosk route
+   "Exit kiosk" is the ONLY affordance a touch-only shared TV has -- a
+   curtain that outranks it would strand the device with no way to leave
+   kiosk mode without a second device. .cf-exit-pin (the PIN dialog this
+   stack opens) sits one tier higher still, so it in turn is never trapped
+   under this stack once open.
    On the AUTHENTICATED route, this same div also carries the DM cockpit
    (scene picker, paging, aspect toggle) -- that must stay under the
-   curtain like every other authenticated control, so an active X-Card
-   still blanks the whole operator surface it is meant to cover, matching
-   the pre-#1908 authed overlay behavior exactly. Leaving this rule
-   unconditional here regressed that (round 12 finding): scope it to
-   cast mode only. */
+   curtain (the base rule's z-index: 20, well below --cf-layer-dialog's 50,
+   already achieves this) like every other authenticated control, so an
+   active X-Card still blanks the whole operator surface it is meant to
+   cover, matching the pre-#1908 authed overlay behavior exactly (round 12
+   finding, still fixed -- just not by dropping the base z-index to auto,
+   which is what broke this route's controls in round 13). */
 .cf-screen .cf-screen-control-stack[data-cast-mode="true"] {
   z-index: calc(var(--cf-layer-dialog, 50) + 1);
 }
@@ -2097,6 +2113,7 @@ const SCREEN_CSS = `
   gap: 2.4cqw;
   font-size: max(15px, 2.7cqh);
   color: var(--color-neutral-200);
+  pointer-events: none;
 }
 .cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
 .cf-screen .cf-status-round { font-weight: 600; }
