@@ -1352,6 +1352,10 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
   -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
   terms TEXT,
+  -- Issue #1904: optional identity ties so the read path can redact a roll whose named
+  -- encounter/NPC becomes hidden AFTER the roll was written — null for most rolls.
+  encounter_id INTEGER,
+  npc_id INTEGER,
   created_at TEXT NOT NULL
 );
 

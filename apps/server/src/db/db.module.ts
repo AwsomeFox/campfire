@@ -925,6 +925,25 @@ function migrateDiceRollsTableForManualProvenance(sqlite: Database.Database): vo
 }
 
 /**
+ * Migration for DBs created before issue #1904's read-time roll redaction:
+ * `dice_rolls.encounter_id` / `dice_rolls.npc_id` didn't exist. Plain nullable ADD
+ * COLUMNs — no table rebuild needed, same shape as
+ * migrateDiceRollsTableForManualProvenance above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares both columns.
+ */
+function migrateDiceRollsTableForEncounterNpcRefs1904(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('encounter_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN encounter_id INTEGER');
+  if (!has('npc_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN npc_id INTEGER');
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -4999,6 +5018,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0157_campaigns_latest_session_number_841', run: migrateCampaignsTableForLatestSessionNumber },
   { name: '0158_encounters_aftermath_mutations_1448', run: migrateEncountersTableForAftermathMutations1448 },
   { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
+  { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
 ];
 
 /**

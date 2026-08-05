@@ -14,11 +14,14 @@ import {
   encounterEvents as encounterEventsTable,
   diceRolls,
   combatantRemovalUndos,
+  encounterOpIdempotency,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AuditService } from '../src/modules/audit/audit.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
 import { RollsService } from '../src/modules/rolls/rolls.service';
+import { UNKNOWN_COMBATANT_LABEL } from '../src/modules/encounters/encounters.logic';
+import { encounterOpFingerprint } from '../src/modules/encounters/encounter-idempotency';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const otherDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-2' };
@@ -669,18 +672,40 @@ describe('encounters (e2e)', () => {
       expect(res.status).toBe(403);
     });
 
-    it('player can set initiative on their own combatant (#1457)', async () => {
+    // Issue #1904 (review finding): #1457 originally let a player PATCH ANY initiative
+    // value onto their own combatant. Once server-authoritative rolling shipped (POST
+    // .../roll-initiative), that manual path became a bypass of the server RNG,
+    // idempotency, and dice-log evidence — a disabled button in the UI, not a server
+    // rule. A player rolling their own combatant's initiative now must go through the
+    // dedicated roll endpoint; this manual PATCH is DM-only even for the owning player.
+    it('player CANNOT set initiative via manual PATCH on their own combatant — DM-only (issue #1904, was #1457)', async () => {
       const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const ariaBefore = (before.body.combatants as Array<{ id: number; initiative: number | null }>).find(
+        (c) => c.id === ariaCombatantId,
+      );
       const res = await request(server)
         .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
         .set(player)
         .send({ initiative: 5 });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: 'COMBATANT_FIELD_DM_ONLY' });
       const get = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
       const aria = (get.body.combatants as Array<{ id: number; initiative: number | null }>).find(
         (c) => c.id === ariaCombatantId,
       );
-      expect(aria?.initiative).toBe(5);
+      // Confirm it's truly a no-op, not a partial/silent apply.
+      expect(aria?.initiative).toBe(ariaBefore?.initiative ?? null);
+    });
+
+    it('dm can still manually set initiative on any combatant, including a player-owned one', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ initiative: 5 });
+      expect(res.status).toBe(200);
+      expect(res.body.initiative).toBe(5);
     });
 
     it('player cannot modify a monster combatant (not theirs)', async () => {
@@ -4853,6 +4878,718 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     } finally {
       rollSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1904 — server-authoritative per-combatant initiative rolls, and the
+// DM's bulk roll landing in the shared campaign dice log.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-log evidence (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let ariaCombatantId: number; // owned by dev:p-1
+  let zedCombatantId: number; // owned by dev:p-2
+  let monsterCombatantId: number; // DM-only, no linked character
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Initiative Table' })).body.id;
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria', stats: { DEX: 16 }, hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Zed', stats: { DEX: 10 }, hpCurrent: 18, hpMax: 18, ownerUserId: 'dev:p-2' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'First Blood', hidden: false });
+    encounterId = encounter.body.id;
+    const seededCombatants = encounter.body.combatants as Array<{ id: number; name: string }>;
+    ariaCombatantId = seededCombatants.find((c) => c.name === 'Aria')!.id;
+    zedCombatantId = seededCombatants.find((c) => c.name === 'Zed')!.id;
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Kobold', hpMax: 5 });
+    monsterCombatantId = monster.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Every "<name> · Initiative" row currently in the campaign's shared dice log. */
+  async function initiativeRolls(): Promise<Array<{ label?: string; total?: number }>> {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    return (res.body as Array<{ label?: string; total?: number }>).filter((roll) => (roll.label ?? '').endsWith('· Initiative'));
+  }
+
+  it("a viewer and a non-owning player cannot roll another combatant's initiative; a player cannot roll an unlinked (DM-only) combatant", async () => {
+    const server = ctx.app.getHttpServer();
+    const viewerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(viewer)
+      .send({ idempotencyKey: 'aria-viewer-attempt' });
+    expect(viewerAttempt.status).toBe(403);
+
+    const otherPlayerAttempt = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send({ idempotencyKey: 'aria-other-player-attempt' });
+    expect(otherPlayerAttempt.status).toBe(403);
+
+    const monsterByPlayer = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'kobold-player-attempt' });
+    expect(monsterByPlayer.status).toBe(403);
+  });
+
+  it("the owning player can roll their own combatant's initiative — value, breakdown, combat-log event, and dice-log row all appear", async () => {
+    const server = ctx.app.getHttpServer();
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'aria-owner-roll' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatant).toMatchObject({ id: ariaCombatantId, name: 'Aria' });
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.combatant.initiativeBreakdown).toMatchObject({ total: res.body.combatant.initiative });
+    expect(res.body.roll).toMatchObject({ label: 'Aria · Initiative', total: res.body.combatant.initiative });
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    expect(events.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'roll', targetId: ariaCombatantId, detail: expect.stringContaining('initiative') }),
+      ]),
+    );
+
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + 1);
+    expect(afterRolls.some((r) => r.label === 'Aria · Initiative')).toBe(true);
+  });
+
+  it('the DM can roll any combatant, including one with no linked character', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'kobold-dm-roll' });
+    expect(res.status).toBe(201);
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.roll).toMatchObject({ label: 'Kobold · Initiative' });
+  });
+
+  it('a second roll on the same combatant 409s; the DM can pass overwrite to re-roll', async () => {
+    const server = ctx.app.getHttpServer();
+    // Aria already rolled in the prior test.
+    const playerRetry = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(player)
+      .send({ idempotencyKey: 'aria-second-roll' });
+    expect(playerRetry.status).toBe(409);
+
+    const dmWithoutOverwrite = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-dm-without-overwrite' });
+    expect(dmWithoutOverwrite.status).toBe(409);
+
+    const overwrite = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-dm-overwrite', overwrite: true });
+    expect(overwrite.status).toBe(201);
+    expect(typeof overwrite.body.combatant.initiative).toBe('number');
+    expect(overwrite.body.roll).toMatchObject({ label: 'Aria · Initiative' });
+  });
+
+  it('replaying the same idempotencyKey returns the original result and inserts no duplicate rows', async () => {
+    const server = ctx.app.getHttpServer();
+    const beforeRolls = await initiativeRolls();
+    const body = { idempotencyKey: 'zed-replay-key' };
+
+    const first = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${zedCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send(body);
+    expect(first.status).toBe(201);
+
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${zedCombatantId}/roll-initiative`)
+      .set(otherPlayer)
+      .send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + 1);
+  });
+
+  it('rolls back the initiative write when the matching dice-log entry cannot persist (transactional pairing, issue #1462 precedent)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Rollback Check', hidden: false });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const freshCombatantId = (freshEncounter.body.combatants as Array<{ id: number; name: string }>).find((c) => c.name === 'Aria')!.id;
+    const rolls = ctx.app.get(RollsService);
+    const recordSpy = jest.spyOn(rolls, 'recordInTransaction').mockImplementation(() => {
+      throw new Error('simulated dice storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${freshEncounterId}/combatants/${freshCombatantId}/roll-initiative`)
+        .set(player)
+        .send({ idempotencyKey: 'aria-rollback-check' });
+      expect(res.status).toBe(500);
+      const after = await request(server).get(`/api/v1/encounters/${freshEncounterId}`).set(dm);
+      const combatant = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === freshCombatantId)!;
+      expect(combatant.initiative).toBeNull();
+    } finally {
+      recordSpy.mockRestore();
+    }
+  });
+
+  it('a hidden encounter DM roll writes initiative but no dice-log row (the dice log is campaign-wide)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ambush Prep', hidden: true });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const freshCombatantId = (freshEncounter.body.combatants as Array<{ id: number; name: string }>).find((c) => c.name === 'Aria')!.id;
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants/${freshCombatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'aria-hidden-roll' });
+    expect(res.status).toBe(201);
+    expect(typeof res.body.combatant.initiative).toBe('number');
+    expect(res.body.roll).toBeNull();
+
+    expect(await initiativeRolls()).toHaveLength(beforeRolls.length);
+  });
+
+  it('a DM bulk roll produces one dice-log row per rolled combatant; a fully-rolled roster inserts nothing', async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll Table', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const combatantIds = (bulkEncounter.body.combatants as Array<{ id: number }>).map((c) => c.id);
+    expect(combatantIds.length).toBeGreaterThan(0);
+
+    const beforeRolls = await initiativeRolls();
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBe(combatantIds.length);
+    const afterRolls = await initiativeRolls();
+    expect(afterRolls).toHaveLength(beforeRolls.length + combatantIds.length);
+
+    // Fully-rolled roster: no additional write, no additional dice-log rows.
+    const noop = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(noop.status).toBe(201);
+    expect(noop.body.rolledCount).toBe(0);
+    expect(await initiativeRolls()).toHaveLength(afterRolls.length);
+  });
+
+  it("a hidden encounter's bulk roll produces no dice-log rows", async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Hidden Bulk Roll', hidden: true });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const beforeRolls = await initiativeRolls();
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBeGreaterThan(0);
+    expect(await initiativeRolls()).toHaveLength(beforeRolls.length);
+  });
+
+  // Issue #1904 review finding (devin-ai-integration / chatgpt-codex-connector): the dice
+  // log is campaign-wide with NO read-time redaction (unlike the roster/combat-log reads,
+  // which mask a hidden-NPC combatant's identity). Both new initiative dice-log writes
+  // must apply the same masking the quick-roll dice log already does for issue #1850.
+  it("a hidden-NPC combatant's per-combatant initiative roll masks its identity in the shared dice log", async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Shadowbrand', hidden: true })
+    ).body.id;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Shadowbrand', hpMax: 30 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'shadowbrand-hidden-roll' });
+    expect(res.status).toBe(201);
+    expect(res.body.roll).toMatchObject({ label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` });
+
+    const rolls = await initiativeRolls();
+    expect(rolls.some((r) => r.label === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+    expect(rolls.some((r) => (r.label ?? '').includes('Shadowbrand'))).toBe(false);
+  });
+
+  it("a hidden-NPC combatant's initiative is masked in the shared dice log for a DM bulk roll too", async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Nightveil', hidden: true })
+    ).body.id;
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll With Hidden NPC', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${bulkEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Nightveil', hpMax: 30 });
+    expect(combatant.status).toBe(201);
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBeGreaterThan(0);
+
+    const rolls = await initiativeRolls();
+    expect(rolls.some((r) => r.label === `${UNKNOWN_COMBATANT_LABEL} · Initiative`)).toBe(true);
+    expect(rolls.some((r) => (r.label ?? '').includes('Nightveil'))).toBe(false);
+  });
+
+  // Issue #1904 review finding (chatgpt-codex-connector): a DM's PATCH to initMod after
+  // creation touches only that column — the stored initiativeBreakdown.terms from creation
+  // are left stale. Rolling afterward must rebuild the terms against the CURRENT modifier,
+  // not reuse the stale ones, or the displayed formula visibly contradicts its own total.
+  it('an initMod edit before rolling produces a formula/terms that actually match the new modifier and total (per-combatant roll)', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Drift Test Monster', hpMax: 10, initMod: 2 });
+    expect(created.status).toBe(201);
+    const combatantId = created.body.id as number;
+
+    // Edit the modifier AFTER creation — only initMod changes; the breakdown seeded at
+    // creation time (terms summing to the OLD modifier, 2) is left untouched by this PATCH.
+    const edit = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ initMod: 5 });
+    expect(edit.status).toBe(200);
+    expect(edit.body.initMod).toBe(5);
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'drift-test-monster-roll' });
+    expect(res.status).toBe(201);
+    const breakdown = res.body.combatant.initiativeBreakdown as {
+      modifier: number;
+      roll: number;
+      total: number;
+      terms: Array<{ label: string; value: number }>;
+      formula: string;
+    };
+    expect(breakdown.modifier).toBe(5);
+    expect(breakdown.total).toBe(breakdown.roll + breakdown.modifier);
+    // The core regression: terms must sum to the CURRENT modifier, never the stale one.
+    expect(breakdown.terms.reduce((sum, t) => sum + t.value, 0)).toBe(5);
+    expect(breakdown.formula).not.toContain('initiative +2');
+  });
+
+  it('an initMod edit before rolling also produces matching terms via the DM bulk roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const bulkEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Bulk Roll Drift Test', hidden: false });
+    const bulkEncounterId = bulkEncounter.body.id as number;
+    const created = await request(server)
+      .post(`/api/v1/encounters/${bulkEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Bulk Drift Monster', hpMax: 10, initMod: 1 });
+    expect(created.status).toBe(201);
+    const combatantId = created.body.id as number;
+
+    const edit = await request(server)
+      .patch(`/api/v1/encounters/${bulkEncounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ initMod: 4 });
+    expect(edit.status).toBe(200);
+
+    const res = await request(server).post(`/api/v1/encounters/${bulkEncounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    const combatant = (res.body.combatants as Array<{ id: number; initiative: number; initiativeBreakdown: { modifier: number; roll: number; total: number; terms: Array<{ label: string; value: number }>; formula: string } }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(combatant.initiativeBreakdown.modifier).toBe(4);
+    expect(combatant.initiativeBreakdown.total).toBe(combatant.initiativeBreakdown.roll + combatant.initiativeBreakdown.modifier);
+    expect(combatant.initiativeBreakdown.terms.reduce((sum, t) => sum + t.value, 0)).toBe(4);
+    expect(combatant.initiativeBreakdown.formula).not.toContain('initiative +1');
+  });
+
+  // Issue #1904 review finding (devin-ai-integration): the idempotent replay stored the
+  // full response body under the key and replayed it verbatim, without checking whether the
+  // CALLER's role still matches the role it was rendered for. Dev-auth's role header IS the
+  // effective role per request (no DB membership row backs it — same #1636 precedent used
+  // elsewhere in this file), so sending the SAME dev-user with a different `x-dev-role` on a
+  // later request faithfully simulates "demoted mid-session, same identity" without needing
+  // a real membership change.
+  it("a demoted replay of a DM-issued roll key receives the DEMOTED role's redacted projection, not the DM's raw one", async () => {
+    const server = ctx.app.getHttpServer();
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Replay Secrecy Monster', hpMax: 40 });
+    expect(monster.status).toBe(201);
+    const monsterCombatantId2 = monster.body.id as number;
+    const idempotencyKey = 'replay-secrecy-dm-roll';
+
+    // DM rolls (a player could never roll this monster fresh — no linked character).
+    const dmRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId2}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(dmRoll.status).toBe(201);
+    expect(dmRoll.body.combatant.hpCurrent).toBe(40); // DM sees the exact number
+    expect(dmRoll.body.combatant.hpBand).toBeNull();
+
+    // Same identity (dm-1), demoted to player on this later request.
+    const demotedDm = { 'x-dev-role': 'player', 'x-dev-user': 'dm-1' };
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId2}/roll-initiative`)
+      .set(demotedDm)
+      .send({ idempotencyKey });
+    expect(replay.status).toBe(201);
+    // The core regression: the demoted replay must NOT carry the DM's raw HP through.
+    expect(replay.body.combatant.hpCurrent).toBeNull();
+    expect(replay.body.combatant.hpBand).toBe('healthy');
+    // Same roll outcome either way (the roll already committed) — only the projection differs.
+    expect(replay.body.combatant.initiative).toBe(dmRoll.body.combatant.initiative);
+    expect(replay.body.roll).toEqual(dmRoll.body.roll);
+  });
+
+  // Issue #1904 review finding (devin-ai-integration): the role-aware replay above can find a
+  // recorded op whose stored response cannot be re-shown to ANY caller (e.g. a claim recorded
+  // before its body was backfilled — same "crash in the moment between commit and backfill"
+  // class the turn-advance idempotency helper already documents). Before this fix, falling
+  // through past that unresolvable replay dereferenced `freshEncounterRow` — never assigned on
+  // this branch, since the write path that assigns it is exactly what a replay skips — and
+  // 500'd instead of failing cleanly. This is the branch nobody exercises by hand: it requires
+  // an already-recorded claim reached from INSIDE the write transaction's own dedup check,
+  // which normally only happens on a genuine concurrent race. A directly-seeded incomplete
+  // claim row reproduces the same "recorded but unrenderable" condition deterministically.
+  it('a recorded roll claim that cannot be re-rendered for the caller 404s cleanly instead of 500ing', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Unrenderable Replay Monster', hpMax: 12 });
+    expect(monster.status).toBe(201);
+    const combatantId = monster.body.id as number;
+    const idempotencyKey = 'unrenderable-replay-claim';
+
+    // Seed an already-committed-looking claim whose response was never backfilled (responseJson
+    // null) — the same "claim committed, body missing" state the turn-advance path's own
+    // comments anticipate, reachable in practice via the in-transaction race branch this fix
+    // guards.
+    await db.insert(encounterOpIdempotency).values({
+      actorId: 'dev:dm-1',
+      operation: 'combatant.roll_initiative',
+      key: idempotencyKey,
+      encounterId,
+      campaignId,
+      fingerprint: encounterOpFingerprint({ combatantId, overwrite: false }),
+      responseJson: null,
+      responseRole: null,
+      createdAt: new Date().toISOString(),
+    });
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(res.status).toBe(404); // not 500
+    // Not re-rolled either — the pre-existing (if incomplete) claim is honored, not overwritten.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatant = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === combatantId);
+    expect(combatant?.initiative).toBeNull();
+  });
+
+  // Issue #1904 review finding (codex, P1): a write-time-only secrecy check cannot react to
+  // an encounter or NPC becoming hidden AFTER a roll naming it was already persisted. The
+  // shared campaign-wide dice log must be redacted at READ time against CURRENT visibility.
+  it('rolling in a visible encounter, then hiding the ENCOUNTER, immediately removes the roll from a non-DM read (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+    const freshEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Later-Hidden Encounter', hidden: false });
+    const freshEncounterId = freshEncounter.body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Later-Hidden Monster', hpMax: 8 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    // Roll while visible — the raw name is safe to persist right now.
+    const roll = await request(server)
+      .post(`/api/v1/encounters/${freshEncounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'later-hidden-encounter-roll' });
+    expect(roll.status).toBe(201);
+
+    const beforeHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(beforeHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(true);
+
+    // Hide the encounter — nothing about the ALREADY-WRITTEN roll changes on disk.
+    const hide = await request(server).patch(`/api/v1/encounters/${freshEncounterId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    // The core regression: a player's very next read no longer contains it.
+    const afterHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(false);
+
+    // The DM still sees it — this is a non-DM read redaction, not data loss.
+    const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden Monster'))).toBe(true);
+  });
+
+  it('rolling for a visible NPC, then hiding the NPC, masks the roll label on a non-DM read but keeps the row (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Later-Hidden NPC', hidden: false })
+    ).body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Later-Hidden NPC', hpMax: 20 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+
+    const roll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'later-hidden-npc-roll' });
+    expect(roll.status).toBe(201);
+
+    const beforeHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(beforeHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
+
+    const hide = await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    const afterHide = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    // The name is gone...
+    expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(false);
+    // ...but the row itself is not (the encounter is still visible — only the NPC's identity
+    // is secret, same as the roster/combat-log masking rule this mirrors).
+    const masked = (afterHide.body as Array<{ label?: string; npcId?: number }>).find(
+      (r) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`,
+    );
+    expect(masked).toBeDefined();
+    // Issue #1904 review finding (reported 3x): the label alone is not enough — npcId is a
+    // stable handle that would let a player correlate this roll with a LATER reveal of the
+    // same NPC. It must be nulled out, not just the display name.
+    expect(masked?.npcId).toBeUndefined();
+
+    const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
+    // The DM still gets the real npcId — this is a non-DM redaction, not data loss.
+    expect(dmView.body.some((r: { npcId?: number }) => r.npcId === npcId)).toBe(true);
+  });
+
+  // Issue #1904 review finding (P1): the idempotent replay's `roll` half was reused verbatim
+  // across a role change — the SAME gap the `combatant` half was already fixed for. A DM
+  // rolls for a visible NPC, the NPC is later hidden, the DM is demoted, and a replay of the
+  // same idempotency key must come back re-redacted for the caller's CURRENT role, not the
+  // stale unmasked label the original DM roll produced.
+  it('a replayed idempotency key is re-redacted for the demoted caller — the dice-log label too, not just the combatant', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Replay Redact NPC', hidden: false })
+    ).body.id as number;
+    const combatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId, name: 'Replay Redact NPC', hpMax: 15 });
+    expect(combatant.status).toBe(201);
+    const combatantId = combatant.body.id as number;
+    const idempotencyKey = 'replay-redact-after-hide-and-demote';
+
+    // DM rolls while the NPC is still visible — the raw label/npcId are legitimately part of
+    // the DM's own committed response at this moment.
+    const dmRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey });
+    expect(dmRoll.status).toBe(201);
+    expect(dmRoll.body.roll.label).toContain('Replay Redact NPC');
+    expect(dmRoll.body.roll.npcId).toBe(npcId);
+
+    // Hide the NPC, then replay the SAME key as the SAME identity demoted to player (dev-auth's
+    // role header is the effective role per request — same #1636 pattern used elsewhere here).
+    const hide = await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+    const demotedDm = { 'x-dev-role': 'player', 'x-dev-user': 'dm-1' };
+    const replay = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(demotedDm)
+      .send({ idempotencyKey });
+    expect(replay.status).toBe(201);
+    // The core regression: the replay's roll payload is re-redacted for the CURRENT
+    // (demoted) role, not reused verbatim from the original DM-rendered response.
+    expect(replay.body.roll.label).not.toContain('Replay Redact NPC');
+    expect(replay.body.roll.label).toBe(`${UNKNOWN_COMBATANT_LABEL} · Initiative`);
+    expect(replay.body.roll.npcId).toBeUndefined();
+  });
+
+  // Issue #1904 review finding (P2 + duplicate): applying the SQL LIMIT before redaction can
+  // hand back a short page while older VISIBLE rolls exist just past the cutoff. Force that
+  // shape directly: the newest rolls in the campaign are all tied to a combatant whose NPC
+  // gets hidden, an OLDER roll stays visible, and a tight limit must still surface it.
+  it('a tight limit still returns a visible roll when the ABSOLUTE NEWEST row gets redacted out entirely (issue #1904 review finding)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // An older, permanently-visible roll — establishes that SOMETHING visible exists in the
+    // campaign before the newest row (below) gets hidden out from under a tight limit.
+    const olderEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Limit Test Older Encounter', hidden: false });
+    const olderMonster = await request(server)
+      .post(`/api/v1/encounters/${olderEncounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Limit Test Older Monster', hpMax: 5 });
+    const olderRoll = await request(server)
+      .post(`/api/v1/encounters/${olderEncounter.body.id}/combatants/${olderMonster.body.id}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'limit-test-older-roll' });
+    expect(olderRoll.status).toBe(201);
+
+    // The newest roll in the whole campaign — the one a naive "LIMIT before redaction" query
+    // would fetch for a limit=1 request. Hiding its encounter drops the row ENTIRELY (unlike
+    // the NPC-hidden case above, which only masks the label and keeps the row) — this is the
+    // shape that can turn a limit=1 request into an EMPTY page pre-fix, not just a short one.
+    const newestEncounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Limit Test Newest Encounter', hidden: false });
+    const newestMonster = await request(server)
+      .post(`/api/v1/encounters/${newestEncounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Limit Test Newest Monster', hpMax: 5 });
+    const newestRoll = await request(server)
+      .post(`/api/v1/encounters/${newestEncounter.body.id}/combatants/${newestMonster.body.id}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'limit-test-newest-roll' });
+    expect(newestRoll.status).toBe(201);
+
+    const hide = await request(server).patch(`/api/v1/encounters/${newestEncounter.body.id}`).set(dm).send({ hidden: true });
+    expect(hide.status).toBe(200);
+
+    // A tight limit of 1: before this fix, the DB-level LIMIT applied BEFORE redaction would
+    // fetch exactly the newest row (now hidden), redaction would drop it, and the response
+    // would be an empty array despite the older roll still being visible. After this fix, the
+    // candidate window is redacted FIRST and the page is taken from what survives.
+    const limited = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=1`).set(player);
+    expect(limited.status).toBe(200);
+    expect(limited.body).toHaveLength(1);
+    expect(limited.body[0].id).not.toBe(newestRoll.body.roll.id); // the hidden one must not leak through
+  });
+});
+
+describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE under group initiative', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Old-School Table' })).body.id;
+    // 'old-school-essentials' resolves to a native OSR adapter with group initiative
+    // (issue #765) purely from the ruleSystem string — no installed rule pack required
+    // for combat math. PATCH /campaigns validates ruleSystem against an installed pack
+    // slug, so this writes the column directly, matching this file's existing
+    // rulePacks/ruleEntries direct-DB seeding convention.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'old-school-essentials' }).where(eq(campaigns.id, campaignId));
+
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Rook', hpCurrent: 8, hpMax: 8, ownerUserId: 'dev:p-1' });
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Wren', hpCurrent: 8, hpMax: 8, ownerUserId: 'dev:p-2' });
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Group Initiative Skirmish', hidden: false });
+    encounterId = encounter.body.id;
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Bandit A', hpMax: 4 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Bandit B', hpMax: 4 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rolls one d6 dice-log row per SIDE, not per combatant (2 party + 2 monsters -> 2 rows)', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    const beforeCount = (before.body as Array<{ label?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative')).length;
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBe(4); // 2 party + 2 monsters, each combatant gets a value
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    const initiativeRows = (after.body as Array<{ label?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative'));
+    // One row per SIDE (party, monsters), not one per combatant.
+    expect(initiativeRows).toHaveLength(beforeCount + 2);
+    expect(initiativeRows.map((r) => r.label).sort()).toEqual(['Monsters · Initiative', 'Party · Initiative']);
+
+    // Every combatant on the same side shares the exact same rolled value.
+    const encAfter = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatants = encAfter.body.combatants as Array<{ name: string; initiative: number }>;
+    const partyInit = combatants.filter((c) => c.name === 'Rook' || c.name === 'Wren').map((c) => c.initiative);
+    const monsterInit = combatants.filter((c) => c.name === 'Bandit A' || c.name === 'Bandit B').map((c) => c.initiative);
+    expect(new Set(partyInit).size).toBe(1);
+    expect(new Set(monsterInit).size).toBe(1);
+  });
+
+  it('the per-combatant roll-initiative endpoint 400s under group initiative — a side shares one roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatantId = (enc.body.combatants as Array<{ id: number }>)[0].id;
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantId}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'group-mode-per-combatant-rejected' });
+    expect(res.status).toBe(400);
   });
 });
 

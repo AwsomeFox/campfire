@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, DeathSaveRollRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -33,6 +33,7 @@ export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {
 export class CombatantUpdateDto extends createZodDto(CombatantUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 export class CombatantRemoveRequestDto extends createZodDto(CombatantRemoveRequest.strict().default({})) {}
 export class DeathSaveRollDto extends createZodDto(DeathSaveRollRequest.strict()) {}
+export class CombatantRollInitiativeDto extends createZodDto(CombatantRollInitiativeRequest.strict()) {}
 export class CombatantRemoveUndoDto extends createZodDto(CombatantRemoveUndo.strict()) {}
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
 export class ActionRollRequestDto extends createZodDto(ActionRollRequest.strict()) {}

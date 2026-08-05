@@ -10370,6 +10370,26 @@ export const DeathSaveRollRequest = z.object({
 export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**
+ * Body for the server-authoritative per-combatant initiative roll (issue #1904). The
+ * caller supplies no die result — the server rolls `adapter.initiativeDie + initMod`,
+ * writes the roll + its breakdown, and records one matching campaign-shared dice-log
+ * entry (skipped only for a hidden encounter, since the dice log is campaign-wide). A
+ * combatant that already has initiative set 409s unless `overwrite` is sent by the DM.
+ * 400s for a group-initiative rule system — a side shares one roll, which stays
+ * exclusively the DM's bulk `POST /encounters/:id/roll-initiative`.
+ */
+export const CombatantRollInitiativeRequest = z.object({
+  // Same replay contract as DeathSaveRollRequest: a lost-response retry replays the
+  // committed roll instead of rolling again.
+  idempotencyKey: z.string().min(1).max(128),
+  // DM-only escape hatch to re-roll a combatant that already has initiative set. A
+  // non-DM caller sending this is still 409'd server-side — the field is silently
+  // ignored rather than granting a player overwrite power via a body flag.
+  overwrite: z.boolean().optional(),
+});
+export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiativeRequest>;
+
+/**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
  * When the sheet advanced after /end, the DM must choose a resync direction before
  * reopening — never silently overwrite intervening healing/rest.
@@ -11047,6 +11067,18 @@ export const RollResult = z.object({
   actor: z.string().max(120).optional(),
   /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
   natural20: z.number().int().min(1).max(20).optional(),
+  /**
+   * Issue #1904 review finding: the encounter/NPC this roll's identity is tied to, when
+   * applicable (currently: per-combatant and bulk initiative rolls). A write-time-only
+   * secrecy check cannot react to the encounter or NPC becoming hidden LATER — the label was
+   * safe to persist when written but the entity it names may not stay visible. Carrying these
+   * ids lets the read path (`RollsService.listForCampaign`) re-check CURRENT visibility and
+   * redact accordingly, instead of baking a permanent, unredactable name into the shared log.
+   * Absent for the vast majority of rolls (checks, quick-rolls, saves, …), which have no such
+   * identity tie and are unaffected.
+   */
+  encounterId: z.number().int().positive().optional(),
+  npcId: z.number().int().positive().optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 
