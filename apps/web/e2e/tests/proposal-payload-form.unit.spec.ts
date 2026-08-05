@@ -515,3 +515,43 @@ test.describe('proposalPayloadForm: empty string vs null (issue #769 review)', (
     expect(diffProposalChangedKeys(original, data)).toEqual(['portraitUrl']);
   });
 });
+
+test.describe('proposalPayloadForm: the draft goes stale exactly where build errors are (issue #769 review)', () => {
+  const fields = describeProposalFields(QuestUpdate);
+  const jsonKeys = jsonFieldKeys(QuestUpdate);
+  const original = { title: 'Old title', giverNpcId: 7 };
+
+  test('an emptied required field leaves the ORIGINAL value in the draft, not the typed emptiness', () => {
+    // This is why switchToAdvanced must refuse: serializing this draft would write
+    // "title": "Old title" back over the reviewer's deletion.
+    const text = initProposalFieldText(describeProposalFields(QuestCreate), jsonFieldKeys(QuestCreate), original);
+    const bool = initProposalFieldBool(describeProposalFields(QuestCreate), original);
+    const built = buildProposalDraftPayload(
+      describeProposalFields(QuestCreate),
+      jsonFieldKeys(QuestCreate),
+      { ...text, title: '' },
+      bool,
+      original,
+    );
+    expect(built.fieldErrors.title).toBeTruthy();
+    expect(built.data.title).toBe('Old title');
+  });
+
+  test('non-numeric text in a number box does the same', () => {
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const built = buildProposalDraftPayload(fields, jsonKeys, { ...text, giverNpcId: 'abc' }, bool, original);
+    expect(built.fieldErrors.giverNpcId).toBeTruthy();
+    expect(built.data.giverNpcId).toBe(7);
+  });
+
+  test('a merely SCHEMA-invalid scalar DOES carry the typed value, so switching stays lossless', () => {
+    // The other side of the predicate: these produce no build error, the typed value is in
+    // the draft, and blocking the switch would trap the reviewer in the guided editor.
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const built = buildProposalDraftPayload(fields, jsonKeys, { ...text, title: 'x'.repeat(500) }, bool, original);
+    expect(built.fieldErrors).toEqual({});
+    expect(built.data.title).toBe('x'.repeat(500));
+  });
+});

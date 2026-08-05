@@ -20,6 +20,7 @@
 import { forwardRef, useImperativeHandle, useMemo, useState } from 'react';
 import { TextArea, TextInput } from '../../components/ui';
 import {
+  buildProposalDraftPayload,
   computeGuidedProposalPreview,
   computeProposalPreviewFromData,
   humanizeFieldKey,
@@ -121,34 +122,30 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     const preview = mode === 'guided' ? guidedPreview : advancedPreview;
 
     function switchToAdvanced() {
-      // Refuse the switch only when a per-field JSON box genuinely fails to PARSE, and show
-      // the error when refusing (review — the first version of this guard was wrong in both
-      // directions).
+      // Refuse the switch when the draft does NOT hold what the reviewer typed (review).
       //
-      // Only unparseable text is lossy: there, `data[key]` still holds the value seeded from
-      // the working payload, so serializing the draft would replace what the reviewer typed.
-      // A parseable-but-schema-invalid value is different — the draft holds exactly what they
-      // typed, so the switch is lossless, and blocking it trapped them in the guided editor
-      // fixing a schema violation in a small JSON box. `fieldErrors[key]` covers both cases,
-      // because Zod issues are keyed by top-level field too, so the text has to be re-tested.
+      // `buildProposalDraftPayload` seeds `data` from the working payload and then overwrites
+      // each key from the controls. When a control cannot produce a value it records an error
+      // and leaves the SEEDED value in place — an emptied required field, a number box holding
+      // non-numeric text, a JSON box that fails to parse. Serializing that draft into raw mode
+      // therefore writes the ORIGINAL value back over what was typed, and switching back
+      // re-seeds guided state from it, so the edit is gone from both modes with nothing said.
       //
-      // And a refusal has to make the reason visible: field errors are gated on `showErrors`,
-      // which only flips on a failed submit, so before any submit this named a field whose
-      // own message was not rendered — "fix X", with nothing shown next to X.
-      const badJsonKey = jsonKeys.find((key) => {
-        if (!guidedPreview.fieldErrors[key]) return false;
-        const raw = text[key] ?? '';
-        if (raw.trim() === '') return false;
-        try {
-          JSON.parse(raw);
-          return false;
-        } catch {
-          return true;
-        }
-      });
-      if (badJsonKey) {
+      // Its build-stage `fieldErrors` are exactly that set, which makes them the right
+      // predicate — narrower than "any error" and broader than "bad JSON". A scalar that is
+      // merely SCHEMA-invalid (too long, out of enum) still had its typed value written, so
+      // the switch is lossless there and stays allowed: raw mode is often how someone fixes
+      // one. An earlier version of this guard tested only JSON.parse and its comment claimed
+      // the draft always held the typed text for everything else — it does not.
+      //
+      // Showing the error matters as much as refusing: field errors are gated on
+      // `showErrors`, which only flips on a failed submit, so before any submit this named a
+      // field whose own message was not rendered.
+      const build = buildProposalDraftPayload(fields, jsonKeys, text, bool, originalPayload, passthroughBase);
+      const unrepresentedKey = Object.keys(build.fieldErrors)[0];
+      if (unrepresentedKey) {
         setShowErrors(true);
-        setModeSwitchError(`Fix ${humanizeFieldKey(badJsonKey)} before switching to raw JSON.`);
+        setModeSwitchError(`Fix ${humanizeFieldKey(unrepresentedKey)} before switching to raw JSON.`);
         return;
       }
       setRawText(JSON.stringify(guidedPreview.draft, null, 2));
