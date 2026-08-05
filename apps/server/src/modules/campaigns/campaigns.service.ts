@@ -711,6 +711,20 @@ export class CampaignsService {
         existing.customMechanicsProfile != null &&
         existing.customMechanicsProfile.slug === effectiveRuleSystem);
     await this.validateRuleSystem(input.ruleSystem, profileBacksEffectiveRuleSystem);
+    // ...and the same check against the EFFECTIVE slug on the one path where the call above
+    // cannot run (review). `validateRuleSystem` short-circuits on a falsy first argument, so a
+    // PATCH of just `{ customMechanicsProfile: null }` never reached it: the profile column was
+    // cleared while `ruleSystem` kept the homebrew slug, and every read site then resolved 5e —
+    // exactly the unbacked-slug state the comment above says this check exists to catch, reached
+    // by omitting the field rather than echoing it.
+    //
+    // Deliberately narrowed to that path instead of always validating `effectiveRuleSystem`:
+    // doing the latter would start rejecting every unrelated PATCH on a campaign whose rule
+    // pack has since been uninstalled, which is a behaviour change this fix has no business
+    // making.
+    if (customMechanicsProfileInput === null && input.ruleSystem === undefined) {
+      await this.validateRuleSystem(effectiveRuleSystem, false);
+    }
     let nextCustomMechanicsProfile: string | null | undefined;
     if (customMechanicsProfileInput !== undefined) {
       // Explicitly set (or cleared with null) in this request.

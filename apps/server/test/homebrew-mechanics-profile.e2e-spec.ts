@@ -162,6 +162,46 @@ describe('campaign customMechanicsProfile (issue #1502, e2e)', () => {
     expect(patchRes.body.message).toMatch(/does not match any installed rule pack/i);
   });
 
+  it('rejects clearing the profile even when the PATCH omits ruleSystem entirely', async () => {
+    // The symmetric twin of the test above, and the case the first version of that guard could
+    // not see: `validateRuleSystem` short-circuits on a falsy slug, so a body of just
+    // `{ customMechanicsProfile: null }` cleared the profile and left the homebrew slug backed
+    // by nothing, silently resolving 5e at every read site.
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Omit Campaign', ruleSystem: 'e2e-omit-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-omit-hack' } });
+    expect(createRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${createRes.body.id}`)
+      .set(dm)
+      .send({ customMechanicsProfile: null });
+    expect(patchRes.status).toBe(400);
+    expect(patchRes.body.message).toMatch(/does not match any installed rule pack/i);
+
+    // And the campaign is untouched — a rejected write must not half-apply.
+    const after = await request(server).get(`/api/v1/campaigns/${createRes.body.id}`).set(dm);
+    expect(after.body.customMechanicsProfile).toMatchObject({ slug: 'e2e-omit-hack' });
+  });
+
+  it('still allows an ordinary PATCH that touches neither ruleSystem nor the profile', async () => {
+    // The narrowing that keeps the fix from over-reaching: only a request that CLEARS the
+    // profile gets the effective-slug check. Renaming a homebrew campaign must stay legal.
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Quiet Campaign', ruleSystem: 'e2e-quiet-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-quiet-hack' } });
+    expect(createRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${createRes.body.id}`)
+      .set(dm)
+      .send({ name: 'Quiet Campaign renamed' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.customMechanicsProfile).toMatchObject({ slug: 'e2e-quiet-hack' });
+  });
+
   it('survives an export -> import round trip, including the handoff profile', async () => {
     // #1502 review. The clone path carried the pair; export/import did not — the allowlist
     // stripped the profile while keeping the slug, and importCampaign only ever looked for an
