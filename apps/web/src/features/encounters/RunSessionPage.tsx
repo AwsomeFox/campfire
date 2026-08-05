@@ -42,6 +42,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
@@ -3877,6 +3878,8 @@ export default function RunSessionPage() {
           <CombatLog events={events} />
 
           <SharedDiceLog campaignId={cid} />
+
+          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} />
         </aside>
       </div>
 
