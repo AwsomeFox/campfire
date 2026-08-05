@@ -3875,6 +3875,58 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(restored.spellSlots['1'].used).toBe(0);
     });
 
+    /**
+     * Issue #1902 rework, round 5 — a fresh review pass found the MCP tool ADVERTISED
+     * `expectedUpdatedAt` (spreading `SpellSlotPatch.shape` widened its declared input
+     * the moment that field was added to the shared schema) but the handler dropped it
+     * on the floor before ever calling `patchSpellSlots`. An AI caller that explicitly
+     * opted into "only save if nothing changed since I looked" got an unconditional
+     * write and no indication the guard never ran. This test drives the SAME
+     * server-side compare-and-set `spell-slot-concurrency.spec.ts` already covers at
+     * the service layer, but through the MCP tool boundary specifically — the layer
+     * where the regression actually was.
+     */
+    it('adjust_spell_slots: expectedUpdatedAt is forwarded end-to-end and rejects a stale MCP write with 409 STALE_WRITE (issue #1902)', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1902 mcp caster' });
+      const characterId = charRes.body.id as number;
+      await dmAgent.patch(`/api/v1/characters/${characterId}`).send({ spellSlots: { '1': { max: 2, used: 0 } } });
+      const staleToken = (await dmAgent.get(`/api/v1/characters/${characterId}`)).body.updatedAt as string;
+
+      // A concurrent write — someone else, or another of the AI's own tool calls —
+      // spends a slot. The character row's `updatedAt` moves past `staleToken`.
+      await client.callTool({ name: 'adjust_spell_slots', arguments: { characterId, level: 1, delta: 1 } });
+
+      // An MCP caller who read the sheet BEFORE that write, and explicitly opts into the
+      // guard by supplying its stale token, must be rejected — not silently overwrite the
+      // concurrent spend while believing the guard protected it.
+      const stale = await client.callTool({
+        name: 'adjust_spell_slots',
+        arguments: { characterId, level: 1, delta: 1, expectedUpdatedAt: staleToken },
+      });
+      expect(stale.isError).toBe(true);
+      const err = parseResult(stale) as { error: { status: number; code: string } };
+      expect(err.error.status).toBe(409);
+      expect(err.error.code).toBe('STALE_WRITE');
+
+      // The rejected write applied NOTHING — still 1, not 2.
+      const after = (await dmAgent.get(`/api/v1/characters/${characterId}`)).body as {
+        spellSlots: Record<string, { used: number }>;
+      };
+      expect(after.spellSlots['1'].used).toBe(1);
+
+      // A caller with a FRESH token still succeeds — the guard rejects staleness, not
+      // the field's mere presence.
+      const freshToken = (await dmAgent.get(`/api/v1/characters/${characterId}`)).body.updatedAt as string;
+      const fresh = parseResult(
+        await client.callTool({
+          name: 'adjust_spell_slots',
+          arguments: { characterId, level: 1, delta: 1, expectedUpdatedAt: freshToken },
+        }),
+      ) as { spellSlots: Record<string, { used: number }> };
+      expect(fresh.spellSlots['1'].used).toBe(2);
+    });
+
     // Issue #422/#1578: the character-resource system had no MCP tool at all. Same
     // requireRole('player') gate as adjust_spell_slots — a viewer-scoped PAT must be
     // refused, matching the REST route's own authorization test.

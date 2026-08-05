@@ -77,4 +77,22 @@ test.describe('inline character cards refresh (issue #421)', () => {
     expect(source).toMatch(/character\.updated/);
     expect(source).toMatch(/characterId/);
   });
+
+  // Issue #1902 rework (round 12, devin): several in-combat writes mirror HP/conditions or a
+  // spell-slot/resource spend onto the linked character SHEET while emitting only
+  // `encounter.updated` (no `character.updated` frame), so `shouldInvalidateInlineCharacters`
+  // never fires for them and `campaignCharacters` is left stale. `ResourceTrackerPanel`'s
+  // cached `char.updatedAt` — the `expectedUpdatedAt` CAS token it sends on a spell-slot spend
+  // — goes stale too, so a player just healed or damaged mid-combat could get a spurious 409
+  // on their very next, otherwise-valid slot spend. `encounter.updated` must now ALSO
+  // invalidate campaignCharacters, piggybacking the same call `character.updated` already gets.
+  test('RunSessionPage invalidates campaignCharacters on encounter.updated ONLY when the server flagged it as sheetMirrored', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    // Nineteenth-round finding (codex P2): round 12's blanket invalidation on EVERY
+    // `encounter.updated` frame refetched the whole campaign character list on every
+    // ordinary roll/token-move too, most of which mirror no sheet at all — wasted work
+    // during a busy fight. The server now tags exactly the frames that mirrored a sheet
+    // with `sheetMirrored`, so the client only piggybacks the invalidation then.
+    expect(source).toMatch(/invalidateEncounter\(queryClient, eid\);\s*\n\s*\/\/ Issue #1902 rework \(round 12, devin; narrowed round 19, codex P2\)[\s\S]*?if \(event\.sheetMirrored\) invalidateCampaignCharacters\(queryClient, cid\);/);
+  });
 });

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
+import { ConflictException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, combatants, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -266,5 +267,87 @@ describe('encounter condition concurrency (real SQLite, service layer)', () => {
 
     const persisted = readConditions(orm, combatantId).slice().sort();
     expect(persisted).toEqual(['blinded', 'deafened']);
+  });
+
+  /**
+   * Issue #1902 rework (round 23, codex P2) — `updateCombatant`'s post-transaction
+   * turnIndex reconciliation (triggered whenever an initiative write lands on a running
+   * encounter) stamped `updatedAt: nowIso()` directly, instead of re-reading the row and
+   * advancing it monotonically the way `nextUpdatedAt` requires. This is the SAME class of
+   * defect already fixed for `characters.updatedAt` in `CharactersService.update()` (issue
+   * #1902 rework, round 12/15) — applied here to the identical `encounters.updatedAt` CAS
+   * token.
+   *
+   * Reproduced deterministically with a frozen clock (no reliance on real-timing luck): the
+   * encounter is seeded at `clientToken`, a client captures that as its own snapshot, then:
+   *   1. "A statblock pip advances it to T+1" — an ordinary HP write on combatant A,
+   *      whose transaction correctly advances `updatedAt` via `nextUpdatedAt`.
+   *   2. "An initiative update landing in the same millisecond" — a patch on combatant B
+   *      that also sets `initiative`, triggering the post-transaction reconciliation. Its
+   *      OWN transaction also advances the token correctly; the bug is specifically in the
+   *      write AFTER that commit.
+   * Under the frozen clock, the pre-fix `nowIso()` in that post-commit write reproduces
+   * EXACTLY `clientToken` again (wall-clock time never advances) — silently erasing both
+   * prior advances. A THIRD caller still holding `clientToken` then passes `assertNotStale`
+   * against that regressed value and its write is wrongly accepted instead of rejected —
+   * the silent data-loss scenario this test guards against.
+   */
+  it('#1902 rework (round 23): the initiative-triggered turnIndex reconciliation never rolls the encounter revision token backward under a same-millisecond collision', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, encountersService } = build();
+    const { encounterId, combatantId: combatantAId } = seedCombatant(orm, []);
+    const [combatantB] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Second',
+        initiative: 5,
+        initMod: 0,
+        hpCurrent: 30,
+        hpMax: 30,
+        conditions: JSON.stringify([]),
+        sortOrder: 1,
+      })
+      .returning()
+      .all();
+
+    const [seeded] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+    const clientToken = seeded.updatedAt;
+
+    jest.useFakeTimers({ advanceTimers: false });
+    jest.setSystemTime(new Date(clientToken));
+    try {
+      // Step 1: the statblock pip. Advances the token past clientToken (nextUpdatedAt's own
+      // same-millisecond collision rule: previous >= now => previous + 1).
+      await encountersService.updateCombatant(encounterId, combatantAId, { hpDelta: -1 }, dmUser, 'dm');
+
+      // Step 2: the initiative update, same frozen instant. Triggers the post-transaction
+      // turnIndex reconciliation this test targets.
+      await encountersService.updateCombatant(encounterId, combatantB.id, { initiative: 15 }, dmUser, 'dm');
+
+      const [after] = orm.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+      // The revision must have advanced past the ORIGINAL token, never tied or rolled back
+      // to it — a bare `nowIso()` in the post-transaction write would stamp exactly
+      // `clientToken` again here, since the frozen clock never advances.
+      expect(after.updatedAt).not.toBe(clientToken);
+      expect(Date.parse(after.updatedAt)).toBeGreaterThan(Date.parse(clientToken));
+
+      // A caller still holding that ORIGINAL token must be rejected, not silently accepted —
+      // the actual data-loss guard: if the reconciliation write above rolled the token back
+      // to EXACTLY `clientToken`, this stale-token PATCH would wrongly pass assertNotStale
+      // and silently clobber the pip from step 1.
+      await expect(
+        encountersService.updateCombatant(
+          encounterId,
+          combatantAId,
+          { hpDelta: -1, expectedUpdatedAt: clientToken },
+          dmUser,
+          'dm',
+        ),
+      ).rejects.toThrow(ConflictException);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

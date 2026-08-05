@@ -2298,6 +2298,60 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
     expect(stale.status).toBe(409);
     expect(stale.body.code).toBe('STALE_WRITE');
   });
+
+  /**
+   * Issue #1902 rework, round 14 (codex P1) — `updateCombatant` checks `expectedUpdatedAt`
+   * against `encounterRow`, read BEFORE this method's own awaited `adapterForCampaign`
+   * call — but never repeats that check against `freshEncounter`, read INSIDE the write
+   * transaction. If another combatant PATCH commits in that gap (bumping the encounter's
+   * `updatedAt`, which every combatant PATCH does), the outer check already passed against
+   * the now-stale value and the write proceeds anyway — silently overwriting whatever the
+   * concurrent PATCH changed. Spies on `adapterForCampaign` (the exact awaited seam between
+   * the outer check and the transaction) to inject a real, already-committed concurrent
+   * PATCH deterministically, rather than depending on winning an unreliable microtask race
+   * — the same technique this rework uses elsewhere (see `rest-mechanics.e2e-spec.ts`'s
+   * `restParty` race test) for exactly this reason.
+   */
+  it('#1902 rework: updateCombatant re-validates expectedUpdatedAt against the transaction-local encounter row, not just the pre-transaction snapshot', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounters = ctx.app.get(EncountersService);
+    const createdCombatant = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Race Condition Ogre', hpMax: 20 });
+    expect(createdCombatant.status).toBe(201);
+    const combatantId = createdCombatant.body.id;
+
+    const current = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const staleToken = current.body.updatedAt;
+
+    const spy = jest.spyOn(encounters as unknown as { adapterForCampaign: (...args: unknown[]) => Promise<unknown> }, 'adapterForCampaign').mockImplementationOnce(async (...args: unknown[]) => {
+      // Restore immediately so this doesn't affect any OTHER call this same request
+      // makes, or any other test — the injected concurrent write is the point, not a
+      // permanently altered adapter lookup.
+      spy.mockRestore();
+      // A real, already-committed concurrent PATCH landing in the exact gap between the
+      // outer `expectedUpdatedAt` check (already passed, using `staleToken`) and this
+      // request's own write transaction — bumps the encounter's `updatedAt`.
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ hpDelta: -1 });
+      return (encounters as unknown as { adapterForCampaign: (...a: unknown[]) => Promise<unknown> }).adapterForCampaign(...args);
+    });
+
+    try {
+      const race = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+        .set(dm)
+        .send({ hpDelta: -2, expectedUpdatedAt: staleToken });
+      // The defect this guards against: without the in-transaction re-check, this would
+      // succeed (200) despite `staleToken` no longer matching the encounter's current
+      // `updatedAt` — the outer check alone cannot see the concurrent write that landed
+      // during `adapterForCampaign`'s await.
+      expect(race.status).toBe(409);
+      expect(race.body.code).toBe('STALE_WRITE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('encounters — lifecycle write serialization (issue #1461, e2e)', () => {
