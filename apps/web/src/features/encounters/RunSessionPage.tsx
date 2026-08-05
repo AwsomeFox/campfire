@@ -958,6 +958,21 @@ export default function RunSessionPage() {
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
   const turnPulseTimerRef = useRef<number | null>(null);
   const ownedTurnFeedbackRef = useRef<number | null>(null);
+  // A character.updated frame invalidates the ownership map, but React Query
+  // deliberately retains its last successful data during the background fetch.
+  // Keep a precise freshness watermark so an immediately following turn edge
+  // cannot promote the previous owner from that stale map.
+  const characterOwnershipPendingDataUpdatedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const pendingDataUpdatedAt = characterOwnershipPendingDataUpdatedAtRef.current;
+    if (
+      pendingDataUpdatedAt == null
+      || charactersQuery.isFetching
+      || charactersQuery.dataUpdatedAt <= pendingDataUpdatedAt
+    ) return;
+    characterOwnershipPendingDataUpdatedAtRef.current = null;
+  }, [charactersQuery.dataUpdatedAt, charactersQuery.isFetching]);
 
   // An owned turn can initially be a private pending beat, then promote once
   // the authorized roster and /turn workspace arrive. Keep the visual cues
@@ -1207,6 +1222,12 @@ export default function RunSessionPage() {
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
+          if (event.type === 'character.updated') {
+            // `data` remains available while this background refetch runs. Record
+            // its version before invalidating so a following turn frame cannot
+            // identify a seat's former owner as the current actor.
+            characterOwnershipPendingDataUpdatedAtRef.current = charactersQuery.dataUpdatedAt;
+          }
           invalidateCampaignCharacters(queryClient, cid);
           // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
           // character.updated — invalidate derived encounter actions AND the turn workspace query.
@@ -1240,7 +1261,9 @@ export default function RunSessionPage() {
           const combatant = event.currentCombatantId == null
             ? undefined
             : encounter?.combatants.find((candidate) => candidate.id === event.currentCombatantId);
-          const ownerDataReady = charactersQuery.data !== undefined;
+          const ownerDataReady = charactersQuery.data !== undefined
+            && !charactersQuery.isFetching
+            && characterOwnershipPendingDataUpdatedAtRef.current == null;
           const rosterCombatantKnown = event.currentCombatantId == null || combatant != null;
           const isYourTurn = ownerDataReady && combatant?.characterId != null
             && characters.some((character) => character.id === combatant.characterId && character.ownerUserId === String(me?.user.id ?? ''));
@@ -1312,7 +1335,7 @@ export default function RunSessionPage() {
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, me?.user.id, triggerOwnedTurnFeedback],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.dataUpdatedAt, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2456,6 +2479,7 @@ export default function RunSessionPage() {
   // repairs an optimistic positive after a missed SSE frame or reconnect.
   useEffect(() => {
     if (!turnWorkspace) return;
+    if (characterOwnershipPendingDataUpdatedAtRef.current != null) return;
     if (turnOwnerPendingCombatantId != null) {
       if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) return;
       setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
@@ -2464,7 +2488,7 @@ export default function RunSessionPage() {
     }
     if (turnWorkspace.current?.combatantId !== currentCombatantId) return;
     setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
-  }, [currentCombatantId, turnOwnerPendingCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+  }, [charactersQuery.dataUpdatedAt, currentCombatantId, turnOwnerPendingCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   // If the character list was still loading when an owned frame arrived, the
   // authoritative workspace can safely promote its already-visible ticker to

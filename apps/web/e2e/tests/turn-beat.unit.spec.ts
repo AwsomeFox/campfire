@@ -140,6 +140,15 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/pending: combatant == null && event\.currentCombatantId != null,/);
   });
 
+  test('does not promote a turn from character ownership data pending refresh', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/const characterOwnershipPendingDataUpdatedAtRef = useRef<number \| null>\(null\);/);
+    expect(source).toMatch(/characterOwnershipPendingDataUpdatedAtRef\.current = charactersQuery\.dataUpdatedAt;/);
+    expect(source).toMatch(/charactersQuery\.dataUpdatedAt <= pendingDataUpdatedAt/);
+    expect(source).toMatch(/!charactersQuery\.isFetching\s*&&\s*characterOwnershipPendingDataUpdatedAtRef\.current == null/);
+    expect(source).toMatch(/if \(characterOwnershipPendingDataUpdatedAtRef\.current != null\) return;/);
+  });
+
   test('keeps Player Display to the paired encounter update load', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/screen/PlayerDisplayPage.tsx'), 'utf8');
     expect(source).toMatch(/if \(event\.type === 'encounter\.turn_changed'\) return;/);
