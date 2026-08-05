@@ -8671,7 +8671,13 @@ export class EncountersService {
     user: RequestUser,
     role: Role,
   ): Promise<Combatant> {
-    const encounter = await this.getRowOrThrow(encounterId);
+    // Issue #1909 review (Codex + Devin, same defect): retain a soft-deleted (trashed)
+    // encounter row here — a keyed retry is a read of an already-committed response, not a
+    // fresh write, and needs this row only to resolve `campaignId`/`hidden` for that replay.
+    // `rollDeathSave` (`:4090`) and `rollCombatantInitiative` (`:5970`) both do the same. A
+    // genuinely fresh write is unaffected: the transaction-local `assertMutable` below still
+    // rejects it once no prior claim is found.
+    const encounter = await this.getRowOrThrow(encounterId, true);
     // Issue #1909 review (Codex): a hidden/prep encounter auto-adds combatants for a
     // party's existing characters, so the OWNERSHIP branch just below could otherwise let
     // a non-DM player reach and mutate a combatant belonging to an encounter that every
@@ -8772,6 +8778,28 @@ export class EncountersService {
     }
 
     let priorClaim: EncounterOpPrior | null = null;
+    // Issue #1909 review (Codex P1, secrecy): `combatantToDomain(row)` is the RAW row —
+    // unlike `getWithCombatantsOrThrow`'s role-filtered projection, it never withholds a
+    // fog-hidden token's exact position. A non-DM owning player adjusting their own
+    // character-linked combatant would otherwise learn (via THIS response, and via a
+    // same-role replay of the stored claim body) exactly where their token sits even when
+    // fog conceals it from every other read path. Redact synchronously here, using ONLY
+    // this encounter's own fog (never the async sibling-map-protection check
+    // `getWithCombatantsOrThrow` also applies — that requires an awaited DB call this
+    // synchronous better-sqlite3 transaction cannot make; a documented, narrower scope than
+    // the full read-path redaction, closing the specific leak this finding describes).
+    // Applied identically to the STORED claim body (so a same-role replay never surfaces
+    // the raw position either) and to the fresh-write's own returned value — never only on
+    // the way out, which a future caller of the stored body could too easily miss.
+    const redactForRole = (c: Combatant, encounterFogJson: string | null): Combatant => {
+      if (role === 'dm') return c;
+      const fog = parseFog(encounterFogJson);
+      const invalidFog = encounterFogJson !== null && fog === null;
+      if (invalidFog) return redactTokenInFog(c, { enabled: true, revealed: [] });
+      if (fog?.enabled) return redactTokenInFog(c, fog);
+      return c;
+    };
+    let committedFogJson: string | null = null;
 
     if (combatant.characterId !== null) {
       const characterId = combatant.characterId;
@@ -8791,6 +8819,17 @@ export class EncountersService {
           // above and never reaches this line at all.
           const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
           if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+          // Issue #1909 review (Codex P2): the outer `isVisibleTo` check above ran against
+          // the STALE outer `encounter` row — if a DM hides this encounter in the window
+          // between that check and this transaction, an owning player's in-flight write
+          // would otherwise proceed on `assertMutable`/campaign-writability alone, letting a
+          // non-DM mutate a character sheet and log a combat event for an encounter that
+          // should now be wholesale nonexistent to them (AGENTS.md's server-enforced-secrecy
+          // invariant). Only meaningful here: the statblock branch is DM-only, and a DM's
+          // visibility never depends on `hidden`.
+          if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+            throw new NotFoundException(`Encounter ${encounterId} not found`);
+          }
           this.assertMutable(freshEncounter);
           // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
           // deleted/ended status, not the CAMPAIGN's lifecycle — if the campaign was
@@ -8904,7 +8943,8 @@ export class EncountersService {
           // resource lives on the linked character sheet), but the re-read still confirms
           // the combatant is still actually present before either the event or this claim
           // body references it.
-          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+          committedFogJson = freshEncounter.fog;
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog), role });
         });
         if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
@@ -9110,7 +9150,11 @@ export class EncountersService {
             })
             .run();
 
-          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+          committedFogJson = freshEncounter.fog;
+          // `redactForRole` is a no-op here in practice (this branch is DM-only, and a DM's
+          // response is never redacted) but applied for consistency with the character
+          // branch above rather than special-cased away.
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog), role });
         });
         if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
@@ -9146,16 +9190,20 @@ export class EncountersService {
     // `sheetMirrored` only for the character branch (issue #1902 rework, round 19
     // convention) — the statblock branch writes only the combatant row itself, which the
     // ordinary encounter.updated nudge already covers.
-    if (!encounter.hidden) {
-      this.events.emit({
-        type: 'encounter.updated',
-        campaignId: encounter.campaignId,
-        encounterId: encounter.id,
-        sheetMirrored: combatant.characterId !== null,
-      });
-    }
+    //
+    // Issue #1909 review (Codex P2): gating on the OUTER `encounter.hidden` (read before the
+    // transaction) let a DM's concurrent hide land between that read and this emit, still
+    // publishing the encounter id on the shared campaign stream. `emitEncounterEvent` exists
+    // precisely to close this — it re-reads `hidden` itself at emit time — so route through
+    // it instead of gating manually on a value that can go stale mid-request, matching every
+    // other encounter-write path in this service.
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounter.id, false, {
+      sheetMirrored: combatant.characterId !== null,
+    });
 
-    return combatantToDomain(row);
+    // Issue #1909 review (Codex P1, secrecy): redact using the fog state committed inside
+    // the transaction above, not a value read before it — see `redactForRole`'s own comment.
+    return redactForRole(combatantToDomain(row), committedFogJson);
   }
 
   async listTokenFormations(campaignId: number, _role: Role) {

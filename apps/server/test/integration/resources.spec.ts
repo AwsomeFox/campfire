@@ -26,6 +26,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
   let db: any;
   let charactersService: any;
   let encountersService: any;
+  let events: CampaignEventsService;
 
   beforeEach(() => {
     dataDir = makeTempDataDir();
@@ -33,7 +34,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     db = dbModule.orm;
 
     const audit = new AuditService(db);
-    const events = new CampaignEventsService();
+    events = new CampaignEventsService();
     // Issue #601: RevisionsService fires the moderation pre-mutation evidence hook
     // on restore, so it takes a real ModerationService. Deliberately not optional —
     // an absent hook would silently stop capturing abuse evidence.
@@ -599,6 +600,69 @@ describe('inline spell slots & character resources (issue #422)', () => {
     ).rejects.toThrow(ForbiddenException);
   });
 
+  // Issue #1909 review (Codex P2, secrecy): the outer `isVisibleTo` check runs against the
+  // STALE outer `encounter` row, fetched before the transaction. If a DM hides the encounter
+  // in the window between that check and the transaction actually running, an owning
+  // player's in-flight write must still be refused — not merely that a helper gets called,
+  // but that the write is ACTUALLY rejected and nothing is persisted. Simulate the race by
+  // wrapping the outer read so it hides the encounter, exactly as a concurrent DM would,
+  // right after the outer check passes but before the transaction re-reads it.
+  it("a DM hiding the encounter between the outer visibility check and the transaction still refuses the owning player's in-flight write (Codex review)", async () => {
+    const owner = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Concurrent Hide Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Ezren',
+        ownerUserId: '1',
+        resources: JSON.stringify({ arcaneRecovery: { max: 1, used: 0, name: 'Arcane Recovery', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Concurrent Hide Fight', status: 'running', hidden: false, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Ezren', sortOrder: 1 })
+      .returning()
+      .all();
+
+    const original = encountersService.getRowOrThrow.bind(encountersService);
+    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...(args as [number]));
+      // Simulate a concurrent DM hiding the encounter in the window between the outer
+      // visibility check (which already read this now-stale, non-hidden snapshot) and the
+      // transaction below re-reading it fresh.
+      db.update(encounters).set({ hidden: true }).where(eq(encounters.id, enc.id)).run();
+      return result;
+    });
+
+    try {
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, owner, 'player'),
+      ).rejects.toThrow(NotFoundException);
+
+      // Nothing was written — the write was genuinely refused, not merely logged.
+      const cAfter = await charactersService.getRowOrThrow(c.id);
+      expect(JSON.parse(cAfter.resources)['arcaneRecovery'].used).toBe(0);
+      const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+      expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   // Issue #1909 review (Devin/Codex secrecy finding): a keyed replay used to return
   // `prior.response` verbatim with no comparison against the CALLER'S CURRENT role — but
   // the stored body was rendered for whatever role committed it, and can embed a DM-only
@@ -670,6 +734,139 @@ describe('inline spell slots & character resources (issue #422)', () => {
     // The replay did not re-run the effect: still used: 1 (the first commit), not 2.
     const character = await charactersService.getRowOrThrow(c.id);
     expect(JSON.parse(character.resources)['layOnHands'].used).toBe(1);
+  });
+
+  // Issue #1909 review (Codex P1, secrecy): the finding above only ever exercised a ROLE
+  // MISMATCH between the committing call and the replay. This test proves the deeper half:
+  // a non-DM owning player's OWN fresh write — and a SAME-ROLE replay of it — must never
+  // carry the raw fog-hidden position either. A test that only checks a DM's response, or
+  // only a cross-role replay, proves nothing about this.
+  it("a non-DM owning player's own fresh write, and a SAME-role replay of it, both redact a fog-hidden token position (Codex review)", async () => {
+    const player = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Same-Role Fog Secrecy Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({
+        campaignId: camp.id,
+        name: 'Same-Role Foggy Ambush',
+        status: 'running',
+        // Fog revealed only the far corner — the combatant below sits at (10, 10), squarely
+        // in the UNREVEALED area.
+        fog: JSON.stringify({ enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1, tokenX: 10, tokenY: 10 })
+      .returning()
+      .all();
+
+    // The owning player's OWN fresh write (no replay involved at all) must not leak the raw
+    // position in its own response.
+    const fresh = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'layOnHands', delta: 1 }, player, 'player',
+    );
+    expect(fresh.tokenX).toBeNull();
+    expect(fresh.tokenY).toBeNull();
+    expect(fresh.tokenHiddenByFog).toBe(true);
+
+    // A SAME-role replay (same actor, same key, same 'player' role — no role mismatch at
+    // all) of a KEYED write must also come back redacted, proving the STORED claim body
+    // itself was redacted at write time, not just re-derived on a role-mismatch fallback.
+    const keyed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'layOnHands', delta: 1, idempotencyKey: 'same-role-fog-secrecy' }, player, 'player',
+    );
+    expect(keyed.tokenX).toBeNull();
+    expect(keyed.tokenY).toBeNull();
+    const replayedSameRole = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'layOnHands', delta: 1, idempotencyKey: 'same-role-fog-secrecy' }, player, 'player',
+    );
+    expect(replayedSameRole.tokenX).toBeNull();
+    expect(replayedSameRole.tokenY).toBeNull();
+    expect(replayedSameRole.tokenHiddenByFog).toBe(true);
+
+    // The replay did not re-run the effect: only the first `keyed` call's delta landed.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['layOnHands'].used).toBe(2); // fresh (1) + keyed (1)
+  });
+
+  // Issue #1909 review (Codex P2, secrecy): the `encounter.updated` SSE nudge used to gate
+  // on the OUTER `encounter.hidden` value, read before the write. If another DM hides the
+  // encounter in the window between that read and the emit, the id would still reach the
+  // shared campaign stream — the exact leak `emitEncounterEvent`'s own re-check exists to
+  // close for every OTHER encounter-write path. Proves the actual frame never arrives, not
+  // merely that a helper gets called.
+  it("hiding the encounter mid-flight suppresses the encounter.updated SSE frame entirely (Codex review)", async () => {
+    const owner = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'SSE Mid-Flight Hide Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Ezren',
+        ownerUserId: '1',
+        resources: JSON.stringify({ arcaneRecovery: { max: 1, used: 0, name: 'Arcane Recovery', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'SSE Hide Fight', status: 'running', hidden: false, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Ezren', sortOrder: 1 })
+      .returning()
+      .all();
+
+    const received: Array<{ type: string; encounterId?: number }> = [];
+    const sub = events.streamFor(camp.id).subscribe((e) => received.push(e as { type: string; encounterId?: number }));
+
+    // Simulate a concurrent DM hiding the encounter in the window between the outer
+    // visibility read and the emit at the end of the write — right after the combatant row
+    // is fetched, well before the final `emitEncounterEvent` call.
+    const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+    const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...(args as [number, number]));
+      db.update(encounters).set({ hidden: true }).where(eq(encounters.id, enc.id)).run();
+      return result;
+    });
+
+    try {
+      // The DM role sees the hidden encounter throughout (unaffected by the hide), so the
+      // write itself still succeeds — this test is about the SSE emission, not the write's
+      // own authorization.
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, owner, 'dm');
+    } finally {
+      spy.mockRestore();
+      sub.unsubscribe();
+    }
+
+    expect(received.some((e) => e.type === 'encounter.updated' && e.encounterId === enc.id)).toBe(false);
   });
 
   describe('issue #1909: statblock combatants', () => {
@@ -1080,6 +1277,48 @@ describe('inline spell slots & character resources (issue #422)', () => {
           enc.id,
           comb.id,
           { key: 'kiPoints', delta: 1, idempotencyKey: 'fresh-key-after-removal' },
+          user,
+          'dm',
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    // Issue #1909 review (Codex + Devin, same defect): the outer `getRowOrThrow` used the
+    // default `includeDeleted = false`, so a keyed retry against an encounter TRASHED since
+    // the original commit would 404 before the idempotency-replay check (added above for the
+    // combatant-removal case) was ever reached — mirrors that same fix, one level up.
+    it("a retried idempotencyKey replays its already-committed outcome even after the ENCOUNTER has since been trashed, while a FRESH write in the same state still 404s", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const first = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-trashed-encounter' },
+        user,
+        'dm',
+      );
+      expect(first.statblock.resources['kiPoints'].used).toBe(1);
+
+      // Simulate another actor trashing the encounter between the original call and this
+      // retry — a soft delete, exactly what deleting an encounter performs.
+      db.update(encounters).set({ deletedAt: new Date().toISOString() }).where(eq(encounters.id, enc.id)).run();
+
+      const replay = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-trashed-encounter' },
+        user,
+        'dm',
+      );
+      expect(replay.statblock.resources['kiPoints'].used).toBe(1);
+
+      // A genuinely FRESH write (a new key) against the same now-trashed encounter still
+      // 404s — only an already-committed replay is exempt from requiring a live row.
+      await expect(
+        encountersService.adjustCombatantResource(
+          enc.id,
+          comb.id,
+          { key: 'kiPoints', delta: 1, idempotencyKey: 'fresh-key-after-trash' },
           user,
           'dm',
         ),
