@@ -18,7 +18,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, useTableSafety } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import { beginReconcile, blocksFurtherActions, clearReconcile, completeReconcile, IDLE_RECONCILE, isAmbiguousOutcome, type ReconcileState } from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -568,6 +568,11 @@ export default function RunSessionPage() {
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
+  // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
+  // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
+  // reading the same table-wide safety-hold state SafetyHoldBar already shows everyone.
+  const { data: tableSafety } = useTableSafety(Number.isFinite(cid) ? cid : undefined);
+  const safetyHoldActive = tableSafety?.active === true;
 
   // Resolve the rule-system adapter FROM THE ACTIVE CAMPAIGN (issue #234) rather than at
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
@@ -2675,7 +2680,11 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy || riskyBlocked) return false;
+            // #599/#1933: the keyboard path must honor the same safety-hold mirror as the
+            // Next-turn button's GatedControl reason — otherwise the shortcut would still
+            // fire (and get server-rejected) while the button next to it visibly explains
+            // why it will not.
+            if (!encounter || headerBusy || riskyBlocked || safetyHoldActive) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -3073,6 +3082,7 @@ export default function RunSessionPage() {
           lifecycle={lifecycle}
           headerBusy={headerBusy}
           riskyBlocked={riskyBlocked}
+          safetyHoldActive={safetyHoldActive}
           needsInitiativeCount={needsInitiativeCount}
           hasNoCombatants={hasNoCombatants}
           undoTurnDisabled={
@@ -3548,6 +3558,7 @@ export default function RunSessionPage() {
             endTurn.mutate({ expectedCurrentCombatantId })
           }
           endTurnBusy={endTurn.isPending}
+          safetyHoldActive={safetyHoldActive}
         />
       )}
       <TurnChangeBeat

@@ -25,9 +25,11 @@ import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap, type SpellCastContext } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
+import { turnEndGateReason } from './turnEndGate';
 
 const STANDARD_ACTIONS = [
   { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
@@ -65,6 +67,10 @@ interface TurnWorkspaceProps {
    *  is authoritative when the parent's encounter cache is briefly stale. */
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
+  /** #599: mirrors the server's assertNoSafetyHold rejection on endTurn — no server change,
+   *  just surfacing the same table-wide safety-hold state (already visible via SafetyHoldBar)
+   *  as a reason on the control it actually blocks. */
+  safetyHoldActive?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
   /** Issue #1900: spend (+1) or restore (-1) one spell-slot level for the current combatant's
@@ -131,6 +137,7 @@ export function TurnWorkspace({
   onUseSuggestedAction,
   onEndTurn,
   endTurnBusy = false,
+  safetyHoldActive = false,
   gridUnit,
   gridScale,
   onUpdateSpellSlot,
@@ -637,23 +644,42 @@ export function TurnWorkspace({
         </section>
       )}
 
-      {/* End turn — a player may end their own turn when allowed; the DM always may. */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {turn.canEndTurn ? (
-          <Btn
-            disabled={controlsDisabled}
-            onClick={() => onEndTurn?.(turn.current!.combatantId)}
-            data-testid="workspace-end-turn"
-          >
-            {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
-          </Btn>
-        ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">{t('encounters.workspace.dmAdvancesTurns')}</span>
-        ) : null}
-        {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
-        )}
-      </div>
+      {/* End turn — a player may end their own turn when allowed; the DM always may.
+          Issue #1933: this used to unmount the button entirely and swap in static hint
+          text whenever `dmControlsTurns` blocked a player, and never accounted for a
+          safety hold at all (the server rejects it — assertNoSafetyHold — but the button
+          stayed live and just failed on click). Both are now surfaced as a mounted,
+          disabled button with a GatedControl reason instead: the control a player would
+          reach for stays in the same place, explaining itself, rather than disappearing. */}
+      {(() => {
+        const gateReasonKey = turnEndGateReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+          safetyHoldActive,
+          syncBlocked: actionsDisabled,
+        });
+        const gateReason = gateReasonKey ? t(`run.gate.${gateReasonKey}`) : undefined;
+        const showButton = turn.canEndTurn || gateReasonKey != null;
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            {showButton && (
+              <GatedControl reason={gateReason}>
+                <Btn
+                  disabled={controlsDisabled}
+                  onClick={() => onEndTurn?.(turn.current!.combatantId)}
+                  data-testid="workspace-end-turn"
+                >
+                  {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
+                </Btn>
+              </GatedControl>
+            )}
+            {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
+              <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
+            )}
+          </div>
+        );
+      })()}
     </Card>
   );
 }

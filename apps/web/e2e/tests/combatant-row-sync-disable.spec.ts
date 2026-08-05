@@ -129,6 +129,17 @@ test.describe('CombatantRow sync-gate disable, not unmount (issue #1746)', () =>
         expect(reasonText).toMatch(/paused|reconnecting/i);
       }
 
+      // Issue #1933 — GatedControl: the HP stepper and +condition toggle are now
+      // `aria-disabled` (not natively `disabled`), specifically so they stay reachable by
+      // Tab and reveal the same reason on keyboard focus, not merely on mouse hover. This
+      // is what actually lets the "keyboard focus shows the reason" acceptance criterion be
+      // true — a genuinely `disabled` element can never receive focus at all.
+      await expect(increaseBtn).toHaveAttribute('aria-disabled', 'true');
+      await increaseBtn.focus();
+      await expect(page.getByTestId('gated-control-hint').first()).toBeVisible();
+      await increaseBtn.blur();
+      await expect(page.getByTestId('gated-control-hint')).toHaveCount(0);
+
       // Mark the actual DOM nodes so we can prove, after the transition below, that
       // they are the SAME nodes — not a fresh mount that merely reuses the same
       // data-testid. React does not know about this attribute, so it only survives
@@ -150,6 +161,68 @@ test.describe('CombatantRow sync-gate disable, not unmount (issue #1746)', () =>
       await expect(increaseBtn).toBeEnabled();
       await expect(tempHpInput).toBeEnabled();
       await expect(addConditionBtn).toBeEnabled();
+    } finally {
+      await playerCtx.dispose();
+      await teardown(baseURL, encounterId, characterId);
+      await context.close();
+    }
+  });
+
+  // Issue #1933 — GatedControl's coarse-pointer acceptance criterion: on touch (no hover),
+  // tapping a gated control shows the reason inline for ~2s instead of doing nothing. Real
+  // touch emulation is forced deterministically via `page.addInitScript` overriding
+  // `window.matchMedia`, rather than relying on a device descriptor's own reported pointer
+  // type, so this holds regardless of which browser/OS runs the suite.
+  test('coarse pointer: tapping the disabled HP stepper shows the reason inline, then hides it', async ({ browser }) => {
+    const { baseURL, campaignId, encounterId, heroCombatantId, characterId, playerCtx } = await seedOwnedCombatant();
+    const context = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const coarse = (query: string) => ({
+        matches: query.includes('coarse'),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => true,
+      });
+      window.matchMedia = coarse;
+    });
+
+    let releaseEvents: () => void = () => {};
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.continue();
+    });
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-sync-chip')).toHaveText('Connecting');
+
+      const row = page.getByTestId(`combatant-row-${heroCombatantId}`);
+      const increaseBtn = row.getByTestId('hp-steppers').getByRole('button', { name: /Increase .* HP by 1/ });
+      await expect(increaseBtn).toHaveAttribute('aria-disabled', 'true');
+
+      // No hint before any interaction.
+      await expect(page.getByTestId('gated-control-hint')).toHaveCount(0);
+
+      // A tap is a real click in a real browser — force it, since Playwright's own
+      // actionability check refuses to `.click()` an aria-disabled element (the same
+      // check `toBeDisabled()` uses), which is correct: nothing should actually happen.
+      await increaseBtn.click({ force: true });
+      const hint = page.getByTestId('gated-control-hint').first();
+      await expect(hint).toBeVisible();
+      await expect(hint).toHaveText('Paused while reconnecting to live updates.');
+
+      // Hides again on its own after ~2s (GATED_HINT_MS), without another interaction.
+      await expect(page.getByTestId('gated-control-hint')).toHaveCount(0, { timeout: 4_000 });
+
+      releaseEvents();
     } finally {
       await playerCtx.dispose();
       await teardown(baseURL, encounterId, characterId);

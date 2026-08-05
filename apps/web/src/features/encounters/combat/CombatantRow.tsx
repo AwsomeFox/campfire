@@ -6,6 +6,7 @@ import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
+import { GatedControl } from '../../../components/GatedControl';
 import { isImeComposing } from '../../../lib/compositionSafeSubmit';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { CombatantActionsList } from '../CombatantActionsList';
@@ -173,7 +174,7 @@ export function CombatantRow({
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
   // tech via `aria-describedby` (below) rather than `title` alone, which screen readers
   // announce inconsistently and keyboard-only users cannot reach at all.
-  const syncBlockedReason = syncBlocked ? t('encounters.sync.controlsPaused') : undefined;
+  const syncBlockedReason = syncBlocked ? t('run.gate.syncBlocked') : undefined;
   const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
   const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
   const [addingCondition, setAddingCondition] = useState(false);
@@ -617,7 +618,6 @@ export function CombatantRow({
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}
-              syncBlockedDescribedBy={syncBlockedDescribedBy}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
             />
@@ -1034,22 +1034,22 @@ export function CombatantRow({
               </form>
               )
             ) : (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
-                disabled={syncBlocked}
-                title={syncBlockedReason}
-                aria-describedby={syncBlockedDescribedBy}
-                data-testid={`add-condition-toggle-${combatant.id}`}
-                onClick={() => {
-                  setEditingConditionId(null);
-                  setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
-                  setAddingCondition(true);
-                }}
-              >
-                + condition
-              </button>
+              <GatedControl reason={syncBlockedReason}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+                  disabled={syncBlocked}
+                  data-testid={`add-condition-toggle-${combatant.id}`}
+                  onClick={() => {
+                    setEditingConditionId(null);
+                    setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+                    setAddingCondition(true);
+                  }}
+                >
+                  + condition
+                </button>
+              </GatedControl>
             )}
 
             {/* Starfinder Stamina Rest Button */}
@@ -1281,22 +1281,21 @@ export function CombatantRow({
       {canEditPermission && combatant.hpCurrent != null && (
         <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
-            <button
-              key={step}
-              className="btn btn-icon btn-secondary cf-target-44"
-              style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
-              /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
-                 lands instantly via setQueryData, so there's no round-trip to wait on.
-                 `busy` intentionally does NOT disable this button; only the sync gate
-                 (issue #1746) does, since a blocked write really cannot be trusted. */
-              disabled={syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
-              onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
-            >
-              {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
-            </button>
+            <GatedControl key={step} reason={syncBlockedReason}>
+              <button
+                className="btn btn-icon btn-secondary cf-target-44"
+                style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
+                /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
+                   lands instantly via setQueryData, so there's no round-trip to wait on.
+                   `busy` intentionally does NOT disable this button; only the sync gate
+                   (issue #1746) does, since a blocked write really cannot be trusted. */
+                disabled={syncBlocked}
+                aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
+                onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
+              >
+                {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+              </button>
+            </GatedControl>
           ))}
           <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <input

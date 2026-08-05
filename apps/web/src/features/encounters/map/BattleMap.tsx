@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { UIIcon } from '../../../components/UIIcon';
+import { GatedControl } from '../../../components/GatedControl';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { FloatingNumbers } from '../FloatingNumbers';
@@ -1430,23 +1431,30 @@ export function BattleMap({
     setFogRegionDrag(null);
   }
 
-  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
-    <button
-      type="button"
-      className="cf-map-tool cf-map-focusable"
-      data-testid={`map-tool-${value}`}
-      disabled={disabled}
-      title={hint}
-      aria-pressed={tool === value}
-      onClick={() => changeTool(value)}
-      style={{
-        borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
-        color: tool === value ? 'var(--color-accent)' : undefined,
-      }}
-    >
-      {label}
-    </button>
-  );
+  // `gateReason` is optional and separate from `hint` (issue #1933): most of this
+  // toolbar's disabled buttons keep their pre-existing hover-only `title`, unchanged.
+  // Only the one call site that passes `gateReason` gets the full GatedControl
+  // affordance (hover/focus tooltip, aria-describedby, coarse-pointer tap hint).
+  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string, gateReason?: string) => {
+    const button = (
+      <button
+        type="button"
+        className="cf-map-tool cf-map-focusable"
+        data-testid={`map-tool-${value}`}
+        disabled={disabled}
+        title={hint}
+        aria-pressed={tool === value}
+        onClick={() => changeTool(value)}
+        style={{
+          borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
+          color: tool === value ? 'var(--color-accent)' : undefined,
+        }}
+      >
+        {label}
+      </button>
+    );
+    return gateReason ? <GatedControl reason={gateReason}>{button}</GatedControl> : button;
+  };
 
   return (
     <Card
@@ -1607,7 +1615,13 @@ export function BattleMap({
           >
             {modeBtn('move', 'Move')}
             {effectiveCanDmWrite && modeBtn('token-select', 'Tokens', false, 'Drag a rectangle to select tokens; hold Alt to lasso; Shift, Ctrl, or Command adds.')}
-            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? measureToolHelp(gridType) : 'Set a grid scale first')}
+            {modeBtn(
+              'measure',
+              'Measure',
+              !canMeasure,
+              canMeasure ? measureToolHelp(gridType) : undefined,
+              canMeasure ? undefined : t('run.gate.measureNoGridScale'),
+            )}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
             {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}

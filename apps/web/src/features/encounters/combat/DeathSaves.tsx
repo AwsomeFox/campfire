@@ -1,3 +1,6 @@
+import { useTranslation } from 'react-i18next';
+import { GatedControl } from '../../../components/GatedControl';
+
 export type DeathSavePatch = { deathSaveSuccesses?: number; deathSaveFailures?: number };
 export const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Stable', dead: 'Dead' };
 
@@ -9,7 +12,6 @@ export type DeathSavePipsProps = {
   busy: boolean;
   syncBlocked: boolean;
   syncBlockedReason?: string;
-  syncBlockedDescribedBy?: string;
   onSet: (patch: DeathSavePatch) => void;
 };
 
@@ -22,7 +24,6 @@ export function DeathSavePips({
   busy,
   syncBlocked,
   syncBlockedReason,
-  syncBlockedDescribedBy,
   onSet,
 }: DeathSavePipsProps) {
   return (
@@ -31,22 +32,21 @@ export function DeathSavePips({
         const filled = i < count;
         const next = count === i + 1 ? i : i + 1;
         return (
-          <button
-            key={i}
-            type="button"
-            className="cf-death-save-pip"
-            aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
-            aria-pressed={filled}
-            aria-describedby={syncBlockedDescribedBy}
-            disabled={!canEditPermission || busy || syncBlocked}
-            title={syncBlockedReason}
-            onClick={() => onSet({ [kind]: next })}
-            style={{
-              ['--cf-death-save-pip-color' as string]: color,
-              ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
-              cursor: canEditPermission && !busy && !syncBlocked ? 'pointer' : 'default',
-            }}
-          />
+          <GatedControl key={i} reason={syncBlockedReason}>
+            <button
+              type="button"
+              className="cf-death-save-pip"
+              aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
+              aria-pressed={filled}
+              disabled={!canEditPermission || busy || syncBlocked}
+              onClick={() => onSet({ [kind]: next })}
+              style={{
+                ['--cf-death-save-pip-color' as string]: color,
+                ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
+                cursor: canEditPermission && !busy && !syncBlocked ? 'pointer' : 'default',
+              }}
+            />
+          </GatedControl>
         );
       })}
     </span>
@@ -61,7 +61,6 @@ export type DeathSaveTrackerProps = {
   busy: boolean;
   syncBlocked: boolean;
   syncBlockedReason?: string;
-  syncBlockedDescribedBy?: string;
   onSet: (patch: DeathSavePatch) => void;
   onRoll: () => void;
 };
@@ -74,7 +73,6 @@ export function DeathSaveTracker({
   busy,
   syncBlocked,
   syncBlockedReason,
-  syncBlockedDescribedBy,
   onSet,
   onRoll,
 }: DeathSaveTrackerProps) {
@@ -84,18 +82,19 @@ export function DeathSaveTracker({
     <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }} data-testid="death-save-tracker">
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
-        <DeathSavePips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" canEditPermission={canEditPermission} busy={busy} syncBlocked={syncBlocked} syncBlockedReason={syncBlockedReason} syncBlockedDescribedBy={syncBlockedDescribedBy} onSet={onSet} />
+        <DeathSavePips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" canEditPermission={canEditPermission} busy={busy} syncBlocked={syncBlocked} syncBlockedReason={syncBlockedReason} onSet={onSet} />
       </span>
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
-        <DeathSavePips kind="deathSaveFailures" count={failures} color="#e5484d" canEditPermission={canEditPermission} busy={busy} syncBlocked={syncBlocked} syncBlockedReason={syncBlockedReason} syncBlockedDescribedBy={syncBlockedDescribedBy} onSet={onSet} />
+        <DeathSavePips kind="deathSaveFailures" count={failures} color="#e5484d" canEditPermission={canEditPermission} busy={busy} syncBlocked={syncBlocked} syncBlockedReason={syncBlockedReason} onSet={onSet} />
       </span>
       {canEditPermission && canRoll && (
-        <button type="button" className="btn btn-ghost cf-target-44" aria-label="Roll a death save" aria-describedby={syncBlockedDescribedBy} title={syncBlockedReason ?? 'Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)'} disabled={busy || syncBlocked} onClick={onRoll} style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}>
-          {t('dice.roll')}
-        </button>
+        <GatedControl reason={syncBlockedReason}>
+          <button type="button" className="btn btn-ghost cf-target-44" aria-label="Roll a death save" title={syncBlockedReason ?? 'Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)'} disabled={busy || syncBlocked} onClick={onRoll} style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}>
+            {t('dice.roll')}
+          </button>
+        </GatedControl>
       )}
     </div>
   );
 }
-import { useTranslation } from 'react-i18next';
