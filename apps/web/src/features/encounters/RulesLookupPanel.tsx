@@ -114,7 +114,9 @@ export function RulesLookupPanel({ campaignId, ruleSystem }: RulesLookupPanelPro
       const next = !prev;
       try {
         sessionStorage.setItem('rules_lookup_panel_collapsed', String(next));
-      } catch {}
+      } catch {
+        /* ignore sessionStorage availability errors */
+      }
       return next;
     });
   }, []);
