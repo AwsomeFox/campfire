@@ -20,7 +20,8 @@
       "rulesOnly": "Rules reference only; it does not expose campaign secrets.",
       "tableVisible": "Shared table agreement visible to every campaign member.",
       "dmOnly": "DM-only prep space; players and viewers cannot see it.",
-      "liveCanonSplit": "Acts in live play, while durable canon edits still become proposals."
+      "liveCanonSplit": "Acts in live play, while durable canon edits still become proposals.",
+      "dmSetTableVisible": "Shown to the whole table; only the DM can change it."
     },
     "phase": {
       "livePlay": "Live play",
@@ -28,7 +29,8 @@
       "prepCanon": "Prep and canon",
       "reference": "Reference",
       "prepSafety": "Table safety",
-      "aiAssist": "AI assist"
+      "aiAssist": "AI assist",
+      "campaignSetting": "Campaign setting"
     },
     "terms": {
       "cast": {
@@ -70,6 +72,11 @@
         "label": "Driver",
         "short": "Driver lets the AI run live play directly, while canon edits still go through proposals.",
         "definition": "Driver is the AI mode where the AI holds the DM seat for live play: narrating, rolling dice, applying HP and conditions, and advancing turns within its budget. Durable canon edits such as new NPCs, quests, or locations still become proposals for DM review."
+      },
+      "dangerLevel": {
+        "label": "Campaign danger level",
+        "short": "Campaign danger level sets the whole campaign's tone and baseline challenge — it is not a live threat meter.",
+        "definition": "Campaign danger level is a DM-set backdrop for the whole campaign's intended tone and baseline challenge, not any single scene, session, or encounter. It stays as set until the DM changes it in Settings or the dashboard, and only colors the AI Driver's narration when set above Low. It is distinct from encounter difficulty (a computed budget for one specific fight), a combatant's HP band (their current wound state), and the Session Zero safety charter (the table's agreed content and safety boundaries)."
       }
     }
   }
