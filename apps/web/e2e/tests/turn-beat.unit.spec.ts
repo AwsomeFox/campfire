@@ -46,6 +46,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectTurnBeat(initial, { ...initial, combatantId: 13 })).toBe('turn');
     expect(detectTurnBeat(initial, { ...initial, combatantId: 13, round: 2 })).toBe('round-wrap');
     expect(detectTurnBeat(initial, { ...initial, combatantId: null, round: 2 })).toBe('round-wrap');
+    expect(detectTurnBeat({ ...initial, combatantId: null }, { ...initial, combatantId: null, round: 2 })).toBe('round-wrap');
   });
 
   test('clears a prior beat for an unnamed same-round lair action', () => {
@@ -56,12 +57,13 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears owned state and refreshes /turn when the poll observes no active combatant', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/if \(currentCombatantId === undefined\) \{[\s\S]*setTurnOwnerFromEvent\(false\);[\s\S]*setTurnOwnerPendingCombatantId\(null\);[\s\S]*void queryClient\.invalidateQueries\(\{ queryKey: queryKeys\.encounterTurn\(eid\) \}\);/);
+    expect(source).toMatch(/if \(currentCombatantId === undefined\) \{[\s\S]*setTurnOwnerFromEvent\(null\);[\s\S]*setTurnOwnerPendingCombatantId\(null\);[\s\S]*void queryClient\.invalidateQueries\(\{ queryKey: queryKeys\.encounterTurn\(eid\) \}\);/);
   });
 
   test('does not use a prior combatant\'s /turn result as the hidden-tab fallback', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/turnWorkspace\?\.current\?\.combatantId === currentCombatantId\s*&&\s*turnWorkspace\?\.isYourTurn === true/);
+    expect(source).toMatch(/turnOwnerFromEvent != null && turnOwnerFromEvent\.combatantId === currentCombatantId\s*\? turnOwnerFromEvent\.isYourTurn/);
   });
 
   test('relies on the paired encounter update while refreshing only /turn for a turn edge', () => {

@@ -952,7 +952,10 @@ export default function RunSessionPage() {
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
   const [turnBeat, setTurnBeat] = useState<TurnChangeBeatEvent | null>(null);
   const [turnPulse, setTurnPulse] = useState(false);
-  const [turnOwnerFromEvent, setTurnOwnerFromEvent] = useState<boolean | null>(null);
+  const [turnOwnerFromEvent, setTurnOwnerFromEvent] = useState<{
+    combatantId: number | null;
+    isYourTurn: boolean;
+  } | null>(null);
   const [turnOwnerPendingCombatantId, setTurnOwnerPendingCombatantId] = useState<number | null>(null);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
@@ -1273,7 +1276,10 @@ export default function RunSessionPage() {
           // stays unknown so it cannot pin an incorrect negative result for the
           // rest of the turn.
           const ownerKnown = rosterCombatantKnown && (ownerDataReady || combatant?.characterId == null);
-          setTurnOwnerFromEvent(ownerKnown ? isYourTurn : null);
+          setTurnOwnerFromEvent(ownerKnown ? {
+            combatantId: event.currentCombatantId ?? null,
+            isYourTurn,
+          } : null);
           setTurnOwnerPendingCombatantId(ownerKnown ? null : event.currentCombatantId ?? null);
           const next: TurnBeatSnapshot = {
             encounterId: eid,
@@ -2468,7 +2474,7 @@ export default function RunSessionPage() {
       // A missed SSE edge can leave a stale owned /turn result behind while a
       // same-round lair action clears the current combatant in the poll.
       // Clear the optimistic owner immediately, then refetch the workspace.
-      setTurnOwnerFromEvent(false);
+      setTurnOwnerFromEvent(null);
       setTurnOwnerPendingCombatantId(null);
     }
     void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
@@ -2482,12 +2488,18 @@ export default function RunSessionPage() {
     if (characterOwnershipPendingDataUpdatedAtRef.current != null) return;
     if (turnOwnerPendingCombatantId != null) {
       if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) return;
-      setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
+      setTurnOwnerFromEvent({
+        combatantId: turnOwnerPendingCombatantId,
+        isYourTurn: turnWorkspace.isYourTurn,
+      });
       setTurnOwnerPendingCombatantId(null);
       return;
     }
     if (turnWorkspace.current?.combatantId !== currentCombatantId) return;
-    setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
+    setTurnOwnerFromEvent({
+      combatantId: currentCombatantId ?? null,
+      isYourTurn: turnWorkspace.isYourTurn,
+    });
   }, [charactersQuery.dataUpdatedAt, currentCombatantId, turnOwnerPendingCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   // If the character list was still loading when an owned frame arrived, the
@@ -3300,10 +3312,10 @@ export default function RunSessionPage() {
         beat={turnBeat}
         isYourTurn={encounter?.status === 'running'
           && turnOwnerPendingCombatantId == null
-          && (turnOwnerFromEvent ?? (
-            turnWorkspace?.current?.combatantId === currentCombatantId
-            && turnWorkspace?.isYourTurn === true
-          ))}
+          && (turnOwnerFromEvent != null && turnOwnerFromEvent.combatantId === currentCombatantId
+            ? turnOwnerFromEvent.isYourTurn
+            : turnWorkspace?.current?.combatantId === currentCombatantId
+              && turnWorkspace?.isYourTurn === true)}
       />
 
       {pendingApply && (

@@ -30,7 +30,7 @@ export function detectTurnBeat(
 
   const previousKey = turnBeatKey(previous);
   const nextKey = turnBeatKey(next);
-  if (previousKey === nextKey) return null;
+  if (previous.combatantId === next.combatantId && previous.round === next.round) return null;
 
   if (next.isYourTurn && nextKey != null && (!previous.isYourTurn || previousKey !== nextKey)) {
     return 'your-turn';
