@@ -26,7 +26,15 @@ test.describe('ActionUseFlow system-math honesty notice (issue #1928)', () => {
     expect(code).toMatch(/t\(['"]encounters\.actionFlow\.systemMathNotice['"]/);
 
     const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { actionFlow?: Record<string, unknown> } };
-    expect(en.encounters?.actionFlow?.systemMathNotice).toBe('Resolved with 5e-style d20 math — verify against your system.');
+    // Codex review (#1981): the notice must NOT claim 5e d20 math ran. `systemMathSupported`
+    // is false whenever the system is unaudited end-to-end, but OSR and Open Legend supply
+    // their own `resolveAttack` (descending AC, exploding pools) — so for those adapters the
+    // resolution is genuinely the system's own, and naming 5e here would be a false claim
+    // about what executed. The honest statement is that the math is unaudited for this system.
+    expect(en.encounters?.actionFlow?.systemMathNotice).toBe(
+      "Resolved with math that hasn't been audited for your system — verify the result.",
+    );
+    expect(en.encounters?.actionFlow?.systemMathNotice).not.toMatch(/5e|d20/i);
 
     const ar = JSON.parse(readFileSync(AR_ENCOUNTERS, 'utf8')) as { encounters?: { actionFlow?: Record<string, unknown> } };
     // Real Arabic copy, not an English passthrough.

@@ -4824,7 +4824,12 @@ export class McpToolsService {
         'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
         'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
         'statblock). Returns { resolution, applied, canApply, policy, undoToken, systemMathSupported, mathProfile }. ' +
-        'The resolver\'s OWN attack/save maths (the d20 roll, ascending-AC comparison, proficiency bonus) are 5e-shaped; ' +
+        '`systemMathSupported` is false whenever this campaign\'s system has NOT been audited end-to-end against the ' +
+        'resolver\'s maths — it does NOT mean 5e math was necessarily used. Some adapters (OSR, Open Legend) supply ' +
+        'their own `resolveAttack` (descending-AC comparison, exploding dice pools) and are still reported unsupported ' +
+        'because the combined attack/save profile is unaudited. Read `mathProfile` for what actually ran: it names the ' +
+        'audited profile when one is in force, and is null otherwise. Only when it names the 5e profile are the d20 ' +
+        'roll, ascending-AC comparison and proficiency bonus below the 5e-shaped ones; ' +
         '`systemMathSupported` is true only when the campaign\'s rule system is 5e or an empty/unrecognized slug ' +
         '(the same 5e fallback combat math already uses) — false for a registered non-5e system (PF2e, OSR, …) that ' +
         'has not been audited against this maths (issue #1928, label don\'t block: resolution still runs and, under ' +

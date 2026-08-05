@@ -197,7 +197,7 @@
     },
     "actionFlow": {
       "noTargets": "No legal targets.",
-      "systemMathNotice": "Resolved with 5e-style d20 math — verify against your system."
+      "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
     },
     "checks": {
       "requestCheck": "Request a check",

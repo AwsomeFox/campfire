@@ -209,7 +209,7 @@
     },
     "actionFlow": {
       "noTargets": "No legal targets.",
-      "systemMathNotice": "تمت التسوية باستخدام حسابات D20 على طراز الإصدار الخامس (5e) — تحقق منها وفق نظام قواعدك."
+      "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
     },
     "wizard": {
       "step1": "1. Parameters",
