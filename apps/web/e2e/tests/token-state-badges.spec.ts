@@ -69,6 +69,10 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(dmPage.getByTestId('map-tool-reveal')).toHaveAttribute('aria-pressed', 'true');
     await expect(dmPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveCSS('pointer-events', 'none');
     await dmPage.getByTestId('map-tool-move').click();
+    await dmPage.getByTestId('map-viewport-pan').click();
+    await expect(dmPage.getByTestId('map-viewport-pan')).toHaveAttribute('aria-pressed', 'true');
+    await expect(dmPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveCSS('pointer-events', 'none');
+    await dmPage.getByTestId('map-viewport-pan').click();
 
     // The viewer never clicks: the DM advances the real encounter and its SSE update
     // moves the accent ring on the second client.
