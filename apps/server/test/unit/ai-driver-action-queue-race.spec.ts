@@ -44,6 +44,7 @@ describe('AiDriverService action queue — concurrent enqueue race (#1586)', () 
       getSeat: jest.fn<any>().mockResolvedValue({ tokenBudget: 1000, tokensUsed: 0, actionQueueDepth: 5 }),
       meterTurn: jest.fn<any>().mockResolvedValue({ seat: { tokenBudget: 1000, tokensUsed: 100 }, budgetRemaining: 900 }),
       registerDriverSessionTeardown: jest.fn(),
+      isExperimentalEnabled: jest.fn<any>().mockResolvedValue(true),
     };
     const mcpTools = { buildToolset: jest.fn().mockReturnValue({ tools: [], get: jest.fn(), call: jest.fn() }) };
     const audit = { log: jest.fn() };

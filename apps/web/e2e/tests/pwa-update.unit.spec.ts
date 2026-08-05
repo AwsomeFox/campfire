@@ -133,4 +133,43 @@ test.describe('pwaUpdate state & transitions (#515)', () => {
 
     unsub();
   });
+
+  test('triggerUpdateNow invokes window.location.reload as a fallback when updateSWFn completes', async () => {
+    let swCalled = false;
+    let locationReloadCalled = false;
+
+    const dummyWindow = {
+      location: {
+        reload: () => {
+          locationReloadCalled = true;
+        },
+      },
+    };
+
+    const prevWindow = globalThis.window;
+    // @ts-expect-error - mock window object for Node unit test runner
+    globalThis.window = dummyWindow;
+
+    try {
+      // 1. With updateSWFn set
+      setPwaStateForTesting({ needRefresh: true }, async () => {
+        swCalled = true;
+      });
+
+      const res1 = await triggerUpdateNow();
+      expect(res1).toBe(true);
+      expect(swCalled).toBe(true);
+      expect(locationReloadCalled).toBe(true);
+
+      // 2. Without updateSWFn set
+      locationReloadCalled = false;
+      setPwaStateForTesting({ needRefresh: true }, undefined);
+
+      const res2 = await triggerUpdateNow();
+      expect(res2).toBe(true);
+      expect(locationReloadCalled).toBe(true);
+    } finally {
+      globalThis.window = prevWindow;
+    }
+  });
 });

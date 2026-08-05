@@ -12,7 +12,8 @@ import {
   setDriverStreamIdleTimeoutMsForTests,
   DRIVER_STREAM_IDLE_TIMEOUT_MS,
 } from '../src/modules/ai-driver/ai-driver.service';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import {
   NARRATION_QUARANTINE_CHARS,
   setNarrationQuarantineCharsForTests,
@@ -488,7 +489,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
     // Subscribe to the in-process narration stream (what GET /ai-dm/stream fans out over SSE).
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // #598: token-by-token delivery is what this case asserts, and the safety quarantine is a
@@ -655,7 +656,7 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     const campaignId = await armDriverWithHumanControl('Teardown Off');
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     const off = await h.configureSeat(campaignId, { mode: 'off' });
@@ -693,7 +694,7 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     expect(opened.body.vote).not.toBeNull();
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     const coDm = await h.configureSeat(campaignId, { mode: 'co_dm' });
@@ -743,7 +744,7 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     // On the first streamed token, tear down — same shape as a driver→off mid-narration.
     let toreDown = false;
     const deltas: string[] = [];
-    const sub = streamSvc.streamFor(campaignId).subscribe((e: AiDmStreamEvent) => {
+    const sub = streamSvc.streamFor(campaignId).subscribe((e: CampaignEvent) => {
       if (e.type === 'narration.delta') {
         deltas.push(e.text);
         if (!toreDown) {
@@ -799,7 +800,7 @@ describe('ai-dm driver — provider streaming failure unlocks composers (#1046)'
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // Mid-stream 500: yield one token, then throw (the repro in the issue).
@@ -877,7 +878,7 @@ describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // Yield one chunk, then hang until the driver's AbortSignal fires.
@@ -942,7 +943,7 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     const usedBefore = seatBefore.body.tokensUsed as number;
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
     // #1052: a `transport` failure with nothing on the wire is now RETRIED, so a single

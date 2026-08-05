@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { ActionSpec, ConditionInstance } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -42,9 +42,30 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     // an absent hook would silently stop capturing abuse evidence.
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
-    const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
+    const campaignLibrary = new CampaignLibraryService(orm, audit, events);
     const actions = new ActionResolverService(orm, events, audit);
+    // Issue #1901: wire ActionResolverService in (the last, optional constructor param) so
+    // suggestedActionsForCombatant's character branch merges equipped-item actions the same
+    // way listUsableActions/resolveSpec do. Harmless for every OTHER test in this file — with
+    // no equipped items the merge is a no-op, identical to the pre-#1901 sheet-only list.
+    const service = new EncountersService(
+      orm,
+      audit,
+      events,
+      rolls,
+      revisions,
+      attachments,
+      campaignLibrary,
+      { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any,
+      undefined, // safety
+      undefined, // charactersService
+      undefined, // inventoryService
+      undefined, // questsService
+      undefined, // storylinesService
+      undefined, // timelineService
+      undefined, // campaignsService
+      actions,
+    );
     return { orm, service, actions };
   }
 
@@ -1786,6 +1807,214 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       const [target2] = orm.select().from(combatants).where(eq(combatants.id, c3.id)).all();
       expect(JSON.parse(target1.conditionInstances ?? '[]')).toEqual([]);
       expect(JSON.parse(target2.conditionInstances ?? '[]')).toEqual([]);
+    });
+  });
+
+  // Issue #1901: /turn's suggestedActions for a character actor merge equipped-item actions
+  // AFTER sheet actions, through ActionResolverService's shared characterUsableActionRows —
+  // the exact same merge listUsableActions/resolveSpec use — so actionIndex N on this payload
+  // is the same action as index N on those.
+  describe('/turn suggestedActions include equipped-item actions (issue #1901)', () => {
+    const greatsword = {
+      name: 'Greatsword',
+      kind: 'melee',
+      toHit: '+7',
+      damage: '2d6+4 slashing',
+      notes: '',
+      spec: {
+        mode: 'attack',
+        // Deliberately omits `attack.bonus` — a character.actions row written straight to
+        // SQLite (bypassing the CharacterUpsertRequest/CharacterAction validation layer
+        // that would otherwise default it to '') is exactly the "malformed source" this
+        // function's doc comment already promises to be defensive about. This regresses
+        // the rework-round bug where suggestedActionsForCombatant passed `spec` to
+        // isResolvableSpec via a bare passthrough instead of `ActionSpec.safeParse`,
+        // crashing `.trim()` on the missing field instead of defaulting it like
+        // resolveSpec already does (issue #1901 rework).
+        attack: { ability: 'STR', proficient: true },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: { hit: { damage: [{ formula: '2d6', flat: 4, type: 'slashing' }] } },
+      },
+    };
+    const dagger = {
+      name: 'Dagger',
+      kind: 'melee',
+      toHit: '+5',
+      damage: '1d4+2 piercing',
+      notes: '',
+      spec: {
+        mode: 'attack',
+        attack: { ability: 'DEX', proficient: true },
+        cost: { slot: 'action', count: 1 },
+        targets: { count: 1, allow: 'enemy' },
+        outcomes: { hit: { damage: [{ formula: '1d4', flat: 2, type: 'piercing' }] } },
+      },
+    };
+
+    it("appends the equipped item's action after sheet actions, tagged with its item name via equippedItemName, and agrees with listUsableActions on the index", async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service, actions } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([greatsword]) }).where(eq(characters.id, characterId)).run();
+      const ts = new Date().toISOString();
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Rusty Dagger',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(2);
+      expect(workspace.suggestedActions[0].name).toBe('Greatsword');
+      expect(workspace.suggestedActions[0].actionIndex).toBe(0);
+      const equippedRow = workspace.suggestedActions[1];
+      expect(equippedRow.name).toBe('Dagger');
+      expect(equippedRow.actionIndex).toBe(1);
+      // Issue #1901 review (devin-ai-integration): `source` must stay the action-economy/kind
+      // hint the web turn workspace buckets tabs and detects spells from — never a display
+      // label — so it reads the dagger's own `kind` ('melee'), exactly like a sheet action
+      // would. The equipping item's name is carried separately.
+      expect(equippedRow.source).toBe('melee');
+      expect(equippedRow.equippedItemName).toBe('Rusty Dagger');
+
+      // Same actor, same index space: listUsableActions index 1 must be the SAME action.
+      const usable = actions.listUsableActions(encounterId, c1, player1, 'player');
+      expect(usable[1].name).toBe('Dagger');
+      expect(usable[1].index).toBe(equippedRow.actionIndex);
+    });
+
+    // Issue #1901 review (devin-ai-integration): before this fix, `source` was
+    // `equipped: <item name>` for every equipped-item row, so a gear-granted bonus action or
+    // reaction — one with no `spec.cost.slot` to fall back on, e.g. a passive trinket's
+    // triggered ability — could only be bucketed via TurnWorkspace's `source` comparison,
+    // which no longer matched 'bonus'/'reaction' once overwritten with the item label. It
+    // fell into "Other / Limited Use" instead of the tab the player expects it in.
+    it('a gear-granted bonus action keeps its kind as source, not the equipping item label, so the turn workspace can bucket it correctly', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([]) }).where(eq(characters.id, characterId)).run();
+      const ts = new Date().toISOString();
+      const trinketAction = {
+        name: 'Flurry Strike',
+        kind: 'bonus',
+        toHit: '+3',
+        damage: '1d4 force',
+        notes: 'A quick follow-up strike.',
+        spec: {
+          mode: 'attack',
+          attack: { ability: 'DEX', proficient: true },
+          // Deliberately NO cost.slot of 'bonus' — TurnWorkspace's bucketing must not
+          // depend on spec.cost.slot alone; `source` itself has to carry the kind.
+          cost: { slot: '', count: 1 },
+          targets: { count: 1, allow: 'enemy' },
+          outcomes: { hit: { damage: [{ formula: '1d4', type: 'force' }] } },
+        },
+      };
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Spell Focus Trinket',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'trinket',
+          equippedAction: JSON.stringify(trinketAction),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(1);
+      const row = workspace.suggestedActions[0];
+      expect(row.source).toBe('bonus');
+      expect(row.equippedItemName).toBe('Spell Focus Trinket');
+      // The item's name contains "spell" — confirms `source` (what the web fallback
+      // spell-list filter checks) is NOT contaminated with the item label.
+      expect(row.source.toLowerCase()).not.toContain('spell');
+    });
+
+    // Issue #1901 review (chatgpt-codex-connector P2): `InventoryItem.name` permits up to 200
+    // characters, so `equippedItemName` must accept the same range — a narrower schema limit
+    // here would make an otherwise-valid item name fail this exported `TurnSuggestedAction`
+    // response shape.
+    it('an equipped item name up to the inventory contract\'s 200-character limit survives the /turn payload', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { campaignId, encounterId, c1 } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      orm.update(characters).set({ actions: JSON.stringify([]) }).where(eq(characters.id, characterId)).run();
+      const longName = 'A'.repeat(200);
+      const ts = new Date().toISOString();
+      orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: longName,
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(workspace.suggestedActions).toHaveLength(1);
+      expect(workspace.suggestedActions[0].equippedItemName).toBe(longName);
+    });
+
+    it('unequipping removes the item action from suggestedActions', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1, campaignId } = seed(orm);
+      const [charRow] = orm.select({ characterId: combatants.characterId }).from(combatants).where(eq(combatants.id, c1)).all();
+      const characterId = charRow.characterId!;
+      const ts = new Date().toISOString();
+      const [item] = orm
+        .insert(inventoryItems)
+        .values({
+          campaignId,
+          ownerType: 'character',
+          characterId,
+          name: 'Rusty Dagger',
+          qty: 1,
+          equipped: true,
+          equipSlot: 'off-hand',
+          equippedAction: JSON.stringify(dagger),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+
+      expect((await service.getTurnWorkspace(encounterId, player1, 'player')).suggestedActions).toHaveLength(1);
+
+      orm.update(inventoryItems).set({ equipped: false, equipSlot: null }).where(eq(inventoryItems.id, item.id)).run();
+
+      expect((await service.getTurnWorkspace(encounterId, player1, 'player')).suggestedActions).toHaveLength(0);
     });
   });
 });

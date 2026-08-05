@@ -943,7 +943,8 @@ describe('campaign import — atomic staged commit (issue #725)', () => {
   /** Count campaign rows the DM can list (excludes trashed). */
   async function listCampaignIds(): Promise<number[]> {
     const res = await dmAgent.get('/api/v1/campaigns');
-    return (res.body as { id: number }[]).map((c) => c.id);
+    const items = Array.isArray(res.body) ? res.body : res.body.items;
+    return items.map((c: { id: number }) => c.id);
   }
 
   it('rolls back the entire import when the membership insert fails (JSON import, no attachments)', async () => {

@@ -121,16 +121,23 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
         'true',
       );
 
-      // Loser should surface error banner.
+      // Loser should surface error banner. The loser's mutation settles asynchronously
+      // (its own onError callback fires after the request round-trip), so an immediate
+      // isVisible() check races the render and can observe "not yet" on both pages —
+      // Promise.race over instant checks resolves on whichever settles first, which is
+      // usually the fast "false" from the page that never gets an error at all. Wait for
+      // either banner to actually become visible instead of sampling a single instant.
       const hasErrorBanner = await Promise.race([
         dmPage
           .getByTestId('error-note')
-          .isVisible()
-          .then((v) => v),
+          .waitFor({ state: 'visible', timeout: 8000 })
+          .then(() => true)
+          .catch(() => false),
         playerPage
           .getByTestId('error-note')
-          .isVisible()
-          .then((v) => v),
+          .waitFor({ state: 'visible', timeout: 8000 })
+          .then(() => true)
+          .catch(() => false),
       ]);
       expect(hasErrorBanner).toBe(true);
     } finally {

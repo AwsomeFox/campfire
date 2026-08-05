@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
 import { AI_PROVIDER_RESOLVER } from '../src/modules/ai-driver/ai-provider-resolver';
@@ -368,7 +369,7 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
   it('broadcasts a thin phase frame the table can follow', async () => {
     const campaignId = await armed('Phase Frames');
     const streamSvc = h.ctx.app.get(AiDmStreamService);
-    const seen: AiDmStreamEvent[] = [];
+    const seen: CampaignEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => seen.push(e));
 
     h.script({ text: 'Hello.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
@@ -376,7 +377,7 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
     sub.unsubscribe();
 
     const phases = seen
-      .filter((e): e is Extract<AiDmStreamEvent, { type: 'phase' }> => e.type === 'phase')
+      .filter((e): e is Extract<CampaignEvent, { type: 'phase' }> => e.type === 'phase')
       .map((e) => e.phase);
     expect(phases).toEqual(['greeting', 'active']);
   });
@@ -492,7 +493,7 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
     const sub = streamSvc
       .streamFor(campaignId)
       .subscribe((e) => {
-        if (e.type === 'phase') frames.push((e as Extract<AiDmStreamEvent, { type: 'phase' }>).phase);
+        if (e.type === 'phase') frames.push((e as Extract<CampaignEvent, { type: 'phase' }>).phase);
       });
     try {
       await run();
@@ -703,7 +704,7 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     const frames: string[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
-      if (e.type === 'phase') frames.push((e as Extract<AiDmStreamEvent, { type: 'phase' }>).phase);
+      if (e.type === 'phase') frames.push((e as Extract<CampaignEvent, { type: 'phase' }>).phase);
     });
 
     // Provider RESOLUTION yielding nothing lands after the slot is reserved and the phase is

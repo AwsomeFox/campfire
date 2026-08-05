@@ -666,6 +666,34 @@ export const DdbCharacterImport = z
   });
 export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
 
+/**
+ * What a D&D Beyond import produced beyond the character's vitals (issue #1903). The
+ * importer never drops an unparseable attack/spell entry silently — it lands as a
+ * text-only `CharacterAction` (name + notes, no resolvable `spec`) and its name is echoed
+ * here so the caller can show the DM/player what needs a manual touch-up. REST and MCP
+ * return this identically alongside the created character.
+ */
+export const DdbImportSummary = z.object({
+  actionsImported: z.number().int().min(0).default(0),
+  spellsImported: z.number().int().min(0).default(0),
+  spellSlotsImported: z.boolean().default(false),
+  // Names of imported actions/spells that came in as text-only (no resolvable spec) —
+  // never a silent drop, always visible to the importer's caller.
+  textOnly: z.array(z.string().max(120)).max(200).default([]),
+  // Count of raw sheet entries trimmed by Character.actions' schema cap (issue #1903
+  // review) — 0 for the overwhelming majority of sheets (well under the cap); reported
+  // rather than silently dropped when a sheet is large enough to exceed it.
+  entriesOmitted: z.number().int().min(0).default(0),
+});
+export type DdbImportSummary = z.infer<typeof DdbImportSummary>;
+
+/** REST/MCP result shape for a D&D Beyond import: the created character plus its summary. */
+export const DdbImportResult = z.object({
+  character: Character,
+  summary: DdbImportSummary,
+});
+export type DdbImportResult = z.infer<typeof DdbImportResult>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
@@ -740,11 +768,26 @@ export function isKnownCondition(vocab: readonly string[], name: string): boolea
   if (!needle) return false;
   return vocab.some((c) => c.toLowerCase() === needle);
 }
-/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+/**
+ * Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot
+ * maxima are edited via PATCH `spellSlots`. `expectedUpdatedAt` is the same optimistic-
+ * concurrency guard as {@link ExpectedUpdatedAt} everywhere else (issue #1902 rework): a
+ * `delta` is meaningless without knowing what it is relative to, so a caller that read
+ * `used` from a render and echoes back the character's `updatedAt` at that moment gets a
+ * 409 instead of a silently-misapplied delta if another client changed the sheet (this
+ * slot or otherwise) in between. Omitted => unconditional write, matching every other
+ * caller of this contract (AI DM/MCP tools included) exactly as before.
+ *
+ * {@link ResourcePatch} carries the identical guard for the sibling resource contract
+ * (issue #1902 rework, round 24) — the two are separate hand-written shapes, not one
+ * merged type, but the same rule.
+ */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
+export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
 /**
  * Spend, restore, or configure one bounded character resource (issue #422/#1578) —
  * `hitDice`/`rage`/`kiPoints` under 5e, `focusPoints` under PF2e, or a custom pool the
@@ -757,6 +800,13 @@ export const SpellSlotPatch = z.object({
  * resource's current `used`, `used` sets it absolutely; the service applies `used` first
  * when both are sent, then `delta`. Spending past 0 or restoring past `max` is a 400, not
  * a clamp (see `CharactersService.adjustResource`'s own doc comment for why).
+ *
+ * `expectedUpdatedAt` is the same optimistic-concurrency guard as {@link SpellSlotPatch}'s
+ * own field (issue #1902 rework, round 24): an absolute `used` is a full overwrite, not a
+ * delta, so a caller that read `used` from a stale render and echoes back the character's
+ * `updatedAt` at that moment gets a 409 instead of silently undoing a concurrent spend/rest
+ * from another tab, a REST client, or an MCP caller. Omitted => unconditional write,
+ * matching every other caller of this contract exactly as before.
  */
 export const ResourcePatch = z.object({
   key: z.string().min(1).max(80),
@@ -766,6 +816,7 @@ export const ResourcePatch = z.object({
   name: z.string().min(1).max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
   source: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([
@@ -1448,6 +1499,7 @@ export const ScheduledSession = z.object({
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
+  prepNotes: z.string().max(20_000).default(''),
   status: z.enum(['scheduled', 'cancelled', 'completed']).default('scheduled'),
   cancelledAt: IsoDateTime.nullable().default(null),
   cancelledBy: z.string().max(120).nullable().default(null),
@@ -1515,6 +1567,7 @@ export const ScheduledSessionUpdate = z.object({
   title: z.string().max(200).optional(),
   location: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
+  prepNotes: z.string().max(20_000).optional(),
 });
 // `timezone` is deliberately absent (#588), so a one-off's zone is set at creation
 // and never corrected here. On a one-off the INSTANT is authoritative and the zone
@@ -3177,6 +3230,11 @@ export const NotificationType = z.enum([
   // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
   // Maps to the always-on `security` category below: a safety stop must not be mutable by a
   // notification preference or deferrable into a digest.
+  // Live play events (issue #1322)
+  'encounter_started',
+  'encounter_ended',
+  'encounter_turn',
+  'character_downed',
   'safety_hold',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
@@ -3292,6 +3350,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
+  'live_play', // encounter_started, encounter_ended, encounter_turn, character_downed
   'access', // added_to_campaign, removed_from_campaign, campaign_trashed, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
@@ -3339,6 +3398,10 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_submitted: 'proposals',
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
+  encounter_started: 'live_play',
+  encounter_ended: 'live_play',
+  encounter_turn: 'live_play',
+  character_downed: 'live_play',
   ai_dm_alert: 'security',
   // 'access' rather than a category of its own, and therefore ALWAYS ON. A published
   // charter version can withdraw a protection the recipient previously agreed to, and
@@ -5149,7 +5212,7 @@ export function formatCheckBreakdown(def: Pick<RollCheckDefinition, 'breakdown' 
 }
 
 /** The three roll modes a d20-style check can be taken with (mirrors the sheet's chooser). */
-export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+export type CheckRollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 /**
  * Build the restricted dice expression for a catalog check + roll mode (issue #415). Uses the
@@ -5158,7 +5221,7 @@ export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
  */
 export function checkRollExpr(
   def: Pick<RollCheckDefinition, 'modifier' | 'die' | 'supportsAdvantage'>,
-  mode: CheckRollMode = 'flat',
+  mode: CheckRollMode = 'normal',
 ): string {
   const die = def.die > 0 ? def.die : 20;
   const tail = def.modifier === 0 ? '' : signedModifier(def.modifier);
@@ -7129,6 +7192,11 @@ export const AiGenerationProvenance = z.object({
   sourceHash: z.string().nullable().default(null),
   promptVersion: z.string().max(80),
   promptHash: z.string(),
+  ruleset: z.object({
+    id: z.string(),
+    pack: z.string().nullable().default(null),
+    version: z.string().nullable().default(null),
+  }).optional(),
   consent: z.object({
     campaignPolicy: AiExternalContentPolicy,
     /**
@@ -9096,6 +9164,8 @@ export const MapPing = z.object({
   y: z.number().min(0).max(100),
   color: z.string().max(24).nullable().default(null),
   label: z.string().max(40).nullable().default(null),
+  senderId: z.string().nullable().default(null),
+  senderName: z.string().nullable().default(null),
 });
 export type MapPing = z.infer<typeof MapPing>;
 
@@ -10249,10 +10319,10 @@ export const CombatantUpdate = z.object({
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   // Structured condition instance mutations (issue #423)
-  addConditionInstance: ConditionInstance.optional(),
-  removeConditionInstanceId: z.string().min(1).max(40).optional(),
-  updateConditionInstance: ConditionInstance.optional(),
-  conditionInstances: z.array(ConditionInstance).max(50).optional(),
+  addConditionInstance: ConditionInstance.optional().describe('Add a single structured condition instance. Preferred over addConditions.'),
+  removeConditionInstanceId: z.string().min(1).max(40).optional().describe('Remove a structured condition instance by its ID (e.g. from conditionInstances).'),
+  updateConditionInstance: ConditionInstance.optional().describe('Update an existing structured condition instance (must match its ID).'),
+  conditionInstances: z.array(ConditionInstance).max(50).optional().describe('Absolute set of structured condition instances.'),
   // Nullable so a mistaken value can be cleared back to the unrolled state (issue
   // #715): `initiative: null` writes NULL onto the row (distinguished from omitting
   // the field, which leaves it unchanged). DM only, enforced server-side. A cleared
@@ -10471,8 +10541,27 @@ export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
 export const TurnSuggestedAction = z.object({
   name: z.string().min(1).max(160),
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  // ALWAYS the action-economy/kind hint, never a display label — the web client keys BOTH
+  // the Action/Bonus/Reaction/Other tab bucketing and the fallback spell-list detection off
+  // this string (see TurnWorkspace.tsx), so overloading it with something else (e.g. an
+  // equipping item's name) breaks both for any equipped item whose economy slot isn't
+  // explicit in `spec.cost.slot` — or, worse, silently renders a mundane item as a
+  // fabricated spell entry the moment its name happens to contain "spell" (issue #1901
+  // review: devin-ai-integration on PR #1951).
   source: z.string().max(40),
+  /**
+   * The equipping item's name (issue #1901), for a row contributed by a character's
+   * equipped-item action — `null` for a hand-authored sheet action or a monster/NPC
+   * statblock action. Kept SEPARATE from `source` (see above) precisely so the "equipped:
+   * <item>" label the web UI renders alongside an action never contaminates `source`'s
+   * economy-hint meaning. Capped at 200 to match `InventoryItem.name` (review:
+   * chatgpt-codex-connector P2) — a shorter limit here would reject an otherwise-valid
+   * item's full name once forwarded into this field, failing this exported response schema.
+   */
+  equippedItemName: z.string().max(200).nullable().default(null),
   summary: z.string().max(600).default(''),
+  toHit: z.string().default(''),
+  damage: z.string().default(''),
   // Index into the combatant's usable-actions list (issue #425). Omitted for prose-only rows.
   actionIndex: z.number().int().min(0).optional(),
   // True when the action carries a structured spec the Use flow can resolve.
@@ -10481,6 +10570,18 @@ export const TurnSuggestedAction = z.object({
   spec: ActionSpec.nullable().optional(),
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
+
+/** Quick-roll request body for one-tap attack or damage roll in an encounter (issue #1850). */
+export const QuickRollRequest = z.object({
+  combatantId: Id.optional(),
+  actorName: z.string().max(200).optional(),
+  actionName: z.string().min(1).max(160),
+  kind: z.enum(['to-hit', 'damage']),
+  expr: z.string().min(1).max(100),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat'),
+});
+export type QuickRollRequest = z.infer<typeof QuickRollRequest>;
+
 
 /** What a turn prompt is about, so the client can group/iconify it. */
 export const TurnPromptKind = z.enum([
@@ -10724,6 +10825,27 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   equipped: z.boolean().optional(),
   equipSlot: z.string().max(60).nullable().optional(),
   equippedAction: CharacterAction.nullable().optional(),
+  /**
+   * Issue #1901 rework: when equipping (equipped:true) into a slot another of this
+   * character's items already occupies, the server normally rejects with 409
+   * INVENTORY_SLOT_CONFLICT so the caller can choose what to do. Setting this true
+   * instead makes the whole swap ATOMIC — the incumbent is unequipped in the SAME
+   * transaction as this equip, rather than the caller issuing an unequip PATCH followed
+   * by a separate equip PATCH (a sequence with a real window: another writer can claim
+   * the slot between the two requests, or the second request can simply fail, leaving
+   * the character wearing neither item). Ignored when there is no conflict, or when
+   * this write isn't an equip transition at all.
+   */
+  displaceEquipped: z.boolean().optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P2): an optional CAS-style guard for
+   * `displaceEquipped` — the id of the incumbent item the caller is confirming displacement
+   * of (from an earlier 409 INVENTORY_SLOT_CONFLICT body). If another writer has since
+   * changed who occupies the target slot, the server rejects with a FRESH 409 naming the new
+   * incumbent instead of silently displacing whichever item happens to be there when this
+   * request lands.
+   */
+  expectedConflictingItemId: Id.optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
@@ -10914,6 +11036,27 @@ export const CampaignEventType = z.enum([
   // the anonymity rules. Putting the actor on the wire would hand every connected browser
   // the one field the whole feature exists to withhold.
   'safety.hold',
+  'turn.start',
+  'narration.delta',
+  'narration.message',
+  'narration.withheld',
+  'tool',
+  'turn.cancelled',
+  'turn.error',
+  'turn.end',
+  'stuck',
+  'recovered',
+  'state',
+  'phase',
+  'vote',
+  'takeover',
+  'secret-approval',
+  'tool-confirmation',
+  'transcript',
+  'session.reset',
+  'transcript.reset',
+  'grounding',
+  'player-display-scene',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -10922,6 +11065,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('encounter.updated'),
     campaignId: Id,
     encounterId: Id,
+    // Issue #1902 rework (round 19, codex P2): most `encounter.updated` frames are pure
+    // combat-log/turn activity (a roll, a token move) with NO character-sheet write behind
+    // them — every connected client refetching the WHOLE campaign character list on each
+    // one is wasted work during a busy fight. Set `true` only by the specific writers that
+    // ACTUALLY mirror onto a linked character sheet in the same commit (the apply-action
+    // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
+    // invalidate `campaignCharacters` precisely instead of on every encounter update.
+    sheetMirrored: z.boolean().optional(),
     at: IsoDate,
   }),
   z.object({
@@ -10948,6 +11099,12 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('player-display-scene'),
+    campaignId: Id,
+    scene: z.string(),
     at: IsoDate,
   }),
   z.object({
@@ -11049,6 +11206,127 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     active: z.boolean(),
     at: IsoDate,
   }),
+  z.object({ type: z.literal('turn.start'), campaignId: Id, at: IsoDate }),
+  z.object({ type: z.literal('narration.delta'), campaignId: Id, text: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('narration.message'), campaignId: Id, text: z.string(), at: IsoDate }),
+  z.object({
+    type: z.literal('narration.withheld'),
+    campaignId: Id,
+    reason: z.enum(['content_filter', 'refusal']),
+    message: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('tool'),
+    campaignId: Id,
+    name: z.string(),
+    isError: z.boolean(),
+    proposed: z.boolean(),
+    pendingConfirmation: z.boolean().optional(),
+    encounterId: Id.optional(),
+    encounterHidden: z.boolean().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.cancelled'),
+    campaignId: Id,
+    narration: z.string(),
+    stopReason: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.error'),
+    campaignId: Id,
+    stopReason: z.literal('provider_error'),
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    steps: z.number().int(),
+    tokensUsed: z.number().int(),
+    tokensUsageUnknown: z.boolean().optional(),
+    budgetRemaining: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('turn.end'),
+    campaignId: Id,
+    stopReason: z.string(),
+    steps: z.number().int(),
+    tokensUsed: z.number().int(),
+    tokensUsageUnknown: z.boolean().optional(),
+    budgetRemaining: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('stuck'),
+    campaignId: Id,
+    reason: z.string(),
+    detail: z.string(),
+    state: z.string(),
+    levers: z.array(z.string()),
+    at: IsoDate,
+  }),
+  z.object({ type: z.literal('recovered'), campaignId: Id, state: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('state'), campaignId: Id, state: z.string(), at: IsoDate }),
+  z.object({ type: z.literal('phase'), campaignId: Id, phase: z.string(), at: IsoDate }),
+  z.object({
+    type: z.literal('vote'),
+    campaignId: Id,
+    action: z.string(),
+    kind: z.string(),
+    outcome: z.string().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('takeover'),
+    campaignId: Id,
+    action: z.string(),
+    memberId: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('secret-approval'),
+    campaignId: Id,
+    action: z.enum(['granted', 'revoked']),
+    tool: z.string(),
+    entityId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('tool-confirmation'),
+    campaignId: Id,
+    action: z.enum(['queued', 'approved', 'rejected']),
+    confirmationId: z.string(),
+    tool: z.string(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('transcript'),
+    campaignId: Id,
+    event: AiDmTranscriptEvent,
+    visibility: AiDmTranscriptVisibility.optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('session.reset'),
+    campaignId: Id,
+    voteExpired: z.boolean(),
+    approvalsRevoked: z.number().int(),
+    confirmationsDiscarded: z.number().int(),
+    at: IsoDate,
+  }),
+  z.object({ type: z.literal('transcript.reset'), campaignId: Id, at: IsoDate }),
+  z.object({
+    type: z.literal('grounding'),
+    campaignId: Id,
+    status: z.enum(['clean', 'unverified']),
+    supportedCount: z.number().int(),
+    unsupportedCount: z.number().int(),
+    provider: z.string(),
+    model: z.string(),
+    claimIds: z.array(Id),
+    at: IsoDate,
+  }),
 ]);
 export type CampaignEvent = z.infer<typeof CampaignEvent>;
 
@@ -11087,7 +11365,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 // records the roll to the shared dice log, and returns the transparent breakdown + outcome.
 export const CheckRollRequest = z.object({
   checkId: z.string().min(1).max(60).describe('Stable catalog id from GET .../checks, e.g. "skill:Athletics", "save:DEX", "initiative"'),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).default('normal').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
 });
@@ -11106,7 +11384,7 @@ export const CheckRollResponse = z.object({
     breakdownText: z.string(),
     incomplete: z.boolean().optional(),
   }),
-  mode: z.enum(['flat', 'advantage', 'disadvantage']),
+  mode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']),
   roll: DiceRoll,
   // PF2e degree of success (only present when the system reports degrees AND a dc was given).
   degree: z.enum(['criticalFailure', 'failure', 'success', 'criticalSuccess']).optional(),
@@ -11120,7 +11398,7 @@ export type CheckRollResponse = z.infer<typeof CheckRollResponse>;
 // request(s) over a permission-checked REST read (the thin `check.requested` SSE tick only
 // tells them to refetch), rolls ONCE via the existing catalog-roll path, and sees the DM's
 // consequence text alongside the outcome. The request is then marked resolved.
-export const CheckRequestMode = z.enum(['flat', 'advantage', 'disadvantage']);
+export const CheckRequestMode = z.enum(['normal', 'advantage', 'disadvantage', 'crit']);
 export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
 export const CheckRequestStatus = z.enum(['pending', 'resolved']);
 export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
@@ -11129,7 +11407,7 @@ export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
 export const CheckRequestCreate = z.object({
   characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
   checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
-  mode: CheckRequestMode.default('flat').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
+  mode: CheckRequestMode.default('normal').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text surfaced to the player with the prompt/result'),
   encounterId: Id.optional().describe('Optional encounter this request is tied to (context only)'),

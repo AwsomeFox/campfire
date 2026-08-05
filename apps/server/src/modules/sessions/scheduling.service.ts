@@ -153,7 +153,7 @@ export type UnlinkSessionOutcome = { campaignId: number; scheduleIds: number[] }
  * occurrences through exactly the same mapper the Schedule tab uses — a second
  * hand-written mapper is how two views of one row start disagreeing.
  */
-export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
+export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSelect, role: Role): ScheduledSession {
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -162,6 +162,7 @@ export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSel
     title: row.title,
     location: row.location,
     notes: row.notes,
+    prepNotes: role === 'dm' ? row.prepNotes : '',
     status: row.status as ScheduledSession['status'],
     cancelledAt: row.cancelledAt,
     cancelledBy: row.cancelledBy,
@@ -186,8 +187,6 @@ export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSel
     updatedAt: row.updatedAt,
   };
 }
-
-const toDomain = scheduledSessionToDomain;
 
 /**
  * Which of these rows' linked recaps are still readable (not trashed)?
@@ -223,8 +222,9 @@ export async function liveLinkedSessionIds(
 export function projectLink(
   row: typeof scheduledSessions.$inferSelect,
   liveLinkedIds: Set<number>,
+  role: Role,
 ): ScheduledSession {
-  const domain = toDomain(row);
+  const domain = scheduledSessionToDomain(row, role);
   // A cancelled night is not a played night, so it must not render a "Recap" link.
   //
   // Reachable since remove() started using the EFFECTIVE status (#504): a future
@@ -264,10 +264,11 @@ export function projectLink(
 export async function reconcileScheduledSessions(
   db: DrizzleDb,
   rows: Array<typeof scheduledSessions.$inferSelect>,
+  role: Role,
 ): Promise<ScheduledSession[]> {
   if (rows.length === 0) return [];
   const liveLinks = await liveLinkedSessionIds(db, rows);
-  return rows.map((row) => projectLink(row, liveLinks));
+  return rows.map((row) => projectLink(row, liveLinks, role));
 }
 
 function rsvpToDomain(row: typeof sessionRsvps.$inferSelect): SessionRsvp {
@@ -369,6 +370,7 @@ export class SchedulingService {
 
   private async attachRsvps(
     rows: Array<typeof scheduledSessions.$inferSelect>,
+    role: Role,
     reconcileLinks = true,
   ): Promise<ScheduledSessionWithRsvps[]> {
     if (rows.length === 0) return [];
@@ -381,7 +383,7 @@ export class SchedulingService {
     ]);
     const grouped = this.groupRsvps(rsvpRows);
     return rows.map((row) => ({
-      ...(reconcileLinks ? this.projectLink(row, liveLinks) : toDomain(row)),
+      ...(reconcileLinks ? this.projectLink(row, liveLinks, role) : scheduledSessionToDomain(row, role)),
       rsvps: grouped.get(row.id) ?? [],
     }));
   }
@@ -404,8 +406,8 @@ export class SchedulingService {
    * docblock for the full reasoning; this exists only so this class's private
    * call sites keep a `this.` shape, with no second copy of the rules.
    */
-  private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>): ScheduledSession {
-    return projectLink(row, liveLinkedIds);
+  private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>, role: Role): ScheduledSession {
+    return projectLink(row, liveLinkedIds, role);
   }
 
   /**
@@ -423,28 +425,29 @@ export class SchedulingService {
    */
   private async effectiveStatusOf(
     row: typeof scheduledSessions.$inferSelect,
+    role: Role,
   ): Promise<ScheduledSession['status']> {
     const liveLinks = await this.liveLinkedSessionIds([row]);
-    return this.projectLink(row, liveLinks).status;
+    return this.projectLink(row, liveLinks, role).status;
   }
 
   /** Point read for a write path: the raw row (for its stored fields) + its effective status. */
-  private async getRowWithEffectiveStatus(id: number): Promise<{
+  private async getRowWithEffectiveStatus(id: number, role: Role): Promise<{
     row: typeof scheduledSessions.$inferSelect;
     status: ScheduledSession['status'];
   }> {
     const row = await this.getRowOrThrow(id);
-    return { row, status: await this.effectiveStatusOf(row) };
+    return { row, status: await this.effectiveStatusOf(row, role) };
   }
 
   /** Full schedule list — kept for export/MCP backward compatibility. Prefer upcoming/past splits (#612). */
-  async listForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
+  async listForCampaign(campaignId: number, role: Role): Promise<ScheduledSessionWithRsvps[]> {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt));
-    return this.attachRsvps(rows);
+    return this.attachRsvps(rows, role);
   }
 
   /**
@@ -458,27 +461,27 @@ export class SchedulingService {
    * completed night to `scheduled` in the portable copy — the trash is reversible, but
    * the export would not be.
    */
-  async listForExport(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
+  async listForExport(campaignId: number, role: Role): Promise<ScheduledSessionWithRsvps[]> {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt));
-    return this.attachRsvps(rows, false);
+    return this.attachRsvps(rows, role, false);
   }
 
   /**
    * Live schedule projection: in-progress + upcoming nights, soonest-first (#612).
    * Queries only not-yet-ended rows instead of loading full history.
    */
-  async listUpcomingForCampaign(campaignId: number, nowMs: number = Date.now()): Promise<ScheduledSessionWithRsvps[]> {
+  async listUpcomingForCampaign(campaignId: number, role: Role, nowMs: number = Date.now()): Promise<ScheduledSessionWithRsvps[]> {
     const nowIso = new Date(nowMs).toISOString();
     const rows = await this.db
       .select()
       .from(scheduledSessions)
       .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleNotEndedSql(nowIso)))
       .orderBy(asc(scheduledSessions.scheduledAt));
-    return this.attachRsvps(rows);
+    return this.attachRsvps(rows, role);
   }
 
   /**
@@ -486,6 +489,7 @@ export class SchedulingService {
    */
   async listPastForCampaign(
     campaignId: number,
+    role: Role,
     page?: PageParams,
     nowMs: number = Date.now(),
   ): Promise<ScheduledSessionListPage> {
@@ -507,7 +511,7 @@ export class SchedulingService {
       .$dynamic();
     q = applyPage(q, { limit, offset });
     const rows = await q;
-    const items = await this.attachRsvps(rows);
+    const items = await this.attachRsvps(rows, role);
     return {
       items,
       total,
@@ -522,7 +526,7 @@ export class SchedulingService {
    * and party-visible notes are searchable; RSVP rows are deliberately excluded so
    * search cannot grow with party size or expose availability snippets.
    */
-  async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
+  async searchForCampaign(campaignId: number, needle: string, limit: number, role: Role): Promise<ScheduledSession[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
     // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
     const folded = foldForSearch(needle.trim());
@@ -551,7 +555,7 @@ export class SchedulingService {
     const liveLinks = await this.liveLinkedSessionIds(matches);
     return (
       matches
-        .map((row) => this.projectLink(row, liveLinks))
+        .map((row) => this.projectLink(row, liveLinks, role))
         // Cancelled nights are excluded (#504). Before this issue, cancelling HARD-
         // DELETED the row, so search never returned one; retaining the row for the
         // Schedule tab's Past list must not silently turn campaign search into a
@@ -574,8 +578,8 @@ export class SchedulingService {
    * scheduledAt+durationMinutes (issue #818) so /schedule/next does not go blank at
    * the start of play.
    */
-  async nextForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps | null> {
-    const { inProgressSession, nextSession } = await this.currentAndNextForCampaign(campaignId);
+  async nextForCampaign(campaignId: number, role: Role): Promise<ScheduledSessionWithRsvps | null> {
+    const { inProgressSession, nextSession } = await this.currentAndNextForCampaign(campaignId, role);
     return inProgressSession ?? nextSession;
   }
 
@@ -584,7 +588,7 @@ export class SchedulingService {
    * next not-yet-started night. Overlapping in-progress rows prefer the earliest
    * start; list order from listForCampaign is soonest-first.
    */
-  async currentAndNextForCampaign(campaignId: number, nowMs: number = Date.now()): Promise<{
+  async currentAndNextForCampaign(campaignId: number, role: Role, nowMs: number = Date.now()): Promise<{
     inProgressSession: ScheduledSessionWithRsvps | null;
     nextSession: ScheduledSessionWithRsvps | null;
   }> {
@@ -604,8 +608,8 @@ export class SchedulingService {
         .limit(1),
     ]);
     const [inProgressAttached, nextAttached] = await Promise.all([
-      this.attachRsvps(inProgressRows),
-      this.attachRsvps(upcomingRows),
+      this.attachRsvps(inProgressRows, role),
+      this.attachRsvps(upcomingRows, role),
     ]);
     return {
       inProgressSession: inProgressAttached[0] ?? null,
@@ -625,13 +629,13 @@ export class SchedulingService {
     return row;
   }
 
-  async getWithRsvps(id: number): Promise<ScheduledSessionWithRsvps> {
+  async getWithRsvps(id: number, role: Role): Promise<ScheduledSessionWithRsvps> {
     const row = await this.getRowOrThrow(id);
     const [rsvpRows, liveLinks] = await Promise.all([
       this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id)),
       this.liveLinkedSessionIds([row]),
     ]);
-    return { ...this.projectLink(row, liveLinks), rsvps: rsvpRows.map(rsvpToDomain) };
+    return { ...this.projectLink(row, liveLinks, role), rsvps: rsvpRows.map(rsvpToDomain) };
   }
 
   /** Client-supplied ISO date-time -> canonical ISO UTC (validated by the Zod schema already). */
@@ -708,7 +712,7 @@ export class SchedulingService {
         changeType: 'created',
       }),
     );
-    return { ...toDomain(row), rsvps: [] };
+    return { ...scheduledSessionToDomain(row, role), rsvps: [] };
   }
 
   async update(
@@ -718,7 +722,7 @@ export class SchedulingService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<ScheduledSessionWithRsvps> {
-    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id, role);
     // A cancelled night is not editable: this write commits a notes revision, an audit
     // entry, and — for time/duration/venue/notes — a "rescheduled" push to the whole
     // party for a game that is not happening. Rejecting is preferred over silently
@@ -787,6 +791,7 @@ export class SchedulingService {
       title: patch.title ?? existing.title,
       location: patch.location ?? existing.location,
       notes: patch.notes ?? existing.notes,
+      prepNotes: patch.prepNotes ?? existing.prepNotes,
     };
     // Issue #588: bump the RFC 5545 SEQUENCE whenever a field a calendar client
     // renders actually changed, and keep the local wall clock in step with the
@@ -820,7 +825,7 @@ export class SchedulingService {
     // and the note bodies are versioned in the revisions table where campaign
     // membership is enforced. Naming the field is what makes the lineage useful;
     // quoting it would leak.
-    const editedProseFields = (['title', 'location', 'notes'] as const).filter((f) => next[f] !== existing[f]);
+    const editedProseFields = (['title', 'location', 'notes', 'prepNotes'] as const).filter((f) => next[f] !== existing[f]);
     let updated: Array<typeof scheduledSessions.$inferSelect> = [];
     // One transaction so the row write and its ledger entry cannot separate. A
     // committed prose edit with no `edit` entry is exactly the invisible
@@ -923,14 +928,14 @@ export class SchedulingService {
         }),
       );
     }
-    return this.getWithRsvps(id);
+    return this.getWithRsvps(id, role);
   }
 
   async remove(id: number, user: RequestUser, role: Role, input: ScheduledSessionCancelInput = {}): Promise<ScheduledSessionWithRsvps> {
     // Effective, not raw: a future night whose recap is in the Trash is shown in
     // Upcoming with the DM's Cancel button, so Cancel has to actually work on it.
-    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
-    if (effectiveStatus === 'cancelled') return this.getWithRsvps(id);
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id, role);
+    if (effectiveStatus === 'cancelled') return this.getWithRsvps(id, role);
     if (effectiveStatus === 'completed') {
       throw new BadRequestException('Completed scheduled sessions cannot be cancelled');
     }
@@ -1008,7 +1013,7 @@ export class SchedulingService {
         changeType: 'cancelled',
       }),
     );
-    return this.getWithRsvps(id);
+    return this.getWithRsvps(id, role);
   }
 
   async restore(id: number, user: RequestUser, role: Role, force = false, reason = ''): Promise<ScheduledSessionRestored> {
@@ -1016,7 +1021,7 @@ export class SchedulingService {
     // projection the API returns. ('cancelled' is never link-derived, so this one is
     // equivalent to the raw column today — it is written this way so the next guard
     // added here copies the correct pattern.)
-    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id, role);
     if (effectiveStatus !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
     const ts = nowIso();
     // Un-cancelling and re-arming the reminders are one change, so they commit or roll
@@ -1171,7 +1176,7 @@ export class SchedulingService {
       forced.map((r) => r.campaignId),
       forced.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
-    return { ...(await this.getWithRsvps(id)), conflicts: redactConflicts(forced, scope, names) };
+    return { ...(await this.getWithRsvps(id, role)), conflicts: redactConflicts(forced, scope, names) };
   }
 
   async duplicate(
@@ -1352,7 +1357,7 @@ export class SchedulingService {
   async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
     const outcome = this.db.transaction((tx) => this.linkSessionInTx(tx, scheduleId, sessionId));
     await this.recordSessionLink(outcome, scheduleId, sessionId, user, role);
-    return this.getWithRsvps(scheduleId);
+    return this.getWithRsvps(scheduleId, role);
   }
 
   /**
@@ -1427,7 +1432,7 @@ export class SchedulingService {
   async setRsvp(scheduleId: number, input: RsvpSetInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
     // Effective, not raw: a future night whose recap is in the Trash reads back as
     // 'scheduled' and is rendered with live RSVP controls, so it must accept them.
-    const { row: schedule, status: effectiveStatus } = await this.getRowWithEffectiveStatus(scheduleId);
+    const { row: schedule, status: effectiveStatus } = await this.getRowWithEffectiveStatus(scheduleId, role);
     if (effectiveStatus !== 'scheduled') {
       throw new BadRequestException('RSVPs can only be changed for scheduled sessions');
     }
@@ -1511,7 +1516,7 @@ export class SchedulingService {
         });
       }
     }
-    return this.getWithRsvps(scheduleId);
+    return this.getWithRsvps(scheduleId, role);
   }
 
   // ----- ICS calendar feed -----
@@ -1596,7 +1601,7 @@ export class SchedulingService {
     // an unknown/rotated token — no schedule disclosure after Trash.
     if (campaign.deletedAt != null) throw new NotFoundException('Unknown calendar feed');
     // ICS feeds include past + future so previously-synced events don't vanish (see buildCampaignIcs).
-    const schedules = await this.listForCampaign(campaign.id);
+    const schedules = await this.listForCampaign(campaign.id, 'player');
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }
 }

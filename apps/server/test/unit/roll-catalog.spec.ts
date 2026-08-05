@@ -49,7 +49,7 @@ describe('roll catalog — D&D 5e', () => {
     expect(acro.modifier).toBe(3);
     expect(acro.proficiency).toBeNull();
     expect(acro.favorite).toBe(false);
-    expect(checkRollExpr(acro, 'flat')).toBe('1d20+3');
+    expect(checkRollExpr(acro, 'normal')).toBe('1d20+3');
   });
 
   it('adds the fixed proficiency bonus to a proficient skill with a transparent breakdown', () => {
@@ -199,7 +199,7 @@ describe('roll catalog — characterizes synthetic adapters with no buildCheckCa
     const catalog = neutralCheckCatalog(homebrew, char);
     const climb = catalog.find((c) => c.id === 'skill:Climbing')!;
     expect(climb.incomplete).toBe(true);
-    expect(checkRollExpr(climb, 'flat')).toMatch(/^1d20/);
+    expect(checkRollExpr(climb, 'normal')).toMatch(/^1d20/);
   });
 
   it('uses the adapter initiative modifier', () => {

@@ -88,6 +88,7 @@
     "save": "Save",
     "moderation": "Moderation",
     "myReports": "My reports",
-    "adminCampaigns": "Campaigns"
+    "adminCampaigns": "Campaigns",
+    "playerDisplay": "Cast"
   }
 }

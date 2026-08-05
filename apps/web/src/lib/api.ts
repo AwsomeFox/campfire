@@ -100,6 +100,22 @@ function parseStaleWriteFields(body: unknown): { currentUpdatedAt?: string; expe
   };
 }
 
+/**
+ * Issue #1901: the incumbent item's id/name + the contested slot, carried on a 409
+ * `INVENTORY_SLOT_CONFLICT` body (additive fields alongside the existing {code, message}).
+ * Lets the inventory UI offer a one-tap "swap" (unequip the incumbent, retry) without
+ * re-parsing the human-readable message string.
+ */
+function parseInventorySlotConflictFields(body: unknown): { conflictingItemId?: number; conflictingItemName?: string; equipSlot?: string } {
+  if (!body || typeof body !== 'object') return {};
+  const conflict = body as { conflictingItemId?: unknown; conflictingItemName?: unknown; equipSlot?: unknown };
+  return {
+    conflictingItemId: typeof conflict.conflictingItemId === 'number' ? conflict.conflictingItemId : undefined,
+    conflictingItemName: typeof conflict.conflictingItemName === 'string' ? conflict.conflictingItemName : undefined,
+    equipSlot: typeof conflict.equipSlot === 'string' ? conflict.equipSlot : undefined,
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -121,6 +137,14 @@ export class ApiError extends Error {
     public currentUpdatedAt?: string,
     /** Revision the rejected request attempted to compare against. */
     public expectedUpdatedAt?: string,
+    /**
+     * Issue #1901: the incumbent's inventory item id/name + the contested slot, present
+     * only on a 409 `INVENTORY_SLOT_CONFLICT`. Lets the inventory UI offer a one-tap swap
+     * (unequip the incumbent, retry) instead of just showing the message.
+     */
+    public conflictingItemId?: number,
+    public conflictingItemName?: string,
+    public equipSlot?: string,
   ) {
     super(message);
   }
@@ -168,6 +192,9 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
       let code: string | undefined;
       let currentUpdatedAt: string | undefined;
       let expectedUpdatedAt: string | undefined;
+      let conflictingItemId: number | undefined;
+      let conflictingItemName: string | undefined;
+      let equipSlot: string | undefined;
       try {
         const body = await res.json();
         fieldErrors = parseFieldErrors(body);
@@ -176,6 +203,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
         const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
         if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
         ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
+        ({ conflictingItemId, conflictingItemName, equipSlot } = parseInventorySlotConflictFields(body));
         // Prefer the structured field-level reasons — the server's `message` for a validation
         // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
         if (fieldErrors.length > 0) {
@@ -186,7 +214,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
       } catch {
         /* non-json error body */
       }
-      throw new ApiError(res.status, message, fieldErrors, code, currentUpdatedAt, expectedUpdatedAt);
+      throw new ApiError(res.status, message, fieldErrors, code, currentUpdatedAt, expectedUpdatedAt, conflictingItemId, conflictingItemName, equipSlot);
     }
     // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
     // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
@@ -314,6 +342,19 @@ export function isTransientError(err: unknown): boolean {
  *
  * `t` is typed loosely so this helper stays dependency-free; pass react-i18next's `t`.
  */
+const GENERIC_HTTP_CODES = new Set([
+  'bad_request',
+  'validation_failed',
+  'unauthorized',
+  'forbidden',
+  'not_found',
+  'conflict',
+  'payload_too_large',
+  'too_many_requests',
+  'unprocessable_entity',
+  'internal_error',
+]);
+
 export function translateApiError(
   err: unknown,
   t: (key: string, opts?: { defaultValue?: string }) => string,
@@ -326,11 +367,16 @@ export function translateApiError(
         ? err.message
         : String(err);
   }
-  if (err.code) {
-    return t(`errors.${err.code}`, { defaultValue: err.message });
+  if (err.code && !GENERIC_HTTP_CODES.has(err.code)) {
+    const translated = t(`errors.${err.code}`, { defaultValue: err.message });
+    if (translated && translated !== `errors.${err.code}`) return translated;
   }
   if (err.message) {
     return err.message;
+  }
+  if (err.code) {
+    const translated = t(`errors.${err.code}`, { defaultValue: '' });
+    if (translated) return translated;
   }
   if (opts?.fallbackKey) {
     return t(opts.fallbackKey);

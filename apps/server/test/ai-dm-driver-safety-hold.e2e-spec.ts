@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { TableSafetyService } from '../src/modules/safety/table-safety.service';
 import {
   NARRATION_QUARANTINE_CHARS,
@@ -69,7 +70,7 @@ describe('ai-dm driver — participant safety hold freezes the seat (#599)', () 
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     const safety = h.ctx.app.get(TableSafetyService);
-    const events: AiDmStreamEvent[] = [];
+    const events: CampaignEvent[] = [];
     let raised = false;
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       events.push(e);
@@ -104,7 +105,7 @@ describe('ai-dm driver — participant safety hold freezes the seat (#599)', () 
     // which used to fire in the stream step's `finally` regardless of why the stream ended and
     // would have pushed one last buffered fragment out AFTER the stop.
     const shown = events
-      .filter((e): e is Extract<AiDmStreamEvent, { type: 'narration.delta' }> => e.type === 'narration.delta')
+      .filter((e): e is Extract<CampaignEvent, { type: 'narration.delta' }> => e.type === 'narration.delta')
       .map((e) => e.text)
       .join('');
     expect(full.startsWith(shown)).toBe(true);
@@ -117,7 +118,7 @@ describe('ai-dm driver — participant safety hold freezes the seat (#599)', () 
 
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     const safety = h.ctx.app.get(TableSafetyService);
-    const toolEvents: AiDmStreamEvent[] = [];
+    const toolEvents: CampaignEvent[] = [];
     let raised = false;
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       if (e.type === 'tool') toolEvents.push(e);

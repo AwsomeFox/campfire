@@ -14,6 +14,27 @@ type Props = {
 };
 
 /**
+ * Playwright / automation bridge for `focusMainDestination`'s recovery-window
+ * override (issue #591 / PR #1957 review). Namespaced under the same
+ * `__CAMPFIRE_E2E__` symbol Announcer.tsx uses (issue #434) and attached only
+ * under the same `navigator.webdriver` gate — never read in normal production
+ * browsing. `route-focus-slow-heading.spec.ts` seeds `routeFocusGraceMs` via
+ * `page.addInitScript` before navigating so it can exercise the recovery-window
+ * boundary in milliseconds instead of waiting out the real multi-second budget.
+ */
+type CampfireE2EWindow = Window & {
+  __CAMPFIRE_E2E__?: { routeFocusGraceMs?: number } | true;
+};
+
+function readRouteFocusGraceMsOverride(): number | undefined {
+  const w = window as CampfireE2EWindow;
+  if (!w.navigator?.webdriver) return undefined;
+  const hooks = w.__CAMPFIRE_E2E__;
+  if (typeof hooks !== 'object' || hooks == null) return undefined;
+  return typeof hooks.routeFocusGraceMs === 'number' ? hooks.routeFocusGraceMs : undefined;
+}
+
+/**
  * Moves keyboard focus to the new page's h1 (or main) on pathname changes and
  * keeps document.title in sync. Query/hash-only updates are left to the page
  * (tabs, filters, EntityDeepLinkFocus, dialogs).
@@ -52,6 +73,7 @@ export function RouteChangeFocus({ mainRef, campaignName = null }: Props) {
         location.pathname,
         location.hash,
       ),
+      graceMs: readRouteFocusGraceMsOverride(),
     });
   }, [location.pathname, location.hash, mainRef]);
 

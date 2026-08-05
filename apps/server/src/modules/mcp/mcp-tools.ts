@@ -1362,6 +1362,168 @@ export class McpToolsService {
       },
     );
 
+    this.writeTool(
+      server,
+      user,
+      'apply_encounter_aftermath_xp',
+      'DM only: apply XP or milestone awards for an ended encounter aftermath (issue #1448). Idempotent award of encounter XP or milestone progress to party characters.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        amount: z.number().int().min(1).optional().describe('Optional custom XP amount per character (defaults to suggested per-character XP)'),
+        characterIds: z.array(Id).optional().describe('Optional target character IDs (defaults to character combatants)'),
+        isMilestone: z.boolean().optional().describe('Flag indicating milestone award mode'),
+        milestoneNote: z.string().optional().describe('Optional note for milestone progression'),
+      },
+      async ({ encounterId, amount, characterIds, isMilestone, milestoneNote }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.applyAftermathXp(
+          encounterId as number,
+          {
+            amount: amount as number | undefined,
+            characterIds: characterIds as number[] | undefined,
+            isMilestone: isMilestone as boolean | undefined,
+            milestoneNote: milestoneNote as string | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'transfer_encounter_aftermath_loot',
+      'DM only: transfer loot item or currency from an ended encounter aftermath directly to character inventory or party treasury (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        itemId: z.string().optional().describe('Loot item id in aftermath to transfer'),
+        ownerType: z.enum(['character', 'party']).optional().default('party').describe('Target owner: character or party'),
+        characterId: Id.nullable().optional().describe('Target character id if ownerType is character'),
+        qty: z.number().int().min(1).optional().describe('Quantity to transfer'),
+        transferCoins: z
+          .object({
+            cp: z.number().int().min(0).optional(),
+            sp: z.number().int().min(0).optional(),
+            ep: z.number().int().min(0).optional(),
+            gp: z.number().int().min(0).optional(),
+            pp: z.number().int().min(0).optional(),
+          })
+          .optional()
+          .describe('Coins to transfer to party treasury'),
+      },
+      async ({ encounterId, itemId, ownerType, characterId, qty, transferCoins }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.transferAftermathLoot(
+          encounterId as number,
+          {
+            itemId: itemId as string | undefined,
+            ownerType: (ownerType as 'character' | 'party') ?? 'party',
+            characterId: characterId as number | null | undefined,
+            qty: qty as number | undefined,
+            transferCoins: transferCoins as any,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_encounter_aftermath_quest',
+      'DM only: update quest status or objectives from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        questId: Id.optional().describe('Quest id (defaults to linked quest)'),
+        objectiveIndex: z.number().int().min(0).optional().describe('Objective index to update'),
+        objectiveCompleted: z.boolean().optional().describe('Objective completion status'),
+        questStatus: z.enum(['available', 'active', 'completed', 'failed']).optional().describe('New quest status'),
+        note: z.string().optional().describe('Optional note'),
+      },
+      async ({ encounterId, questId, objectiveIndex, objectiveCompleted, questStatus, note }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.updateAftermathQuest(
+          encounterId as number,
+          {
+            questId: (questId as number) ?? row.questId ?? 0,
+            objectiveIndex: objectiveIndex as number | undefined,
+            objectiveCompleted: objectiveCompleted as boolean | undefined,
+            questStatus: questStatus as any,
+            note: note as string | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_encounter_aftermath_beat',
+      'DM only: update or create a storyline beat from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        beatId: Id.optional().describe('Story beat id to update (omit to create a new beat)'),
+        arcId: Id.optional().describe('Story arc id when creating a new beat'),
+        title: z.string().optional().describe('Beat title'),
+        body: z.string().optional().describe('Beat markdown body/notes'),
+        status: z.enum(['planned', 'active', 'done', 'skipped']).optional().describe('Beat status'),
+      },
+      async ({ encounterId, beatId, arcId, title, body, status }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.updateAftermathBeat(
+          encounterId as number,
+          {
+            beatId: beatId as number | undefined,
+            arcId: arcId as number | undefined,
+            title: title as string | undefined,
+            body: body as string | undefined,
+            status: status as any,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'add_encounter_aftermath_timeline_event',
+      'DM only: add a campaign timeline event from encounter aftermath (issue #1448).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        title: z.string().min(1).max(200).describe('Timeline event title'),
+        description: z.string().optional().describe('Event description'),
+        inGameDate: z.string().optional().describe('In-game date string'),
+        era: z.string().optional().describe('Era name'),
+        sortIndex: z.number().int().optional().describe('Sort order index'),
+      },
+      async ({ encounterId, title, description, inGameDate, era, sortIndex }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.addAftermathTimelineEvent(
+          encounterId as number,
+          {
+            title: title as string,
+            description: description as string | undefined,
+            inGameDate: inGameDate as string | undefined,
+            era: era as string | undefined,
+            sortIndex: sortIndex as number | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
     this.tool(
       server,
       'list_encounter_events',
@@ -1387,7 +1549,8 @@ export class McpToolsService {
       'get_turn',
       'Get the current-turn workspace (issue #413): the active combatant, round, next actor, and — for the DM or the ' +
         'current combatant\'s owner — the adapter-defined action-economy slots (with usage + plain-language help), ' +
-        'movement / reaction / concentration / active effects, suggested actions from the sheet or statblock, and the ' +
+        'movement / reaction / concentration / active effects, suggested actions from the sheet, EQUIPPED inventory ' +
+        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, and the ' +
         'start/end-of-turn prompts to resolve before advancing. Read-only. The detailed workspace is withheld from ' +
         'other viewers (a monster\'s abilities/effects never leak to players).',
       { encounterId: Id.describe('Encounter id — from list_encounters') },
@@ -1404,8 +1567,10 @@ export class McpToolsService {
       'List a combatant\'s usable structured actions (issue #414): each sheet action with its mode (attack/save/check), ' +
         'the structured spec, and a `resolvable` flag — false means the action lacks enough structure to auto-resolve, ' +
         'so fall back to its freeform statblock (toHit/damage/notes) rather than inventing numbers. The freeform text is ' +
-        'always returned. A player may list only their own character\'s actions; the DM may list any combatant\'s. Feed ' +
-        'the chosen action name/index into resolve_action.',
+        'always returned. For a character, sheet actions come first, then any EQUIPPED inventory item\'s authored ' +
+        'action appended after (issue #1326) — an equipped-item row\'s `source` reads "equipped: <item name>" (issue ' +
+        '#1901); a sheet action\'s `source` is empty. A player may list only their own character\'s actions; the DM ' +
+        'may list any combatant\'s. Feed the chosen action name/index into resolve_action.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), combatantId: Id.describe('Combatant id — from get_encounter') },
       async ({ encounterId, combatantId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -1848,8 +2013,8 @@ export class McpToolsService {
         'Distinct from get_session_recaps, which is the log of sessions that already happened.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.scheduling.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.listForCampaign(campaignId as number, role);
       },
     );
 
@@ -1860,8 +2025,8 @@ export class McpToolsService {
         'nothing is planned. Requires membership.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.scheduling.nextForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.nextForCampaign(campaignId as number, role);
       },
     );
 
@@ -2926,15 +3091,24 @@ export class McpToolsService {
       'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. ' +
         'A spend that exceeds the slots remaining FAILS with an error carrying `remaining` and `max`, so it is safe ' +
         'to treat success as "the slot was consumed" — do not narrate a spell as cast if this call errored. ' +
-        'Restores clamp at zero. 400 if the character has no slots configured at that level.',
+        'Restores clamp at zero. 400 if the character has no slots configured at that level. Optional ' +
+        '`expectedUpdatedAt` (the character\'s `updatedAt` you last read) rejects the write with 409 if the sheet ' +
+        'changed since — omit for an unconditional write.',
       { characterId: Id.describe('Character id'), ...SpellSlotPatch.shape },
-      async ({ characterId, level, delta }) => {
+      // Issue #1902 rework (round 5): `expectedUpdatedAt` MUST be pulled out and forwarded
+      // explicitly, matching update_quest/update_npc/update_faction above — spreading
+      // `SpellSlotPatch.shape` into this tool's declared input widens what it ADVERTISES,
+      // but nothing forwards a field the handler never names. Before this fix an MCP
+      // caller (the AI DM) that supplied `expectedUpdatedAt` believing it opted into the
+      // 409 STALE_WRITE guard got an unconditional write instead — the token was silently
+      // dropped, not honoured.
+      async ({ characterId, level, delta, expectedUpdatedAt }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const before = await this.characters.spellSlotsLeft(characterId as number, level as number);
         const updated = await this.characters.patchSpellSlots(
           characterId as number,
-          { level: level as number, delta: delta as number },
+          { level: level as number, delta: delta as number, expectedUpdatedAt: expectedUpdatedAt as string | undefined },
           user,
           role,
         );
@@ -2990,7 +3164,10 @@ export class McpToolsService {
         'never a silent clamp — so it is safe to treat success as "the resource was actually spent/restored"; do not ' +
         'narrate a Second Wind or a Ki technique the call errored on. `key` is not restricted to ' +
         'list_character_resources\' vocabulary: an unrecognised key creates a custom resource from `max`/`name`/' +
-        '`recharge` (or their defaults) the first time it is touched.',
+        '`recharge` (or their defaults) the first time it is touched. Optional `expectedUpdatedAt` (the character\'s ' +
+        '`updatedAt` you last read) rejects the write with 409 if the sheet changed since — this matters especially ' +
+        'here because `used` is an ABSOLUTE overwrite: without it, a concurrent spend or rest from another caller ' +
+        'between your read and this write is silently undone. Omit for an unconditional write.',
       { characterId: Id.describe('Character id'), ...ResourcePatch.shape },
       async ({ characterId, ...patch }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
@@ -4028,7 +4205,7 @@ export class McpToolsService {
           characterId as number,
           {
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
           },
@@ -4066,7 +4243,7 @@ export class McpToolsService {
           {
             characterIds: characterIds as number[],
             checkId: checkId as string,
-            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit',
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
             encounterId: encounterId as number | undefined,
@@ -4350,9 +4527,11 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), addConditions/removeConditions. Use roll_death_save for a server-authoritative d20. ' +
-        'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
-        'the DM may mint custom condition labels. ' +
+        'successes = stable). Use roll_death_save for a server-authoritative d20. ' +
+        'Structured conditions are PREFERRED over flat string labels: use addConditionInstance, removeConditionInstanceId, ' +
+        'updateConditionInstance, or conditionInstances. A ConditionInstance supports { name, durationRounds, ' +
+        'roundsRemaining, saveDc, saveAbility, isConcentration, source, sourceCombatantId, ruleEntryId, stacks }. ' +
+        'Legacy addConditions/removeConditions flat strings are still supported. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
@@ -5207,9 +5386,11 @@ export class McpToolsService {
       server,
       user,
       'import_ddb_character',
-      'Import a character from a public D&D Beyond sheet (player+ role). Pass either `ddbId` (numeric character id) ' +
-        'or `url` (a D&D Beyond character/share link). The sheet must be set to Public on DDB. Only available for D&D 5e ' +
-        'campaigns — rejected with 400 for other rule systems.',
+      'Import a character from a public D&D Beyond sheet (player+ role), including attacks, spells, and spell slots. ' +
+        'Pass either `ddbId` (numeric character id) or `url` (a D&D Beyond character/share link). The sheet must be set ' +
+        'to Public on DDB. Only available for D&D 5e campaigns — rejected with 400 for other rule systems. Returns ' +
+        '`{ character, summary }`: the created character plus counts of imported actions/spells/slots and the names of ' +
+        'any entries that came in text-only (unparseable, never silently dropped).',
       {
         campaignId: CampaignIdArg,
         ddbId: z.string().max(200).optional().describe('D&D Beyond numeric character id'),

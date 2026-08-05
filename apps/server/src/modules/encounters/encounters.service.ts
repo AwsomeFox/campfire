@@ -1,18 +1,24 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { CharactersService } from '../characters/characters.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { QuestsService } from '../quests/quests.service';
+import { StorylinesService } from '../storylines/storylines.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
@@ -23,6 +29,8 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { NotificationsService } from '../notifications/notifications.service';
+import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
   advanceEncounterTurn,
@@ -735,6 +743,7 @@ export class EncountersService {
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
     private readonly campaignLibrary: CampaignLibraryService,
+    private readonly notifications: NotificationsService,
     /**
      * #599 — the table safety hold. Optional and LAST in the list because several integration
      * specs hand-construct this service positionally (test/integration/encounter-*.spec.ts);
@@ -742,6 +751,22 @@ export class EncountersService {
      * shape for a unit test of turn logic. Every use is `?.`-guarded.
      */
     @Optional() private readonly safety?: TableSafetyService,
+    @Optional() @Inject(forwardRef(() => CharactersService)) private readonly charactersService?: CharactersService,
+    @Optional() @Inject(forwardRef(() => InventoryService)) private readonly inventoryService?: InventoryService,
+    @Optional() @Inject(forwardRef(() => QuestsService)) private readonly questsService?: QuestsService,
+    @Optional() @Inject(forwardRef(() => StorylinesService)) private readonly storylinesService?: StorylinesService,
+    @Optional() @Inject(forwardRef(() => TimelineService)) private readonly timelineService?: TimelineService,
+    @Optional() @Inject(forwardRef(() => CampaignsService)) private readonly campaignsService?: CampaignsService,
+    /**
+     * Issue #1901 — shares ActionResolverService's character-action merge (sheet actions +
+     * equipped-item actions, ONE index space) so `/turn` `suggestedActions.actionIndex` means
+     * the same action `listUsableActions`/`resolveSpec` do. No circular dependency (this
+     * service is not one of ActionResolverService's own dependencies), so this is a plain
+     * optional dependency, not a `forwardRef`. Optional + last so the many hand-constructed
+     * test doubles for this service (`test/**`) that predate #1901 keep compiling; absent, the
+     * character branch below falls back to its pre-#1901 sheet-only behavior.
+     */
+    @Optional() private readonly actionResolver?: ActionResolverService,
   ) {}
 
   /**
@@ -2348,9 +2373,55 @@ export class EncountersService {
     });
   }
 
+  private generateDefaultAftermathLoot(
+    outcome: EncounterAftermathOutcome,
+    suggestedPartyXp: number | null,
+  ): EncounterAftermathLoot {
+    const deadMonsters = outcome.dead.filter((c: EncounterAftermathCombatant) => c.kind === 'monster' || c.kind === 'npc');
+    const items: EncounterAftermathLootItem[] = [];
+
+    if (deadMonsters.length > 0) {
+      deadMonsters.forEach((monster: EncounterAftermathCombatant, index: number) => {
+        items.push({
+          id: `item-${index + 1}`,
+          name: `${monster.name}'s Gear`,
+          qty: 1,
+          notes: `Looted from defeated ${monster.name}`,
+          claimed: false,
+          claimedByCharacterId: null,
+          claimedToParty: false,
+        });
+      });
+    } else {
+      items.push({
+        id: 'item-1',
+        name: 'Spoils of War',
+        qty: 1,
+        notes: 'Combat trophies and supplies',
+        claimed: false,
+        claimedByCharacterId: null,
+        claimedToParty: false,
+      });
+    }
+
+    const gpAmount = suggestedPartyXp && suggestedPartyXp > 0 ? Math.max(10, Math.round(suggestedPartyXp / 10)) : 25;
+
+    return {
+      items,
+      coins: {
+        cp: 0,
+        sp: 0,
+        ep: 0,
+        gp: gpAmount,
+        pp: 0,
+      },
+      coinsClaimed: false,
+    };
+  }
+
   /**
-   * Post-encounter aftermath read model (issue #473): outcome review, recap draft seeded
-   * from combat events, adapter-aware XP guidance, and deep-link hand-offs. DM-only;
+   * Post-encounter aftermath read model (issue #473, #1448): outcome review, recap draft seeded
+   * from combat events, adapter-aware XP guidance, loot list package, mutation controls, and deep-link hand-offs. DM-only;
    * only meaningful for ended encounters.
    */
   async getAftermath(encounterId: number, role: Role): Promise<EncounterAftermath> {
@@ -2366,6 +2437,38 @@ export class EncountersService {
     const characterCount = encounter.combatants.filter((c) => c.kind === 'character').length;
     const xp = suggestedXpFromDifficulty(difficulty, characterCount);
     const campaignId = encounter.campaignId;
+
+    const campaignRow = this.db
+      .select({ dmControlsProgression: campaigns.dmControlsProgression })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    const milestoneMode = !!campaignRow?.dmControlsProgression || !xp.supported;
+
+    const outcomeRead: EncounterAftermathOutcome = {
+      rounds: outcome.rounds,
+      dead: outcome.dead.map((c) => ({ name: c.name, kind: c.kind })),
+      downed: outcome.downed.map((c) => ({ name: c.name, kind: c.kind })),
+      survivors: outcome.survivors.map((c) => ({ name: c.name, kind: c.kind })),
+    };
+
+    let loot: EncounterAftermathLoot;
+    if (row.aftermathLoot) {
+      const parsed = EncounterAftermathLoot.safeParse(fromJsonText(row.aftermathLoot, null));
+      if (parsed.success) {
+        loot = parsed.data;
+      } else {
+        loot = this.generateDefaultAftermathLoot(outcomeRead, xp.suggestedPartyTotal);
+      }
+    } else {
+      loot = this.generateDefaultAftermathLoot(outcomeRead, xp.suggestedPartyTotal);
+      this.db
+        .update(encounters)
+        .set({ aftermathLoot: toJsonText(loot) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+    }
+
     const base = `/c/${campaignId}`;
     const recapPath =
       encounter.sessionId == null
@@ -2383,12 +2486,7 @@ export class EncountersService {
     return {
       encounterId,
       campaignId,
-      outcome: {
-        rounds: outcome.rounds,
-        dead: outcome.dead.map((c) => ({ name: c.name, kind: c.kind })),
-        downed: outcome.downed.map((c) => ({ name: c.name, kind: c.kind })),
-        survivors: outcome.survivors.map((c) => ({ name: c.name, kind: c.kind })),
-      },
+      outcome: outcomeRead,
       recapDraft,
       combatLogHighlights,
       xp: {
@@ -2399,13 +2497,359 @@ export class EncountersService {
         difficultyLabel: xp.difficultyLabel,
         warnings: xp.warnings,
       },
+      xpAwardedAt: row.aftermathXpAwardedAt ?? null,
+      xpAwarded: row.aftermathXpAwardedAt != null,
+      milestoneMode,
+      loot,
       difficulty,
       handoffs,
       questId: encounter.questId,
       sessionId: encounter.sessionId,
       locationId: encounter.locationId,
-      dismissedAt: row.aftermathDismissedAt,
+      dismissedAt: row.aftermathDismissedAt ?? null,
     };
+  }
+
+  async applyAftermathXp(
+    encounterId: number,
+    input: EncounterAftermathApplyXpInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath XP can only be applied for ended encounters');
+    }
+
+    if (row.aftermathXpAwardedAt && input.amount === undefined && !input.isMilestone) {
+      return this.getAftermath(encounterId, role);
+    }
+
+    const encounter = await this.getWithCombatantsOrThrow(encounterId, role);
+    const difficulty = await this.getDifficulty(encounterId, role);
+    const characterCombatants = encounter.combatants.filter((c) => c.kind === 'character');
+    const characterCount = characterCombatants.length;
+    const xp = suggestedXpFromDifficulty(difficulty, characterCount);
+
+    const amount = input.amount ?? xp.suggestedPerCharacter ?? xp.suggestedPartyTotal ?? 0;
+    const recipientIds =
+      input.characterIds ?? characterCombatants.map((c) => c.characterId).filter((id): id is number => id != null);
+
+    const ts = nowIso();
+
+    if (amount > 0 && recipientIds.length > 0) {
+      if (this.charactersService) {
+        await this.charactersService.awardXp(
+          row.campaignId,
+          { amount, includeNonActive: false, characterIds: recipientIds },
+          user,
+          role,
+        );
+      } else {
+        this.db.transaction((tx) => {
+          for (const charId of recipientIds) {
+            // Issue #1902 rework (round 13, codex P2 sweep): PER CHARACTER, not the shared
+            // `ts` above — same class of bug as `restParty`/`awardXp`'s own per-character
+            // fix. This fallback path only runs when `charactersService` isn't injected
+            // (the preferred branch above already calls the fixed `awardXp`), but it writes
+            // the same CAS-guarded `updatedAt` column, so it needs the same guarantee.
+            const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, charId)).get();
+            tx.update(characters)
+              .set({ xp: sql`${characters.xp} + ${amount}`, updatedAt: nextUpdatedAt(current?.updatedAt ?? ts) })
+              .where(eq(characters.id, charId))
+              .run();
+          }
+        });
+      }
+    }
+
+    this.db
+      .update(encounters)
+      .set({ aftermathXpAwardedAt: ts, updatedAt: ts })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_apply_xp',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify({ amount, characterIds: recipientIds, isMilestone: !!input.isMilestone, note: input.milestoneNote }),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async transferAftermathLoot(
+    encounterId: number,
+    input: EncounterAftermathLootTransferInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath loot can only be transferred for ended encounters');
+    }
+
+    const aftermath = await this.getAftermath(encounterId, role);
+    const loot = aftermath.loot;
+    const ts = nowIso();
+
+    if (input.itemId) {
+      const item = loot.items.find((i) => i.id === input.itemId);
+      if (!item) {
+        throw new BadRequestException(`Loot item ${input.itemId} not found in aftermath`);
+      }
+      if (item.claimed) {
+        throw new BadRequestException(`Loot item ${input.itemId} has already been claimed`);
+      }
+
+      const ownerType = input.ownerType ?? 'party';
+      const characterId = ownerType === 'character' ? (input.characterId ?? null) : null;
+      const qty = input.qty ?? item.qty;
+
+      if (this.inventoryService) {
+        await this.inventoryService.create(
+          row.campaignId,
+          {
+            name: item.name,
+            qty,
+            notes: item.notes || `Looted from encounter #${encounterId}`,
+            ownerType,
+            characterId: characterId ?? undefined,
+          },
+          user,
+          role,
+        );
+      } else {
+        this.db
+          .insert(inventoryItems)
+          .values({
+            campaignId: row.campaignId,
+            ownerType,
+            characterId,
+            name: item.name,
+            qty,
+            notes: item.notes || `Looted from encounter #${encounterId}`,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      item.claimed = true;
+      item.claimedByCharacterId = characterId;
+      item.claimedToParty = ownerType === 'party';
+    }
+
+    if (input.transferCoins) {
+      const coinsToTransfer = {
+        cp: input.transferCoins.cp ?? loot.coins.cp,
+        sp: input.transferCoins.sp ?? loot.coins.sp,
+        ep: input.transferCoins.ep ?? loot.coins.ep,
+        gp: input.transferCoins.gp ?? loot.coins.gp,
+        pp: input.transferCoins.pp ?? loot.coins.pp,
+      };
+
+      if (this.inventoryService) {
+        await this.inventoryService.patchTreasury(
+          row.campaignId,
+          { delta: coinsToTransfer },
+          user,
+          role,
+        );
+      }
+
+      loot.coinsClaimed = true;
+    }
+
+    this.db
+      .update(encounters)
+      .set({ aftermathLoot: toJsonText(loot), updatedAt: ts })
+      .where(eq(encounters.id, encounterId))
+      .run();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_transfer_loot',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async updateAftermathQuest(
+    encounterId: number,
+    input: EncounterAftermathQuestUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath quest updates can only be applied to ended encounters');
+    }
+    const questId = input.questId ?? row.questId;
+    if (!questId) {
+      throw new BadRequestException('No quest specified or linked to encounter aftermath');
+    }
+
+    if (this.questsService) {
+      if (input.objectiveIndex != null) {
+        const objectives = await this.db
+          .select()
+          .from(questObjectives)
+          .where(eq(questObjectives.questId, questId))
+          .orderBy(questObjectives.sortOrder, questObjectives.id);
+        const obj = objectives[input.objectiveIndex];
+        if (obj) {
+          await this.questsService.patchObjective(
+            questId,
+            obj.id,
+            { done: input.objectiveCompleted ?? !obj.done },
+            user,
+            role,
+          );
+        }
+      }
+      if (input.questStatus) {
+        await this.questsService.setStatus(questId, { status: input.questStatus }, user, role);
+      }
+    } else {
+      const objectives = await this.db
+        .select()
+        .from(questObjectives)
+        .where(eq(questObjectives.questId, questId))
+        .orderBy(questObjectives.sortOrder, questObjectives.id);
+      if (input.objectiveIndex != null && objectives[input.objectiveIndex]) {
+        const targetObj = objectives[input.objectiveIndex];
+        this.db
+          .update(questObjectives)
+          .set({ done: input.objectiveCompleted ?? !targetObj.done })
+          .where(eq(questObjectives.id, targetObj.id))
+          .run();
+      }
+      if (input.questStatus) {
+        this.db
+          .update(quests)
+          .set({ status: input.questStatus, updatedAt: nowIso() })
+          .where(eq(quests.id, questId))
+          .run();
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_update_quest',
+      entityType: 'quest',
+      entityId: questId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async updateAftermathBeat(
+    encounterId: number,
+    input: EncounterAftermathBeatUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath beats can only be updated for ended encounters');
+    }
+
+    if (input.beatId && this.storylinesService) {
+      await this.storylinesService.updateBeat(
+        input.beatId,
+        {
+          ...(input.title ? { title: input.title } : {}),
+          ...(input.body ? { body: input.body } : {}),
+        },
+        user,
+        role,
+      );
+      if (input.status) {
+        await this.storylinesService.setBeatStatus(input.beatId, { status: input.status }, user, role);
+      }
+    } else if (this.storylinesService && input.title) {
+      let arcId = input.arcId;
+      if (!arcId) {
+        const arcs = await this.storylinesService.listArcs(row.campaignId);
+        arcId = arcs[0]?.id;
+      }
+      if (arcId) {
+        await this.storylinesService.addBeat(
+          arcId,
+          {
+            title: input.title,
+            body: input.body ?? `Resolved in encounter #${encounterId}`,
+            status: input.status ?? 'done',
+          },
+          user,
+          role,
+        );
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_update_beat',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
+  }
+
+  async addAftermathTimelineEvent(
+    encounterId: number,
+    input: EncounterAftermathTimelineEventInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterAftermath> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath timeline events can only be added for ended encounters');
+    }
+
+    if (this.timelineService) {
+      await this.timelineService.createEvent(
+        row.campaignId,
+        {
+          title: input.title,
+          body: input.description ?? `Encounter #${encounterId} concluded.`,
+          inWorldDate: input.inGameDate ?? '',
+          era: input.era ?? '',
+          sortIndex: input.sortIndex ?? 0,
+        },
+        user,
+        role,
+      );
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_add_timeline_event',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    return this.getAftermath(encounterId, role);
   }
 
   /**
@@ -3437,10 +3881,11 @@ export class EncountersService {
           const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
           const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
           const turnIndex = turnIndexFor(sorted, freshEncounter.currentCombatantId);
+          const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            ...(turnIndex !== freshEncounter.turnIndex ? { updatedAt: nowIso() } : {}),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
           }).where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running'))).run();
         }
         emittedEncounter = freshEncounter;
@@ -3733,11 +4178,8 @@ export class EncountersService {
 
     const isDm = role === 'dm';
     if (!isDm) {
-      // Identity + initiative edits are DM-only (issue #114): a player must not be
-      // able to rename a combatant or rewrite its hpMax/initMod, only adjust HP.
-      if (patch.initiative !== undefined) {
-        throw new ForbiddenException('Only dm may set initiative');
-      }
+      // Identity edits and combat-log actor are DM-only.
+      // Players may set initiative on their own combatant (#1457).
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
       // patching their own combatant must not spoof who dealt the damage/heal.
       //
@@ -3827,7 +4269,9 @@ export class EncountersService {
     // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
+    // Initiative: DMs can set on any combatant; players can set on their own (#1457).
+    // The ownership guard above already rejected non-owned combatants for non-DMs.
+    if (patch.initiative !== undefined) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
@@ -3960,6 +4404,13 @@ export class EncountersService {
         }
       : null;
     let replayedCombatant: Combatant | null = null;
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): read after the
+    // transaction commits, at this method's own `emitEncounterEvent` call below — see
+    // `ActionResolverService.apply()`'s `sheetMirrored` doc comment for the general
+    // rationale. `mirrorSheet` itself is computed from the transaction-local encounter
+    // row (line ~4426), so it can't be read at that emission point directly; mirrored
+    // here into an outer-scope flag the same way.
+    let combatantSheetMirrored = false;
 
     try {
       this.db.transaction((tx) => {
@@ -3982,9 +4433,17 @@ export class EncountersService {
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
         this.assertMutable(freshEncounter);
+        // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
+        // THIS transaction-local row, not just the pre-transaction `encounterRow` checked
+        // above — the same reason `freshEncounter` itself is re-read here rather than reused
+        // (a caller between the outer check and this transaction, e.g. an unrelated combatant
+        // PATCH, can advance the encounter's `updatedAt`; the outer check already passed
+        // against the now-stale value, so without this the write proceeds anyway).
+        if (patch.expectedUpdatedAt) this.revisions.assertNotStale(freshEncounter, patch.expectedUpdatedAt);
         // The sheet mirror has the same lifecycle boundary: derive it from the
         // transaction-local encounter row, never the stale preflight snapshot.
         const mirrorSheet = shouldMirrorSheet && freshEncounter.status !== 'ended';
+        combatantSheetMirrored = mirrorSheet;
         const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
         if (!fresh || fresh.encounterId !== encounterId) {
           throw new NotFoundException(`Combatant ${combatantId} not found`);
@@ -4193,7 +4652,11 @@ export class EncountersService {
           }
           const concentrationBroken = willBreakConcentration && isConcentrating;
           if (concentrationBroken) {
-            const { removed, casterInstances } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            // Issue #1902 rework (round 22, codex P2): a concentration cascade off this
+            // combatant's own HP change can mirror a DIFFERENT character's sheet — fold
+            // that into the flag this method's own `encounter.updated` emission reports.
+            const { removed, casterInstances, sheetMirrored: cascadeSheetMirrored } = this.breakConcentration(tx, encounterId, combatantId, turnState, true);
+            if (cascadeSheetMirrored) combatantSheetMirrored = true;
             concentrationCascades = removed;
             writeSet.turnState = toJsonText(turnState);
             if (conditionFieldsTouched) {
@@ -4260,7 +4723,14 @@ export class EncountersService {
           afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
         }
         if (mirrorSheet) {
-          const mirroredAt = nowIso();
+          // Issue #1902 rework (round 13, codex P2 sweep): read the character's CURRENT
+          // `updatedAt` here, inside the transaction, rather than reusing `character` (read
+          // pre-transaction, via an earlier `await` — the same stale-snapshot gap fixed
+          // elsewhere in this rework). `nextUpdatedAt`, not `nowIso()`, for the same reason
+          // every other `characters` table writer in this rework needs it: this column is
+          // the CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on.
+          const priorCharUpdatedAt = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, existing.characterId!)).get()?.updatedAt;
+          const mirroredAt = nextUpdatedAt(priorCharUpdatedAt ?? nowIso());
           const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
           if (recomputeHp || spFieldsTouched || deathStateTouched) {
             sheetSet.hpCurrent = updated.hpCurrent;
@@ -4534,13 +5004,53 @@ export class EncountersService {
         adapter,
       );
       const turnIndex = turnIndexFor(sortedAfter, encounterRow.currentCombatantId);
+      // Issue #1902 rework (round 23, codex P2): this write lands AFTER the transaction
+      // above already committed (and after the awaited adapter/roster lookups just above),
+      // so `encounterRow.updatedAt` captured at the top of this method is stale — the
+      // transaction's own write already advanced it via `nextUpdatedAt`, which can land
+      // STRICTLY AHEAD of wall-clock `now` on a same-millisecond collision (see
+      // `nextUpdatedAt`'s own doc comment). A bare `nowIso()` here would not just fail to
+      // advance the token — it can tie or roll it BACKWARD relative to that already-committed
+      // value. That regression is exactly the defect `CharactersService.update()` fixed for
+      // the `characters.updatedAt` CAS token (issue #1902 rework, round 12/15: re-read the
+      // row fresh and derive the next token from THAT, never from the wall clock alone) —
+      // applied here to the identical `encounters.updatedAt` token so the two mirror the same
+      // rule. Without this, a client holding an older `expectedUpdatedAt` (from before the
+      // transaction's own change) could pass `assertNotStale` against this rolled-back value
+      // and silently overwrite that change with a stale whole-statblock PATCH.
+      const [freshEncounterRow] = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).limit(1);
       await this.db
         .update(encounters)
-        .set({ turnIndex, updatedAt: nowIso() })
+        .set({ turnIndex, updatedAt: nextUpdatedAt(freshEncounterRow?.updatedAt ?? encounterRow.updatedAt) })
         .where(eq(encounters.id, encounterId));
     }
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    // Issue #1902 rework (round 21, codex P2 sweep continuation): tag this frame the same
+    // way `apply()`/`undo()`/`adjustCombatantResource` do (see `sheetMirrored`'s schema doc
+    // comment) — a combatant HP/condition/death-state PATCH mirrors onto a linked character
+    // sheet whenever `combatantSheetMirrored` is true, so the client's `campaignCharacters`
+    // invalidation needs to fire for THIS write too, not just the other three.
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden, { sheetMirrored: combatantSheetMirrored });
+
+    if (row.kind === 'character' && row.characterId) {
+      if (beforeDeath !== 'dead' && afterDeath === 'dead') {
+        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+          type: 'character_downed',
+          title: 'Character died!',
+          body: `${row.name} has died in combat.`,
+          entityType: 'encounter',
+          entityId: encounterId,
+        }).catch(() => {});
+      } else if (beforeHp > 0 && afterHp === 0 && afterDeath !== 'dead') {
+        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+          type: 'character_downed',
+          title: 'Character downed!',
+          body: `${row.name} was downed in combat.`,
+          entityType: 'encounter',
+          entityId: encounterId,
+        }).catch(() => {});
+      }
+    }
 
     return combatantToDomain(row);
   }
@@ -4784,12 +5294,13 @@ export class EncountersService {
         }
         tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-        updatedAt: now,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
       }).where(eq(encounters.id, encounterId)).run();
       const escalationEventId = wrappedToNextRound && escalation?.logDetail
         ? Number(tx.insert(encounterEvents).values({ encounterId, round: afterEncounter.round, type: 'override', actor: null, target: null, actorId: null, targetId: null, detail: escalation.logDetail, chainId: null, parentEventId: null, phase: null, performedByJson: null, metadataJson: JSON.stringify({ escalationDie: escalation.escalationDie }), createdAt: now }).run().lastInsertRowid)
@@ -4956,6 +5467,7 @@ export class EncountersService {
           for (const legendarySnapshot of roundLegendarySnapshots) {
             tx.update(combatants).set({ turnState: legendarySnapshot.turnState }).where(eq(combatants.id, legendarySnapshot.id)).run();
           }
+          const currentEnc1 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             currentCombatantId: before.currentCombatantId,
             turnIndex: restoredTurnIndex,
@@ -4966,7 +5478,7 @@ export class EncountersService {
             turnPhase: before.turnPhase,
             ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
           if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
         } else if (runningAdapter) {
@@ -4977,11 +5489,12 @@ export class EncountersService {
           // lair resume target; an unrelated combatant mutation must not lose it.
           const restoreLairResume = before.lairResumeCombatantId === snapshot.id
             && current.lairResumeCombatantId === after.lairResumeCombatantId;
+          const currentEnc2 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             ...(restoreLairResume ? { lairResumeCombatantId: before.lairResumeCombatantId } : {}),
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc2?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
         }
         // Snapshot is the receipt's response body after its first successful undo.
@@ -5092,10 +5605,11 @@ export class EncountersService {
           adapter,
         );
         const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters).set({
           turnIndex,
           combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-          ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         }).where(eq(encounters.id, encounterId)).run();
       }
 
@@ -5228,6 +5742,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -5239,7 +5754,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -5293,6 +5808,34 @@ export class EncountersService {
       currentCombatantId,
       combatantKind: first?.kind ?? null,
     });
+
+    this.notifications.notifyCampaign(campaignId, user, {
+      type: 'encounter_started',
+      title: 'Encounter started',
+      body: `Encounter '${encounterRow.name}' has begun.`,
+      entityType: 'encounter',
+      entityId: encounterId,
+    }).catch(() => {});
+
+    if (first?.kind === 'character' && first.characterId) {
+      this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, first.characterId))
+        .limit(1)
+        .then(([char]) => {
+          if (char && char.ownerUserId) {
+            this.notifications.notifyUser(char.ownerUserId, campaignId, user, {
+              type: 'encounter_turn',
+              title: 'Your turn!',
+              body: `It's ${first.name}'s turn in '${encounterRow.name}'.`,
+              entityType: 'encounter',
+              entityId: encounterId,
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
 
     return snapshot;
   }
@@ -5659,6 +6202,7 @@ export class EncountersService {
           newCurrentName = 'Lair';
         }
 
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
           .set({
             turnIndex,
@@ -5669,7 +6213,7 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
           .run();
@@ -5778,6 +6322,27 @@ export class EncountersService {
       currentCombatantId: newCurrentId,
       combatantKind: startingKind,
     });
+
+    const [newCurrentRow] = await this.db.select().from(combatants).where(eq(combatants.id, newCurrentId!)).limit(1);
+    if (newCurrentRow?.kind === 'character' && newCurrentRow.characterId) {
+      this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, newCurrentRow.characterId))
+        .limit(1)
+        .then(([char]) => {
+          if (char && char.ownerUserId) {
+            this.notifications.notifyUser(char.ownerUserId, encounterRow.campaignId, user, {
+              type: 'encounter_turn',
+              title: 'Your turn!',
+              body: `It's ${newCurrentRow.name}'s turn in '${encounterRow.name}'.`,
+              entityType: 'encounter',
+              entityId: encounterId,
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
 
     const view = await this.getWithCombatantsOrThrow(encounterId, role);
     // Backfill the original response onto the already-committed claim (issue #580) so a
@@ -6003,6 +6568,7 @@ export class EncountersService {
         tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           turnIndex,
@@ -6013,7 +6579,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-          updatedAt: nowIso(),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -6089,8 +6655,8 @@ export class EncountersService {
           : `automatic round ${encounterRow.round} default +${value}`;
     const entry = this.escalationEntry(encounterRow.round, value, source, held, override, note);
     const history = this.appendEscalationHistory(encounterRow.escalationDieHistory, entry);
-    const ts = nowIso();
 
+    const currentEnc = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
     await this.db
       .update(encounters)
       .set({
@@ -6098,7 +6664,7 @@ export class EncountersService {
         escalationDieHeld: held,
         escalationDieOverride: override,
         escalationDieHistory: history,
-        updatedAt: ts,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
       })
       .where(eq(encounters.id, encounterId));
 
@@ -6269,7 +6835,11 @@ export class EncountersService {
         out.push({
           name: a.name.slice(0, 160),
           source,
+          // Monster/NPC statblock actions are never equipped-item rows.
+          equippedItemName: null,
           summary: bits.join(' · ').slice(0, 600),
+          toHit: a.toHit ?? '',
+          damage: a.damage ?? '',
           actionIndex: startIndex + i,
           resolvable: isResolvableSpec(a.spec),
           spec: a.spec ?? null,
@@ -6277,21 +6847,49 @@ export class EncountersService {
       }
     };
     if (c.kind === 'character' && c.characterId !== null) {
-      const [character] = await this.db.select({ actions: characters.actions }).from(characters).where(eq(characters.id, c.characterId)).limit(1);
-      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown }>>(character?.actions ?? null, []);
-      for (let i = 0; i < actions.length; i++) {
-        const a = actions[i];
+      const [character] = await this.db
+        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions })
+        .from(characters)
+        .where(eq(characters.id, c.characterId))
+        .limit(1);
+      if (!character) return out;
+      // Issue #1901: sheet actions + equipped-item actions, in the SAME merged index space
+      // ActionResolverService's listUsableActions/resolveSpec use — actionIndex N on this
+      // payload means the same action N on those. Falls back to sheet-only (pre-#1901
+      // behavior) when this service was constructed without the optional dependency (some
+      // hand-rolled test doubles predate it).
+      type ActionRow = { name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown };
+      const rows: Array<{ row: ActionRow; itemName: string | null }> = this.actionResolver
+        ? (this.actionResolver.characterUsableActionRows(character) as Array<{ row: ActionRow; itemName: string | null }>)
+        : fromJsonText<ActionRow[]>(character.actions, []).map((row) => ({ row, itemName: null }));
+      for (let i = 0; i < rows.length; i++) {
+        const { row: a, itemName } = rows[i];
         if (typeof a?.name !== 'string' || a.name.length === 0) continue;
         const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
-        const specParsed = zod.object({ spec: zod.unknown().optional() }).passthrough().safeParse(a);
-        const spec = specParsed.success ? specParsed.data.spec : undefined;
+        // Validate through the full ActionSpec schema (not a bare passthrough) — same as
+        // resolveSpec's `ActionSpec.safeParse(raw?.spec)` — so isResolvableSpec always sees
+        // a schema-defaulted spec (e.g. attack.bonus present as '' rather than absent) and
+        // this stays best-effort/defensive per the doc comment above rather than throwing on
+        // a spec shape that predates a field default or was never written through the
+        // validated character-upsert path.
+        const specParsed = ActionSpec.safeParse(a.spec);
+        const spec = specParsed.success ? specParsed.data : undefined;
         out.push({
           name: a.name.slice(0, 160),
+          // Issue #1901 review (devin-ai-integration): `source` is the Actions/Bonus/
+          // Reactions tab bucketing key AND the fallback spell-list detector on the web side
+          // (TurnWorkspace.tsx) — it must stay the action's economy/kind hint for an
+          // equipped-item row exactly like a sheet action, never the equipping item's name.
+          // The item name is carried separately via `equippedItemName` below so the UI can
+          // still label it without corrupting `source`'s established meaning.
           source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          equippedItemName: itemName,
           summary: bits.join(' · ').slice(0, 600),
+          toHit: typeof a.toHit === 'string' ? a.toHit : '',
+          damage: typeof a.damage === 'string' ? a.damage : '',
           actionIndex: i,
-          resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
-          spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
+          resolvable: isResolvableSpec(spec),
+          spec: spec ?? null,
         });
       }
       return out.slice(0, 100);
@@ -6365,6 +6963,10 @@ export class EncountersService {
       const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
       const effects = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(fresh.activeEffects, null));
       const activeEffects: ActiveEffectType[] = effects.success ? effects.data : [];
+
+      // Unconditionally nudge so the client receives the update (issue #1457)
+      shouldNudge = true;
+
 
       // #1674 — bound EVERY slot against the same adapter-owned action-economy model the
       // action-resolver's apply_action spend path consumes (#1637), not a second copy of the
@@ -6518,8 +7120,12 @@ export class EncountersService {
         .all();
       row = updated;
       if (encounterRow.status === 'running') {
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
-          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .set({
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
+          })
           .where(eq(encounters.id, encounterId))
           .run();
       }
@@ -6723,6 +7329,22 @@ export class EncountersService {
       }
       for (const w of characterWrites) {
         const prior = priorById.get(w.characterId);
+        // Issue #1902 rework (round 13, codex P2 sweep; corrected round 15, devin): PER
+        // CHARACTER, from `prior` (already read fresh, inside this transaction, a few
+        // lines above) — not the shared `ts` this whole encounter-end call uses for OTHER
+        // purposes (endedAt, the encounter's own updatedAt). This column is the CAS token
+        // `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on every
+        // writer. Computed ONCE here (not inline in `set` below) because
+        // `sheetSyncedUpdatedAt` on the combatant row MUST be stamped with this EXACT same
+        // value — `sheetSyncedUpdatedAt` is defined as "the sheet's `updatedAt` at the
+        // moment of sync" (see `CharactersService.syncActiveCombatants` and
+        // `updateCombatant`'s mirror, which both write one shared value to both rows).
+        // Round 13 advanced the character's token per-character but left the combatant
+        // stamped with the shared `ts`, breaking that equality — `canWriteBackHp` and the
+        // CAS predicate below both compare the two directly, so ANY later end would either
+        // report a false HP_SYNC_CONFLICT or silently no-op its write-back (0 rows
+        // matched) once the two values diverged.
+        let sheetSyncToken = nextUpdatedAt(prior?.updatedAt ?? ts);
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
@@ -6740,7 +7362,7 @@ export class EncountersService {
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
           conditionInstances: w.conditionInstances,
-          updatedAt: ts,
+          updatedAt: sheetSyncToken,
         };
         if (prior !== undefined && prior.status !== w.status) {
           set.status = w.status;
@@ -6776,20 +7398,25 @@ export class EncountersService {
             });
           }
           // Slices already match (e.g. name-only sheet edit) — bump updatedAt + token.
+          // `nextUpdatedAt(fresh.updatedAt)` (issue #1902 rework, round 13) — `fresh` was
+          // just read above, inside this same transaction. Reassign `sheetSyncToken` to
+          // whatever was ACTUALLY written here, so the combatant marker below matches.
           if (fresh) {
+            sheetSyncToken = nextUpdatedAt(fresh.updatedAt);
             tx.update(characters)
-              .set({ updatedAt: ts })
+              .set({ updatedAt: sheetSyncToken })
               .where(eq(characters.id, w.characterId))
               .run();
           }
         }
         tx.update(combatants)
-          .set({ sheetSyncedUpdatedAt: ts })
+          .set({ sheetSyncedUpdatedAt: sheetSyncToken })
           .where(eq(combatants.id, w.combatantId))
           .run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: ts })
+        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -6822,6 +7449,14 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+
+    this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+      type: 'encounter_ended',
+      title: 'Encounter ended',
+      body: `Encounter '${encounterRow.name}' has concluded.`,
+      entityType: 'encounter',
+      entityId: encounterId,
+    }).catch(() => {});
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -6958,6 +7593,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -6971,7 +7607,7 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -7094,6 +7730,198 @@ export class EncountersService {
     });
 
     return persisted;
+  }
+
+  /**
+   * Quick-roll a weapon attack (to-hit) or spell damage in an encounter (issue #1850).
+   * Rolls the dice, records the entry in the campaign's shared dice_rolls log, AND
+   * appends an event to the encounter's encounter_events feed with character identity,
+   * formula breakdown, nat20/nat1 visual flags, and damage type icon.
+   */
+  async quickRoll(
+    encounterId: number,
+    body: QuickRollRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{
+    roll: DiceRoll;
+    event: EncounterEvent;
+    breakdown: string;
+    isNat20: boolean;
+    isNat1: boolean;
+    total: number;
+  }> {
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+
+    const isDm = role === 'dm';
+    const actorId: number | null = body.combatantId ?? null;
+    let actorName = body.actorName?.trim() || '';
+    let combatantRow: typeof combatants.$inferSelect | null = null;
+
+    if (actorId != null) {
+      const [found] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!found) {
+        throw new NotFoundException(`Combatant ${actorId} not found in encounter ${encounterId}`);
+      }
+      combatantRow = found;
+      actorName = combatantRow.name;
+
+      if (!isDm) {
+        if (combatantRow.kind !== 'character' || combatantRow.characterId === null) {
+          throw new ForbiddenException('Only the DM may quick-roll for monsters or NPCs');
+        }
+        const [char] = await this.db
+          .select({ ownerUserId: characters.ownerUserId })
+          .from(characters)
+          .where(eq(characters.id, combatantRow.characterId))
+          .limit(1);
+        if (!char || char.ownerUserId !== user.id) {
+          throw new ForbiddenException('You may only quick-roll for your own character');
+        }
+      }
+    } else {
+      if (!isDm) {
+        actorName = user.name || 'Player';
+      } else if (!actorName) {
+        actorName = user.name || 'DM';
+      }
+    }
+
+    // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
+    let isActorHidden = false;
+    if (encounter.hidden) {
+      isActorHidden = true;
+    } else if (combatantRow) {
+      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+        const [npc] = await this.db
+          .select({ hidden: npcs.hidden })
+          .from(npcs)
+          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .limit(1);
+        if (npc?.hidden) {
+          isActorHidden = true;
+        }
+      }
+    }
+
+    const mode = body.mode || 'flat';
+    let formula = '';
+    const isToHit = body.kind === 'to-hit';
+    let damageTypeIcon = '⚔️';
+    let damageType = '';
+
+    if (isToHit) {
+      const trimmed = body.expr.trim();
+      let mod = 0;
+      if (/^[+-]?\d+$/.test(trimmed)) {
+        mod = parseInt(trimmed, 10);
+      } else {
+        const match = /^([+-]?\d+)/.exec(trimmed);
+        if (match) mod = parseInt(match[1], 10);
+      }
+      const sign = mod >= 0 ? `+${mod}` : `${mod}`;
+      if (mode === 'advantage') formula = `2d20kh1${sign}`;
+      else if (mode === 'disadvantage') formula = `2d20kl1${sign}`;
+      else formula = `1d20${sign}`;
+    } else {
+      formula = body.expr.trim();
+      const match = /^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s*(.*)$/i.exec(formula);
+      if (match) {
+        formula = match[1].replace(/\s+/g, '');
+        damageType = match[2].trim();
+      }
+      if (damageType) {
+        const t = damageType.toLowerCase();
+        if (t.includes('fire')) damageTypeIcon = '🔥';
+        else if (t.includes('cold') || t.includes('ice')) damageTypeIcon = '❄️';
+        else if (t.includes('lightning') || t.includes('electric')) damageTypeIcon = '⚡';
+        else if (t.includes('thunder')) damageTypeIcon = '🔊';
+        else if (t.includes('acid') || t.includes('poison')) damageTypeIcon = '🧪';
+        else if (t.includes('radiant') || t.includes('holy')) damageTypeIcon = '✨';
+        else if (t.includes('necrotic') || t.includes('dark')) damageTypeIcon = '💀';
+        else if (t.includes('psychic') || t.includes('mind')) damageTypeIcon = '🧠';
+        else if (t.includes('force')) damageTypeIcon = '💥';
+      }
+    }
+
+    const rollRes = rollDice(formula);
+    const naturalRoll = rollRes.rolls.length > 0 ? rollRes.rolls[0] : null;
+    const isNat20 = isToHit && (naturalRoll === 20 || rollRes.rolls.includes(20));
+    const isNat1 = isToHit && (naturalRoll === 1 || (rollRes.rolls.length === 1 && naturalRoll === 1));
+
+    const breakdown = `${formula} (${rollRes.rolls.join(', ')}) = ${rollRes.total}`;
+    const detail = isToHit
+      ? `${body.actionName} (to-hit): ${rollRes.total} [${breakdown}]${isNat20 ? ' — CRITICAL HIT! (Nat 20)' : isNat1 ? ' — CRITICAL MISS! (Nat 1)' : ''}`
+      : `${body.actionName} (damage): ${rollRes.total} ${damageTypeIcon} [${breakdown}]`;
+
+    const diceActor = isActorHidden ? UNKNOWN_COMBATANT_LABEL : actorName;
+    const diceLabel = `${diceActor} · ${body.actionName} (${body.kind})`;
+
+    const roll = await this.rolls.record(
+      encounter.campaignId,
+      {
+        expr: formula,
+        rolls: rollRes.rolls,
+        total: rollRes.total,
+        label: diceLabel,
+        actor: diceActor,
+        natural20: isNat20 ? 1 : 0,
+      },
+      user,
+    );
+
+    const now = nowIso();
+    const performedBy = { userId: user.id, role, kind: 'human' };
+
+    const [eventRow] = await this.db
+      .insert(encounterEvents)
+      .values({
+        encounterId,
+        round: encounter.round,
+        type: 'roll',
+        actor: actorName,
+        actorId,
+        target: null,
+        targetId: null,
+        detail,
+        chainId: null,
+        parentEventId: null,
+        phase: 'roll',
+        performedByJson: JSON.stringify(performedBy),
+        metadataJson: JSON.stringify({
+          actionName: body.actionName,
+          kind: body.kind,
+          expr: body.expr,
+          formulaBreakdown: breakdown,
+          naturalRoll,
+          natural20: isNat20,
+          natural1: isNat1,
+          damageType,
+          damageIcon: damageTypeIcon,
+          total: rollRes.total,
+        }),
+        createdAt: now,
+      })
+      .returning()
+      .all();
+
+    if (!encounter.hidden) {
+      this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId });
+    }
+
+    return {
+      roll,
+      event: eventToDomain(eventRow),
+      breakdown,
+      isNat20,
+      isNat1,
+      total: rollRes.total,
+    };
   }
 
   /**
@@ -7232,7 +8060,11 @@ export class EncountersService {
         }
         slot.used = nextUsed;
         slots[levelKey] = slot;
-        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
+        // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+        // EVERY spellSlots writer. `character` was read INSIDE this same transaction
+        // above, so there's no separate atomicity gap to guard here.
+        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
       } else if (patch.key) {
         const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
@@ -7243,7 +8075,7 @@ export class EncountersService {
         }
         res.used = nextUsed;
         resources[patch.key] = res;
-        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
         eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
       } else {
         throw new BadRequestException('Must supply either spellLevel or key to adjust');
@@ -7264,7 +8096,10 @@ export class EncountersService {
         .run();
     });
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    // Issue #1902 rework (round 19, codex P2): `sheetMirrored: true` unconditionally — this
+    // method's entire purpose is spending/restoring a linked character's spell slot or
+    // resource, so every call here writes the sheet (see the `characters` update above).
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored: true });
 
     return this.getRowOrThrow(encounterId);
   }
@@ -7460,7 +8295,16 @@ export class EncountersService {
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] } | null,
     casterExcluded: boolean,
     effectName?: string | null,
-  ): { removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[]; casterInstances?: ConditionInstance[] } {
+  ): {
+    removed: { combatantId: number; combatantName: string; condition: ConditionInstance }[];
+    casterInstances?: ConditionInstance[];
+    sheetMirrored: boolean;
+  } {
+    // Issue #1902 rework (round 22, codex P2): report whether this cascade mirrored any
+    // character sheet, matching the same signal `action-resolver.service.ts`'s
+    // `breakConcentration` now returns — a cascade can touch a character-linked combatant
+    // other than the caster the caller already has in hand.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -7485,15 +8329,24 @@ export class EncountersService {
       const row = withInstances.find((r) => r.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — see the matching fix (and its
+      // fuller doc comment) in `action-resolver.service.ts`'s `breakConcentration` for why
+      // the combatant's `sheetSyncedUpdatedAt` and the character's own `updatedAt` must be
+      // the EXACT same value.
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     if (turnState) {
@@ -7509,6 +8362,7 @@ export class EncountersService {
         condition: r.condition,
       })),
       casterInstances,
+      sheetMirrored,
     };
   }
 }

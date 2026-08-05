@@ -17,8 +17,10 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
+import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { QuickRollButtons } from './QuickRollButtons';
 
 type Step = 'targets' | 'preview';
 
@@ -94,12 +96,27 @@ export function ActionUsePanel({
   const needsTarget = spec.targets.count > 0;
 
   const resolvePreview = useMutation({
-    mutationFn: () =>
+    mutationFn: (rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit') =>
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
+        // Issue #1901 rework (review: chatgpt-codex-connector P1): bind the resolve request
+        // to the action the panel actually opened for, not just its index. If an equipped
+        // item's action is removed/unequipped/reordered while this panel is open, a later
+        // action can shift into `actionIndex` — resolveSpec's own index/name cross-check
+        // (see ActionResolverService) rejects that mismatch with a clean 400 instead of
+        // silently resolving whatever now sits at that index.
+        actionName,
+        // Round 2 of the same fix (review: chatgpt-codex-connector P1): action names are not
+        // unique on a sheet, so a name match alone can't tell two different actions apart if
+        // one was swapped in for another under the same name while this panel was open.
+        // `spec` is the exact content this panel already opened for (the fetched row) —
+        // sending it as `expectedSpec` makes the server verify content, not just name, and
+        // reject a mismatch instead of resolving whatever now sits at that index/name.
+        expectedSpec: spec,
         targetIds,
         commit: false,
+        rollMode,
       }),
     onMutate: () => onError(null),
     onSuccess: (res) => {
@@ -175,6 +192,14 @@ export function ActionUsePanel({
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontWeight: 700, fontSize: 13 }}>{actorName} · {actionName}</span>
         <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
+        <QuickRollButtons
+          encounterId={encounterId}
+          combatantId={actorCombatantId}
+          actorName={actorName}
+          actionName={actionName}
+          spec={spec}
+          disabled={commit.isPending || commitSubmitted || isUnconfirmed || applyDisabled}
+        />
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
@@ -216,13 +241,14 @@ export function ActionUsePanel({
               </div>
             </div>
           )}
-          <Btn
+          <RollContextMenu
+            className="btn btn-primary"
             data-testid="action-use-preview"
             disabled={!canPreview || resolvePreview.isPending}
-            onClick={() => resolvePreview.mutate()}
+            onRoll={(mode) => resolvePreview.mutate(mode)}
           >
             {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
-          </Btn>
+          </RollContextMenu>
         </>
       )}
 

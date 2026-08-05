@@ -389,6 +389,91 @@ describe('inventory & treasury (e2e)', () => {
       expect(live.body.name).toBe('Torch bundle');
     });
 
+    it('issue #1901 rework: qty idempotency fingerprint covers displaceEquipped (review: chatgpt-codex-connector P2)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Hired Guard Buckler', ownerType: 'character', characterId: dmCharacterId, qty: 1 });
+      const id = created.body.id;
+      const key = 'displace-fingerprint-1901';
+      const slot = 'idempotency-displace-slot-1901';
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: false });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Same key, same qtyDelta, same equip/equipSlot — but a FLIPPED displaceEquipped. This
+      // payload authorizes something the original one did not (unequipping whatever else
+      // occupies the slot), so it must 409 rather than silently replay the first response.
+      const flipped = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true });
+      expect(flipped.status).toBe(409);
+      expect(flipped.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The identical request, replayed, is still a clean idempotent no-op.
+      const replay = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: false });
+      expect(replay.status).toBe(200);
+      expect(replay.body.qty).toBe(2);
+    });
+
+    // Issue #1901 review (chatgpt-codex-connector P2 + devin-ai-integration): the SAME rule
+    // as displaceEquipped above applies to expectedConflictingItemId — it changes what the
+    // write is AUTHORIZED to do (which incumbent it may displace), so reusing an idempotency
+    // key while confirming a DIFFERENT incumbent must 409, not silently replay the prior
+    // response as if the caller's (different) confirmation had been honored.
+    it('issue #1901 review: qty idempotency fingerprint covers expectedConflictingItemId', async () => {
+      const server = ctx.app.getHttpServer();
+      const slot = 'idempotency-cas-slot-1901';
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Hired Guard Cudgel', ownerType: 'character', characterId: dmCharacterId, qty: 1 });
+      const id = created.body.id;
+      const incumbentA = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Incumbent A', ownerType: 'character', characterId: dmCharacterId });
+      const incumbentB = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Incumbent B', ownerType: 'character', characterId: dmCharacterId });
+      await request(server).patch(`/api/v1/inventory/${incumbentA.body.id}`).set(dm).send({ equipped: true, equipSlot: slot });
+
+      const key = 'cas-fingerprint-1901';
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentA.body.id });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Same key, same qty/equip/displaceEquipped — but confirming a DIFFERENT incumbent.
+      // This authorizes displacing incumbentB, which the original request never confirmed.
+      const flipped = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentB.body.id });
+      expect(flipped.status).toBe(409);
+      expect(flipped.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // The identical request, replayed, is still a clean idempotent no-op.
+      const replay = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: incumbentA.body.id });
+      expect(replay.status).toBe(200);
+      expect(replay.body.qty).toBe(2);
+    });
+
     it('prunes expired inventory_qty_idempotency rows on the next qty write (#782)', async () => {
       const server = ctx.app.getHttpServer();
       const created = await request(server)
@@ -711,6 +796,11 @@ describe('inventory & treasury (e2e)', () => {
         .send({ equipped: true, equipSlot: 'main-hand' });
       expect(conflict.status).toBe(409);
       expect(conflict.body.code).toBe('INVENTORY_SLOT_CONFLICT');
+      // Issue #1901: the incumbent's id/name + the contested slot ride along so the web
+      // one-tap swap can unequip the incumbent and retry without parsing the message string.
+      expect(conflict.body.conflictingItemId).toBe(sword.body.id);
+      expect(conflict.body.conflictingItemName).toBe('Rapier');
+      expect(conflict.body.equipSlot).toBe('main-hand');
 
       // Unequipping the incumbent frees the slot for the second item.
       const freed = await request(server).patch(`/api/v1/inventory/${sword.body.id}`).set(player).send({ equipped: false });
@@ -720,6 +810,141 @@ describe('inventory & treasury (e2e)', () => {
         .set(player)
         .send({ equipped: true, equipSlot: 'main-hand' });
       expect(retry.status).toBe(200);
+    });
+
+    it('issue #1901 rework: displaceEquipped resolves a slot conflict atomically — one request, no half-applied state', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Unique slot string (see the "review fix" test above): this describe block shares
+      // ownCharacterId across earlier tests in this file and never unequips between them,
+      // so a common name like 'main-hand' would collide with THEIR leftover equipped item
+      // (the prior 409-conflict test above leaves 'main-hand' occupied) rather than
+      // exercising a clean slot conflict for THIS test.
+      const slot = 'atomic-swap-slot-1901';
+      const sword = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Rapier', ownerType: 'character', characterId: ownCharacterId });
+      const dagger = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Dagger', ownerType: 'character', characterId: ownCharacterId });
+
+      const first = await request(server)
+        .patch(`/api/v1/inventory/${sword.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+      expect(first.status).toBe(200);
+
+      // Without displaceEquipped, still a plain 409 (existing behavior unchanged).
+      const stillConflicts = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+      expect(stillConflicts.status).toBe(409);
+
+      // ONE request, with displaceEquipped: true, atomically unequips the incumbent and
+      // equips the new item — no separate unequip PATCH, no window where neither item
+      // (or, on a client retry bug, both items) is equipped.
+      const swap = await request(server)
+        .patch(`/api/v1/inventory/${dagger.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true });
+      expect(swap.status).toBe(200);
+      expect(swap.body.equipped).toBe(true);
+      expect(swap.body.equipSlot).toBe(slot);
+
+      const incumbentAfter = await request(server).get(`/api/v1/inventory/${sword.body.id}`).set(player);
+      expect(incumbentAfter.body.equipped).toBe(false);
+      expect(incumbentAfter.body.equipSlot).toBeNull();
+
+      // Exactly one item holds the slot afterward.
+      const list = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(player);
+      const inSlot = (list.body as Array<{ id: number; equipped: boolean; equipSlot: string | null }>).filter(
+        (it) => (it.id === sword.body.id || it.id === dagger.body.id) && it.equipped && it.equipSlot === slot,
+      );
+      expect(inSlot).toHaveLength(1);
+      expect(inSlot[0].id).toBe(dagger.body.id);
+    });
+
+    it('issue #1901 rework: displaceEquipped is a no-op flag when there is no conflict', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Unique slot string — see the note in the atomic-swap test above.
+      const slot = 'no-conflict-slot-1901';
+      const item = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Buckler', ownerType: 'character', characterId: ownCharacterId });
+
+      const res = await request(server)
+        .patch(`/api/v1/inventory/${item.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true });
+      expect(res.status).toBe(200);
+      expect(res.body.equipped).toBe(true);
+      expect(res.body.equipSlot).toBe(slot);
+    });
+
+    // Issue #1901 review (chatgpt-codex-connector P2): the web one-tap swap shows "Replace
+    // <incumbent>" naming the item from an earlier 409, then re-sends the same slot with
+    // displaceEquipped: true. If a DIFFERENT client unequips that named incumbent and equips a
+    // third item into the same slot before the swap lands, the swap must reject — not silently
+    // displace the third item under a confirmation that named someone else.
+    it('issue #1901 review (chatgpt-codex-connector P2): expectedConflictingItemId rejects a swap once the confirmed incumbent no longer holds the slot', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const slot = 'cas-swap-slot-1901';
+      const swordA = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword A', ownerType: 'character', characterId: ownCharacterId });
+      const swordB = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword B', ownerType: 'character', characterId: ownCharacterId });
+      const swordC = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Sword C', ownerType: 'character', characterId: ownCharacterId });
+
+      // Sword A holds the slot; confirm the 409 names it as the incumbent.
+      await request(server).patch(`/api/v1/inventory/${swordA.body.id}`).set(player).send({ equipped: true, equipSlot: slot });
+      const conflict = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.conflictingItemId).toBe(swordA.body.id);
+
+      // Another client races ahead: unequips Sword A, equips Sword C into the same slot.
+      await request(server).patch(`/api/v1/inventory/${swordA.body.id}`).set(player).send({ equipped: false });
+      await request(server)
+        .patch(`/api/v1/inventory/${swordC.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot });
+
+      // The stale confirmation (still naming Sword A) must be rejected with a FRESH 409
+      // naming Sword C — not silently displace Sword C under a confirmation for Sword A.
+      const staleSwap = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: swordA.body.id });
+      expect(staleSwap.status).toBe(409);
+      expect(staleSwap.body.conflictingItemId).toBe(swordC.body.id);
+
+      const cUntouched = await request(server).get(`/api/v1/inventory/${swordC.body.id}`).set(player);
+      expect(cUntouched.body.equipped).toBe(true);
+      expect(cUntouched.body.equipSlot).toBe(slot);
+
+      // Re-confirming against the FRESH incumbent succeeds and displaces Sword C, not A.
+      const freshSwap = await request(server)
+        .patch(`/api/v1/inventory/${swordB.body.id}`)
+        .set(player)
+        .send({ equipped: true, equipSlot: slot, displaceEquipped: true, expectedConflictingItemId: swordC.body.id });
+      expect(freshSwap.status).toBe(200);
+      const cAfter = await request(server).get(`/api/v1/inventory/${swordC.body.id}`).set(player);
+      expect(cAfter.body.equipped).toBe(false);
     });
 
     it('moving an equipped character item to the party stash auto-unequips it', async () => {

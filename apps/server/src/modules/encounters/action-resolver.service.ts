@@ -76,6 +76,7 @@ import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromInstances, conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -362,11 +363,13 @@ export class ActionResolverService {
    * issue). Ordered by item id so the index space is stable across calls, which
    * matters because {@link listUsableActions} and {@link resolveSpec} both append
    * these AFTER the character's manually-authored `character.actions`, and the apply
-   * path resolves an action purely by that combined index/name.
+   * path resolves an action purely by that combined index/name. Each row carries the
+   * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
+   * without a second inventory lookup.
    */
-  private equippedItemActions(characterId: number, campaignId: number): CharacterAction[] {
+  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ equippedAction: inventoryItems.equippedAction })
+      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
       .from(inventoryItems)
       .where(
         and(
@@ -378,25 +381,47 @@ export class ActionResolverService {
       )
       .orderBy(inventoryItems.id)
       .all();
-    const actions: CharacterAction[] = [];
+    const actions: Array<{ action: CharacterAction; itemName: string }> = [];
     for (const row of rows) {
       if (!row.equippedAction) continue;
       const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push(parsed.data);
+      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
     }
     return actions;
   }
 
   /**
-   * A character's full usable-action list (issue #1326): hand-authored sheet actions
-   * FIRST, then equipped-item actions appended — merged, never replacing, and in one
-   * stable index space so `resolveSpec`'s actionIndex lookup and `listUsableActions`
-   * agree on what index N means for this character right now.
+   * A character's full usable-action list (issue #1326, #1901): hand-authored sheet actions
+   * FIRST, then equipped-item actions appended — merged, never replacing, and in one stable
+   * index space so `resolveSpec`'s actionIndex lookup, `listUsableActions`, AND the `/turn`
+   * `suggestedActions` payload (via {@link EncountersService}) all agree on what index N means
+   * for this character right now. `itemName` is `null` for a sheet action, the equipping
+   * item's name for an equipped-item action — the ONE thing that distinguishes the two halves
+   * of the merge for a caller that wants to label the source (issue #1901).
    */
-  private characterActionRows(character: typeof characters.$inferSelect): Array<Record<string, unknown>> {
+  characterUsableActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActions(character.id, character.campaignId) as unknown as Array<Record<string, unknown>>;
-    return [...manual, ...equipped];
+    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
+    // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
+    // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
+    // sheet-action maximum would push every appended equipped-item action to index >= 100,
+    // where it can never be resolved (and the /turn payload's own `out.slice(0, 100)` would
+    // silently drop it too). Cap the SAME merged index space every caller of this method
+    // shares (listUsableActions, resolveSpec, and EncountersService's /turn payload) here,
+    // once, so nothing this method ever returns can land outside the resolvable range.
+    return [
+      ...manual.map((row) => ({ row, itemName: null as string | null })),
+      ...equipped.map(({ action, itemName }) => ({ row: action as unknown as Record<string, unknown>, itemName })),
+    ].slice(0, 100);
+  }
+
+  private characterActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+  ): Array<Record<string, unknown>> {
+    return this.characterUsableActionRows(character).map((x) => x.row);
   }
 
   private actionToUsable(a: CharacterAction, index: number): UsableAction {
@@ -458,6 +483,24 @@ export class ActionResolverService {
     return role === 'dm' || (encounter.status === 'running' && encounter.turnPhase === 'combatant' && encounter.currentCombatantId === actor.id);
   }
 
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P1): reject a lookup-by-index/name whose
+   * result doesn't match the caller's `expectedSpec` — closes the gap the plain name check
+   * in {@link resolveSpec} leaves open when two rows in the SAME merged list share a name
+   * (character sheet actions and equipped-item actions are both free-named, and the service
+   * already knows names aren't unique — that's exactly why `actionFingerprint` exists for the
+   * apply-time check below). Content is compared via the SAME canonicalized-hash approach as
+   * `actionFingerprint`, but applied to the PARSED `ActionSpec` on both sides — never the raw
+   * sheet-JSON row — so an unrelated extra key on the stored row can't produce a false
+   * mismatch against a client that only ever sees the normalized `ActionSpec` shape.
+   */
+  private assertExpectedSpecMatches(req: ActionResolveRequest, name: string, spec: ActionSpec): void {
+    if (req.expectedSpec === undefined) return;
+    if (actionFingerprint(spec) !== actionFingerprint(ActionSpec.parse(req.expectedSpec))) {
+      throw new BadRequestException(`Action "${name}" changed or moved before it could be applied.`);
+    }
+  }
+
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
   private resolveSpec(
     actor: typeof combatants.$inferSelect,
@@ -494,6 +537,7 @@ export class ActionResolverService {
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
+      this.assertExpectedSpecMatches(req, name, parsed.data);
       return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
     }
     const statActions = this.combatantActions(actor, campaignId);
@@ -517,6 +561,7 @@ export class ActionResolverService {
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
+    this.assertExpectedSpecMatches(req, action.name, parsed.data);
     return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
   }
 
@@ -540,8 +585,8 @@ export class ActionResolverService {
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
-      const actions = this.characterActionRows(character);
-      return actions.map((a, index) => {
+      const rows = this.characterUsableActionRows(character);
+      return rows.map(({ row: a, itemName }, index) => {
         const parsed = ActionSpec.safeParse(a?.spec);
         const spec = parsed.success ? parsed.data : null;
         return UsableAction.parse({
@@ -554,6 +599,8 @@ export class ActionResolverService {
           notes: typeof a?.notes === 'string' ? a.notes : '',
           resolvable: isResolvableSpec(spec),
           spec,
+          // Issue #1901: tag which equipped item granted this action; empty for a sheet action.
+          source: itemName ? `equipped: ${itemName}`.slice(0, 40) : '',
         });
       });
     }
@@ -629,7 +676,7 @@ export class ActionResolverService {
     for (const tid of targetIds) {
       const target = this.combatantRowOrThrow(encounterId, tid);
       this.assertTargetAllowed(spec.targets.allow, actor, target, name);
-      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target));
+      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target, req.rollMode));
     }
 
     const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
@@ -682,6 +729,7 @@ export class ActionResolverService {
     prof: number,
     roll: ActionRollFn,
     target: typeof combatants.$inferSelect,
+    rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit',
   ): ResolvedTarget {
     const base = {
       combatantId: target.id,
@@ -723,9 +771,10 @@ export class ActionResolverService {
       // -AC behaviour, byte-identical) for every adapter that has not. The resolver does not ask
       // "which system is this" itself — see osr-adapter.ts / index.ts's OpenLegendAdapter for
       // where that decision actually lives.
-      const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll });
+      const rollModeForAttack = rollMode === 'advantage' || rollMode === 'disadvantage' ? rollMode : undefined;
+      const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll, rollMode: rollModeForAttack });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
-      outcome = resolvedOutcome;
+      outcome = rollMode === 'crit' ? 'crit' : resolvedOutcome;
       // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
@@ -754,7 +803,7 @@ export class ActionResolverService {
       const { dc } = computeSaveDc(spec.save.dc, adapter, actorStats, prof);
       if (dc === null) throw new BadRequestException(`"${actionName}" has no resolvable DC — resolve manually rather than inventing one.`);
       const saveMod = this.targetSaveModifier(target, spec.save.ability, adapter as unknown as RuleSystemAdapter);
-      const nat = this.rollD20(roll);
+      const nat = this.rollD20(roll, rollMode);
       const total = nat + saveMod;
       const { outcome: o, degree } = classifySaveOutcome(adapter, total, nat, dc);
       outcome = o;
@@ -827,8 +876,11 @@ export class ActionResolverService {
     return ResolvedTarget.parse({ ...base, outcome, playerText, dmText });
   }
 
-  private rollD20(roll: ActionRollFn): number {
-    const r = roll('1d20');
+  private rollD20(roll: ActionRollFn, rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit'): number {
+    let expr = '1d20';
+    if (rollMode === 'advantage') expr = '2d20kh1';
+    else if (rollMode === 'disadvantage') expr = '2d20kl1';
+    const r = roll(expr);
     return r.rolls[0] ?? r.total;
   }
 
@@ -1514,6 +1566,12 @@ export class ActionResolverService {
     let actorConcentrationTouched = false;
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
+    // Issue #1902 rework (round 19, codex P2): set true only when this specific apply
+    // ACTUALLY mirrored something onto a linked character sheet (HP/condition or a
+    // spell-slot spend) — most actions (a monster-only fight, a roll with no
+    // consequence) touch no sheet at all, so the emitted `encounter.updated` should not
+    // claim one and trigger every client's `campaignCharacters` refetch for nothing.
+    let sheetMirrored = false;
 
     const earlyToken = this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
@@ -1582,7 +1640,7 @@ export class ActionResolverService {
       // "damage landed" and "the cast turned out to be unpayable". Failing before any of that
       // is written keeps the transaction simple and gives the caller (frequently the AI
       // Driver) a clean retry — nothing here to undo.
-      let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
+      let spellSlotSpend: { characterId: number; slots: SpellSlotMap; priorUpdatedAt: string } | null = null;
       if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
         const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
@@ -1600,7 +1658,11 @@ export class ActionResolverService {
               max: outcome.max,
             });
           }
-          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots };
+          // `priorUpdatedAt` carried to the write site below (issue #1902 rework, round 10)
+          // so that write can advance the character's CAS token monotonically via
+          // `nextUpdatedAt`, matching `patchSpellSlots`/`restParty` — this read is already
+          // transaction-scoped (`tx.select`), so there's no separate re-read to add.
+          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots, priorUpdatedAt: character.updatedAt };
         }
       }
 
@@ -1759,7 +1821,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState);
+          // Issue #1902 rework (round 22, codex P2): a cascade off the actor's own
+          // concentration break can mirror a DIFFERENT character's sheet.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState)) sheetMirrored = true;
         }
         if (resolution.startsConcentration) {
           // Queued saves belong to the PRIOR effect and must never break the new one,
@@ -1861,10 +1925,11 @@ export class ActionResolverService {
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && liveEncounter.status !== 'ended') {
           const sheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
+          const targetSheetToken = nextUpdatedAt(sheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               hpCurrent: result.hpCurrent,
@@ -1877,10 +1942,18 @@ export class ActionResolverService {
               // The live condition name list is the combatant's; the structured instance
               // prior must come from the sheet itself or legacy rows will wipe sheet detail.
               ...sheetConditionWriteSetFromNames([...conditions], sheetRow?.conditionInstances ?? null),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the
+              // spell-slot spend write's comment below for why this token must advance on
+              // every characters-row writer.
+              updatedAt: targetSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: targetSheetToken })
+            .where(eq(combatants.id, fresh.id))
+            .run();
+          sheetMirrored = true;
         }
 
         // Issue #1452: if a concentrating target is dropped by the resolved attack, break
@@ -1917,7 +1990,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState);
+          // Issue #1902 rework (round 22, codex P2): same cascade-mirrors-a-third-sheet
+          // gap as the actor's own break above.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState)) sheetMirrored = true;
           tx.update(combatants).set({ turnState: toJsonText(nextTargetTurnState) }).where(eq(combatants.id, fresh.id)).run();
         }
 
@@ -1932,11 +2007,32 @@ export class ActionResolverService {
       }
       // The spend was already validated (and the replacement blob computed) at the top of
       // this transaction, before any consequence above was written — this is just the write.
+      // Issue #1902 rework (devin review PRRT_kwDOTdNRkM6WFOfH): re-read the character row
+      // fresh immediately before this write. `breakConcentration` or target HP/condition
+      // mirrors earlier in this transaction may have already advanced `characters.updatedAt`
+      // beyond `spellSlotSpend.priorUpdatedAt`. Derive the final token from that current state
+      // and update the linked combatant's `sheetSyncedUpdatedAt` to match.
       if (spellSlotSpend) {
+        const freshChar = tx
+          .select({ updatedAt: characters.updatedAt })
+          .from(characters)
+          .where(eq(characters.id, spellSlotSpend.characterId))
+          .get();
+        const finalToken = nextUpdatedAt(freshChar?.updatedAt ?? spellSlotSpend.priorUpdatedAt);
         tx.update(characters)
-          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nowIso() })
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: finalToken })
           .where(eq(characters.id, spellSlotSpend.characterId))
           .run();
+        tx.update(combatants)
+          .set({ sheetSyncedUpdatedAt: finalToken })
+          .where(
+            and(
+              eq(combatants.encounterId, encounter.id),
+              eq(combatants.characterId, spellSlotSpend.characterId),
+            ),
+          )
+          .run();
+        sheetMirrored = true;
       }
 
       // Issue #1449: persist the pre-apply snapshot server-side, keyed by chainId, so undo()
@@ -1991,7 +2087,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id });
+    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id, sheetMirrored });
 
     return ActionUndoToken.parse({
       encounterId: committedEncounter.id,
@@ -2044,6 +2140,11 @@ export class ActionResolverService {
    */
   undo(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role): { ok: true } {
     const encounter = this.encounterRowOrThrow(encounterId);
+    // Issue #1902 rework (round 19, codex P2 sweep continuation): mirrors `apply()`'s own
+    // `sheetMirrored` tracking (see that method's doc comment) — undo restores each
+    // target's HP/condition slice and refunds a spent spell slot, both onto the linked
+    // character sheet, so this event needs the same precise tag as apply's.
+    let sheetMirrored = false;
     if (token.encounterId !== encounterId) {
       this.auditRejectedUndo(encounter, token, user, role, 'cross_encounter_token');
       throw new BadRequestException('Undo token is for a different encounter.');
@@ -2203,7 +2304,7 @@ export class ActionResolverService {
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
           const undoSheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
@@ -2217,6 +2318,7 @@ export class ActionResolverService {
                 deathSaveSuccesses: t.deathSaveSuccessesBefore,
                 deathSaveFailures: t.deathSaveFailuresBefore,
               };
+          const undoSheetToken = nextUpdatedAt(undoSheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               ...sheetHpRestore,
@@ -2224,10 +2326,18 @@ export class ActionResolverService {
               ...(conditionInstancesBefore
                 ? sheetConditionWriteSetFromInstances(conditionInstancesBefore)
                 : sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances)),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the apply-side
+              // spell-slot write's comment below for why this CAS token must advance on
+              // EVERY characters-row writer, not just patchSpellSlots.
+              updatedAt: undoSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: undoSheetToken })
+            .where(eq(combatants.id, fresh.id))
+            .run();
+          sheetMirrored = true;
         }
       }
       // Refund the actor's resources — from the STORED chain, never the client token.
@@ -2272,7 +2382,23 @@ export class ActionResolverService {
           const slot = slots[String(chain.spellLevelSpent)];
           if (slot) {
             slot.used = Math.max(0, (slot.used ?? 0) - 1);
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
+            // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a
+            // CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing
+            // on EVERY spellSlots writer. `character` was read INSIDE this same
+            // transaction just above, so there's no separate atomicity gap to guard here
+            // (unlike `restParty`'s pre-transaction plan).
+            const sheetToken = nextUpdatedAt(character.updatedAt);
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: sheetToken }).where(eq(characters.id, actor.characterId)).run();
+            tx.update(combatants)
+              .set({ sheetSyncedUpdatedAt: sheetToken })
+              .where(
+                and(
+                  eq(combatants.encounterId, committedEncounter.id),
+                  eq(combatants.characterId, actor.characterId),
+                ),
+              )
+              .run();
+            sheetMirrored = true;
           }
         }
       }
@@ -2318,7 +2444,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored });
     return { ok: true };
   }
 
@@ -2334,7 +2460,13 @@ export class ActionResolverService {
     round: number,
     caster: { id: number; name: string },
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] },
-  ): void {
+  ): boolean {
+    // Issue #1902 rework (round 22, codex P2): returns whether this cascade mirrored any
+    // character sheet, so both callers below can OR it into their own `sheetMirrored`
+    // flag — a caster/target dropping concentration can cascade a condition-removal write
+    // onto a THIRD, character-linked combatant that isn't the caster or the direct action
+    // target, which neither caller could see without this signal.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -2358,15 +2490,28 @@ export class ActionResolverService {
       const row = withInstances.find((row2) => row2.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — `sheetSyncedUpdatedAt` on the
+      // combatant is defined as "the sheet's `updatedAt` at the moment of sync"
+      // (`CharactersService.syncActiveCombatants`/`updateCombatant`'s mirror both write
+      // one shared value to both rows), and `canWriteBackHp`/`endEncounter`'s CAS
+      // predicate compare it directly against the sheet's ACTUAL `updatedAt`. Round 13
+      // advanced the character's token per-character but still stamped the combatant
+      // with the shared `now` — the identical mismatch class already fixed for
+      // `endEncounter` (round 15) and `applyPartyRecovery`/`undoPartyRecovery` (round 17).
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     for (const r of removed) {
@@ -2392,5 +2537,6 @@ export class ActionResolverService {
     }
     turnState.concentration = null;
     turnState.pendingConcentrationChecks = [];
+    return sheetMirrored;
   }
 }

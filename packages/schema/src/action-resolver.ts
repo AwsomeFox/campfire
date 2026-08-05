@@ -119,7 +119,8 @@ export interface ResolverAdapter {
 export interface AttackRollInput {
   readonly modifier: number;
   readonly targetAc: number;
-  readonly roll: ActionRollFn;
+  roll: ActionRollFn;
+  rollMode?: 'advantage' | 'disadvantage';
 }
 
 /**
@@ -151,7 +152,8 @@ export interface AttackRollResult {
  * behaviour a NAMED default instead of the only path that existed.
  */
 export function defaultAttackRoll(adapter: ResolverAdapter, input: AttackRollInput): AttackRollResult {
-  const r = input.roll('1d20');
+  const expr = input.rollMode === 'advantage' ? '2d20kh1' : input.rollMode === 'disadvantage' ? '2d20kl1' : '1d20';
+  const r = input.roll(expr);
   const naturalRoll = r.rolls[0] ?? r.total;
   const total = naturalRoll + input.modifier;
   const outcome = classifyAttackOutcome(adapter, total, naturalRoll, input.targetAc);
@@ -678,8 +680,21 @@ export const ActionResolveRequest = z.object({
   actionName: z.string().max(120).optional(),
   actionIndex: z.number().int().min(0).max(99).optional(),
   spec: ActionSpec.optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P1): an OPTIONAL identity check for an
+   * actionIndex/actionName lookup — NOT the same as `spec` above, which bypasses the lookup
+   * entirely as an inline ad-hoc action. Action names are not unique on a character sheet or
+   * merged equipped-item list (see ActionResolverService), so if two rows share a name and
+   * the caller's selected one is removed/unequipped while its panel was open, a later
+   * same-named row can shift into `actionIndex` — the plain actionIndex+actionName guard
+   * cannot tell the two apart because the name still matches. Passing the exact spec the
+   * caller already fetched for that row lets the server verify CONTENT, not just name, and
+   * reject a mismatch instead of silently resolving whatever now sits at that index/name.
+   */
+  expectedSpec: ActionSpec.optional(),
   targetIds: z.array(z.number().int()).max(50).default([]),
   commit: z.boolean().default(false),
+  rollMode: z.enum(['normal', 'advantage', 'disadvantage', 'crit']).optional(),
 });
 export type ActionResolveRequest = z.infer<typeof ActionResolveRequest>;
 
@@ -758,6 +773,12 @@ export const UsableAction = z.object({
   // the caller must fall back to the inline statblock rather than invent numbers.
   resolvable: z.boolean(),
   spec: ActionSpec.nullable().default(null),
+  /**
+   * Issue #1901: for a character's equipped-item action, "equipped: <item name>" — empty for
+   * a hand-authored sheet action or a monster/NPC statblock action. Lets the UI tag which
+   * combat action came from gear vs. the sheet without a second lookup.
+   */
+  source: z.string().max(40).default(''),
 });
 export type UsableAction = z.infer<typeof UsableAction>;
 

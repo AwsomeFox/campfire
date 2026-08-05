@@ -95,12 +95,12 @@ async function mockTable(
   store: TranscriptStore,
   opts: { sseGate?: () => boolean } = {},
 ): Promise<void> {
-  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+  await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();
 
-    if (path.endsWith('/ai-dm/stream')) {
+    if ((path.endsWith('/ai-dm/stream') || path.endsWith('/events'))) {
       if (opts.sseGate && !opts.sseGate()) {
         // Held "offline": fail the connect so the hook keeps retrying with backoff.
         return route.abort('connectionrefused');

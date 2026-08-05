@@ -623,6 +623,7 @@ CREATE TABLE IF NOT EXISTS scheduled_sessions (
   title TEXT NOT NULL DEFAULT '',
   location TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
+  prep_notes TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'scheduled',
   cancelled_at TEXT,
   cancelled_by TEXT,
@@ -1326,6 +1327,8 @@ CREATE TABLE IF NOT EXISTS encounters (
   hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
   aftermath_dismissed_at TEXT,
+  aftermath_xp_awarded_at TEXT,
+  aftermath_loot TEXT,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

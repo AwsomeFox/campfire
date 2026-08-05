@@ -41,8 +41,8 @@ export class CampaignScheduleController {
   @ApiOperation({ summary: 'List scheduled (planned) sessions', description: 'Requires campaign membership. Ordered soonest-first; each item includes member RSVPs.' })
   @ApiResponse({ status: 200, description: 'Scheduled sessions with RSVPs.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps[]> {
-    await this.access.requireMember(user, campaignId);
-    return this.scheduling.listForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.scheduling.listForCampaign(campaignId, role);
   }
 
   @Get('upcoming')
@@ -56,8 +56,8 @@ export class CampaignScheduleController {
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
   ): Promise<ScheduledSessionWithRsvps[]> {
-    await this.access.requireMember(user, campaignId);
-    return this.scheduling.listUpcomingForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.scheduling.listUpcomingForCampaign(campaignId, role);
   }
 
   @Get('past')
@@ -75,9 +75,10 @@ export class CampaignScheduleController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ): Promise<ScheduledSessionListPage> {
-    await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId);
     return this.scheduling.listPastForCampaign(
       campaignId,
+      role,
       parsePageParams({ limit, offset }, SCHEDULE_PAST_MAX_LIMIT),
     );
   }
@@ -90,8 +91,8 @@ export class CampaignScheduleController {
   })
   @ApiResponse({ status: 200, description: 'Current or next scheduled session, or null.' })
   async next(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps | null> {
-    await this.access.requireMember(user, campaignId);
-    return this.scheduling.nextForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.scheduling.nextForCampaign(campaignId, role);
   }
 
   @Post()
@@ -124,8 +125,8 @@ export class ScheduleController {
     @CurrentUser() user: RequestUser,
   ): Promise<ScheduledSessionWithRsvps> {
     const row = await this.scheduling.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.scheduling.getWithRsvps(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.scheduling.getWithRsvps(id, role);
   }
 
   @Patch(':id')

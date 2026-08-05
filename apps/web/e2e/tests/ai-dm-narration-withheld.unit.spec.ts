@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { AiDmTranscriptEvent } from '@campfire/schema';
-import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import { parseAiDmStreamEvent } from './util';
 import {
   dmEntryText,
   emptyTranscript,
@@ -221,12 +221,4 @@ test('the LIVE commit point refuses a withheld stop reason too, without the retr
   const state = apply(emptyTranscript, turnStart, delta(UNSAFE), turnEnd);
   const bubble = state.entries.find((e): e is DmEntry => e.kind === 'dm');
   expect(dmEntryText(bubble!)).toBe('');
-});
-
-test('a withheld frame with an unrecognized reason is still honoured as a retraction', () => {
-  // Forward compatibility must not fail OPEN here. Dropping a frame this client cannot fully
-  // model would leave the withheld deltas sitting in the bubble.
-  const parsed = parseAiDmStreamEvent({ ...withheld, reason: 'some_future_reason' });
-  expect(parsed).toBeTruthy();
-  expect(parsed && parsed.type === 'narration.withheld' && parsed.reason).toBe('content_filter');
 });

@@ -43,7 +43,7 @@ function makeSafety(orm: DrizzleDb): TableSafetyService {
  * rather than inserting it mid-list left every existing positional construction valid.
  */
 function makeDriver(orm: DrizzleDb, safety: TableSafetyService): AiDriverService {
-  const aiDm = { registerDriverSessionTeardown: jest.fn() };
+  const aiDm = { registerDriverSessionTeardown: jest.fn(), isExperimentalEnabled: jest.fn(() => Promise.resolve(true)) };
   const audit = { log: jest.fn(async () => undefined) };
   const stream = { emit: jest.fn() };
   const notifications = {

@@ -78,7 +78,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import {
   beginReconcile,
@@ -199,7 +199,7 @@ import {
   snapMapPercentToHex,
   tokenFootprintDiameterPx,
 } from './hexGeometry';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { scrollBehavior, prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
@@ -1136,12 +1136,23 @@ export default function RunSessionPage() {
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
-  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
   const pingSeq = useRef(0);
-  const addPing = useCallback((ping: MapPing) => {
+  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++pingSeq.current;
-    setPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
-    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 2600);
+    if (ping.senderName) {
+      announce(`${ping.senderName} pinged the map`);
+    } else {
+      announce('A map ping arrived');
+    }
+    setPings((prev) => {
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      return next.slice(-10);
+    });
+    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
+  }, [announce]);
+  const dismissPing = useCallback((key: number) => {
+    setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
@@ -1308,7 +1319,7 @@ export default function RunSessionPage() {
     // Preserve the click's user activation by handing `clipboard.write` a Promise
     // that resolves to the link text once the server mints it (Safari/WebKit).
     const textPromise = mintCastLink().then((url) => new Blob([url], { type: 'text/plain' }));
-    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as any).ClipboardItem) as typeof ClipboardItem | undefined;
+    const ClipboardItemCtor = (typeof window !== 'undefined' && (window as unknown as { ClipboardItem: typeof ClipboardItem }).ClipboardItem) as typeof ClipboardItem | undefined;
     const writePromise =
       ClipboardItemCtor && navigator.clipboard?.write
         ? navigator.clipboard.write([new ClipboardItemCtor({ 'text/plain': textPromise })])
@@ -1630,6 +1641,15 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
+          // Issue #1901 review (devin-ai-integration): an inventory equip/unequip also
+          // emits character.updated (the combat-action list changed, not just the sheet
+          // fields campaignCharacters covers) — but a character change can only ever affect
+          // the DERIVED action reads (the per-combatant actions query, the turn workspace's
+          // suggestedActions), never the encounter root, its difficulty derivation, or its
+          // combat log. The broader invalidateEncounter() used here originally busted all of
+          // those on every sheet edit — a refetch storm during busy play (party rest
+          // follow-ups, several players editing sheets at once) on the app's heaviest screen.
+          invalidateEncounterActions(queryClient, eid);
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
@@ -1650,6 +1670,22 @@ export default function RunSessionPage() {
           return;
         }
         invalidateEncounter(queryClient, eid);
+        // Issue #1902 rework (round 12, devin; narrowed round 19, codex P2): several
+        // in-combat writes mirror HP/conditions or a spell-slot/resource spend onto the
+        // linked character SHEET (action-resolver's apply path, `adjustCombatantResource`)
+        // while emitting only `encounter.updated` — no `character.updated` frame, so
+        // `shouldInvalidateInlineCharacters` above never fires for them. With
+        // `campaignCharacters` left stale, `ResourceTrackerPanel`'s cached `char.updatedAt`
+        // (the `expectedUpdatedAt` CAS token it sends on a spell-slot spend) goes stale
+        // too — a player just healed or damaged mid-combat could get a spurious 409 on
+        // their VERY NEXT, otherwise-valid slot spend, for up to the 10s poll interval.
+        // Round 12 invalidated on EVERY `encounter.updated` frame to close this, but most
+        // frames (an ordinary roll, a token move) mirror no sheet at all — refetching the
+        // whole campaign character list on each one is wasted work during a busy fight.
+        // The server now tags exactly the frames that mirrored a sheet with
+        // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
+        // needed.
+        if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
       [eid, cid, navigate, queryClient, addPing],
     ),
@@ -2586,7 +2622,7 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null });
+  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null } as unknown as MapPing);
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
@@ -2972,15 +3008,17 @@ export default function RunSessionPage() {
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
-                    disabled={headerBusy || riskyBlocked || hasNoCombatants}
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
                     onClick={startEncounter}
-                    aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
+                    aria-describedby={hasNoCombatants || needsInitiativeCount > 0 ? 'start-roster-hint' : undefined}
                   >
                     Start
                   </Btn>
-                  {hasNoCombatants && (
-                    <p id="start-empty-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
-                      Add at least one combatant before starting
+                  {(hasNoCombatants || needsInitiativeCount > 0) && (
+                    <p id="start-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
+                      {hasNoCombatants
+                        ? 'Add at least one combatant before starting'
+                        : 'Roll initiative for all combatants before starting'}
                     </p>
                   )}
                 </div>
@@ -3390,6 +3428,7 @@ export default function RunSessionPage() {
           onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
           pings={pings}
+          onDismissPing={dismissPing}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
@@ -3694,12 +3733,12 @@ export default function RunSessionPage() {
                     c.characterId != null &&
                     canEditCombatant(c) &&
                     (canDmWrite || (encounter.status === 'running' && c.id === currentCombatantId))
-                      ? (actionIndex) => {
-                          const ch = charactersById.get(c.characterId!);
-                          const act = ch?.actions[actionIndex];
-                          if (!act?.spec) return;
-                          onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
-                        }
+                      ? // Issue #1901: CharacterStatCard now hands back the SERVER's merged
+                        // action index (sheet actions + equipped-item actions) plus its
+                        // name/spec directly — no more re-deriving them from
+                        // `ch.actions[actionIndex]`, which silently missed anything past
+                        // the raw sheet's length.
+                        (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
                   onUseMonsterAction={
@@ -3778,7 +3817,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
@@ -4047,6 +4086,7 @@ export function BattleMap({
   onDismissGuidance,
   onPing,
   pings,
+  onDismissPing,
   onError,
   onAoeHitLayoutChange,
   projection = 'session',
@@ -4083,7 +4123,8 @@ export function BattleMap({
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
   onPing: (x: number, y: number) => void;
-  pings: ReadonlyArray<{ key: number; x: number; y: number }>;
+  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>;
+  onDismissPing: (key: number) => void;
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
@@ -6418,26 +6459,67 @@ export function BattleMap({
                 )}
 
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
-                {pings.map((p) => (
-                  <div
-                    key={p.key}
-                    className="absolute -translate-x-1/2 -translate-y-1/2"
-                    style={{
-                      left: `${p.x}%`,
-                      top: `${p.y}%`,
-                      width: 20,
-                      height: 20,
-                      borderRadius: '50%',
-                      border: '3px solid var(--color-accent)',
-                      zIndex: 10,
-                      animation: 'cfPing 2.4s ease-out forwards',
-                    }}
-                  />
+                {pings.map((p) => {
+                  const isReduced = prefersReducedMotion();
+                  const color = p.color || 'var(--color-accent)';
+                  return (
+                    <div
+                      key={p.key}
+                      className="absolute z-10 flex flex-col items-center justify-center pointer-events-none"
+                      style={{
+                        left: `${p.x}%`,
+                        top: `${p.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                      }}
+                    >
+                      <div className="relative flex items-center justify-center" style={{ width: 24, height: 24 }}>
+                        {!isReduced && (
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              borderRadius: '50%',
+                              border: `3px solid ${color}`,
+                              animation: 'cfPing 2.4s ease-out forwards',
+                            }}
+                          />
+                        )}
+                        <div
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: '50%',
+                            backgroundColor: color,
+                            boxShadow: '0 0 4px rgba(0,0,0,0.5)',
+                            border: '1px solid white', // high contrast
+                          }}
+                        />
+                      </div>
+                      {p.senderName && (
+                        <div className="mt-1 px-1 rounded text-xs whitespace-nowrap bg-surface-raised font-semibold shadow-sm" style={{ color: 'var(--color-text)', border: `1px solid ${color}` }}>
+                          {p.senderName}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Ping Log */}
+            {pings.length > 0 && (
+              <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
+                {pings.slice().reverse().map((p) => (
+                  <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
+                    <span className="truncate mr-2 font-medium">{p.senderName || 'Someone'} pinged</span>
+                    <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
+                      <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
             </div>
-            <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
+            <style>{'@keyframes cfPing{0%{transform:scale(.4);opacity:.9}70%{opacity:.55}100%{transform:scale(3);opacity:0}}'}</style>
           </div>
 
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
@@ -6933,8 +7015,12 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
-  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
-  onUseAction?: (actionIndex: number) => void;
+  /**
+   * Issue #414 / #425 / #1901: open the structured action Use flow. Carries the action's
+   * name/spec alongside the (server-merged, for a character) index — same shape as
+   * `onUseMonsterAction` below.
+   */
+  onUseAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
@@ -7170,23 +7256,39 @@ function CombatantRow({
         </div>
       ) : (
         <div className="flex items-center" style={{ gap: 2 }}>
-          <span
-            title={combatant.initiativeBreakdown?.formula}
-            style={{
-              width: 30,
-              height: 30,
-              flex: 'none',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--color-divider)',
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 13,
-              fontFamily: 'var(--font-heading)',
-              color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
-            }}
-          >
-            {combatant.initiative ?? '–'}
-          </span>
+          {combatant.initiative === null && canEditPermission && onSetInitiative ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
+              disabled={busy || syncBlocked}
+              title={combatant.initiativeBreakdown?.formula || "Roll initiative"}
+              onClick={() => {
+                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initMod ?? 0);
+                onSetInitiative(roll);
+              }}
+            >
+              Roll Init
+            </button>
+          ) : (
+            <span
+              title={combatant.initiativeBreakdown?.formula}
+              style={{
+                width: 30,
+                height: 30,
+                flex: 'none',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-divider)',
+                display: 'grid',
+                placeItems: 'center',
+                fontSize: 13,
+                fontFamily: 'var(--font-heading)',
+                color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+              }}
+            >
+              {combatant.initiative ?? '–'}
+            </span>
+          )}
           {adapter.initiativeModel?.mode === 'group' && (
             <select
               className="input cf-target-44"
@@ -7918,6 +8020,11 @@ function CombatantRow({
             openOnActiveTurn={openCardOnActiveTurn}
             /* Click-to-roll only from an active owned card, or any card for the DM. */
             campaignId={campaignId}
+            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+               actions) — mounting this card already implies DM-or-owner (see the `character`
+               prop gate above), matching listUsableActions' own authorization. */
+            encounterId={encounterId}
+            combatantId={combatant.id}
             onError={onRollError}
             onApplyDamage={onApplyDamage}
             onUseAction={onUseAction}

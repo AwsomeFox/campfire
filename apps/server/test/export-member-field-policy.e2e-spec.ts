@@ -256,4 +256,102 @@ describe('member export field policy (e2e, issue #1680)', () => {
     expect(res.body.npcs).toBeUndefined();
     expect(res.body.locations).toBeUndefined();
   });
+  it('validates the manifest format and preview endpoint', async () => {
+    const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me/preview`);
+    expect(res.status).toBe(200);
+    expect(res.body.manifest).toBeDefined();
+    expect(res.body.manifest.version).toBe(1);
+    expect(String(res.body.manifest.userId)).toBe(playerId);
+    expect(res.body.manifest.included).toContain('characters');
+    expect(res.body.manifest.included).toContain('auditActions');
+    expect(res.body.manifest.excluded).toContain('campaignWorldData');
+    expect(res.body.manifest.counts.characters).toBeGreaterThanOrEqual(0);
+    
+    // Preview should not include the actual data
+    expect(res.body.characters).toBeUndefined();
+  });
+
+  it('includes redacted parent context for comment threads', async () => {
+    // 1. Other player creates a visible quest and a comment on it
+    const visibleQuest = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Context Quest', hidden: false });
+    
+    const otherComment = await otherPlayerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: visibleQuest.body.id, body: 'Parent comment by someone else' });
+      
+    // 2. Player replies to the other player's comment
+    const myReply = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: visibleQuest.body.id, parentId: otherComment.body.id, body: 'My reply' });
+
+    // 3. Check the export
+    const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res.status).toBe(200);
+    
+    const comments = res.body.comments;
+    expect(comments.some((c: any) => c.id === myReply.body.id)).toBe(true);
+    
+    const context = res.body.commentParentContext;
+    expect(context).toBeDefined();
+    const parentContext = context.find((c: any) => c.id === otherComment.body.id);
+    expect(parentContext).toBeDefined();
+    expect(parentContext.body).toBe('Parent comment by someone else');
+    expect(parentContext.authorName).toBe('[Redacted Member]'); // Privacy check!
+  });
+
+  it('includes user-attributable data (rolls, rsvps, revisions, audit)', async () => {
+    // 1. Create a roll
+    const roll = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .send({ expr: '1d20' });
+    expect(roll.status).toBe(201);
+      
+    // 2. Create an RSVP
+    const session = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ title: 'Export RSVP Test', scheduledAt: '2099-06-10T18:00:00Z' })
+      .expect(201);
+    await playerAgent
+      .put(`/api/v1/schedule/${session.body.id}/rsvp`)
+      .send({ status: 'yes', note: 'I can make it' })
+      .expect(200);
+      
+    // 3. Create a revision by editing a note authored by player
+    const note = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Initial note', visibility: 'private' })
+      .expect(201);
+    await playerAgent
+      .patch(`/api/v1/notes/${note.body.id}`)
+      .send({ body: 'Edited note' })
+      .expect(200);
+      
+    // 4. Export and check
+    const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res.status).toBe(200);
+    
+    const { diceRolls, rsvps, revisions, auditActions } = res.body;
+    expect(diceRolls).toBeDefined();
+    expect(diceRolls.some((r: any) => r.id === roll.body.id)).toBe(true);
+    
+    expect(rsvps).toBeDefined();
+    expect(rsvps.some((r: any) => r.note === 'I can make it' && r.scheduledSessionId === session.body.id)).toBe(true);
+    
+    expect(revisions).toBeDefined();
+    expect(revisions.some((r: any) => r.entityType === 'note' && r.entityId === note.body.id)).toBe(true);
+    
+    expect(auditActions).toBeDefined();
+    // Audit actions are recorded by the system for the note creation/edit
+    expect(auditActions.some((a: any) => a.action === 'note.create' && a.entityId === note.body.id)).toBe(true);
+    
+    // Ensure no other member's data is present
+    const otherRoll = await otherPlayerAgent
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .send({ expr: '2d20' });
+    expect(otherRoll.status).toBe(201);
+    const res2 = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res2.body.diceRolls.some((r: any) => r.id === otherRoll.body.id)).toBe(false);
+  });
 });

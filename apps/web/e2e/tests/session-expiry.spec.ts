@@ -124,17 +124,16 @@ test.describe('issue #885 - session expiry reauth', () => {
     await expect(page).toHaveURL(new RegExp(`${deepLink.replace(/\//g, '\\/')}$`));
   });
 
-  test('AI-DM stream 401 (not seat 403) triggers session-expired reauth', async ({ page }) => {
+  test('Campaign events stream 401 (not seat 403) triggers session-expired reauth', async ({ page }) => {
     const { campaignId } = seed();
 
     await mockAuthStatus(page);
-    // Force Driver mode so Layout opens useAiDmStream, then 401 the connect.
-    await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      if (path.endsWith('/ai-dm/stream')) {
-        return fulfillJson(route, 401, { message: 'Unauthorized' });
-      }
-      if (path.endsWith('/ai-dm') && route.request().method() === 'GET') {
+    // Wait for Driver mode so Layout opens useCampaignEvents, then 401 the connect.
+    await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      return fulfillJson(route, 401, { message: 'Unauthorized' });
+    });
+    await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm`, async (route) => {
+      if (route.request().method() === 'GET') {
         return fulfillJson(route, 200, {
           campaignId,
           mode: 'driver',

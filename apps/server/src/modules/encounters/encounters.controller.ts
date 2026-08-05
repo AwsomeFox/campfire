@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -394,6 +394,91 @@ export class EncountersController {
     return this.encounters.dismissAftermath(id, user, role);
   }
 
+  @Post(':id/aftermath/apply-xp')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Apply XP or milestone award from encounter aftermath (issue #1448)',
+    description: 'DM only. Idempotent award of encounter XP or milestone progress to party characters.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated aftermath read model with XP award status.' })
+  async applyAftermathXp(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterAftermathApplyXpInputDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.applyAftermathXp(id, body, user, role);
+  }
+
+  @Post(':id/aftermath/transfer-loot')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Transfer loot item or currency from encounter aftermath (issue #1448)',
+    description: 'DM only. Transfer aftermath loot directly to character inventory or party treasury.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated aftermath read model with claimed loot.' })
+  async transferAftermathLoot(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterAftermathLootTransferInputDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.transferAftermathLoot(id, body, user, role);
+  }
+
+  @Post(':id/aftermath/update-quest')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Update quest objectives or status from encounter aftermath (issue #1448)',
+    description: 'DM only. Update linked or specified quest status and objective completion.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated aftermath read model.' })
+  async updateAftermathQuest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterAftermathQuestUpdateInputDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.updateAftermathQuest(id, body, user, role);
+  }
+
+  @Post(':id/aftermath/update-beat')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Update or create a storyline beat from encounter aftermath (issue #1448)',
+    description: 'DM only. Update existing storyline beat or create a beat linked to encounter.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated aftermath read model.' })
+  async updateAftermathBeat(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterAftermathBeatUpdateInputDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.updateAftermathBeat(id, body, user, role);
+  }
+
+  @Post(':id/aftermath/add-timeline-event')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Add a timeline event from encounter aftermath (issue #1448)',
+    description: 'DM only. Create a campaign timeline event from aftermath details.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated aftermath read model.' })
+  async addAftermathTimelineEvent(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterAftermathTimelineEventInputDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.addAftermathTimelineEvent(id, body, user, role);
+  }
+
   @Patch(':id')
   @ApiOperation({
     summary: 'Update an encounter',
@@ -436,7 +521,7 @@ export class EncountersController {
     // enforced inside pingMap itself, AFTER the hidden check, so hidden stays 404 for
     // everyone non-DM while a merely-visible encounter now correctly 403s a viewer.
     const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
-    this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
+    this.encounters.pingMap(id, row.campaignId, { ...body, senderId: user.id, senderName: user.name }, role, row.hidden);
     return { ok: true };
   }
 
@@ -838,4 +923,18 @@ export class EncountersController {
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.undo(id, body, user, role);
   }
+
+  @Post(':id/quick-roll')
+  @ApiOperation({
+    summary: 'Quick-roll an action to-hit or damage in an encounter (issue #1850)',
+    description:
+      'Rolls to-hit (d20+mod) or damage dice for a combatant action in one tap. Persists the roll to BOTH campaign dice_rolls feed AND encounter_events feed with character identity, roll kind, formula breakdown, nat20/nat1 status, and damage type icon.',
+  })
+  @ApiResponse({ status: 201, description: 'The rolled dice result and recorded encounter event.' })
+  async quickRoll(@Param('id', ParseIntPipe) id: number, @Body() body: QuickRollRequestDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.quickRoll(id, body, user, role);
+  }
 }
+

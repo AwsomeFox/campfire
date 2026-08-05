@@ -48,8 +48,8 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     // an absent hook would silently stop capturing abuse evidence.
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
-    const campaignLibrary = new CampaignLibraryService(orm, audit);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
+    const campaignLibrary = new CampaignLibraryService(orm, audit, events);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
     const access = new CampaignAccessService(orm, new RoleResolver(orm));
     const charactersService = new CharactersService(orm, audit, revisions, events, rolls, access);
     return { orm, encountersService, charactersService, audit };

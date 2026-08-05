@@ -50,7 +50,7 @@ interface Harness {
  * true write path runs. A bare `undefined` would throw the moment a lever recorded.
  */
 function makeService(orm: DrizzleDb): Harness {
-  const aiDm = { registerDriverSessionTeardown: jest.fn() };
+  const aiDm = { registerDriverSessionTeardown: jest.fn(), isExperimentalEnabled: jest.fn(() => Promise.resolve(true)) };
   const audit = { log: jest.fn(async () => undefined) };
   const stream = { emit: jest.fn() };
   const notifications = {

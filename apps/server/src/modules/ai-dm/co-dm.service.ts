@@ -21,10 +21,11 @@ import {
   buildNarrationLanguageContract,
   resolveNarrationLanguage,
   StoryBeatProposalCreate,
+  ruleSystemAdapter,
 } from '@campfire/schema';
-import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role } from '@campfire/schema';
+import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, storyArcs } from '../../db/schema';
+import { campaigns, storyArcs, rulePacks } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -136,11 +137,33 @@ export class CoDmService {
     // CoDmService always used the injected AI_DM_PROVIDER (NoopAiDmProvider by default),
     // so a configured provider's drafts were served by the no-op scaffold — which fails
     // JSON parsing (422). When no provider is configured, fall back to the legacy seam.
+    const [campaign] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    
+    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+
+    let packVersion: string | null = null;
+    if (campaign?.ruleSystem) {
+      const [packRow] = await this.db
+        .select({ version: rulePacks.version })
+        .from(rulePacks)
+        .where(eq(rulePacks.slug, campaign.ruleSystem))
+        .limit(1);
+      if (packRow) {
+        packVersion = packRow.version;
+      }
+    }
+
     const instructions = this.buildInstructions(
       seat.instructions,
       input.target,
       count,
       await this.resolveLanguageContract(campaignId, input.narrationLanguage),
+      adapter,
+      campaign?.ruleSystem,
     );
     // `endpointScope` here is the scope that OWNS the resolved endpoint, not merely
     // whether a campaign override row exists — a keyless override executes against the
@@ -261,7 +284,7 @@ export class CoDmService {
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
-    const payloads = this.toPayloads(input.target, narration, count, { arcId: input.arcId });
+    const payloads = this.toPayloads(input.target, narration, count, { arcId: input.arcId, adapter });
 
     // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
     // The label reflects the model that actually served the draft when a provider is
@@ -280,6 +303,7 @@ export class CoDmService {
       model: modelLabel,
       endpointScope,
       endpointBaseUrl,
+      ruleset: { id: adapter.id, pack: campaign?.ruleSystem || null, version: packVersion },
     });
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
@@ -331,6 +355,7 @@ export class CoDmService {
     model: string;
     endpointScope: AiGenerationProvenance['endpoint']['scope'];
     endpointBaseUrl?: string | null;
+    ruleset: { id: string; pack: string | null; version: string | null };
   }): AiGenerationProvenance {
     const promptHash = crypto
       .createHash('sha256')
@@ -351,6 +376,7 @@ export class CoDmService {
       sourceHash: crypto.createHash('sha256').update(input.prompt).digest('hex'),
       promptVersion: CO_DM_PROMPT_VERSION,
       promptHash,
+      ruleset: input.ruleset,
       retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
       createdAt: nowIso(),
     };
@@ -362,16 +388,24 @@ export class CoDmService {
     target: CoDmDraftTarget,
     count: number,
     languageContract: string,
+    adapter: RuleSystemAdapter,
+    ruleSystem?: string,
   ): string {
     const base = persona ? `${persona}\n\n` : '';
-    const shape = DRAFT_JSON_SHAPE[target];
+    const shape = DRAFT_JSON_SHAPE(adapter)[target];
     const arrayNote =
       MULTI_TARGETS.has(target) && count > 1
         ? `Return a JSON ARRAY of exactly ${count} such objects.`
         : 'Return a single JSON object.';
+    let systemPrompt = `You are drafting tabletop RPG content for ${adapter.label}.`;
+    if (!ruleSystem || ruleSystem === 'neutral') {
+      systemPrompt = `You are drafting tabletop RPG content. Ask for assumptions before applying mechanics.`;
+    } else if (adapter.id === 'dnd5e') {
+      systemPrompt = `You are drafting D&D content for the DM to review.`;
+    }
     return (
       `${base}${languageContract}\n\n` +
-      `You are drafting D&D content for the DM to review. Reply with ONLY JSON — no prose, ` +
+      `${systemPrompt} Reply with ONLY JSON — no prose, ` +
       `no markdown fences. ${arrayNote} Each object matches: ${shape}`
     );
   }
@@ -401,7 +435,7 @@ export class CoDmService {
     target: CoDmDraftTarget,
     narration: string,
     count: number,
-    opts?: { arcId?: number },
+    opts?: { arcId?: number; adapter?: RuleSystemAdapter },
   ): Record<string, unknown>[] {
     const parsed = extractJson(narration);
 
@@ -438,7 +472,7 @@ export class CoDmService {
   private validate(
     target: CoDmDraftTarget,
     raw: Record<string, unknown>,
-    opts?: { arcId?: number },
+    opts?: { arcId?: number; adapter?: RuleSystemAdapter },
   ): Record<string, unknown> {
     try {
       switch (target) {
@@ -471,13 +505,18 @@ export class CoDmService {
           }) as Record<string, unknown>;
         case 'recap':
           return SessionCreate.parse(raw) as Record<string, unknown>;
-        case 'encounter':
+        case 'encounter': {
           // Seed pinned so approve re-runs the identical generator (#304). Default a band.
+          let validDifficulty = 'medium';
+          if (typeof raw.difficulty === 'string' && ['trivial', 'easy', 'medium', 'hard', 'deadly'].includes(raw.difficulty)) {
+            validDifficulty = raw.difficulty;
+          }
           return EncounterGenerate.parse({
-            difficulty: 'medium',
             ...raw,
+            difficulty: validDifficulty,
             seed: typeof raw.seed === 'number' ? raw.seed : mintNumericSeed(),
           }) as Record<string, unknown>;
+        }
         case 'map': {
           // Seed pinned so approve re-runs the identical generator (#306). The model may
           // hand back a FREE-FORM theme ("volcanic", "sylvan") that isn't in the procedural
@@ -501,7 +540,7 @@ export class CoDmService {
 }
 
 /** Per-target JSON hint the model is asked to fill (informational; the server re-validates). */
-const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
+const DRAFT_JSON_SHAPE = (adapter: RuleSystemAdapter): Record<CoDmDraftTarget, string> => ({
   npc: '{"name": string (required), "role"?: string, "disposition"?: string, "body"?: string, "dmSecret"?: string}',
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
@@ -511,10 +550,11 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   faction:
     '{"name": string (required), "body"?: string (markdown), "kind"?: string, "goals"?: string, "standing"?: "hostile"|"unfriendly"|"neutral"|"friendly"|"allied", "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
-  encounter:
-    '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
+  encounter: adapter.supportsEncounterDifficulty
+    ? '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}'
+    : '{"difficulty"?: string (use native difficulty terms), "count"?: number, "shape"?: string}',
   map: '{"kind"?: "dungeon"|"cave"|"wilderness", "size"?: "small"|"medium"|"large", "theme"?: string}',
-};
+});
 
 /** A fresh uint32 seed for the encounter generator. */
 function mintNumericSeed(): number {

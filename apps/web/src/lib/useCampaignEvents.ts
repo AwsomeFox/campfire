@@ -111,6 +111,19 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'safety.hold') {
     return typeof v.active === 'boolean';
   }
+  if (v.type === 'player-display-scene') {
+    return typeof v.scene === 'string';
+  }
+  // AI-DM stream events (Issue #880)
+  const AI_DM_TYPES = new Set([
+    'turn.start', 'narration.delta', 'narration.message', 'narration.withheld',
+    'turn.cancelled', 'turn.error', 'turn.end', 'stuck', 'recovered', 'state',
+    'phase', 'vote', 'takeover', 'secret-approval', 'tool-confirmation',
+    'transcript', 'session.reset', 'transcript.reset', 'grounding', 'tool'
+  ]);
+  if (AI_DM_TYPES.has(v.type as string)) {
+    return true;
+  }
   return false;
 }
 

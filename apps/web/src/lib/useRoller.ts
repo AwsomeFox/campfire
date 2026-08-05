@@ -19,7 +19,7 @@ import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibilit
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
 /** Roll modes a catalog check can be rolled with (advantage/disadvantage only where supported). */
-export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+export type CheckRollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
@@ -73,7 +73,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   );
 
   const rollCheck = useCallback(
-    async (characterId: number, checkId: string, mode: CheckRollMode = 'flat', dc?: number): Promise<CheckRollResponse | null> => {
+    async (characterId: number, checkId: string, mode: CheckRollMode = 'normal', dc?: number): Promise<CheckRollResponse | null> => {
       setRolling(true);
       onError(null);
       beginRollAnimation(mode === 'advantage' || mode === 'disadvantage' ? '2d20kh1' : '1d20');

@@ -1554,6 +1554,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_note',
   // session recap
   'add_session_recap',
+  // aftermath mutations (#1448)
+  'apply_encounter_aftermath_xp',
+  'transfer_encounter_aftermath_loot',
+  'update_encounter_aftermath_quest',
+  'update_encounter_aftermath_beat',
+  'add_encounter_aftermath_timeline_event',
 ]);
 
 /**
@@ -1646,6 +1652,11 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'whisper_to_player',
   'add_note',
   'add_session_recap',
+  'apply_encounter_aftermath_xp',
+  'transfer_encounter_aftermath_loot',
+  'update_encounter_aftermath_quest',
+  'update_encounter_aftermath_beat',
+  'add_encounter_aftermath_timeline_event',
 ]);
 
 export {
@@ -1784,7 +1795,25 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
   },
   'update_inventory_item': {
     allowed: new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']),
-    forbidden: new Set(['qty', 'ownerType', 'characterId', 'expectedUpdatedAt', 'equipped', 'equipSlot', 'equippedAction']),
+    // Issue #1901 rework: `displaceEquipped` (and its CAS guard pair
+    // `expectedConflictingItemId`, added alongside it in review) only do anything together
+    // with `equipped`/`equipSlot`, which are already forbidden here (#1326) — the driver does
+    // not touch equip state at all, full stop, so a request to atomically displace another
+    // item is exactly as out of bounds as the equip it would ride along with. Forbidding it
+    // (not silently allowing) keeps a new schema field from becoming an un-vetted driver
+    // capability by default; a human player/DM still gets it via the same REST endpoint,
+    // this table only gates the AI driver's live-play tool calls.
+    forbidden: new Set([
+      'qty',
+      'ownerType',
+      'characterId',
+      'expectedUpdatedAt',
+      'equipped',
+      'equipSlot',
+      'equippedAction',
+      'displaceEquipped',
+      'expectedConflictingItemId',
+    ]),
   },
 };
 

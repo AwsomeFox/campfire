@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
@@ -344,7 +344,7 @@ export class CampaignsService {
     private readonly characters: CharactersService,
     private readonly sessions: SessionsService,
     private readonly scheduling: SchedulingService,
-    private readonly encounters: EncountersService,
+    @Inject(forwardRef(() => EncountersService)) private readonly encounters: EncountersService,
     private readonly inventory: InventoryService,
     private readonly timeline: TimelineService,
     private readonly comments: CommentsService,
@@ -3826,7 +3826,7 @@ export class CampaignsService {
         this.inventory.countForCampaign(id),
         this.comments.countForCampaign(id, role),
         // Issue #818: keep the in-progress game night separate from the later upcoming one.
-        this.scheduling.currentAndNextForCampaign(id),
+        this.scheduling.currentAndNextForCampaign(id, role),
       ]);
 
     const currentLocation = campaign.currentLocationId

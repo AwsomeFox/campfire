@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, Param, ParseIntPipe, Post, Query, Req, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, ParseIntPipe, Post, Query, Req, Res } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -22,6 +22,7 @@ import {
 } from '../../common/throttle.constants';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { CastService } from './cast.service';
 import { CastSessionCreateDto, CastSessionExitDto } from './cast.dto';
 
@@ -57,6 +58,7 @@ export class CampaignCastSessionsController {
   constructor(
     private readonly cast: CastService,
     private readonly access: CampaignAccessService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   @Get()
@@ -106,6 +108,19 @@ export class CampaignCastSessionsController {
   ): Promise<CastSessionMutationResult> {
     const role = await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     return this.cast.revokeAll(campaignId, user, role);
+  }
+
+  @Post('scene')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Broadcast a new scene to all player displays', description: 'DM or co-DM role required.' })
+  @ApiResponse({ status: 200, description: 'Broadcasted.' })
+  async broadcastScene(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body('scene') scene: string,
+    @CurrentUser() user: RequestUser,
+  ): Promise<void> {
+    await this.access.requireRole(user, campaignId, 'dm');
+    this.events.emit({ type: 'player-display-scene', campaignId, scene });
   }
 }
 

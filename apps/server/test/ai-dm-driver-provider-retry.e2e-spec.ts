@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
-import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import type { CampaignEvent } from '@campfire/schema';
+import { AiDmStreamService } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { setRetrySleepForTests } from '../src/modules/ai-driver/ai-driver.service';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
 
@@ -25,9 +26,9 @@ async function withStream<T>(
   h: AiEvalHarness,
   campaignId: number,
   fn: () => Promise<T>,
-): Promise<{ result: T; events: AiDmStreamEvent[] }> {
+): Promise<{ result: T; events: CampaignEvent[] }> {
   const streamSvc = h.ctx.app.get(AiDmStreamService);
-  const events: AiDmStreamEvent[] = [];
+  const events: CampaignEvent[] = [];
   const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
   try {
     return { result: await fn(), events };
