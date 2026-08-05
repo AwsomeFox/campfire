@@ -293,10 +293,6 @@ export function CombatantRow({
       data-current-turn={isCurrentTurn ? 'true' : undefined}
       data-target-legal={targeting?.legal ? 'true' : undefined}
       data-target-selected={targeting?.selected ? 'true' : undefined}
-      role={targeting?.legal ? 'button' : undefined}
-      tabIndex={targeting?.legal ? 0 : undefined}
-      aria-label={targeting?.legal ? `Select ${combatant.name} as a target` : undefined}
-      aria-pressed={targeting?.legal ? targeting.selected : undefined}
       className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
@@ -316,13 +312,21 @@ export function CombatantRow({
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
       }}
-      onKeyDown={(event) => {
-        if (!targeting?.legal || event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
-        event.preventDefault();
-        targeting.onToggle();
-      }}
     >
       <FloatingNumbers events={hpFeedbackEvents} />
+      {targeting?.legal && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44"
+          data-testid={`combatant-target-toggle-${combatant.id}`}
+          aria-label={`${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
+          aria-pressed={targeting.selected}
+          onClick={targeting.onToggle}
+          style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
+        >
+          {targeting.selected ? 'Targeted' : 'Target'}
+        </button>
+      )}
       {/* Issue #1746: single accessible reason shared by every write control this row
           disables while the sync gate blocks, referenced via aria-describedby below. */}
       {syncBlocked && (

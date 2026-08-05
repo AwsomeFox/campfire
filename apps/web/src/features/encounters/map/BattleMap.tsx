@@ -252,7 +252,7 @@ export function BattleMap({
   };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
-    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
@@ -355,6 +355,7 @@ export function BattleMap({
   // released id long enough to identify that expected notification; any earlier capture loss is
   // an interruption and must roll the gesture back without persisting it.
   const successfulPointerUpRef = useRef<number | null>(null);
+  const targetGestureRef = useRef<{ tokenId: number; moved: boolean } | null>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
   const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
@@ -932,9 +933,11 @@ export function BattleMap({
     const point = pointerToPercent(e, true);
     if (!point) return;
     const captureTarget = e.currentTarget;
+    const targetable = targeting?.legalIds.includes(c.id) ?? false;
+    if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
-    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point };
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, moved: false, targetable };
     setDraggingId(c.id);
     setDragPos(point);
   }
@@ -1075,6 +1078,7 @@ export function BattleMap({
 
     if (gesture.kind === 'token') {
       gesture.point = pct;
+      if (Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
       setDragPos(pct);
     } else if (gesture.kind === 'token-select') {
       gesture.end = pct;
@@ -1156,6 +1160,8 @@ export function BattleMap({
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
 
     if (gesture.kind === 'token') {
+      if (gesture.targetable) targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };
+      if (gesture.targetable && !gesture.moved) return;
       const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
@@ -2339,7 +2345,7 @@ export function BattleMap({
                         if (!target || target.tokenX == null || target.tokenY == null) return null;
                         const targetX = target.tokenX;
                         const targetY = target.tokenY;
-                        return <line key={targetId} data-testid={`map-target-line-${targetId}`} x1={actorX} y1={actorY} x2={targetX} y2={targetY} stroke="var(--color-accent)" strokeWidth="0.45" opacity="0.6" strokeDasharray={targeting.declared ? '1.2 0.8' : undefined} vectorEffect="non-scaling-stroke" />;
+                        return <line key={targetId} data-testid={`map-target-line-${targetId}`} x1={actorX} y1={actorY} x2={targetX} y2={targetY} stroke="var(--color-accent)" strokeWidth={2} opacity="0.6" strokeDasharray={targeting.declared ? '1.2 0.8' : undefined} vectorEffect="non-scaling-stroke" />;
                       })}
                     </svg>
                   );
@@ -2424,6 +2430,15 @@ export function BattleMap({
                         onTokenPointerDown(e, c);
                       }}
                       onClick={(event) => {
+                        const targetGesture = targetGestureRef.current;
+                        if (targetGesture?.tokenId === c.id) {
+                          targetGestureRef.current = null;
+                          if (!targetGesture.moved && legalTarget) {
+                            event.stopPropagation();
+                            targeting?.onToggle(c.id);
+                          }
+                          return;
+                        }
                         if (targetClickable) event.stopPropagation();
                         // A drag ends with a click; only a stationary token tap may select.
                         if (targetClickable && !isDragging) targeting?.onToggle(c.id);

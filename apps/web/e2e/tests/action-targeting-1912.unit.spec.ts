@@ -31,8 +31,9 @@ test('legal target affordances support repeated pointer and keyboard selection',
   expect(mapSource).toContain('tabIndex={movable || targetClickable ? 0 : -1}');
   expect(mapSource).toContain("e.key === 'Enter' || e.key === ' '");
   expect(mapSource).toContain('if (movable) onTokenKeyDown(e, c);');
+  expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
+  expect(mapSource).toContain('strokeWidth={2}');
   expect(mapSource).not.toContain('event.detail === 1');
-  expect(rosterSource).toContain("role={targeting?.legal ? 'button' : undefined}");
-  expect(rosterSource).toContain('aria-pressed={targeting?.legal ? targeting.selected : undefined}');
-  expect(rosterSource).toContain('event.target !== event.currentTarget');
+  expect(rosterSource).toContain('data-testid={`combatant-target-toggle-${combatant.id}`}');
+  expect(rosterSource).toContain('aria-pressed={targeting.selected}');
 });
