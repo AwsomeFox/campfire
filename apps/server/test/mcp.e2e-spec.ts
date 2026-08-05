@@ -1995,6 +1995,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(listAfter.body.some((c: { id: number }) => c.id === newCampaignId)).toBe(false);
   });
 
+  // Issue #1910: upsert_character derives its input shape from CharacterUpdate/CharacterCreate,
+  // so speed rides that existing spread with no new tool — this proves it actually round-trips
+  // (create -> update -> clear back to null) rather than only typechecking.
+  it('upsert_character round-trips speed and clears it back to null (issue #1910)', async () => {
+    const client = await mcpClient(dmToken);
+    const created = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Sprinter', hpMax: 10, speed: 35 },
+      }),
+    ) as { id: number; speed: number | null };
+    expect(created.speed).toBe(35);
+
+    const updated = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, characterId: created.id, speed: 40 },
+      }),
+    ) as { speed: number | null };
+    expect(updated.speed).toBe(40);
+
+    const cleared = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, characterId: created.id, speed: null },
+      }),
+    ) as { speed: number | null };
+    expect(cleared.speed).toBeNull();
+  });
+
   it('quest objective update/remove and location discovery and note/session edit+delete round-trip over MCP', async () => {
     const client = await mcpClient(dmToken);
 

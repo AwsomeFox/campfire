@@ -2,6 +2,7 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
@@ -12,8 +13,8 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, CombatantStatblock as CombatantStatblockValue, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
@@ -45,8 +46,6 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
-import { withStatblockRevision } from './resourceTrackerLogic';
-import { createStatblockSaveQueue, type StatblockSaveQueue } from './statblockSaveQueue';
 import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -579,6 +578,13 @@ export default function RunSessionPage() {
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -672,6 +678,9 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // React state disables the source row after render; the ref closes the same-tick
+  // double-click window before that render can happen.
+  const pendingDuplicateCombatantIds = useRef(new Set<number>());
   const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
     setPendingCombatantIds((prev) => {
       const next = new Set(prev);
@@ -1696,6 +1705,44 @@ export default function RunSessionPage() {
     },
   });
 
+  const duplicateCombatant = useMutation({
+    mutationFn: ({ body }: { combatantId: number; body: Record<string, unknown> }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants`, body),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      pendingDuplicateCombatantIds.current.delete(combatantId);
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  const requestDuplicateCombatant = useCallback(
+    (combatant: Combatant, rosterNames: readonly string[]) => {
+      if (riskyBlocked || reconcileBlocks || pendingDuplicateCombatantIds.current.has(combatant.id)) return;
+      pendingDuplicateCombatantIds.current.add(combatant.id);
+      markCombatantPending(combatant.id, true);
+      duplicateCombatant.mutate({
+        combatantId: combatant.id,
+        body: {
+          kind: combatant.kind,
+          duplicateOfCombatantId: combatant.id,
+          name: duplicateCombatantName(combatant.name, rosterNames),
+          ruleEntryId: combatant.ruleEntryId ?? undefined,
+          statblock: combatant.statblock ?? undefined,
+          hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
+          initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
+          tokenSize: combatant.tokenSize,
+        },
+      });
+    },
+    [duplicateCombatant, markCombatantPending, reconcileBlocks, riskyBlocked],
+  );
+
   const combatantTurnState = useMutation({
     mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
       api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
@@ -2114,96 +2161,25 @@ export default function RunSessionPage() {
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
-  // Issue #1909 review (Devin) — a regression the earlier `withStatblockRevision` fix
-  // introduced: `CombatantStatblockEditor` has no debounce of its own (every keystroke
-  // calls `onChange` synchronously), and EVERY combatant PATCH advances the encounter's
-  // CAS token server-side (`updateCombatant`'s unconditional `encounters.updatedAt` bump).
-  // Sending that token unconditionally on every keystroke meant the SECOND keystroke's
-  // PATCH would carry the token the FIRST keystroke's PATCH had already invalidated,
-  // 409ing at ordinary typing speed. `statblockSaveQueue` debounces keystrokes into one
-  // save per pause and serializes saves per combatant.
-  //
-  // Issue #1909 review round 2 (Devin + Codex, converging independently) — the FIRST fix
-  // here refetched the encounter and read its revision immediately before EVERY send, which
-  // defeated the CAS guard it was supposed to enforce: the draft being sent was captured
-  // BEFORE that refetch, so a refetch that picked up a genuinely concurrent OTHER writer's
-  // change would still pair a stale draft with that writer's fresh token and sail straight
-  // through `assertNotStale` — silently clobbering their edit, the exact whole-blob-clobber
-  // class this PR set out to close. Fixed by tracking, per combatant, the revision this
-  // client's OWN reconciled state is at (`knownRevisionRef`) — read to build a save's CAS
-  // token BEFORE that save's network call, and updated ONLY from a refetch AFTER a save's
-  // own write has landed. Because the queue serializes saves per combatant, that post-write
-  // refetch always completes before the NEXT save for the same id starts, so a second
-  // same-client edit reads the just-advanced revision and still succeeds — while a save
-  // whose captured base revision predates a genuinely concurrent OTHER writer's change
-  // still 409s, since nothing here ever substitutes a fresher revision for the one the
-  // in-flight draft actually corresponds to.
-  const knownRevisionRef = useRef<Map<number, string | undefined>>(new Map());
-  // The `deps` ref sidesteps a stale-closure trap from creating this queue once (a lazy
-  // ref, so the debounce/serialization state survives across renders) while `eid`/
-  // `combatantPatch`/`reportError` still need their CURRENT values at save time.
-  const statblockSaveDepsRef = useRef({ eid, combatantPatch: undefined as unknown as typeof combatantPatch, reportError });
-  statblockSaveDepsRef.current.eid = eid;
-  statblockSaveDepsRef.current.combatantPatch = combatantPatch;
-  statblockSaveDepsRef.current.reportError = reportError;
-
-  const statblockSaveQueueRef = useRef<StatblockSaveQueue<CombatantStatblockValue> | null>(null);
-  if (!statblockSaveQueueRef.current) {
-    statblockSaveQueueRef.current = createStatblockSaveQueue<CombatantStatblockValue>({
-      debounceMs: 600,
-      save: async (combatantId, draft) => {
-        const deps = statblockSaveDepsRef.current;
-        const encounterKey = queryKeys.encounter(deps.eid);
-        // The token this SEND uses: whatever revision this combatant's statblock was last
-        // reconciled to (seeded, the very first time, from the CURRENT cache with no
-        // refetch — the revision this draft's editor state was actually rendered from).
-        // Never refetched here: refetching at send time is exactly what let a stale draft
-        // ride in on a fresher-but-unrelated revision (see the comment above).
-        let expectedUpdatedAt = knownRevisionRef.current.get(combatantId);
-        if (expectedUpdatedAt === undefined) {
-          expectedUpdatedAt = queryClient.getQueryData<EncounterWithCombatants>(encounterKey)?.updatedAt;
-        }
-        const withRevision = withStatblockRevision({ statblock: draft }, expectedUpdatedAt);
-        await deps.combatantPatch.mutateAsync({ combatantId, patch: withRevision });
-        // Reconcile AFTER this write lands, for whichever save comes NEXT (never for the
-        // one just sent above) — serialization guarantees the next save for this id cannot
-        // start until this refetch has completed.
-        await queryClient.invalidateQueries({ queryKey: encounterKey });
-        const fresh = queryClient.getQueryData<EncounterWithCombatants>(encounterKey);
-        if (fresh?.updatedAt) knownRevisionRef.current.set(combatantId, fresh.updatedAt);
-      },
-      onError: (_combatantId, err) => statblockSaveDepsRef.current.reportError(err),
-    });
-  }
-
-  // Issue #1909 review (Devin) — `flushNow` existed with zero call sites, so a debounced
-  // edit sitting only in the queue's pending-draft map was silently dropped if the DM
-  // navigated away (or the page was hidden) before the 600ms timer fired; before this PR
-  // every keystroke issued its own PATCH, so the worst case was losing one in-flight
-  // request, not a whole unflushed burst. Best-effort flush on unmount AND on the page
-  // being hidden (covers a tab switch/close as well as an in-app navigation) — this cannot
-  // guarantee delivery on a hard process kill, but neither could the pre-PR per-keystroke
-  // PATCH in that same case.
-  useEffect(() => {
-    const flushAll = () => {
-      void statblockSaveQueueRef.current?.flushAll();
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') flushAll();
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-      flushAll();
-    };
-  }, []);
-
+  // Issue #1909 scope note: earlier rounds of this PR added a CAS token + debounce/
+  // serialization queue to this whole-statblock PATCH (the in-app statblock editor's
+  // onChange path), trying to close a pre-existing lost-update on a caller this issue
+  // never named. That mechanism went through five review-caught regressions in a row (no
+  // token → lost updates; token added → 409 on every keystroke; token re-read at send time
+  // → guard defeated by a concurrent writer; token latched per-combatant → permanent
+  // lockout after any other encounter write; draft leaked across an encounter-id change
+  // mid-debounce) — a strong signal it was being built in the wrong place for this PR.
+  // Reverted back to this endpoint's actual, and already-solved, scope: `patchCombatant`
+  // sends every patch (including `statblock`) as a plain, immediate, token-less PATCH,
+  // exactly as it did before this PR touched this file. This restores the PRE-EXISTING
+  // whole-statblock-editor concurrency gap (a concurrent whole-statblock save can still
+  // revert another writer's unrelated edit) rather than introducing a new one — that gap
+  // predates this PR and is now tracked as its own follow-up issue rather than solved here.
+  // What #1909 actually asked for — flipping ONE resource pip no longer clobbers the WHOLE
+  // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
+  // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {
-      if ('statblock' in patch) {
-        statblockSaveQueueRef.current?.enqueue(combatantId, patch.statblock as CombatantStatblockValue);
-        return;
-      }
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
@@ -3516,11 +3492,12 @@ export default function RunSessionPage() {
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3851,6 +3828,9 @@ export default function RunSessionPage() {
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
                   canRemove={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={

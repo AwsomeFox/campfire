@@ -152,6 +152,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     ac: row.ac,
     eac: row.eac,
     kac: row.kac,
+    speed: row.speed ?? null,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
     spCurrent: row.spCurrent,
@@ -1037,6 +1038,7 @@ export class CharactersService {
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),
         kac: clampAc(input.kac ?? null),
+        speed: input.speed ?? null,
         hpCurrent,
         hpMax,
         hpTemp,
@@ -1142,6 +1144,10 @@ export class CharactersService {
     if (input.ac !== undefined) update.ac = clampAc(input.ac);
     if (input.eac !== undefined) update.eac = clampAc(input.eac);
     if (input.kac !== undefined) update.kac = clampAc(input.kac);
+    // Issue #1910: no clamp — schema's min(0) is the only bound (unlike AC's AC_MAX,
+    // no rule system caps a maximum speed). undefined = untouched; null clears it back
+    // to "unset" so the turn workspace falls through to the adapter default again.
+    if (input.speed !== undefined) update.speed = input.speed;
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
     if (input.spCurrent !== undefined) update.spCurrent = input.spCurrent;
     if (input.spMax !== undefined) update.spMax = input.spMax;

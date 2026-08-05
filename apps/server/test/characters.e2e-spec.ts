@@ -1298,6 +1298,22 @@ describe('characters (e2e)', () => {
       expect(res.body.stats).toEqual({});
     });
 
+    // Issue #1910 review (Codex, PR #1980, round 5): a { name, speed } create must be
+    // treated as combat data, the same as an { name, ac } create — not silently downgraded
+    // to a draft with 0/0 HP (which would then be skipped by encounter auto-add).
+    it('a speed-only create is active with default HP, matching an ac-only create (issue #1910)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Fleet Foot', speed: 40 });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('active');
+      expect(res.body.hpMax).toBe(10);
+      expect(res.body.hpCurrent).toBe(10);
+      expect(res.body.speed).toBe(40);
+    });
+
     it('explicit template payload stays draft until marked active', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)
@@ -2085,5 +2101,54 @@ describe('POST /characters/:id/rest — individual character rest', () => {
     expect(res.body.spCurrent).toBe(15);
     expect(res.body.rpCurrent).toBe(3);
     expect(res.body.deathState).toBe('none');
+  });
+
+  // Issue #1910: movement speed replaces the hardcoded 30 ft every PC previously got in
+  // the turn workspace. Nullable/default-null (not a baked-in 30) so an existing character
+  // row from before this column existed keeps reading as "unset" rather than silently
+  // acquiring a fabricated value; getTurnWorkspace supplies the adapter default at read time.
+  describe('movement speed (issue #1910)', () => {
+    it('create without speed defaults to null (upgrade compatibility for pre-#1910 rows)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${restCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Speedless', hpMax: 10, hpCurrent: 10 });
+      expect(res.status).toBe(201);
+      expect(res.body.speed).toBeNull();
+    });
+
+    it('create with speed persists a non-30 value (e.g. a dwarf at 25)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${restCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Stout Dwarf', hpMax: 10, hpCurrent: 10, speed: 25 });
+      expect(res.status).toBe(201);
+      expect(res.body.speed).toBe(25);
+    });
+
+    it('PATCH /characters/:id round-trips speed and clearing it back to null works', async () => {
+      const server = ctx.app.getHttpServer();
+      const set = await dbUpdate(server, owner, restCharId, { speed: 40 });
+      expect(set.status).toBe(200);
+      expect(set.body.speed).toBe(40);
+
+      const get = await request(server).get(`/api/v1/characters/${restCharId}`).set(owner);
+      expect(get.body.speed).toBe(40);
+
+      const cleared = await dbUpdate(server, owner, restCharId, { speed: null });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.speed).toBeNull();
+    });
+
+    it('rejects a negative speed as a validation error', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${restCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Rooted', hpMax: 10, hpCurrent: 10, speed: -5 });
+      expect(res.status).toBe(400);
+    });
   });
 });
