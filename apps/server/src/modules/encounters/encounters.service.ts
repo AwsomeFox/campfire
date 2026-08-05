@@ -3523,6 +3523,10 @@ export class EncountersService {
    * NOTHING — any member (or AI) may preview; committing is the separate write path.
    */
   async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
+    // #1502: resolve through the campaign's persisted homebrew profile, not the slug alone.
+    // main added this call site while this branch was converting every adapter lookup to the
+    // profile-aware path; a slug-only `ruleSystemAdapter` here would silently give a homebrew
+    // campaign 5e's monster/difficulty maths for generated encounters.
     const adapter = await this.adapterForCampaign(campaignId);
     const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
