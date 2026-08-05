@@ -298,8 +298,20 @@ function applyScalarField(
     // proposal, and "clear it" only when the key was actually there for the user to
     // clear. `wasPresent` is passed rather than derived from `data`, because `data` is
     // seeded from the original payload and mutated as fields are applied.
+    // Round 3 (review). A field that WAS present and is optional-but-not-nullable — Quest's
+    // `reward` / `body` / `dmSecret`, all `z.string().default('')` made optional by
+    // `.partial()` — used to fall through to the same omission, so a DM who deliberately
+    // blanked a description got nothing: `.set({ ...input })` leaves an omitted column
+    // untouched, while the preview (which sees `'Gold'` become `undefined`) told them the
+    // field WOULD be cleared. An empty string is the clear those fields actually have, and
+    // sending it makes the request do what the preview promises.
+    //
+    // Number and select have no empty representation — `''` is not a number and not a member
+    // of any enum — so those keep omitting, and the diff below no longer reports an omitted
+    // key as a change, so the preview stops promising a clear that cannot be expressed.
     if (f.optional && !wasPresent) delete data[f.key];
     else if (f.nullable) data[f.key] = null;
+    else if (f.optional && (f.kind === 'text' || f.kind === 'textarea')) data[f.key] = '';
     else if (f.optional) delete data[f.key];
     else fieldErrors[f.key] = f.kind === 'select' ? 'Choose an option.' : f.kind === 'number' ? 'Enter a number.' : 'This field is required.';
     return;
@@ -409,7 +421,15 @@ function sameJson(a: unknown, b: unknown): boolean {
  *  payload and a candidate next payload — drives the preview's changed-fields list. */
 export function diffProposalChangedKeys(original: Record<string, unknown>, next: Record<string, unknown>): string[] {
   const keys = new Set([...Object.keys(original), ...Object.keys(next)]);
-  return [...keys].filter((key) => !sameJson(original[key], next[key]));
+  return [...keys].filter((key) => {
+    // A key the submitted payload OMITS changes nothing (round 3 review). Every update path
+    // this editor feeds applies `.set({ ...input })`, so an absent key leaves the column
+    // exactly as it was. Reporting `reward  Gold → —` for an omission promised a clear the
+    // request could not perform — the inverse of the explicit-`null` case `sameJson` above
+    // exists to surface, which DOES clear and must stay visible.
+    if (key in original && !(key in next)) return false;
+    return !sameJson(original[key], next[key]);
+  });
 }
 
 export interface ProposalPreviewResult {

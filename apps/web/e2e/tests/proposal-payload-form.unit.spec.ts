@@ -114,19 +114,43 @@ test.describe('proposalPayloadForm: buildProposalDraftPayload', () => {
     expect(data.title).toBe('Old title'); // untouched fallback, not blanked out
   });
 
-  test('omits a blank optional non-nullable field entirely', () => {
+  test('sends an explicit empty string when a present optional text field is cleared', () => {
+    // Round 3 (issue #769 review, Devin). This test previously asserted `'reward' in data`
+    // was false — it locked in the bug. `reward` is `z.string().default('')` made optional by
+    // `QuestUpdate = QuestCreate.partial()`, so it is optional-but-not-nullable, and omitting
+    // it from a `.set({ ...input })` update leaves the column exactly as it was. A DM who
+    // blanked the reward and approved kept the old text, while the preview said it changed.
     const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
     const bool = initProposalFieldBool(fields, { title: 'Quest' });
-    const { fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest', reward: 'Gold' });
-    expect(fieldErrors).toEqual({});
-    // `reward` text was initialized from the original payload ("Gold"), unchanged here,
-    // so this exercises the nullable/optional-empty branch via a field the user actually clears:
     const cleared = buildProposalDraftPayload(fields, jsonKeys, { ...text, reward: '' }, bool, {
       title: 'Quest',
       reward: 'Gold',
     });
     expect(cleared.fieldErrors).toEqual({});
-    expect('reward' in cleared.data).toBe(false);
+    expect(cleared.data.reward).toBe('');
+  });
+
+  test('still omits an optional text field the proposal never carried', () => {
+    // The other half of the same branch, unchanged: absent stays absent. Materializing `''`
+    // for every untouched optional text field would blank columns across the entity — the
+    // over-correction the fix above must not become.
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Quest' });
+    const bool = initProposalFieldBool(fields, { title: 'Quest' });
+    const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, { title: 'Quest' });
+    expect(fieldErrors).toEqual({});
+    expect('reward' in data).toBe(false);
+  });
+
+  test('an omitted key is not reported as a changed field — omission changes nothing server-side', () => {
+    // The preview's half of the same defect. A number/select field has no empty
+    // representation, so clearing it can only omit the key; the diff used to report that as
+    // `→ —`, promising a clear the request cannot perform. An explicit `null`, which DOES
+    // clear the column, must still show — that distinction is the whole point of `sameJson`.
+    expect(diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' })).toEqual([]);
+    expect(diffProposalChangedKeys({ giverNpcId: 7 }, { giverNpcId: null })).toEqual(['giverNpcId']);
+    // A key the payload ADDS is still a change; only the original-present/next-absent
+    // direction is silent.
+    expect(diffProposalChangedKeys({ title: 'Quest' }, { title: 'Quest', reward: 'Gold' })).toEqual(['reward']);
   });
 
   test('sets a nullable field to null when cleared', () => {
@@ -274,11 +298,15 @@ test.describe('proposalPayloadForm: diffProposalChangedKeys', () => {
     expect(changed).toEqual(['title']);
   });
 
-  test('reports an added key and a removed key', () => {
+  test('reports an added key, and stays silent about a removed one', () => {
     const changed = diffProposalChangedKeys({ title: 'Quest' }, { title: 'Quest', status: 'available' }).sort();
     expect(changed).toEqual(['status']);
+    // A removed key was reported as changed until round 3 of the #769 review. It is not: an
+    // omitted key leaves the column untouched under `.set({ ...input })`, so calling it a
+    // change promised the DM a clear the request would never perform. The full reasoning and
+    // the explicit-null counterpart live in the omit-vs-clear test above.
     const removed = diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' });
-    expect(removed).toEqual(['reward']);
+    expect(removed).toEqual([]);
   });
 });
 
