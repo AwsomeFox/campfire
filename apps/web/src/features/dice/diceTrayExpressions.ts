@@ -1,4 +1,4 @@
-import { openLegendAttributeDicePool } from '@campfire/schema';
+import { openLegendAttributeDicePool, type DiceRoll } from '@campfire/schema';
 import type { AdvMode, Pool } from './savedRollsState';
 
 /** Standard polyhedral faces accepted by the shared roll endpoint. */
@@ -41,4 +41,16 @@ export function openLegendActionRollAnimationExpr(score: number): string {
   const pool = openLegendAttributeDicePool(score);
   const terms = pool.dice.map((sides) => `1d${sides}`);
   return (pool.disadvantage ? [...terms, ...terms] : terms).join('+');
+}
+
+/**
+ * Expand the persisted action-roll terms into one side count per returned face.
+ * Explosions add faces to a term, so their original die side must come from the
+ * server's `sides` metadata rather than the initial pool preview.
+ */
+export function openLegendActionRollAnimationSides(terms: DiceRoll['terms']): number[] | undefined {
+  if (!terms) return undefined;
+  const diceTerms = terms.filter((term) => term.rolls !== undefined);
+  if (diceTerms.length === 0 || diceTerms.some((term) => term.sides === undefined)) return undefined;
+  return diceTerms.flatMap((term) => Array.from({ length: term.rolls!.length }, () => term.sides!));
 }

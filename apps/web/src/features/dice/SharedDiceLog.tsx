@@ -19,7 +19,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { useRollResultToast } from '../../components/RollResultToastContext';
 import { useCampaignAccessFor } from '../../app/CampaignAccessContext';
 import { DiceTray } from './DiceTray';
-import { openLegendActionRollAnimationExpr } from './diceTrayExpressions';
+import { openLegendActionRollAnimationExpr, openLegendActionRollAnimationSides } from './diceTrayExpressions';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
@@ -235,7 +235,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
           return next;
         });
         setJustRolledId(result.id);
-        showRoll(result);
+        showRoll(result, { animationSides: openLegendActionRollAnimationSides(result.terms) });
         return result;
       } catch (err) {
         cancelRollAnimation();

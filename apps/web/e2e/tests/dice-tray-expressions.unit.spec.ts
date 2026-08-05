@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   buildDiceTrayExprs,
   openLegendActionRollAnimationExpr,
+  openLegendActionRollAnimationSides,
 } from '../../src/features/dice/diceTrayExpressions';
 
 test.describe('dice tray expressions (issue #1918)', () => {
@@ -25,5 +26,12 @@ test.describe('dice tray expressions (issue #1918)', () => {
   test('derives Open Legend animation dice from the submitted action pool, including score-zero disadvantage', () => {
     expect(openLegendActionRollAnimationExpr(6)).toBe('1d20+1d8+1d8');
     expect(openLegendActionRollAnimationExpr(0)).toBe('1d20+1d20');
+  });
+
+  test('uses persisted action-roll metadata to retain the sides of exploded faces', () => {
+    expect(openLegendActionRollAnimationSides([
+      { term: 'd20!', value: 26, rolls: [20, 6], sides: 20, exploded: true },
+      { term: 'd8!', value: 5, rolls: [5], sides: 8, exploded: false },
+    ])).toEqual([20, 20, 8]);
   });
 });

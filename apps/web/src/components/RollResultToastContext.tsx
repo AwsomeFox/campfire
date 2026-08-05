@@ -45,6 +45,8 @@ export function reliableDiceSubtotal(roll: DiceRoll): number | undefined {
 export interface ShowRollOptions {
   /** Encounter apply-damage handler captured at roll time (character-card rolls). */
   onApply?: ApplyDamageHandler;
+  /** Exact per-face dice sides when the response expands beyond the submitted expression. */
+  animationSides?: number[];
   /**
    * Structurally excludes this roll from the apply-damage bridge (issue #1904 review
    * finding), regardless of what `looksLikeDamageRoll`'s label/expression heuristic would
@@ -145,6 +147,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
         if (!prev || prev.phase !== 'tumbling') return prev;
         return {
           ...prev,
+          sides: options?.animationSides ?? prev.sides,
           phase: 'settling',
           values: r.rolls,
           kept: r.kept,
