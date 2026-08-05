@@ -1289,7 +1289,8 @@ export default function RunSessionPage() {
             // outlive the turn that just ended.
             setTurnBeat(null);
           }
-          invalidateEncounter(queryClient, eid);
+          // The paired encounter.updated frame has already invalidated the
+          // encounter read; only the viewer-specific workspace needs refresh.
           void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
           return;
         }

@@ -59,6 +59,17 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/turnWorkspace\?\.current\?\.combatantId === currentCombatantId\s*&&\s*turnWorkspace\?\.isYourTurn === true/);
   });
 
+  test('relies on the paired encounter update while refreshing only /turn for a turn edge', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const start = source.indexOf("if (event.type === 'encounter.turn_changed')");
+    const turnChangedBranch = source.slice(
+      start,
+      source.indexOf('return;\n        }', start),
+    );
+    expect(turnChangedBranch).toContain('queryKeys.encounterTurn(eid)');
+    expect(turnChangedBranch).not.toContain('invalidateEncounter(queryClient, eid);');
+  });
+
   test('accepts the optional turn_changed frame fields and rejects malformed values', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
