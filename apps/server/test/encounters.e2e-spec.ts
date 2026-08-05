@@ -4963,7 +4963,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
         .set(player)
         .send({ idempotencyKey: 'death-save-campaign-trash-race' });
 
-      expect(rejected.status).toBe(403);
+      expect(rejected.status).toBe(404);
       expect(adapterLookups).toBeGreaterThanOrEqual(2);
       expect(rollSpy).not.toHaveBeenCalled();
       expect((await db.select().from(diceRolls).where(eq(diceRolls.campaignId, trashCampaignId))).length).toBe(beforeDice);

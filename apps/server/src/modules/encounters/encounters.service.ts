@@ -905,9 +905,10 @@ export class EncountersService {
       .where(eq(campaigns.id, campaignId))
       .get();
     if (!campaign) throw new NotFoundException('Campaign not found');
-    if (campaign.deletedAt != null || campaign.status !== 'active') {
+    if (campaign.deletedAt != null) throw new NotFoundException('Campaign not found');
+    if (campaign.status !== 'active') {
       throw new ForbiddenException(
-        `Campaign is ${campaign.deletedAt != null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
+        `Campaign is ${campaign.status} (read-only) — set its status back to 'active' to make changes`,
       );
     }
   }
