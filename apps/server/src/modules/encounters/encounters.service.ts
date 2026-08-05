@@ -6758,7 +6758,7 @@ export class EncountersService {
       const prior = this.db.transaction((tx) => findExactPriorEncounterOp(tx, claim, Date.now()));
       if (prior && prior.responseRole === currentRole) {
         if (prior.response) return prior.response as EncounterWithCombatants;
-        return this.getWithCombatantsOrThrow(encounterId, currentRole);
+        return this.getWithCombatantsOrThrow(encounterId, currentRole, user.id);
       }
     }
     const [campaign] = await this.db
