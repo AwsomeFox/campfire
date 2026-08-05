@@ -317,7 +317,7 @@ export function CombatantRow({
         targeting.onToggle();
       }}
       onKeyDown={(event) => {
-        if (!targeting?.legal || (event.key !== 'Enter' && event.key !== ' ')) return;
+        if (!targeting?.legal || event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault();
         targeting.onToggle();
       }}

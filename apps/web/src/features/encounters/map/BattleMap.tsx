@@ -2370,6 +2370,9 @@ export function BattleMap({
                   const selectedForBatch = selectedTokenIds.has(c.id);
                   const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
                   const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  // Map gestures retain precedence outside move mode, and movable tokens keep
+                  // their drag behavior.
+                  const targetClickable = legalTarget && tool === 'move' && !viewportPan && !movable;
                   const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
@@ -2396,7 +2399,7 @@ export function BattleMap({
                       key={c.id}
                       data-testid={`map-token-${c.id}`}
                       role="button"
-                      tabIndex={movable || legalTarget ? 0 : -1}
+                      tabIndex={movable || targetClickable ? 0 : -1}
                       aria-label={tokenLabel}
                       aria-pressed={legalTarget ? selectedTarget : undefined}
                       aria-describedby="map-keyboard-help"
@@ -2406,7 +2409,7 @@ export function BattleMap({
                         left: `${left}%`,
                         top: `${top}%`,
                         // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: movable || legalTarget ? 'auto' : 'none',
+                        pointerEvents: movable || targetClickable ? 'auto' : 'none',
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
                         opacity: isDragging ? 0.85 : targeting && !legalTarget ? 0.6 : 1,
@@ -2414,16 +2417,16 @@ export function BattleMap({
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => {
-                        if (legalTarget) {
+                        if (targetClickable) {
                           e.stopPropagation();
                           return;
                         }
                         onTokenPointerDown(e, c);
                       }}
                       onClick={(event) => {
-                        if (legalTarget) event.stopPropagation();
+                        if (targetClickable) event.stopPropagation();
                         // A drag ends with a click; only a stationary token tap may select.
-                        if (legalTarget && !isDragging) targeting?.onToggle(c.id);
+                        if (targetClickable && !isDragging) targeting?.onToggle(c.id);
                       }}
                       onKeyDown={(e) => {
                         if (legalTarget && (e.key === 'Enter' || e.key === ' ')) {

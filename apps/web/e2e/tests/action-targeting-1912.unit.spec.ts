@@ -27,9 +27,11 @@ test('legal target affordances support repeated pointer and keyboard selection',
     readFile(resolve(process.cwd(), 'src/features/encounters/combat/CombatantRow.tsx'), 'utf8'),
   ]);
 
-  expect(mapSource).toContain('tabIndex={movable || legalTarget ? 0 : -1}');
+  expect(mapSource).toContain("const targetClickable = legalTarget && tool === 'move' && !viewportPan && !movable;");
+  expect(mapSource).toContain('tabIndex={movable || targetClickable ? 0 : -1}');
   expect(mapSource).toContain("e.key === 'Enter' || e.key === ' '");
   expect(mapSource).not.toContain('event.detail === 1');
   expect(rosterSource).toContain("role={targeting?.legal ? 'button' : undefined}");
   expect(rosterSource).toContain('aria-pressed={targeting?.legal ? targeting.selected : undefined}');
+  expect(rosterSource).toContain('event.target !== event.currentTarget');
 });
