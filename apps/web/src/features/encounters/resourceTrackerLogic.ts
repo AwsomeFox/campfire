@@ -142,12 +142,13 @@ export type PipOwnerScope = { characterId: number } | { combatantId: number };
  *     that doesn't yet include the first's change, and silently reverts it on success.
  *
  * Collapsing the key to the TARGET (not the specific resource/slot) serializes every
- * control on that one character/combatant against each other, while different
- * characters/combatants remain fully independent — exactly round 4's original ask,
- * correctly scoped this time.
+ * control on that one character sheet against each other, while different characters remain
+ * fully independent. Statblock combatants share the encounter-wide `encounterUpdatedAt` CAS token,
+ * so statblock writes across all monsters in an encounter map to the encounter-wide
+ * `'combatant:statblock'` key to prevent concurrent writes from sending stale concurrency tokens.
  */
 export function pendingTargetKey(scope: PipOwnerScope): string {
-  return 'characterId' in scope ? `char:${scope.characterId}` : `combatant:${scope.combatantId}`;
+  return 'characterId' in scope ? `char:${scope.characterId}` : 'combatant:statblock';
 }
 
 /**

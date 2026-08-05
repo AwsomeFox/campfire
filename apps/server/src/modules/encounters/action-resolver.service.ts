@@ -1883,6 +1883,7 @@ export class ActionResolverService {
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
+          const targetSheetToken = nextUpdatedAt(sheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               hpCurrent: result.hpCurrent,
@@ -1898,9 +1899,13 @@ export class ActionResolverService {
               // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the
               // spell-slot spend write's comment below for why this token must advance on
               // every characters-row writer.
-              updatedAt: nextUpdatedAt(sheetRow?.updatedAt ?? nowIso()),
+              updatedAt: targetSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
+            .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: targetSheetToken })
+            .where(eq(combatants.id, fresh.id))
             .run();
           sheetMirrored = true;
         }
@@ -1956,15 +1961,30 @@ export class ActionResolverService {
       }
       // The spend was already validated (and the replacement blob computed) at the top of
       // this transaction, before any consequence above was written — this is just the write.
-      // Issue #1902 rework (round 10): `nextUpdatedAt`, not `nowIso()` — `updatedAt` is a
-      // CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
-      // EVERY spellSlots writer, not just itself. The prior value was read INSIDE this same
-      // transaction above (`character.updatedAt`), so — unlike `restParty`'s pre-transaction
-      // read — there's no separate atomicity gap to also guard against here.
+      // Issue #1902 rework (devin review PRRT_kwDOTdNRkM6WFOfH): re-read the character row
+      // fresh immediately before this write. `breakConcentration` or target HP/condition
+      // mirrors earlier in this transaction may have already advanced `characters.updatedAt`
+      // beyond `spellSlotSpend.priorUpdatedAt`. Derive the final token from that current state
+      // and update the linked combatant's `sheetSyncedUpdatedAt` to match.
       if (spellSlotSpend) {
-        tx.update(characters)
-          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nextUpdatedAt(spellSlotSpend.priorUpdatedAt) })
+        const freshChar = tx
+          .select({ updatedAt: characters.updatedAt })
+          .from(characters)
           .where(eq(characters.id, spellSlotSpend.characterId))
+          .get();
+        const finalToken = nextUpdatedAt(freshChar?.updatedAt ?? spellSlotSpend.priorUpdatedAt);
+        tx.update(characters)
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: finalToken })
+          .where(eq(characters.id, spellSlotSpend.characterId))
+          .run();
+        tx.update(combatants)
+          .set({ sheetSyncedUpdatedAt: finalToken })
+          .where(
+            and(
+              eq(combatants.encounterId, encounter.id),
+              eq(combatants.characterId, spellSlotSpend.characterId),
+            ),
+          )
           .run();
         sheetMirrored = true;
       }
@@ -2252,6 +2272,7 @@ export class ActionResolverService {
                 deathSaveSuccesses: t.deathSaveSuccessesBefore,
                 deathSaveFailures: t.deathSaveFailuresBefore,
               };
+          const undoSheetToken = nextUpdatedAt(undoSheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               ...sheetHpRestore,
@@ -2262,9 +2283,13 @@ export class ActionResolverService {
               // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the apply-side
               // spell-slot write's comment below for why this CAS token must advance on
               // EVERY characters-row writer, not just patchSpellSlots.
-              updatedAt: nextUpdatedAt(undoSheetRow?.updatedAt ?? nowIso()),
+              updatedAt: undoSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
+            .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: undoSheetToken })
+            .where(eq(combatants.id, fresh.id))
             .run();
           sheetMirrored = true;
         }
@@ -2316,7 +2341,17 @@ export class ActionResolverService {
             // on EVERY spellSlots writer. `character` was read INSIDE this same
             // transaction just above, so there's no separate atomicity gap to guard here
             // (unlike `restParty`'s pre-transaction plan).
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, actor.characterId)).run();
+            const sheetToken = nextUpdatedAt(character.updatedAt);
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: sheetToken }).where(eq(characters.id, actor.characterId)).run();
+            tx.update(combatants)
+              .set({ sheetSyncedUpdatedAt: sheetToken })
+              .where(
+                and(
+                  eq(combatants.encounterId, committedEncounter.id),
+                  eq(combatants.characterId, actor.characterId),
+                ),
+              )
+              .run();
             sheetMirrored = true;
           }
         }

@@ -330,11 +330,9 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
     expect(pendingTargetKey({ characterId: 1 })).toBe(pendingTargetKey({ characterId: 1 }));
     // Different characters never collide.
     expect(pendingTargetKey({ characterId: 1 })).not.toBe(pendingTargetKey({ characterId: 2 }));
-    // A statblock combatant's resource pip and spell-slot pip also share ONE key now —
-    // sixth-round finding (devin): a second click on the SAME monster while the first is
-    // still in flight must be blocked, or it composes its whole-statblock PATCH from a
-    // snapshot that doesn't yet include the first write, silently reverting it.
-    expect(pendingTargetKey({ combatantId: 7 })).toBe(pendingTargetKey({ combatantId: 7 }));
+    // Statblock combatants share the encounter-wide pending key so concurrent statblock writes
+    // do not race against the shared encounter.updatedAt CAS token.
+    expect(pendingTargetKey({ combatantId: 7 })).toBe(pendingTargetKey({ combatantId: 8 }));
     // A character-linked target and a statblock target never collide even with the same
     // numeric id, since the two scopes are namespaced separately.
     expect(pendingTargetKey({ characterId: 7 })).not.toBe(pendingTargetKey({ combatantId: 7 }));

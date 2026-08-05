@@ -3870,10 +3870,11 @@ export class EncountersService {
           const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
           const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
           const turnIndex = turnIndexFor(sorted, freshEncounter.currentCombatantId);
+          const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            ...(turnIndex !== freshEncounter.turnIndex ? { updatedAt: nowIso() } : {}),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
           }).where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running'))).run();
         }
         emittedEncounter = freshEncounter;
@@ -5282,12 +5283,13 @@ export class EncountersService {
         }
         tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-        updatedAt: now,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
       }).where(eq(encounters.id, encounterId)).run();
       const escalationEventId = wrappedToNextRound && escalation?.logDetail
         ? Number(tx.insert(encounterEvents).values({ encounterId, round: afterEncounter.round, type: 'override', actor: null, target: null, actorId: null, targetId: null, detail: escalation.logDetail, chainId: null, parentEventId: null, phase: null, performedByJson: null, metadataJson: JSON.stringify({ escalationDie: escalation.escalationDie }), createdAt: now }).run().lastInsertRowid)
@@ -5454,6 +5456,7 @@ export class EncountersService {
           for (const legendarySnapshot of roundLegendarySnapshots) {
             tx.update(combatants).set({ turnState: legendarySnapshot.turnState }).where(eq(combatants.id, legendarySnapshot.id)).run();
           }
+          const currentEnc1 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             currentCombatantId: before.currentCombatantId,
             turnIndex: restoredTurnIndex,
@@ -5464,7 +5467,7 @@ export class EncountersService {
             turnPhase: before.turnPhase,
             ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
           if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
         } else if (runningAdapter) {
@@ -5475,11 +5478,12 @@ export class EncountersService {
           // lair resume target; an unrelated combatant mutation must not lose it.
           const restoreLairResume = before.lairResumeCombatantId === snapshot.id
             && current.lairResumeCombatantId === after.lairResumeCombatantId;
+          const currentEnc2 = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
           tx.update(encounters).set({
             turnIndex,
             ...(restoreLairResume ? { lairResumeCombatantId: before.lairResumeCombatantId } : {}),
             combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc2?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
         }
         // Snapshot is the receipt's response body after its first successful undo.
@@ -5590,10 +5594,11 @@ export class EncountersService {
           adapter,
         );
         const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters).set({
           turnIndex,
           combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
-          ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         }).where(eq(encounters.id, encounterId)).run();
       }
 
@@ -5726,6 +5731,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -5737,7 +5743,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -6185,6 +6191,7 @@ export class EncountersService {
           newCurrentName = 'Lair';
         }
 
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
           .set({
             turnIndex,
@@ -6195,7 +6202,7 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
           .run();
@@ -6550,6 +6557,7 @@ export class EncountersService {
         tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           turnIndex,
@@ -6560,7 +6568,7 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-          updatedAt: nowIso(),
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
@@ -6636,8 +6644,8 @@ export class EncountersService {
           : `automatic round ${encounterRow.round} default +${value}`;
     const entry = this.escalationEntry(encounterRow.round, value, source, held, override, note);
     const history = this.appendEscalationHistory(encounterRow.escalationDieHistory, entry);
-    const ts = nowIso();
 
+    const currentEnc = await this.db.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
     await this.db
       .update(encounters)
       .set({
@@ -6645,7 +6653,7 @@ export class EncountersService {
         escalationDieHeld: held,
         escalationDieOverride: override,
         escalationDieHistory: history,
-        updatedAt: ts,
+        updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
       })
       .where(eq(encounters.id, encounterId));
 
@@ -7073,8 +7081,12 @@ export class EncountersService {
         .all();
       row = updated;
       if (encounterRow.status === 'running') {
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
         tx.update(encounters)
-          .set({ combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` })
+          .set({
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
+          })
           .where(eq(encounters.id, encounterId))
           .run();
       }
@@ -7363,8 +7375,9 @@ export class EncountersService {
           .where(eq(combatants.id, w.combatantId))
           .run();
       }
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: ts })
+        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -7541,6 +7554,7 @@ export class EncountersService {
         }
       }
 
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
         .set({
           status: 'running',
@@ -7554,7 +7568,7 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
-          updatedAt: ts,
+          updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
         .run();
