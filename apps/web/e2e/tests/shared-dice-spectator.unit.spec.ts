@@ -7,7 +7,7 @@ const ROOT = resolve(__dirname, '../..');
 
 test.describe('Shared dice log SSE and spectator roll animations (issue #1899)', () => {
   const schemaSource = readFileSync(resolve(ROOT, '../../packages/schema/src/index.ts'), 'utf8');
-  const eventsSource = readFileSync(resolve(ROOT, 'src/lib/useCampaignEvents.ts'), 'utf8');
+  const _eventsSource = readFileSync(resolve(ROOT, 'src/lib/useCampaignEvents.ts'), 'utf8');
   const logSource = readFileSync(resolve(ROOT, 'src/features/dice/SharedDiceLog.tsx'), 'utf8');
   const contextSource = readFileSync(resolve(ROOT, 'src/components/RollResultToastContext.tsx'), 'utf8');
   const toastSource = readFileSync(resolve(ROOT, 'src/components/RollResultToast.tsx'), 'utf8');
