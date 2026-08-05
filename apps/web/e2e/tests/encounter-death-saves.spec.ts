@@ -208,9 +208,17 @@ test.describe('encounter death saves (#1465)', () => {
       ).json();
 
       await dmCtx.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
-      await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${pcCombatant.id}`, {
+      const dyingPatchRes = await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${pcCombatant.id}`, {
         data: { initiative: 50, hpSet: 0, deathSaveSuccesses: 0, deathSaveFailures: 0, deathState: 'dying' },
       });
+      // If this write 400s/no-ops, the PC silently stays a healthy `none` combatant, which
+      // would ALSO suppress the card — for reasons unrelated to the ruleset gate this test
+      // exists to cover. Assert success and the resulting state directly from the response
+      // body, rather than trusting the request landed.
+      expect(dyingPatchRes.ok(), 'setting deathState=dying on the Open Legend PC must succeed').toBe(true);
+      const dyingPatchBody = (await dyingPatchRes.json()) as { deathState: string; hpCurrent: number | null };
+      expect(dyingPatchBody.deathState).toBe('dying');
+      expect(dyingPatchBody.hpCurrent).toBe(0);
       await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${monster.id}`, {
         data: { initiative: 10 },
       });
