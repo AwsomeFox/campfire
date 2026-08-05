@@ -25,9 +25,14 @@ import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap, type SpellCastContext } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
+import { turnEndGateReason, turnEndStandingReason } from './turnEndGate';
+
+/** Ties the End-turn button to its standing dmControlsTurns line for assistive tech. */
+const TURN_END_STANDING_ID = 'turn-end-standing-reason';
 
 const STANDARD_ACTIONS = [
   { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
@@ -65,6 +70,10 @@ interface TurnWorkspaceProps {
    *  is authoritative when the parent's encounter cache is briefly stale. */
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
+  /** #599: mirrors the server's assertNoSafetyHold rejection on endTurn — no server change,
+   *  just surfacing the same table-wide safety-hold state (already visible via SafetyHoldBar)
+   *  as a reason on the control it actually blocks. */
+  safetyHoldActive?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
   /** Issue #1900: spend (+1) or restore (-1) one spell-slot level for the current combatant's
@@ -131,6 +140,7 @@ export function TurnWorkspace({
   onUseSuggestedAction,
   onEndTurn,
   endTurnBusy = false,
+  safetyHoldActive = false,
   gridUnit,
   gridScale,
   onUpdateSpellSlot,
@@ -358,6 +368,12 @@ export function TurnWorkspace({
                 <SlotChip
                   key={slot.key}
                   slot={slot}
+                  // Deliberately NOT gated on `turn.canEndTurn` (issue #1933 review). Under
+                  // `dmControlsTurns` a player cannot ADVANCE the turn, but the server still
+                  // accepts their own `/turn-state` writes — movement, action slots — and the
+                  // standard-action bar, spell slots and concentration controls beside these
+                  // chips stay usable. Keying them to the end-turn permission would disable
+                  // half the workspace for exactly the players it belongs to.
                   disabled={controlsDisabled}
                   unit={unit}
                   step={step}
@@ -637,23 +653,91 @@ export function TurnWorkspace({
         </section>
       )}
 
-      {/* End turn — a player may end their own turn when allowed; the DM always may. */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {turn.canEndTurn ? (
-          <Btn
-            disabled={controlsDisabled}
-            onClick={() => onEndTurn?.(turn.current!.combatantId)}
-            data-testid="workspace-end-turn"
-          >
-            {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
-          </Btn>
-        ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">{t('encounters.workspace.dmAdvancesTurns')}</span>
-        ) : null}
-        {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
-        )}
-      </div>
+      {/* End turn — a player may end their own turn when allowed; the DM always may.
+          Issue #1933: this used to unmount the button entirely and swap in static hint
+          text whenever `dmControlsTurns` blocked a player, and never accounted for a
+          safety hold at all (the server rejects it — assertNoSafetyHold — but the button
+          stayed live and just failed on click). Both are now surfaced as a mounted,
+          disabled button with a GatedControl reason instead: the control a player would
+          reach for stays in the same place, explaining itself, rather than disappearing.
+          `turnEndGateReason` decides APPLICABILITY (is this viewer's control at all — DM
+          or the turn's owner) before layering on any reason, so a plain onlooker still
+          gets nothing, hold or no hold — see that function's doc comment. */}
+      {(() => {
+        const gateReasonKey = turnEndGateReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+          safetyHoldActive,
+          syncBlocked: actionsDisabled,
+        });
+        // Suppressed while this player's own end-turn is in flight (issue #1933 review):
+        // GatedControl strips the native `disabled` whenever a reason is present, so the
+        // button would announce "the table is paused" during the moment the truth is "your
+        // click is still going". Same rule as `gateReasonText`'s busy argument.
+        //
+        // Deliberately `endTurnBusy`, NOT the broader `busy` (= endTurnBusy ||
+        // turnState.isPending). `turnState` covers every action-economy toggle,
+        // concentration clear and readied/delay edit, so suppressing on it would blank the
+        // reason during unrelated saves — leaving a player under `dmControlsTurns` with a
+        // mounted, disabled, unexplained button, which is the exact state this issue exists
+        // to eliminate. A viewer who cannot end the turn can never have an end-turn request
+        // in flight, so the narrow flag loses nothing.
+        const gateReason = gateReasonKey && !endTurnBusy ? t(`run.gate.${gateReasonKey}`) : undefined;
+        // Applicability still keys off the UNsuppressed reason, so an in-flight request
+        // never makes the button vanish for a player who had one.
+        const showButton = turn.canEndTurn || gateReasonKey != null;
+        // `dmControlsTurns` is a campaign SETTING, not a passing condition — it holds for the
+        // whole fight and is the answer to "why can I never end my own turn here". Before
+        // GatedControl it had a permanently visible line; folding it into the priority-ranked
+        // resolver put it behind hover/focus/tap, leaving a sighted mouse user with a dead
+        // control and no explanation (issue #1933 review). Same category as the Start
+        // button's roster hints, so it gets the same standing treatment.
+        const standingKey = turnEndStandingReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+        });
+        const standingReason = standingKey ? t(`run.gate.${standingKey}`) : undefined;
+        // Don't let GatedControl emit a second, visually-hidden copy of a sentence the line
+        // below is already showing — that double-announces to a screen reader and makes
+        // getByText resolve to two nodes (the same trap the header hit).
+        const tooltipReason = gateReasonKey === standingKey ? undefined : gateReason;
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            {showButton && (
+              <GatedControl reason={tooltipReason}>
+                <Btn
+                  // `|| !turn.canEndTurn` is load-bearing, not belt-and-braces: `GatedControl`
+                  // only swallows the click while a `reason` is present, and the dedupe just
+                  // above deliberately passes `undefined` when the standing line already says
+                  // it — which takes GatedControl's passthrough branch and leaves the child
+                  // fully live. `controlsDisabled` is `busy || actionsDisabled` and knows
+                  // nothing about permission, so without this a player under `dmControlsTurns`
+                  // could press End turn and get a bare server rejection (issue #1933 review).
+                  //
+                  // The general rule this cost us: the wrapper is an AFFORDANCE, not an
+                  // authorization. A control's own `disabled` has to be correct on its own.
+                  // Scope it to this button only — the action-economy chips above are a
+                  // different permission and must stay live for this same player.
+                  disabled={controlsDisabled || !turn.canEndTurn}
+                  onClick={() => onEndTurn?.(turn.current!.combatantId)}
+                  aria-describedby={standingReason ? TURN_END_STANDING_ID : undefined}
+                  data-testid="workspace-end-turn"
+                >
+                  {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
+                </Btn>
+              </GatedControl>
+            )}
+            {standingReason && (
+              <span id={TURN_END_STANDING_ID} className="text-sm text-muted">{standingReason}</span>
+            )}
+            {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
+              <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
+            )}
+          </div>
+        );
+      })()}
     </Card>
   );
 }
