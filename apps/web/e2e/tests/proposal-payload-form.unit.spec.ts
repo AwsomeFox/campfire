@@ -169,6 +169,41 @@ test.describe('proposalPayloadForm: buildProposalDraftPayload', () => {
     expect('hidden' in data).toBe(false);
   });
 
+  test('an empty nullable field absent from the original payload stays OMITTED, never sent as an explicit null', () => {
+    // Same invariant as the boolean case above, and missed for scalars on the first pass
+    // (issue #769 review, Devin). `applyScalarField` checked `nullable` before `optional`,
+    // so every optional+nullable field the proposal never mentioned was materialized as an
+    // explicit `null`. That is destructive rather than cosmetic: `QuestsService.update`
+    // writes `.set({ ...input })`, so `null` CLEARS the column while an omitted key leaves
+    // it untouched. A DM opening this editor to fix a title and approving would silently
+    // unlink the quest's giver NPC and parent quest.
+    const original = { title: 'Quest' }; // no parentId / giverNpcId
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, original);
+    expect(fieldErrors).toEqual({});
+    expect('parentId' in data).toBe(false);
+    expect('giverNpcId' in data).toBe(false);
+  });
+
+  test('clearing a nullable field that WAS present sends an explicit null, so a real clear still works', () => {
+    // The other half of the invariant: omission must not swallow a deliberate clear. The
+    // user emptied a control that had a value, so `null` is the correct payload.
+    const original = { title: 'Quest', giverNpcId: 7 };
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const { data, fieldErrors } = buildProposalDraftPayload(
+      fields,
+      jsonKeys,
+      { ...text, giverNpcId: '' },
+      bool,
+      original,
+    );
+    expect(fieldErrors).toEqual({});
+    expect('giverNpcId' in data).toBe(true);
+    expect(data.giverNpcId).toBeNull();
+  });
+
   test('an explicit false already present in the original payload round-trips as false, not omitted', () => {
     const original = { title: 'Quest', hidden: false };
     const text = initProposalFieldText(fields, jsonKeys, original);

@@ -278,9 +278,25 @@ function applyScalarField(
   raw: string,
   data: Record<string, unknown>,
   fieldErrors: Record<string, string>,
+  wasPresent: boolean,
 ): void {
   if (raw === '') {
-    if (f.nullable) data[f.key] = null;
+    // Same "omit != false" invariant the boolean branch below documents, and it applies
+    // here for the same reason — this branch originally checked `nullable` FIRST, which
+    // meant every optional+nullable field the proposal never mentioned was materialized
+    // as an explicit `null` (issue #769 review, Devin). That is not a cosmetic
+    // difference: `QuestsService.update` writes `.set({ ...input })`, so an explicit
+    // `null` CLEARS the column while an omitted key leaves it untouched. A DM who opened
+    // this editor to fix a title and approved would silently unlink the quest's
+    // `giverNpcId` and `parentId` (both `Id.nullable().default(null)`, made optional by
+    // `QuestUpdate = QuestCreate.partial()`), or wipe a faction's `portraitUrl`.
+    //
+    // An empty control therefore means "leave it alone" when the key was ABSENT from the
+    // proposal, and "clear it" only when the key was actually there for the user to
+    // clear. `wasPresent` is passed rather than derived from `data`, because `data` is
+    // seeded from the original payload and mutated as fields are applied.
+    if (f.optional && !wasPresent) delete data[f.key];
+    else if (f.nullable) data[f.key] = null;
     else if (f.optional) delete data[f.key];
     else fieldErrors[f.key] = f.kind === 'select' ? 'Choose an option.' : f.kind === 'number' ? 'Enter a number.' : 'This field is required.';
     return;
@@ -305,8 +321,11 @@ export function buildProposalDraftPayload(
   text: ProposalFieldTextState,
   bool: ProposalFieldBoolState,
   originalPayload: Record<string, unknown>,
+  /** Seed for passthrough keys — see `computeGuidedProposalPreview`. Defaults to the
+   *  original payload, which is correct until the draft has been through advanced mode. */
+  passthroughBase: Record<string, unknown> = originalPayload,
 ): ProposalDraftBuild {
-  const data: Record<string, unknown> = { ...originalPayload };
+  const data: Record<string, unknown> = { ...passthroughBase };
   const fieldErrors: Record<string, string> = {};
 
   for (const f of fields) {
@@ -326,7 +345,7 @@ export function buildProposalDraftPayload(
       }
       continue;
     }
-    applyScalarField(f, text[f.key] ?? '', data, fieldErrors);
+    applyScalarField(f, text[f.key] ?? '', data, fieldErrors, f.key in originalPayload);
   }
 
   for (const key of jsonKeys) {
@@ -373,7 +392,14 @@ export function validateProposalPayload(schema: z.ZodTypeAny, data: Record<strin
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  // NOT `a ?? null` on both sides (issue #769 review — Copilot and Kilo, independently).
+  // Coercing `undefined` to `null` made "key omitted" and "key explicitly null"
+  // indistinguishable, so the preview stayed silent about the single most destructive
+  // edit this editor can make: an explicit `null` is what CLEARS a column server-side
+  // (`.set({ ...input })`), while omission leaves it untouched. `JSON.stringify(undefined)`
+  // is `undefined` and `JSON.stringify(null)` is `"null"`, so they now compare unequal and
+  // the changed-fields list reports a deliberate clear.
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /** Top-level keys whose value differs (structurally) between the original proposal
@@ -431,8 +457,23 @@ export function computeGuidedProposalPreview(
   bool: ProposalFieldBoolState,
   originalPayload: Record<string, unknown>,
   schema: z.ZodTypeAny | null,
+  /**
+   * The object the guided draft is SEEDED from — i.e. the current working payload,
+   * which after a round-trip through advanced mode is what the user last typed there,
+   * not the proposal as originally submitted. Defaults to `originalPayload` so every
+   * existing caller and test is unchanged.
+   *
+   * These are two genuinely different things and conflating them lost work (issue #769
+   * review, Devin): `buildProposalDraftPayload` seeds from this base, so keys the schema
+   * does not declare at all are carried through from it — meaning a raw-JSON edit to an
+   * unknown key was reverted, and an unknown key deleted there came back, on switching
+   * to guided. `originalPayload` stays the reference for the changed-keys diff and for
+   * the omit-vs-explicit presence checks, which are questions about the ORIGINAL
+   * proposal and must not drift as the user edits.
+   */
+  passthroughBase: Record<string, unknown> = originalPayload,
 ): ProposalPreviewResult {
-  const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, originalPayload);
+  const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, originalPayload, passthroughBase);
   if (Object.keys(fieldErrors).length > 0) {
     return { draft: data, fieldErrors, formError: null, changedKeys: diffProposalChangedKeys(originalPayload, data), normalized: null };
   }

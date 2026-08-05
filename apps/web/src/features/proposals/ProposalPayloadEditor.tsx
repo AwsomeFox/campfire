@@ -90,9 +90,16 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     // codebase's on-submit validation convention (see QuestPage's title error).
     const [showErrors, setShowErrors] = useState(false);
 
+    // The working payload the guided draft is seeded from. Starts as the proposal as
+    // submitted, and is replaced by whatever the user last had in advanced mode on a
+    // successful switch back — otherwise a raw-JSON edit to a key the schema does not
+    // declare was silently reverted (issue #769 review, Devin). `originalPayload` remains
+    // the reference for the diff and the presence checks.
+    const [passthroughBase, setPassthroughBase] = useState<Record<string, unknown>>(originalPayload);
+
     const guidedPreview = useMemo(
-      () => computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, schema),
-      [fields, jsonKeys, text, bool, originalPayload, schema],
+      () => computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase),
+      [fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase],
     );
 
     const advancedPreview = useMemo<ProposalPreviewResult>(() => {
@@ -120,6 +127,10 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       }
       setText(initProposalFieldText(fields, jsonKeys, parsed.data));
       setBool(initProposalFieldBool(fields, parsed.data));
+      // Carry the raw-mode object forward as the passthrough seed, so keys the schema
+      // does not declare reflect what the user just typed rather than snapping back to
+      // the original proposal (issue #769 review, Devin).
+      setPassthroughBase(parsed.data);
       setModeSwitchError(null);
       setMode('guided');
     }
@@ -157,6 +168,11 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
                 id={id}
                 type="checkbox"
                 checked={bool[f.key] ?? false}
+                // Matches every other control in this component (issue #769 review,
+                // Copilot): the checkbox associated its error via `aria-describedby` but
+                // never announced itself as invalid, so a screen-reader user heard the
+                // message without the state.
+                aria-invalid={error ? true : undefined}
                 aria-describedby={describedBy}
                 onChange={(e) => setBool((cur) => ({ ...cur, [f.key]: e.target.checked }))}
               />

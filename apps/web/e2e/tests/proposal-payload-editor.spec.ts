@@ -188,14 +188,19 @@ test.describe('proposal payload editor', () => {
     await page.getByRole('button', { name: 'Approve edited' }).focus();
     await page.keyboard.press('Enter');
 
-    // Every other guided field on QuestUpdate was left untouched, so the normalized
-    // payload also carries their as-typed/nullable-cleared values (`giverNpcId`/
-    // `parentId` are nullable number fields with nothing typed in); `hidden` is NOT
-    // among them — it stays omitted since it was absent from the original payload and
-    // the checkbox was never touched (see the "omit != false" secrecy invariant test
-    // in proposal-payload-form.unit.spec.ts).
+    // ONLY the field the user actually edited is sent. Every other guided field was
+    // absent from the original proposal and left untouched, so it stays OMITTED rather
+    // than being materialized as an explicit empty value — for nullables (`giverNpcId`,
+    // `parentId`) exactly as much as for booleans (`hidden`).
+    //
+    // This assertion previously expected `giverNpcId: null, parentId: null`, encoding the
+    // bug as intended behavior (issue #769 review, Devin). `QuestsService.update` applies
+    // `.set({ ...input })`, so those nulls CLEAR the columns: a DM who opened the editor
+    // to fix a title and approved would silently unlink the quest's giver NPC and parent
+    // quest, with nothing shown in the preview. See the two nullable-omission tests in
+    // proposal-payload-form.unit.spec.ts.
     await expect.poll(() => api.approveCalls).toEqual([
-      { id: 505, body: { payload: { title: 'Keyboard title', giverNpcId: null, parentId: null } } },
+      { id: 505, body: { payload: { title: 'Keyboard title' } } },
     ]);
   });
 });
@@ -242,7 +247,10 @@ test.describe('proposal payload editor: proposer self-view revise', () => {
     const error = page.getByRole('alert').filter({ hasText: 'Simulated revise failure' });
     await expect(error).toBeVisible();
     await expect.poll(() => revisions).toEqual([
-      { id: 601, body: { payload: { title: 'Revised title', giverNpcId: null, parentId: null } } },
+      // Same omit-vs-null invariant as the DM approve flow above: untouched nullable
+      // fields absent from the original proposal stay omitted rather than being sent as
+      // explicit nulls that would clear the columns on save (issue #769 review).
+      { id: 601, body: { payload: { title: 'Revised title' } } },
     ]);
 
     // Cancelling the edit clears the stale network error instead of leaving it stranded
