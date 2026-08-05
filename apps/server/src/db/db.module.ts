@@ -944,6 +944,35 @@ function migrateDiceRollsTableForEncounterNpcRefs1904(sqlite: Database.Database)
 }
 
 /**
+ * Issue #1910: additive nullable `speed` column on `characters` and `combatants` —
+ * movement speed in the rule system adapter's movement unit, replacing the hardcoded
+ * 30 ft every PC previously got in the turn workspace. NULL on both tables preserves
+ * upgrade compatibility: an existing character/combatant row keeps reading as "no
+ * speed on file", and getTurnWorkspace's resolution chain (combatant snapshot ->
+ * character -> adapter movement-slot max) supplies the same adapter default those
+ * rows already displayed before this column existed. Same guarded per-table ADD
+ * COLUMN idiom as migrateStarfinderCombatState above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares both columns.
+ */
+function migrateCharacterCombatantSpeed1910(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (hasCharactersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'speed')) sqlite.exec('ALTER TABLE characters ADD COLUMN speed INTEGER');
+  }
+
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'speed')) sqlite.exec('ALTER TABLE combatants ADD COLUMN speed INTEGER');
+  }
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -5019,6 +5048,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0158_encounters_aftermath_mutations_1448', run: migrateEncountersTableForAftermathMutations1448 },
   { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
+  { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
 ];
 
 /**

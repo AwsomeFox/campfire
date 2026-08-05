@@ -46,6 +46,7 @@ import {
   generateEncounterGroup,
   hpBandFor,
   initialEncounterTurnState,
+  movementSlotMax,
   redactEncounterEventsForViewer,
   resetLegendaryUsage,
   resetTurnStateForStart,
@@ -442,6 +443,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     rpMax: row.rpMax ?? 0,
     eac: row.eac ?? null,
     kac: row.kac ?? null,
+    speed: row.speed ?? null,
     hpTemp: row.hpTemp,
     hpBand: null,
     deathState: row.deathState as Combatant['deathState'],
@@ -2261,6 +2263,11 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as the single-combatant
+            // addCombatant() path — without it, an auto-added party member's movement
+            // max would resolve through the character's LIVE speed on every read
+            // instead of freezing at the value the sheet had when the fight started.
+            speed: character.speed,
             // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
             // intervening sheet edits made while the encounter was ended.
             sheetSyncedUpdatedAt: character.updatedAt,
@@ -3460,6 +3467,10 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as addCombatant()/create() —
+            // otherwise a party member auto-added by the generator resolves through
+            // the character's LIVE speed instead of freezing at fight-start.
+            speed: character.speed,
             sheetSyncedUpdatedAt: character.updatedAt,
             // #1047: carry the sheet's structured copy in too. No translation needed —
             // a sheet instance already has the round-scoped fields null, so it enters as an
@@ -3644,6 +3655,9 @@ export class EncountersService {
     let rpMax = 0;
     let eac: number | null = null;
     let kac: number | null = null;
+    // Issue #1910: add-time snapshot of the linked character's speed, same convention
+    // as eac/kac/the HP-model fields below — stays null for monster/npc combatants.
+    let speed: number | null = null;
     let statblockJson: string | null = null;
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
@@ -3739,6 +3753,7 @@ export class EncountersService {
       rpMax = character.rpMax;
       eac = character.eac;
       kac = character.kac;
+      speed = character.speed;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
@@ -3881,6 +3896,7 @@ export class EncountersService {
             rpMax,
             eac,
             kac,
+            speed,
             // Issue #711: only a character combatant carries the persistent
             // death/temp-HP slice in; monsters/NPCs default to alive/temp-less
             // (the Combatant schema defaults handle the unset monster case).
@@ -7222,16 +7238,37 @@ export class EncountersService {
 
     const model = actionEconomyForAdapter(adapter);
     const used = current.turnState.used;
+    const movementSlot = model.slots.find((s) => s.kind === 'movement');
+    // Issue #1910 review (Devin, PR #1980, round 4): resolve the per-combatant
+    // movement max as the combatant's own add-time speed snapshot, or — full
+    // stop — the adapter's movement-slot max (e.g. 30 ft for 5e). Deliberately
+    // NOT falling through to the linked character's live speed when the
+    // snapshot is null: `combatant.speed === null` is unavoidably ambiguous
+    // between "this row predates the speed column" and "the linked character
+    // had no speed set at add time" (Character.speed defaults to null, so the
+    // second case is every character until someone fills in a value) — the two
+    // cases are indistinguishable at the DB level without a discriminator
+    // column, and a live-character fallback resolves BOTH the same way,
+    // reintroducing exactly the retroactive-change bug this snapshot exists to
+    // prevent for the (overwhelmingly common) second case. Falling through to
+    // the adapter default instead costs nothing relative to pre-PR behavior —
+    // every combatant reported the hardcoded adapter constant before this
+    // column existed, which for 5e is the same 30 the default resolves to now.
+    //
+    // Routed through the shared `movementSlotMax` (encounters.logic.ts, round 5 review)
+    // rather than computed inline: `ActionResolverService.resolveActionEconomyCost` calls
+    // the SAME function for the movement spend/guard path, so this DISPLAY value and that
+    // ENFORCEMENT value cannot drift apart the way they did before round 5.
+    const resolvedMovementMax = movementSlot ? movementSlotMax('movement', movementSlot.max, current.speed) : 0;
     const actionEconomy = model.slots.map((slot) => ({
       key: slot.key,
       label: slot.label,
       help: slot.help,
       kind: slot.kind,
-      max: slot.max,
+      max: movementSlotMax(slot.kind, slot.max, current.speed),
       used: slot.kind === 'movement' ? current.turnState.movementUsedFt : used[slot.key] ?? 0,
       resetsAt: slot.resetsAt,
     }));
-    const movementSlot = model.slots.find((s) => s.kind === 'movement');
     const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
     const suggestedActions = await this.suggestedActionsForCombatant(current);
 
@@ -7253,7 +7290,7 @@ export class EncountersService {
       isYourTurn,
       canEndTurn,
       actionEconomy,
-      movement: movementSlot ? { maxFt: movementSlot.max, usedFt: current.turnState.movementUsedFt } : null,
+      movement: movementSlot ? { maxFt: resolvedMovementMax, usedFt: current.turnState.movementUsedFt } : null,
       reactionAvailable: reactionSlot ? (used[reactionSlot.key] ?? 0) < reactionSlot.max : false,
       concentration: current.turnState.concentration,
       activeEffects: current.activeEffects,
