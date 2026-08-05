@@ -499,20 +499,68 @@ describe('scribe encounter-event user-attributed actors (#1520 review)', () => {
     expect(damage?.actor).toBe('Rook');
   });
 
+  /**
+   * Extract the `.values({ ... })` object literal of every `insert(encounterEvents)` call.
+   *
+   * The first version of this scan used a single regex —
+   * `/insert\(encounterEvents\)\.values\(\{([\s\S]{0,600}?)\}\)/g` — and Devin caught that it
+   * was itself a test that could not fail (issue #1520 review). Two defects, both worth
+   * naming because they are the generic failure modes of source-scanning guards:
+   *
+   *  1. It required `.values({` to sit on the same line as `insert(encounterEvents)`. Only 5
+   *     of the 11 call sites are written that way; the rest are `.insert(encounterEvents)`
+   *     newline `.values({`. So it silently inspected under half the producers — and passed,
+   *     because the two `token_batch` producers happen to be in the single-line group.
+   *  2. The non-greedy `}\)` terminator stopped at the first nested `})`, e.g. the
+   *     `JSON.stringify({ userId, role, kind })` for `performedByJson`, truncating a block
+   *     before `actor` could even appear in it.
+   *
+   * So: a whitespace-tolerant anchor, and a brace-balanced walk for the extent. The count
+   * assertion below is the part that keeps this honest — an under-matching scan now fails
+   * loudly instead of reporting "no offenders found".
+   */
+  function encounterEventValueBlocks(rel: string): string[] {
+    const code = readFileSync(resolve(__dirname, '../../', rel), 'utf8');
+    const blocks: string[] = [];
+    for (const anchor of code.matchAll(/insert\(encounterEvents\)\s*\.values\(\s*\{/g)) {
+      const open = code.indexOf('{', anchor.index + 'insert(encounterEvents)'.length);
+      let depth = 0;
+      for (let i = open; i < code.length; i += 1) {
+        if (code[i] === '{') depth += 1;
+        else if (code[i] === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            blocks.push(code.slice(open, i + 1));
+            break;
+          }
+        }
+      }
+    }
+    return blocks;
+  }
+
+  const PRODUCER_FILES = [
+    'src/modules/encounters/encounters.service.ts',
+    'src/modules/encounters/action-resolver.service.ts',
+  ];
+
+  it('the scan reaches EVERY insert(encounterEvents) call site, not just the conveniently formatted ones', () => {
+    // The guard below is only worth anything if this holds. Asserting coverage against the
+    // raw occurrence count is what makes a silently under-matching scan fail.
+    for (const rel of PRODUCER_FILES) {
+      const code = readFileSync(resolve(__dirname, '../../', rel), 'utf8');
+      const callSites = (code.match(/insert\(encounterEvents\)/g) ?? []).length;
+      expect(encounterEventValueBlocks(rel)).toHaveLength(callSites);
+    }
+  });
+
   it('every server producer that writes `actor: user.name` has its event type in the strip set', () => {
     // Scans the PRODUCERS, not the sanitizer. A pure test of USER_ATTRIBUTED_EVENT_TYPES
     // could never notice a new `insert(encounterEvents)` call storing a display name — which
     // is exactly how this defect shipped. Reading the call sites is what makes it catchable.
-    const files = [
-      'src/modules/encounters/encounters.service.ts',
-      'src/modules/encounters/action-resolver.service.ts',
-    ];
-
     const offenders: string[] = [];
-    for (const rel of files) {
-      const code = readFileSync(resolve(__dirname, '../../', rel), 'utf8');
-      for (const match of code.matchAll(/insert\(encounterEvents\)\.values\(\{([\s\S]{0,600}?)\}\)/g)) {
-        const block = match[1] ?? '';
+    for (const rel of PRODUCER_FILES) {
+      for (const block of encounterEventValueBlocks(rel)) {
         if (!/actor:\s*user\.name/.test(block)) continue;
         const type = /type:\s*'([a-z_]+)'/.exec(block)?.[1];
         if (!type || !USER_ATTRIBUTED_EVENT_TYPES.has(type)) {
@@ -524,18 +572,14 @@ describe('scribe encounter-event user-attributed actors (#1520 review)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('the scan actually finds the known producer — otherwise the guard above passes vacuously', () => {
-    // Without this, a regex that matched nothing would report "no offenders" forever.
-    const code = readFileSync(
-      resolve(__dirname, '../../src/modules/encounters/encounters.service.ts'),
-      'utf8',
+  it('the scan actually finds the known producers — otherwise the guard above passes vacuously', () => {
+    // Without this, a scan that matched nothing would report "no offenders" forever.
+    const withUserName = PRODUCER_FILES.flatMap(encounterEventValueBlocks).filter((b) =>
+      /actor:\s*user\.name/.test(b),
     );
-    const blocks = [...code.matchAll(/insert\(encounterEvents\)\.values\(\{([\s\S]{0,600}?)\}\)/g)]
-      .map((m) => m[1] ?? '')
-      .filter((b) => /actor:\s*user\.name/.test(b));
 
-    expect(blocks.length).toBeGreaterThanOrEqual(2); // applyTokenBatch + undoTokenBatch
-    for (const block of blocks) {
+    expect(withUserName).toHaveLength(2); // applyTokenBatch + undoTokenBatch, and only those
+    for (const block of withUserName) {
       expect(/type:\s*'token_batch'/.test(block)).toBe(true);
     }
   });
