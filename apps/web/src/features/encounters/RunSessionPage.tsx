@@ -957,9 +957,32 @@ export default function RunSessionPage() {
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
   const turnPulseTimerRef = useRef<number | null>(null);
+  const ownedTurnFeedbackRef = useRef<number | null>(null);
+
+  // An owned turn can initially be a private pending beat, then promote once
+  // the authorized roster and /turn workspace arrive. Keep the visual cues
+  // tied to that one beat even if those reads cause several rerenders.
+  const triggerOwnedTurnFeedback = useCallback((beatKey: number) => {
+    if (ownedTurnFeedbackRef.current === beatKey) return;
+    ownedTurnFeedbackRef.current = beatKey;
+    if (!prefersReducedMotion()) {
+      setTurnPulse(true);
+      if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+      turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
+    }
+    // A turn change must not pull a player away from an active form or dialog.
+    const active = document.activeElement as HTMLElement | null;
+    if (!active?.closest('form, [role="dialog"], input, textarea, select')) {
+      document.querySelector<HTMLElement>('[data-testid="turn-workspace"]')?.scrollIntoView({
+        behavior: scrollBehavior(),
+        block: 'nearest',
+      });
+    }
+  }, []);
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
+    ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
@@ -991,6 +1014,7 @@ export default function RunSessionPage() {
   // a prior owned turn (including the hidden-tab title) alive after combat stops.
   useEffect(() => {
     if (encounter?.status === 'running') return;
+    ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
@@ -1245,8 +1269,9 @@ export default function RunSessionPage() {
           // A lair action has no roster combatant, but a round-wrap still has
           // useful, non-secret feedback for every viewer.
           if (kind && (combatant || event.currentCombatantId != null || tickerKind === 'round-wrap')) {
+            const beatKey = ++turnBeatSequence.current;
             setTurnBeat({
-              key: ++turnBeatSequence.current,
+              key: beatKey,
               combatantId: event.currentCombatantId ?? null,
               pending: combatant == null && event.currentCombatantId != null,
               kind,
@@ -1256,19 +1281,7 @@ export default function RunSessionPage() {
               identityBackground: combatant ? tokenIdentityBackground(combatant) : 'var(--color-neutral-900)',
             });
             if (kind === 'your-turn' && combatant) {
-              if (!prefersReducedMotion()) {
-                setTurnPulse(true);
-                if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
-                turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
-              }
-              // A turn change must not pull a player away from an active form or dialog.
-              const active = document.activeElement as HTMLElement | null;
-              if (!active?.closest('form, [role="dialog"], input, textarea, select')) {
-                document.querySelector<HTMLElement>('[data-testid="turn-workspace"]')?.scrollIntoView({
-                  behavior: scrollBehavior(),
-                  block: 'nearest',
-                });
-              }
+              triggerOwnedTurnFeedback(beatKey);
             }
           }
           invalidateEncounter(queryClient, eid);
@@ -1293,7 +1306,7 @@ export default function RunSessionPage() {
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, me?.user.id],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, me?.user.id, triggerOwnedTurnFeedback],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2471,6 +2484,7 @@ export default function RunSessionPage() {
       || turnBeat.combatantId !== currentCombatantId
       || turnBeat.kind === 'your-turn'
     ) return;
+    triggerOwnedTurnFeedback(turnBeat.key);
     setTurnBeat((previous) => previous && previous.combatantId === currentCombatantId
       ? {
           ...previous,
@@ -2481,7 +2495,7 @@ export default function RunSessionPage() {
           identityBackground: currentCombatant ? tokenIdentityBackground(currentCombatant) : previous.identityBackground,
         }
       : previous);
-  }, [currentCombatant, currentCombatantId, turnBeat?.combatantId, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+  }, [currentCombatant, currentCombatantId, triggerOwnedTurnFeedback, turnBeat?.combatantId, turnBeat?.key, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {

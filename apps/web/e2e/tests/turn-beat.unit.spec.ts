@@ -26,7 +26,7 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears a previous encounter baseline before accepting the next encounter edge', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
   });
 
@@ -89,7 +89,7 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears turn ownership and transient cues when combat stops', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);/);
+    expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);/);
     expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running' &&/);
   });
 
@@ -106,9 +106,12 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(event\.type === 'encounter\.turn_changed'\) return;/);
   });
 
-  test('keeps the safe turn-workspace scroll when reduced motion is preferred', () => {
+  test('replays the owned pulse and safe workspace scroll when a pending beat promotes', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{\s*if \(!prefersReducedMotion\(\)\) \{[\s\S]*setTurnPulse/);
-    expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{[\s\S]*scrollIntoView\(\{/);
+    expect(source).toMatch(/const triggerOwnedTurnFeedback = useCallback\(\(beatKey: number\) => \{\s*if \(ownedTurnFeedbackRef\.current === beatKey\) return;/);
+    expect(source).toMatch(/if \(!prefersReducedMotion\(\)\) \{\s*setTurnPulse\(true\);/);
+    expect(source).toMatch(/querySelector<HTMLElement>\('\[data-testid="turn-workspace"\]'\)\?\.scrollIntoView\(\{/);
+    expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{\s*triggerOwnedTurnFeedback\(beatKey\);/);
+    expect(source).toMatch(/turnBeat\.kind === 'your-turn'\s*\) return;\s*triggerOwnedTurnFeedback\(turnBeat\.key\);/);
   });
 });
