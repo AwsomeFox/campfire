@@ -39,6 +39,11 @@ test.describe('encounter action-error clearing (issue #430)', () => {
     expect(err.at).toBe(1_700_000_000_000);
   });
 
+  // `clearsActionErrorOn` documents the intended per-event policy above, but it has no
+  // production caller — RunSessionPage.tsx calls `setActionError(null)` directly in each
+  // handler rather than gating through this helper. A regression that unhooks Refresh or
+  // Dismiss from `setActionError` (or lets `ErrorNote` drop its dismiss control) would
+  // still pass every assertion above; only reading the actual wiring catches that.
   test('RunSessionPage Refresh and Dismiss clear actionError; ErrorNote supports dismiss', () => {
     const page = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const ui = readFileSync(ERROR_NOTE, 'utf8');

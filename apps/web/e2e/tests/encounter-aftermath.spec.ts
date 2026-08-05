@@ -56,6 +56,9 @@ test.describe('ended encounter aftermath workflow (issue #473)', () => {
       await page.goto(`/c/${campaignId}/encounters/${endedEncounterId}`);
       await expect(page.getByRole('heading', { name: 'Aftermath at the Ember Hearth' })).toBeVisible();
 
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      expect(overflow).toBeLessThanOrEqual(1);
+
       const panel = page.locator('[aria-labelledby="encounter-aftermath-heading"]');
       const recap = panel.getByRole('link', { name: /^Write recap/ });
       const loot = panel.getByRole('link', { name: /^Distribute loot/ });

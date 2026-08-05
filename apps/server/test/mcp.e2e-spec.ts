@@ -658,6 +658,98 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(parseResult(missingCharacter)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
   });
 
+  it('set_escalation_die MCP tool updates escalation die on 13th Age encounter', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    // `ruleSystem` must name an INSTALLED rule-pack slug (CampaignsService.validateRuleSystem)
+    // — this suite's beforeAll only installs the Open5e (5e) pack, so 'archmage' must be
+    // installed here first or every campaign write below 400s.
+    const archmagePackUpload = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'archmage', name: 'MCP 13th Age Fixtures', version: '1', license: 'CC0' },
+      entries: [{ slug: 'mcp-archmage-fixture', name: 'MCP Archmage Fixture Monster', type: 'monster', body: '13th Age fixture monster.' }],
+    });
+    expect(archmagePackUpload.status).toBe(202);
+    const archmageJobId = archmagePackUpload.body.id as string;
+    const archmageJobStart = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${archmageJobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - archmageJobStart > 10_000) throw new Error(`archmage pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // `create_campaign` only accepts { name, description } and discards any other argument
+    // (`CampaignCreate.parse({ name, ...description })` never sees `ruleSystem`), so it
+    // cannot make this an Archmage campaign directly. `update_campaign` DOES validate and
+    // persist `ruleSystem` — use it, and assert success, so the rest of this test genuinely
+    // runs against a 13th Age campaign instead of silently exercising the default 5e adapter's
+    // error path.
+    const createCampRaw = await dmClient.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Archmage Table' },
+    });
+    expect(createCampRaw.isError).toBeFalsy();
+    const createCamp = parseResult(createCampRaw) as { id: number };
+
+    const setRuleSystemRaw = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: createCamp.id, ruleSystem: 'archmage' },
+    });
+    expect(setRuleSystemRaw.isError).toBeFalsy();
+    const updatedCampaign = parseResult(setRuleSystemRaw) as { ruleSystem: string };
+    expect(updatedCampaign.ruleSystem).toBe('archmage');
+
+    const enc = parseResult(
+      await dmClient.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId: createCamp.id, name: 'MCP 13A Fight' },
+      }),
+    ) as { id: number };
+
+    const addCombatantRaw = await dmClient.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Manticore', hpMax: 40 },
+    });
+    expect(addCombatantRaw.isError).toBeFalsy();
+    const rollInitiativeRaw = await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    expect(rollInitiativeRaw.isError).toBeFalsy();
+    // The catalogued/registered MCP tool is `begin_encounter`, not `start_encounter` (which
+    // does not exist — see mcp-catalog.ts and every other MCP encounter-lifecycle test in this
+    // file). Calling a nonexistent tool name returns an unknown-tool error and never actually
+    // starts the encounter; assert isError is falsy so a regression here fails loudly instead
+    // of letting `set_escalation_die` below silently exercise a still-`preparing` encounter.
+    const beginEncounterRaw = await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    expect(beginEncounterRaw.isError).toBeFalsy();
+
+    // DM can update escalation die — assert the write actually succeeded and returned the
+    // requested override, not just that the (possibly-error) JSON payload is truthy.
+    const setResRaw = await dmClient.callTool({
+      name: 'set_escalation_die',
+      arguments: { encounterId: enc.id, held: true, override: 5 },
+    });
+    expect(setResRaw.isError).toBeFalsy();
+    const setRes = parseResult(setResRaw) as {
+      escalationDie: number;
+      escalationDieHeld: boolean;
+      escalationDieOverride: number | null;
+    };
+    expect(setRes.escalationDieOverride).toBe(5);
+    expect(setRes.escalationDie).toBe(5);
+    expect(setRes.escalationDieHeld).toBe(true);
+
+    // Non-DM is refused
+    const denied = await viewerClient.callTool({
+      name: 'set_escalation_die',
+      arguments: { encounterId: enc.id, override: 2 },
+    });
+    expect(denied.isError).toBe(true);
+  });
+
   it('roll catalog (issue #415): list_checks surfaces unproficient skills; roll_check resolves server-side', async () => {
     const client = await mcpClient(dmToken);
     const created = parseResult(
@@ -693,6 +785,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.check.modifier).toBe(3);
     expect(rolled.check.breakdownText).toBe('DEX +3 = +3');
     expect(rolled.roll.expr).toBe('1d20+3');
+    // #1867 (merged into main after this spec was written) renamed the catalog roll-mode
+    // enum's default from 'flat' to 'normal' — CheckRollRequest.shape.mode carries a zod
+    // `.default('normal')`, which the MCP arg parser applies before this call ever reaches
+    // characters.service#rollCheck, so an omitted `mode` here is genuinely 'normal' now.
     expect(rolled.mode).toBe('normal');
     expect(typeof rolled.roll.success).toBe('boolean');
   });

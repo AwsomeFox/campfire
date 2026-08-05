@@ -145,6 +145,39 @@ describe('encounters (e2e)', () => {
     expect(scout.initMod).toBe(10);
   });
 
+  it('13th Age create seeds character initMod with DEX mod + level (issue #1465)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    await db
+      .insert(rulePacks)
+      .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+      .onConflictDoNothing();
+
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Archmage Init Campaign', ruleSystem: 'archmage-srd' });
+    expect(camp.status).toBe(201);
+
+    const hero = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Vanguard', stats: { DEX: 14 }, level: 5, hpCurrent: 40, hpMax: 40 });
+    expect(hero.status).toBe(201);
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Dragon Battle' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatants).toHaveLength(1);
+    const vanguard = res.body.combatants[0];
+    expect(vanguard.characterId).toBe(hero.body.id);
+    // 13th Age initiative is DEX mod (+2) + level (5) = +7
+    expect(vanguard.initMod).toBe(7);
+  });
+
   it('player without dm role cannot create an encounter', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope', hidden: false });
@@ -9029,6 +9062,138 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       const otherState = state.body.combatants.find((c: any) => c.id === otherId);
       expect(otherState.hpCurrent).toBe(0);
       expect(otherState.deathState).toBe('stable');
+    });
+  });
+
+  describe('POST /api/v1/encounters/:id/escalation (issue #1465)', () => {
+    it('returns 403 when called by a player', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '5e Escalation Gate' });
+      const enc = await request(server).post(`/api/v1/campaigns/${camp.body.id}/encounters`).set(dm).send({ name: '5e Fight' });
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(player)
+        .send({ held: true });
+      expect(res.status).toBe(403);
+    });
+
+    it('returns 400 when called on a non-13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '5e Escalation non-13A' });
+      const enc = await request(server).post(`/api/v1/campaigns/${camp.body.id}/encounters`).set(dm).send({ name: '5e Fight' });
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ held: true });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('13th Age');
+    });
+
+    it('returns 400 for out-of-range override values on 13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Range Test', ruleSystem: 'archmage-srd' });
+      expect(camp.status).toBe(201);
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Escalation Fight' });
+      expect(enc.status).toBe(201);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      const started = await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      expect(started.status).toBe(201);
+
+      // `POST /encounters/:id/escalation` param-parses `:id` with ParseIntPipe before
+      // ever reaching the archmage-adapter override-range check. If campaign/encounter
+      // creation above silently failed, `enc.body.id` would be `undefined` and the
+      // route would 400 from ParseIntPipe alone — the exact same status this test
+      // expects from a genuinely out-of-range override — letting a broken setup pass
+      // silently. The asserts above pin the setup to 200/201 so a 400 below can only
+      // come from the override-range check itself.
+      const highRes = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: 7 });
+      expect(highRes.status).toBe(400);
+
+      const lowRes = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: -1 });
+      expect(lowRes.status).toBe(400);
+    });
+
+    it('returns 409 when called on an ended 13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Ended Test', ruleSystem: 'archmage-srd' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Escalation Fight' });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/end`).set(dm);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: 3 });
+      // updateEscalationDie() calls assertMutable() first, which rejects an ended
+      // encounter with 409 before the 13th-Age-adapter check ever runs — pin to the
+      // real contract instead of accepting a permissive [400, 409] (issue #1465 review).
+      expect(res.status).toBe(409);
+    });
+
+    it('updates escalation die state on valid DM request', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Valid Test', ruleSystem: 'archmage-srd' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Running Escalation Fight' });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ held: true, override: 4 });
+      expect(res.status).toBe(201);
+      expect(res.body.escalationDie).toBe(4);
+      expect(res.body.escalationDieHeld).toBe(true);
+      expect(res.body.escalationDieOverride).toBe(4);
     });
   });
 });
