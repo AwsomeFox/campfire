@@ -1633,12 +1633,12 @@ export default function RunSessionPage() {
 
   const toggleActionTarget = useCallback((id: number) => {
     setActionTargetIds((previous) => {
-      if (!pendingActionUse) return previous;
+      if (!pendingActionUse || actionTargetsDeclared) return previous;
       if (previous.includes(id)) return previous.filter((targetId) => targetId !== id);
       const max = pendingActionUse.spec.targets.count > 0 ? pendingActionUse.spec.targets.count : 50;
       return previous.length >= max ? previous : [...previous, id];
     });
-  }, [pendingActionUse]);
+  }, [pendingActionUse, actionTargetsDeclared]);
   const actionLegalTargetIds = useMemo(() => pendingActionUse
     ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
     : [], [encounter?.combatants, pendingActionUse]);

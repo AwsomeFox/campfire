@@ -306,7 +306,11 @@ export function CombatantRow({
         opacity: down ? 0.55 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
-      onClick={() => { if (targeting?.legal) targeting.onToggle(); }}
+      onClick={(event) => {
+        if (!targeting?.legal) return;
+        if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return;
+        targeting.onToggle();
+      }}
     >
       <FloatingNumbers events={hpFeedbackEvents} />
       {/* Issue #1746: single accessible reason shared by every write control this row

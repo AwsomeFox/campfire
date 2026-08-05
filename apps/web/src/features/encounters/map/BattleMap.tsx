@@ -2413,7 +2413,10 @@ export function BattleMap({
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => onTokenPointerDown(e, c)}
-                      onClick={() => { if (legalTarget) targeting?.onToggle(c.id); }}
+                      onClick={(event) => {
+                        // A drag ends with a click; only a stationary token tap may select.
+                        if (legalTarget && !isDragging && event.detail === 1) targeting?.onToggle(c.id);
+                      }}
                       onKeyDown={(e) => onTokenKeyDown(e, c)}
                       onFocus={(e) => {
                         setSelectedTokenId(c.id);
