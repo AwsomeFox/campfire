@@ -5428,9 +5428,11 @@ export class McpToolsService {
       server,
       user,
       'import_ddb_character',
-      'Import a character from a public D&D Beyond sheet (player+ role). Pass either `ddbId` (numeric character id) ' +
-        'or `url` (a D&D Beyond character/share link). The sheet must be set to Public on DDB. Only available for D&D 5e ' +
-        'campaigns — rejected with 400 for other rule systems.',
+      'Import a character from a public D&D Beyond sheet (player+ role), including attacks, spells, and spell slots. ' +
+        'Pass either `ddbId` (numeric character id) or `url` (a D&D Beyond character/share link). The sheet must be set ' +
+        'to Public on DDB. Only available for D&D 5e campaigns — rejected with 400 for other rule systems. Returns ' +
+        '`{ character, summary }`: the created character plus counts of imported actions/spells/slots and the names of ' +
+        'any entries that came in text-only (unparseable, never silently dropped).',
       {
         campaignId: CampaignIdArg,
         ddbId: z.string().max(200).optional().describe('D&D Beyond numeric character id'),

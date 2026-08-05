@@ -666,6 +666,34 @@ export const DdbCharacterImport = z
   });
 export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
 
+/**
+ * What a D&D Beyond import produced beyond the character's vitals (issue #1903). The
+ * importer never drops an unparseable attack/spell entry silently — it lands as a
+ * text-only `CharacterAction` (name + notes, no resolvable `spec`) and its name is echoed
+ * here so the caller can show the DM/player what needs a manual touch-up. REST and MCP
+ * return this identically alongside the created character.
+ */
+export const DdbImportSummary = z.object({
+  actionsImported: z.number().int().min(0).default(0),
+  spellsImported: z.number().int().min(0).default(0),
+  spellSlotsImported: z.boolean().default(false),
+  // Names of imported actions/spells that came in as text-only (no resolvable spec) —
+  // never a silent drop, always visible to the importer's caller.
+  textOnly: z.array(z.string().max(120)).max(200).default([]),
+  // Count of raw sheet entries trimmed by Character.actions' schema cap (issue #1903
+  // review) — 0 for the overwhelming majority of sheets (well under the cap); reported
+  // rather than silently dropped when a sheet is large enough to exceed it.
+  entriesOmitted: z.number().int().min(0).default(0),
+});
+export type DdbImportSummary = z.infer<typeof DdbImportSummary>;
+
+/** REST/MCP result shape for a D&D Beyond import: the created character plus its summary. */
+export const DdbImportResult = z.object({
+  character: Character,
+  summary: DdbImportSummary,
+});
+export type DdbImportResult = z.infer<typeof DdbImportResult>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),

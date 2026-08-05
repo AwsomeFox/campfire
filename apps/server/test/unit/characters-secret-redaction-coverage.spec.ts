@@ -20,8 +20,13 @@ import ts from 'typescript';
  * inside a callback, e.g. a `db.transaction(...)` closure) is either:
  *   - a call to `redactSecret(...)` / `redactSecrets(...)`, or
  *   - a delegating call to another `this.<method>(...)` that is itself one
- *     of the enumerated, redaction-covered methods (e.g. `importFromDdb`
- *     delegates to `create`).
+ *     of the enumerated, redaction-covered methods.
+ *
+ * `importFromDdb` (issue #1903) returns `Promise<DdbImportResult>` — an
+ * envelope of `{ character, summary }`, not a bare `Character` — so this
+ * enumeration no longer picks it up directly. It still can't leak `dmSecret`:
+ * the `character` it embeds comes from `this.create(...)`, which IS one of
+ * the enumerated, redaction-covered methods below.
  *
  * A future method that returns a bare `toDomain(row)` — the exact shape of
  * this bug — fails this test immediately, without needing to be added to any
@@ -147,7 +152,6 @@ describe('CharactersService — every Character-returning method redacts dmSecre
       [
         'listForCampaign',
         'getOrThrow',
-        'importFromDdb',
         'create',
         'update',
         'restore',
