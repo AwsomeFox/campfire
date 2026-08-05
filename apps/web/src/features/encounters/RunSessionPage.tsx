@@ -35,6 +35,7 @@ import type {
   CombatantKind,
   ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
+  DiceRoll,
   DifficultyBand,
   EncounterDifficulty,
   EncounterEvent,
@@ -98,6 +99,7 @@ import {
 import { isDown, endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import {
   canStabilizeCombatant,
   hasRestoredTrashedEncounter,
@@ -141,7 +143,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
-import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
+import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
@@ -1049,6 +1051,9 @@ export default function RunSessionPage() {
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  // Issue #1904: the per-combatant "Roll initiative" action animates through the same
+  // shared dice overlay/toast as every other campaign roll.
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
   // #1589 — read from `attemptGridDefaults`, which can run from inside a mutation's
   // `onSettled` callback (see `gridDefaultRetryOnFree`) rather than only from render, so it
   // needs the CURRENT permission rather than whatever was in scope when that callback closure
@@ -1641,15 +1646,12 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
-          // Issue #1901 review (devin-ai-integration): an inventory equip/unequip also
-          // emits character.updated (the combat-action list changed, not just the sheet
-          // fields campaignCharacters covers) — but a character change can only ever affect
-          // the DERIVED action reads (the per-combatant actions query, the turn workspace's
-          // suggestedActions), never the encounter root, its difficulty derivation, or its
-          // combat log. The broader invalidateEncounter() used here originally busted all of
-          // those on every sheet edit — a refetch storm during busy play (party rest
-          // follow-ups, several players editing sheets at once) on the app's heaviest screen.
+          // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
+          // character.updated — invalidate derived encounter actions AND the turn workspace query.
           invalidateEncounterActions(queryClient, eid);
+          if (event.type === 'character.updated' && Number.isFinite(eid)) {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+          }
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
@@ -1695,6 +1697,10 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      // Same staleness the character.updated SSE branch above fixes (issue #1900
+      // review): a dropped-then-recovered stream must not leave the Spellbook's
+      // /turn-sourced slots/spells stale either.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1702,6 +1708,7 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -1907,6 +1914,36 @@ export default function RunSessionPage() {
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  // Issue #1900: the in-combat Spellbook's slot spend/restore. Optimistically flips the
+  // affected pip in the SHARED /turn cache entry (the same `queryKeys.encounterTurn(eid)`
+  // TurnWorkspace itself now reads, since the duplicate child query was removed) so a click
+  // feels instant; a 4xx/5xx rolls the cache back to its pre-click snapshot and surfaces a
+  // toast, rather than leaving a pip showing a spend that never happened server-side.
+  const updateSpellSlot = useMutation({
+    mutationFn: ({ characterId, level, delta }: { characterId: number; level: number; delta: number }) =>
+      api.post<Character>(`${API}/characters/${characterId}/spell-slots`, { level, delta }),
+    onMutate: async ({ level, delta }) => {
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      const previous = queryClient.getQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid));
+      if (previous) {
+        queryClient.setQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid), {
+          ...previous,
+          spellSlots: applyOptimisticSpellSlotDelta(previous.spellSlots, level, delta),
+        });
+      }
+      return { previous };
+    },
+    onError: (err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKeys.encounterTurn(eid), context.previous);
+      setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.spellSlot' })));
+    },
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
     },
   });
 
@@ -2216,6 +2253,70 @@ export default function RunSessionPage() {
     },
   });
 
+  // Issue #1904: server-authoritative "Roll initiative" for one combatant (the DM's own
+  // bulk roll is the `rollInitiative` mutation below). The result animates through the
+  // shared DiceRollOverlay/toast, same as any other campaign roll.
+  const combatantInitiativeRoll = useKeyedMutation({
+    mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
+      api.post<{ combatant: Combatant; roll: DiceRoll | null }>(
+        `${API}/encounters/${eid}/combatants/${combatantId}/roll-initiative`,
+        { idempotencyKey },
+      ),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+      beginRollAnimation(`1d${activeAdapter.initiativeDie}`);
+    },
+    onSuccess: (data) => {
+      // Issue #1904 review finding: applyDisabled, not a label heuristic — an initiative
+      // roll under a non-d20 ruleset (e.g. Starforged's 1d6) otherwise passes
+      // looksLikeDamageRoll's "positive, non-d20, not heal/cure-labeled" test and would
+      // offer to apply the initiative value as HP damage while the apply-damage bridge is
+      // active (any running encounter). This is never damage, structurally, regardless of
+      // die size or label wording.
+      if (data.roll) {
+        showRoll(data.roll, { applyDisabled: true });
+        return;
+      }
+      // Issue #1904 review finding: `roll` is null specifically because THIS encounter is
+      // hidden (DM prep) — only the DM can even reach a hidden encounter's roll-initiative
+      // action, and the shared campaign-wide dice log deliberately gets no row for it. The
+      // roll still happened (data.combatant.initiative/initiativeBreakdown are committed);
+      // cancelling the animation into nothing left the roller watching dice tumble and then
+      // vanish with no result. Synthesize a LOCAL, never-persisted DiceRoll from the
+      // committed breakdown so the one person entitled to see it still gets the same toast
+      // every other roll shows, rather than silence.
+      const breakdown = data.combatant.initiativeBreakdown;
+      if (breakdown == null || breakdown.roll == null || breakdown.total == null) {
+        cancelRollAnimation();
+        return;
+      }
+      const expr = breakdown.modifier === 0 ? `1d${breakdown.die}` : `1d${breakdown.die}${breakdown.modifier > 0 ? '+' : ''}${breakdown.modifier}`;
+      const localRoll: DiceRoll = {
+        id: -data.combatant.id, // synthetic, negative so it can never collide with a real row id
+        campaignId: cid,
+        rollerUserId: me?.user.id !== undefined ? String(me.user.id) : '',
+        rollerName: me?.user.displayName || me?.user.username || '',
+        expr,
+        rolls: [breakdown.roll],
+        total: breakdown.total,
+        label: `${data.combatant.name} · Initiative`,
+        source: 'rolled',
+        createdAt: new Date().toISOString(),
+      };
+      showRoll(localRoll, { applyDisabled: true });
+    },
+    onError: (err) => {
+      cancelRollAnimation();
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
   const patchCombatantTurnState = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
     [combatantTurnState],
@@ -2225,6 +2326,12 @@ export default function RunSessionPage() {
   const rollDeathSave = useCallback(
     (combatant: Pick<Combatant, 'id'>) => deathSaveRoll.mutate({ combatantId: combatant.id }),
     [deathSaveRoll],
+  );
+
+  /** One server roll drives the combatant's initiative and (unless hidden) its shared dice-log entry. */
+  const rollCombatantInitiative = useCallback(
+    (combatant: Pick<Combatant, 'id'>) => combatantInitiativeRoll.mutate({ combatantId: combatant.id }),
+    [combatantInitiativeRoll],
   );
 
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
@@ -3477,8 +3584,7 @@ export default function RunSessionPage() {
       {encounter.status === 'running' && (
         <TurnWorkspace
           encounterId={eid}
-          round={encounter.round}
-          currentCombatantId={currentCombatantId ?? null}
+          turn={turnWorkspace}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
@@ -3488,12 +3594,69 @@ export default function RunSessionPage() {
           gridUnit={encounter.gridUnit}
           gridScale={encounter.gridScale}
           onRollDeathSave={rollDeathSave}
+          onUpdateSpellSlot={
+            // Review fix: derive the actor from turnWorkspace.current (the SAME data the
+            // Spellbook itself renders), not the separately-fetched `currentCombatant` — the
+            // encounter and /turn queries refetch independently, so right after a turn
+            // advance one can briefly hold the new actor while the other still holds the
+            // previous one. Binding to `currentCombatant.characterId` in that window could
+            // debit a different character's slots than the one on screen. `canDmWrite`
+            // (not just `isDm`) also gates the DM branch — an archived/ended campaign must
+            // disable the control, not just have the server reject the write.
+            turnWorkspace?.current?.characterId != null &&
+            ((isDm && canDmWrite) || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+              ? (level, delta, castContext) => {
+                  const actor = turnWorkspace.current!;
+                  const characterId = actor.characterId!;
+                  // Review fix (P1, atomicity): a descriptive-but-structured spec has no
+                  // resolver path, so this is the ONLY write for its action-economy cost and
+                  // concentration — but two separate REST resources (character spell slots,
+                  // combatant turn-state) can never be a single DB transaction without a new
+                  // combined server endpoint. Spend the SLOT first — it rejects loudly with
+                  // NOTHING else touched if there aren't enough left. Only on success apply
+                  // the turn-state patch; if THAT rejects (e.g. the action was already used
+                  // this turn), compensate by refunding the slot rather than leaving it spent
+                  // with no action/concentration recorded. Either both land, or neither does.
+                  const applyCastContext = () => {
+                    if (!castContext) return;
+                    const patch: Record<string, unknown> = {};
+                    if (castContext.costSlot) patch.useSlot = castContext.costSlot;
+                    if (castContext.concentrationName !== undefined) patch.concentration = castContext.concentrationName;
+                    if (Object.keys(patch).length === 0) return;
+                    combatantTurnState.mutate(
+                      { combatantId: actor.combatantId, patch },
+                      {
+                        onError: () => {
+                          if (level != null && delta !== 0) {
+                            updateSpellSlot.mutate({ characterId, level, delta: -delta });
+                          }
+                        },
+                      },
+                    );
+                  };
+                  // A cantrip has no slot to spend (`level` undefined, `delta` 0) but may
+                  // still carry a real castContext — apply it directly, nothing to sequence.
+                  if (level != null && delta !== 0) {
+                    updateSpellSlot.mutate({ characterId, level, delta }, { onSuccess: applyCastContext });
+                    return;
+                  }
+                  applyCastContext();
+                }
+              : undefined
+          }
           onUseSuggestedAction={
-            currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+            // Review fix: bind to turnWorkspace.current — the SAME data the Spellbook and the
+            // suggested-actions list render — instead of the encounter-query-derived
+            // currentCombatantId/orderedCombatants. Same cross-query drift class as the
+            // spell-slot fix above: after a turn advance, resolving the actor through the
+            // separately-refetching encounter query could apply a resolved action (and its
+            // slot/HP/effect writes) to whichever combatant that query still holds, not the
+            // one actually on screen.
+            turnWorkspace?.current != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
-                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
-                  if (!actor || !spec) return;
-                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                  if (!spec) return;
+                  const actor = turnWorkspace.current!;
+                  onUseActionRequested(actor.combatantId, actor.name, actionIndex, actionName, spec);
                 }
               : undefined
           }
@@ -3763,6 +3926,7 @@ export default function RunSessionPage() {
                   onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
                   onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  onRollInitiative={() => rollCombatantInitiative(c)}
                   onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
                   onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
                   onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
@@ -6959,6 +7123,7 @@ function CombatantRow({
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  onRollInitiative,
   onSetInitiative,
   onClearInitiative,
   onAddCondition,
@@ -7036,6 +7201,13 @@ function CombatantRow({
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /**
+   * Roll this combatant's own initiative through the server-authoritative die + shared
+   * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
+   * viewer may edit (their own owned combatant, or the DM); the ownership/already-set
+   * checks are still enforced server-side.
+   */
+  onRollInitiative: () => void;
   onSetInitiative: (value: number) => void;
   /** Clear initiative back to the unrolled state (issue #715) — sends `initiative: null`. */
   onClearInitiative: () => void;
@@ -7256,19 +7428,24 @@ function CombatantRow({
         </div>
       ) : (
         <div className="flex items-center" style={{ gap: 2 }}>
-          {combatant.initiative === null && canEditPermission && onSetInitiative ? (
+          {combatant.initiative === null && canEditPermission && adapter.initiativeModel?.mode !== 'group' ? (
+            // Issue #1904: a server-authoritative roll (crypto RNG, breakdown, combat-log
+            // event, and a labeled shared dice-log row), not a client-computed value pushed
+            // through the manual PATCH — a player's own die roll is now real evidence, not
+            // a trusted client claim. Hidden under group initiative (issue #765): a side
+            // shares one roll, which only the DM's bulk "Roll remaining" can produce.
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-primary cf-target-44"
+              data-testid={`roll-initiative-${combatant.id}`}
+              aria-label={`Roll initiative for ${combatant.name}`}
+              aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
               style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
               disabled={busy || syncBlocked}
-              title={combatant.initiativeBreakdown?.formula || "Roll initiative"}
-              onClick={() => {
-                const roll = Math.floor(Math.random() * (adapter.initiativeDie ?? 20)) + 1 + (combatant.initMod ?? 0);
-                onSetInitiative(roll);
-              }}
+              title="Roll initiative"
+              onClick={onRollInitiative}
             >
-              Roll Init
+              Roll initiative
             </button>
           ) : (
             <span

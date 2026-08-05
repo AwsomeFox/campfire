@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -634,6 +634,37 @@ export class EncountersController {
     // distinguish that safe read from a fresh write after membership is established.
     const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
     return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
+  }
+
+  @Post(':id/combatants/:cid/roll-initiative')
+  @ApiOperation({
+    summary: 'Roll initiative for one combatant',
+    description:
+      'dm role required for any combatant; a player may roll only a combatant linked to a character they own. The server rolls adapter.initiativeDie + initMod, writes the breakdown, audits the write, and records one matching campaign-shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless the DM passes overwrite: true. 400 for a group-initiative rule system — a side shares one roll; use the bulk POST .../roll-initiative instead.',
+  })
+  @ApiResponse({ status: 201, description: 'The updated combatant and the dice-log roll (null when the encounter is hidden).' })
+  @ApiResponse({ status: 400, description: 'The active rule system uses group initiative — roll for the whole side via the bulk endpoint instead.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or owning player.' })
+  @ApiResponse({ status: 404, description: 'Encounter or combatant was deleted or does not exist.' })
+  @ApiResponse({ status: 409, description: 'Initiative is already set for this combatant.' })
+  async rollCombatantInitiative(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantRollInitiativeDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    // A same-key retry is a read of the stored response, so retain the soft-deleted
+    // encounter long enough to establish current membership. Fresh writes are rejected
+    // by the transaction-local mutable check in the service.
+    const row = await this.encounters.getRowOrThrow(id, true);
+    await this.access.requireMember(user, row.campaignId, { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }))) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
+    // A same-key retry only replays an already-committed response. Let the service
+    // distinguish that safe read from a fresh write after membership is established.
+    const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+    return this.encounters.rollCombatantInitiative(id, cid, body.idempotencyKey, body.overwrite, user, role);
   }
 
   @Post(':id/token-batches/preview') @HttpCode(200)

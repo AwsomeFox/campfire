@@ -45,6 +45,18 @@ export function reliableDiceSubtotal(roll: DiceRoll): number | undefined {
 export interface ShowRollOptions {
   /** Encounter apply-damage handler captured at roll time (character-card rolls). */
   onApply?: ApplyDamageHandler;
+  /**
+   * Structurally excludes this roll from the apply-damage bridge (issue #1904 review
+   * finding), regardless of what `looksLikeDamageRoll`'s label/expression heuristic would
+   * conclude. Needed because that heuristic has no notion of roll INTENT — it only sees a
+   * positive, non-d20, non-"heal"/"cure"-labeled expression, which is exactly what a
+   * non-5e initiative roll (e.g. Starforged's 1d6) looks like. Extending the heuristic with
+   * an "initiative" label check would only move the same guess one word along for the next
+   * non-d20 roll kind that isn't damage; this flag lets a caller that KNOWS its roll's
+   * intent opt out unconditionally instead. Full roll-kind plumbing is issue #1511's
+   * broader scope — this is the narrow, call-site-scoped fix this PR needs.
+   */
+  applyDisabled?: boolean;
 }
 
 interface OverlayState {
@@ -73,6 +85,9 @@ const RollResultToastContext = createContext<RollResultToastContextValue>(noop);
 export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const [roll, setRoll] = useState<DiceRoll | null>(null);
   const [rollApplyHandler, setRollApplyHandler] = useState<ApplyDamageHandler | null>(null);
+  // Issue #1904 review finding: set from ShowRollOptions.applyDisabled at showRoll time —
+  // structurally overrides looksLikeDamageRoll for a roll whose caller knows it is not damage.
+  const [rollApplyDisabled, setRollApplyDisabled] = useState(false);
   const applyHandlerRef = useRef<ApplyDamageHandler | null>(null);
   const [overlay, setOverlay] = useState<OverlayState | null>(null);
 
@@ -111,6 +126,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
     setRollApplyHandler(options?.onApply ?? null);
+    setRollApplyDisabled(options?.applyDisabled === true);
   }, []);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
@@ -156,21 +172,24 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const dismiss = useCallback(() => {
     setRoll(null);
     setRollApplyHandler(null);
+    setRollApplyDisabled(false);
   }, []);
 
   const activeApplyHandler = rollApplyHandler ?? applyHandlerRef.current;
 
   const handleApply = useCallback(() => {
     if (!roll) return;
+    if (rollApplyDisabled) return;
     const handler = rollApplyHandler ?? applyHandlerRef.current;
     if (!handler) return;
     if (rollApplyHandler == null && !looksLikeDamageRoll(roll)) return;
     const label = roll.label || roll.expr;
     handler(Math.max(0, roll.total), label, reliableDiceSubtotal(roll));
     dismiss();
-  }, [roll, rollApplyHandler, dismiss]);
+  }, [roll, rollApplyHandler, rollApplyDisabled, dismiss]);
 
   const canApply =
+    !rollApplyDisabled &&
     roll != null &&
     activeApplyHandler != null &&
     (rollApplyHandler != null || looksLikeDamageRoll(roll));

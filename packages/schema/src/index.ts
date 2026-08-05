@@ -10370,6 +10370,26 @@ export const DeathSaveRollRequest = z.object({
 export type DeathSaveRollRequest = z.infer<typeof DeathSaveRollRequest>;
 
 /**
+ * Body for the server-authoritative per-combatant initiative roll (issue #1904). The
+ * caller supplies no die result — the server rolls `adapter.initiativeDie + initMod`,
+ * writes the roll + its breakdown, and records one matching campaign-shared dice-log
+ * entry (skipped only for a hidden encounter, since the dice log is campaign-wide). A
+ * combatant that already has initiative set 409s unless `overwrite` is sent by the DM.
+ * 400s for a group-initiative rule system — a side shares one roll, which stays
+ * exclusively the DM's bulk `POST /encounters/:id/roll-initiative`.
+ */
+export const CombatantRollInitiativeRequest = z.object({
+  // Same replay contract as DeathSaveRollRequest: a lost-response retry replays the
+  // committed roll instead of rolling again.
+  idempotencyKey: z.string().min(1).max(128),
+  // DM-only escape hatch to re-roll a combatant that already has initiative set. A
+  // non-DM caller sending this is still 409'd server-side — the field is silently
+  // ignored rather than granting a player overwrite power via a body flag.
+  overwrite: z.boolean().optional(),
+});
+export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiativeRequest>;
+
+/**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
  * When the sheet advanced after /end, the DM must choose a resync direction before
  * reopening — never silently overwrite intervening healing/rest.
@@ -10571,6 +10591,57 @@ export const TurnSuggestedAction = z.object({
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
 
+/**
+ * A castable spell surfaced in the current-turn workspace (issue #1900) — the in-combat
+ * Spellbook's data source. Derived server-side from the SAME action rows as
+ * {@link TurnSuggestedAction} (see {@link deriveTurnSpells}), never fabricated: fields with no
+ * data model (school, range, casting time) simply do not exist here. `level`/`castingSlot`/
+ * `concentration` come straight off the row's `spec.uses`/`spec.cost` — there is no separate
+ * spell data model.
+ */
+export const TurnSpellEntry = z.object({
+  name: z.string().min(1).max(160),
+  // 0 = cantrip / at-will; 1-9 = the slot level the row's structured spec declares.
+  level: z.number().int().min(0).max(9),
+  // Adapter action-economy slot this spell's cast consumes ('action', 'bonus', …); '' = unset.
+  castingSlot: z.string().max(40).default(''),
+  concentration: z.boolean().default(false),
+  // Same index space as TurnSuggestedAction.actionIndex — feeds the resolve/apply Use flow.
+  actionIndex: z.number().int().min(0).optional(),
+  resolvable: z.boolean().default(false),
+  spec: ActionSpec.nullable().optional(),
+});
+export type TurnSpellEntry = z.infer<typeof TurnSpellEntry>;
+
+/**
+ * Pure derivation (issue #1900): pick the spell-qualifying rows out of the same
+ * `TurnSuggestedAction[]` the workspace already built for `suggestedActions`, and reshape them
+ * into {@link TurnSpellEntry}. A row qualifies when its structured spec spends a spell slot
+ * (`spec.uses.spellLevel >= 1`), or its source/kind reads as a spell or cantrip at level 0 (a
+ * cantrip has no slot to spend, so `spellLevel` alone can't distinguish it from a non-spell
+ * action). No school/range/casting-time invention — those fields have no data model and are
+ * simply absent from the result, unlike the deleted client-side fallback this replaces.
+ */
+export function deriveTurnSpells(actions: readonly TurnSuggestedAction[]): TurnSpellEntry[] {
+  const out: TurnSpellEntry[] = [];
+  for (const a of actions) {
+    const level = a.spec?.uses?.spellLevel ?? 0;
+    const kind = a.source.trim().toLowerCase();
+    const isSpellKind = kind === 'spell' || kind === 'cantrip';
+    if (level < 1 && !isSpellKind) continue;
+    out.push({
+      name: a.name,
+      level,
+      castingSlot: a.spec?.cost?.slot ?? '',
+      concentration: a.spec?.uses?.concentration ?? false,
+      actionIndex: a.actionIndex,
+      resolvable: a.resolvable,
+      spec: a.spec ?? null,
+    });
+  }
+  return out;
+}
+
 /** Quick-roll request body for one-tap attack or damage roll in an encounter (issue #1850). */
 export const QuickRollRequest = z.object({
   combatantId: Id.optional(),
@@ -10653,6 +10724,12 @@ export const TurnWorkspace = z.object({
   suggestedActions: z.array(TurnSuggestedAction),
   startPrompts: z.array(TurnPrompt),
   endPrompts: z.array(TurnPrompt),
+  // Issue #1900: the current combatant's persisted spell slots (character actors only) —
+  // null for a monster/NPC actor, or when the viewer doesn't pass the detail gate above.
+  spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).nullable(),
+  // Issue #1900: castable spells derived from the same rows as `suggestedActions` (see
+  // {@link deriveTurnSpells}) — empty when the actor is not a character or has none.
+  spells: z.array(TurnSpellEntry),
 });
 export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
 
@@ -10990,6 +11067,18 @@ export const RollResult = z.object({
   actor: z.string().max(120).optional(),
   /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
   natural20: z.number().int().min(1).max(20).optional(),
+  /**
+   * Issue #1904 review finding: the encounter/NPC this roll's identity is tied to, when
+   * applicable (currently: per-combatant and bulk initiative rolls). A write-time-only
+   * secrecy check cannot react to the encounter or NPC becoming hidden LATER — the label was
+   * safe to persist when written but the entity it names may not stay visible. Carrying these
+   * ids lets the read path (`RollsService.listForCampaign`) re-check CURRENT visibility and
+   * redact accordingly, instead of baking a permanent, unredactable name into the shared log.
+   * Absent for the vast majority of rolls (checks, quick-rolls, saves, …), which have no such
+   * identity tie and are unaffected.
+   */
+  encounterId: z.number().int().positive().optional(),
+  npcId: z.number().int().positive().optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 

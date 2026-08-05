@@ -3,9 +3,9 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -78,6 +78,7 @@ import {
   readEncounterOpAfterRace,
   recordEncounterOp,
   type EncounterOpClaim,
+  type EncounterOpPrior,
 } from './encounter-idempotency';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
@@ -348,6 +349,35 @@ function manualInitiativeBreakdown(adapter: RuleSystemAdapter, modifier: number)
     terms,
     formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
   });
+}
+
+/**
+ * Terms to display for a roll against the CURRENT modifier (issue #1904 review finding).
+ * A DM's PATCH to `initMod` (creation-time fix, or a mid-campaign stat change) updates only the
+ * `initMod` column — the previously-stored `initiativeBreakdown.terms` (e.g. "DEX +2") is left
+ * untouched. Rolling afterward while reusing those stale terms verbatim produces a formula that
+ * visibly contradicts its own total (terms sum to the OLD modifier; `total` is computed from the
+ * NEW one). If the stored terms still sum to the current modifier, nothing drifted — keep them,
+ * since they may carry a richer label than a flat number. If they don't, collapse to one flat
+ * term so the displayed formula can never disagree with the total beside it.
+ */
+function initiativeTermsForModifier(
+  existing: CombatantInitiativeBreakdown,
+  modifier: number,
+): Array<{ label: string; value: number }> {
+  const staleSum = existing.terms.reduce((sum, t) => sum + t.value, 0);
+  return staleSum === modifier ? existing.terms : [{ label: 'initiative', value: modifier }];
+}
+
+/** Bare dice expression for a shared dice-log row (issue #1904) — e.g. "1d20+3", "1d20-1", "1d20". */
+function initiativeRollExpr(die: number, modifier: number): string {
+  if (modifier === 0) return `1d${die}`;
+  return `1d${die}${modifier >= 0 ? '+' : ''}${modifier}`;
+}
+
+/** Dice-log label for a group-initiative side roll (issue #765 / #1904) — "party" -> "Party". */
+function groupInitiativeLabel(group: string): string {
+  return group.length > 0 ? group[0].toUpperCase() + group.slice(1) : group;
 }
 
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
@@ -4179,7 +4209,6 @@ export class EncountersService {
     const isDm = role === 'dm';
     if (!isDm) {
       // Identity edits and combat-log actor are DM-only.
-      // Players may set initiative on their own combatant (#1457).
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
       // patching their own combatant must not spoof who dealt the damage/heal.
       //
@@ -4200,8 +4229,28 @@ export class EncountersService {
             'Only a DM may set the combat-log actor. Omit actorId — damage is attributed to the current-turn combatant automatically.',
         });
       }
-      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
-        throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
+      // Issue #1904 (review finding): a player could formerly set initiative to ANY
+      // value on their own combatant (#1457) via this manual PATCH, entirely
+      // bypassing the server RNG, idempotency, and dice-log evidence the new
+      // POST .../roll-initiative endpoint provides. That made "server-authoritative
+      // initiative" a UI-only convention — a disabled button, not a server rule — since
+      // any direct request (or an old client) could still choose its own value. A
+      // player rolls their own initiative exclusively through the dedicated endpoint
+      // now; manual initiative PATCHes (set or clear) are DM-only, same as name/hpMax/
+      // initMod/tokenSize. Absolute rule, same reasoning as actorId above: a player
+      // never needs to send this field, so it is rejected outright rather than ignored.
+      if (
+        patch.name !== undefined ||
+        patch.hpMax !== undefined ||
+        patch.initMod !== undefined ||
+        patch.tokenSize !== undefined ||
+        patch.initiative !== undefined
+      ) {
+        throw new ForbiddenException({
+          code: 'COMBATANT_FIELD_DM_ONLY',
+          message:
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+        });
       }
       if (!existing.characterId) {
         throw new ForbiddenException('Only dm may modify this combatant');
@@ -4269,9 +4318,12 @@ export class EncountersService {
     // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    // Initiative: DMs can set on any combatant; players can set on their own (#1457).
-    // The ownership guard above already rejected non-owned combatants for non-DMs.
-    if (patch.initiative !== undefined) staticUpdate.initiative = patch.initiative;
+    // Initiative: DM-only manual set/clear (issue #1904 — see the ForbiddenException
+    // above, which already rejects a non-DM's `initiative` outright). A player rolls
+    // their own initiative exclusively through POST .../roll-initiative now, not this
+    // manual PATCH (formerly allowed for the owning player under #1457). `&& isDm` here
+    // is defense-in-depth matching the sibling identity fields below, not the only gate.
+    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
@@ -5549,13 +5601,52 @@ export class EncountersService {
         .where(and(eq(combatants.encounterId, encounterId), isNull(combatants.initiative)))
         .all();
 
+      // Issue #1904 review finding: the dice log is campaign-wide and performs no
+      // read-time redaction (unlike the roster/combat-log reads, which mask a
+      // hidden-NPC combatant's identity — see getWithCombatantsOrThrow above and
+      // listEncounterEvents' redactEncounterEventsForViewer). Individual-mode labels
+      // below borrow the combatant's raw name, so a hidden NPC's identity must be
+      // masked before it reaches that label — same rule the quick-roll dice log
+      // already applies (issue #1850).
+      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+      const hiddenNpcIds = new Set<number>();
+      if (npcIdsInRoll.length > 0) {
+        const hiddenRows = tx.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIdsInRoll), eq(npcs.hidden, true))).all();
+        for (const r of hiddenRows) hiddenNpcIds.add(r.id);
+      }
+      const diceLogName = (row: { kind: string; npcId: number | null; name: string }): string =>
+        row.kind === 'npc' && row.npcId !== null && hiddenNpcIds.has(row.npcId) ? UNKNOWN_COMBATANT_LABEL : row.name;
+
+      // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
+      // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
+      // it leave the same campaign-wide trail a manual roll would. Built alongside `rolled`
+      // so a fully-rolled roster (rolled.length === 0 below) still inserts nothing.
+      //
+      // `npcId` (individual mode only — a group-mode label names a SIDE, never an
+      // individual) lets RollsService.listForCampaign redact the label at READ time if the
+      // linked NPC becomes hidden AFTER this roll was written (review finding on #1904): a
+      // write-time-only check cannot react to a later hide. `encounterId` on every entry
+      // (both modes) lets the same read path drop the whole row if the ENCOUNTER itself is
+      // later hidden — mirroring the write-time rule right below that a hidden encounter's
+      // roll must never reach the campaign-wide log in the first place.
+      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number; npcId?: number }> = [];
+
       if (initModel.mode === 'group') {
         // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
         const groupRolls = new Map<string, number>();
         rolled = unrolled.map((row) => {
           const group = row.initiativeGroup ?? (row.kind === 'character' || row.kind === 'npc' ? 'party' : 'monsters');
-          if (!groupRolls.has(group)) groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
+          const isNewGroupRoll = !groupRolls.has(group);
+          if (isNewGroupRoll) groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
           const base = groupRolls.get(group)!;
+          if (isNewGroupRoll) {
+            diceLogEntries.push({
+              label: `${groupInitiativeLabel(group)} · Initiative`,
+              expr: `1d${adapter.initiativeDie}`,
+              rolls: [base],
+              total: base,
+            });
+          }
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, 0);
           const breakdown = CombatantInitiativeBreakdown.parse({
             ...existing,
@@ -5573,19 +5664,53 @@ export class EncountersService {
           const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
           const natural = initiative - row.initMod;
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
+          // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever
+          // the stored breakdown's terms summed to when it was last written — a DM's PATCH
+          // to initMod after creation touches only that column, so stale terms here would
+          // format a formula that visibly contradicts the total/modifier computed below.
+          const terms = initiativeTermsForModifier(existing, row.initMod);
           const breakdown = CombatantInitiativeBreakdown.parse({
             ...existing,
             die: adapter.initiativeDie,
             roll: natural,
             modifier: row.initMod,
             total: initiative,
-            formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+            terms,
+            formula: initiativeFormula(adapter.initiativeDie, terms, natural, initiative),
+          });
+          diceLogEntries.push({
+            label: `${diceLogName(row)} · Initiative`,
+            expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
+            rolls: [natural],
+            total: initiative,
+            ...(row.kind === 'npc' && row.npcId !== null ? { npcId: row.npcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
       }
 
       if (rolled.length === 0) return;
+
+      // Issue #1904 secrecy: the dice log is campaign-wide, so a hidden encounter's bulk
+      // roll must never leak into it (matches the per-combatant roll's same rule below).
+      if (!fresh.hidden) {
+        for (const entry of diceLogEntries) {
+          this.rolls.recordInTransaction(
+            tx,
+            fresh.campaignId,
+            {
+              expr: entry.expr,
+              rolls: entry.rolls,
+              total: entry.total,
+              label: entry.label,
+              source: 'rolled',
+              encounterId,
+              ...(entry.npcId !== undefined ? { npcId: entry.npcId } : {}),
+            },
+            user,
+          );
+        }
+      }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
       const breakdownCases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${toJsonText(r.breakdown)}`), sql` `);
       tx.update(combatants)
@@ -5656,6 +5781,287 @@ export class EncountersService {
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
+  }
+
+  /**
+   * Server-authoritative initiative roll for ONE combatant (issue #1904) — the player-facing
+   * counterpart to the DM's bulk {@link rollInitiative}. The DM may roll any combatant; a
+   * player may roll only a combatant linked to a character they own (everyone else 403s).
+   * Allowed while `preparing`, or while `running` with a still-null initiative (the same
+   * late-joiner case the bulk roll fills); a combatant that already has initiative set 409s
+   * unless the DM passes `overwrite: true`. The rolled face, its breakdown, a combat-log
+   * 'roll' event, and one labeled shared dice-log row all commit in ONE transaction
+   * (death-save precedent, issue #1462) — except the dice-log row, which is skipped for a
+   * hidden encounter since the dice log is campaign-wide (only the DM can even reach a
+   * hidden encounter here; non-DM callers already 404 above).
+   *
+   * 400s for a group-initiative rule system (issue #765): a side shares ONE roll, so a
+   * single-combatant write here would desync it from the rest of its side. That side-wide
+   * roll stays exclusively the bulk `rollInitiative` path.
+   */
+  async rollCombatantInitiative(
+    encounterId: number,
+    combatantId: number,
+    idempotencyKey: string,
+    overwrite: boolean | undefined,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ combatant: Combatant; roll: DiceRoll | null }> {
+    // A retained trashed row is sufficient to authorize an existing keyed replay; fresh
+    // writes still fail in the transaction-local mutable check below.
+    const encounter = await this.getRowOrThrow(encounterId, true);
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const opClaim: EncounterOpClaim = {
+      actorId: user.id,
+      operation: 'combatant.roll_initiative',
+      key: idempotencyKey,
+      encounterId,
+      campaignId: encounter.campaignId,
+      fingerprint: encounterOpFingerprint({ combatantId, overwrite: overwrite === true }),
+    };
+    const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll | null } | null => {
+      // `response` is `null` outright when the claim committed but its body was never
+      // backfilled (see the analogous turn-advance comment on this exact window) — optional
+      // chaining here, not a bare property access, so that state resolves to "cannot replay"
+      // rather than throwing before resolveReplay ever gets to decide what to do about it.
+      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }> | null | undefined;
+      return candidate?.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
+    };
+    // Issue #1904 review finding: the stored response was rendered for the ROLE that
+    // committed it. If the caller's role has since changed within the replay window (e.g. a
+    // DM demoted to player/viewer), replaying that stored projection verbatim would leak
+    // whatever the DM saw — exact monster HP, an unmasked hidden-NPC name or npcId, an
+    // un-redacted dice-log label — to a lower-privileged caller. BOTH halves need
+    // re-deriving on a mismatch: `combatant` via a fresh role-filtered read (below), and
+    // `roll` via RollsService.redactRollForRole — the dice log itself is no longer
+    // universally identical across roles (it gets the SAME read-time redaction
+    // listForCampaign applies), so reusing the stored `roll` verbatim would bypass exactly
+    // the read-time check that redaction exists for. The roll already committed either way
+    // — this re-renders CURRENT state for the caller's role rather than re-running the
+    // effect, mirroring the turn-advance precedent (issue #580) of falling through to fresh
+    // server truth on a role mismatch.
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
+      const parsed = replayResponse(prior.response);
+      if (!parsed) return null;
+      if (prior.responseRole === role) return parsed;
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (!found) return null;
+      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+      return { combatant: found, roll };
+    };
+    const findPrior = (): EncounterOpPrior | null => {
+      let prior: EncounterOpPrior | null = null;
+      this.db.transaction((tx) => {
+        prior = findPriorEncounterOp(tx, opClaim, Date.now());
+      });
+      return prior;
+    };
+    const earlyPrior = findPrior();
+    if (earlyPrior) {
+      const earlyReplay = await resolveReplay(earlyPrior);
+      if (earlyReplay) return earlyReplay;
+    }
+
+    try {
+      const adapter = await this.adapterForCampaign(encounter.campaignId);
+      const initModel = initiativeModelForAdapter(adapter);
+
+      // This pre-read authorizes the actor before any transactional work. The mutable /
+      // already-set checks live inside the transaction below, off a fresh row, so a
+      // concurrent change between this read and the write cannot be raced past.
+      const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+      if (role !== 'dm') {
+        if (combatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+        }
+      }
+      // Group-initiative systems (issue #765) share ONE die per side — a per-combatant
+      // roll that only wrote this one row would leave it out of sync with the rest of its
+      // side (and with whatever the DM's bulk roll later assigns everyone else on it).
+      // That side-wide roll stays exclusively the bulk `rollInitiative` path; this
+      // single-combatant action is for individual-initiative systems only.
+      if (initModel.mode === 'group') {
+        throw new BadRequestException(
+          'This rule system uses group initiative — ask the DM to roll for the whole side (Roll remaining).',
+        );
+      }
+
+      let roll: DiceRoll | null = null;
+      let committed!: Combatant;
+      let freshEncounterRow!: typeof encounters.$inferSelect;
+      // Holds the raw prior (not yet role-resolved) when this transaction lands on a race —
+      // the same key committed between the early check above and this transaction starting.
+      // Resolved via resolveReplay AFTER the transaction, since that may need an async
+      // role-filtered re-read and this callback is a synchronous better-sqlite3 transaction.
+      let priorFromRace: EncounterOpPrior | null = null;
+
+      this.db.transaction((tx) => {
+        const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+        if (prior) {
+          priorFromRace = prior;
+          return;
+        }
+        const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+        if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        this.assertMutable(fresh);
+        this.assertCampaignWritableInTx(tx, fresh.campaignId);
+        if (!isVisibleTo({ hidden: fresh.hidden }, role)) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
+        const [freshCombatant] = tx
+          .select()
+          .from(combatants)
+          .where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId)))
+          .limit(1)
+          .all();
+        if (!freshCombatant) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+        if (role !== 'dm') {
+          if (freshCombatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
+          const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, freshCombatant.characterId)).limit(1).all();
+          if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
+            throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+          }
+        }
+        if (freshCombatant.initiative !== null && !(role === 'dm' && overwrite === true)) {
+          throw new ConflictException({
+            code: 'INITIATIVE_ALREADY_SET',
+            message: 'This combatant already has an initiative — the DM can pass overwrite to re-roll.',
+          });
+        }
+        // Running combat only ever fills a still-null initiative here (the late-joiner
+        // case `rollInitiative` also handles) — the check above already guarantees that
+        // unless a DM explicitly opted into overwriting mid-fight.
+
+        const rollModifier = freshCombatant.initMod;
+        const initiative = rollInitiative(rollModifier, adapter.initiativeDie);
+        const natural = initiative - rollModifier;
+        const existing = parseInitiativeBreakdown(freshCombatant.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, rollModifier);
+        // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever the
+        // stored breakdown's terms summed to when it was last written. A DM's PATCH to
+        // initMod (creation-time fix, or a mid-campaign stat change) touches only that
+        // column, so reusing stale terms here would format a formula (e.g. "+2") beside a
+        // total/modifier that were actually computed from a different value (e.g. "+5").
+        const terms = initiativeTermsForModifier(existing, rollModifier);
+        const breakdown = CombatantInitiativeBreakdown.parse({
+          ...existing,
+          die: adapter.initiativeDie,
+          roll: natural,
+          modifier: rollModifier,
+          total: initiative,
+          terms,
+          formula: initiativeFormula(adapter.initiativeDie, terms, natural, initiative),
+        });
+
+        tx.update(combatants)
+          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .where(eq(combatants.id, combatantId))
+          .run();
+
+        // Filling a late joiner's initiative mid-fight re-sorts the order, so keep the
+        // positional index aligned with the unchanged identity pointer (mirrors the bulk roll).
+        if (fresh.status === 'running') {
+          const sorted = this.sortCombatantsWithAdapter(
+            tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+            'running',
+            adapter,
+          );
+          const turnIndex = turnIndexFor(sorted, fresh.currentCombatantId);
+          tx.update(encounters).set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            ...(turnIndex !== fresh.turnIndex ? { updatedAt: nowIso() } : {}),
+          }).where(eq(encounters.id, encounterId)).run();
+        }
+
+        this.appendEventInTransaction(tx, encounterId, fresh.round, 'roll', {
+          target: freshCombatant.name,
+          targetId: combatantId,
+          detail: `initiative ${breakdown.formula}`,
+        });
+
+        // Issue #1904 secrecy: the dice log is campaign-wide. Only the DM can reach a
+        // hidden encounter this far (non-DM callers already 404 above), and a hidden
+        // encounter's roll must never leak into the shared log. Same rule for a
+        // combatant borrowing a hidden NPC's identity (review finding, same masking
+        // the quick-roll dice log already applies for issue #1850): mask here at write
+        // time for the state at THIS moment, AND persist encounterId/npcId so
+        // RollsService.listForCampaign can redact this row again at READ time if the
+        // encounter or NPC becomes hidden LATER — a write-time check alone cannot react
+        // to a hide that happens after the roll was already recorded.
+        if (!fresh.hidden) {
+          let hiddenNpcName = false;
+          if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
+            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, freshCombatant.npcId)).limit(1).all();
+            hiddenNpcName = npc?.hidden === true;
+          }
+          const label = `${hiddenNpcName ? UNKNOWN_COMBATANT_LABEL : freshCombatant.name} · Initiative`;
+          const expr = initiativeRollExpr(adapter.initiativeDie, rollModifier);
+          roll = this.rolls.recordInTransaction(
+            tx,
+            fresh.campaignId,
+            {
+              expr,
+              rolls: [natural],
+              total: initiative,
+              label,
+              source: 'rolled',
+              encounterId,
+              ...(freshCombatant.kind === 'npc' && freshCombatant.npcId !== null ? { npcId: freshCombatant.npcId } : {}),
+            },
+            user,
+          );
+        }
+
+        this.audit.logInTx(tx, {
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'encounter.combatant.roll_initiative',
+          entityType: 'combatant',
+          entityId: combatantId,
+          campaignId: fresh.campaignId,
+          detail: `${freshCombatant.name}: ${initiative}`,
+        });
+
+        const [updatedRow] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        committed = combatantToDomain(updatedRow);
+        freshEncounterRow = fresh;
+
+        recordEncounterOp(tx, opClaim, nowIso(), { body: { combatant: committed, roll }, role });
+      });
+
+      if (priorFromRace) {
+        // The write branch above never ran (it returned early the moment it found this
+        // race), so `committed`/`freshEncounterRow` were never assigned — falling through
+        // to the fresh-write emit/return below would dereference undefined and 500 instead
+        // of replaying. Resolve the race's outcome for THIS caller's role, or, on the rare
+        // case that fails (role mismatch AND the combatant is no longer visible to it —
+        // e.g. removed since), surface a 404 rather than crash. Either way, a race replay
+        // must return here: the op already committed under the concurrent request, which
+        // owns the ONE audit entry + SSE signal for it (same reasoning as the analogous
+        // bulk-roll/turn-advance "an idempotent replay stops here" comments elsewhere).
+        const raceReplay = await resolveReplay(priorFromRace);
+        if (raceReplay) return raceReplay;
+        throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      }
+      this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      return { combatant: committed, roll };
+    } catch (err) {
+      // The original same-key request can commit after our early replay lookup but before
+      // a mutable-row preflight (for example, before another DM ends the encounter).
+      // Recheck the stored outcome before surfacing that later 404/409/403 so an ambiguous
+      // retry still recovers the committed authoritative result.
+      const latePrior = findPrior();
+      if (latePrior) {
+        const lateReplay = await resolveReplay(latePrior);
+        if (lateReplay) return lateReplay;
+      }
+      throw err;
+    }
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -6725,6 +7131,8 @@ export class EncountersService {
       suggestedActions: [],
       startPrompts: [],
       endPrompts: [],
+      spellSlots: null,
+      spells: [],
     };
     if (status !== 'running') {
       return base;
@@ -6778,6 +7186,17 @@ export class EncountersService {
     const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
     const suggestedActions = await this.suggestedActionsForCombatant(current);
 
+    // Issue #1900: spellSlots/spells are the in-combat Spellbook's real data source, gated
+    // by the exact same canSeeDetail check as the rest of the detailed workspace above — a
+    // player never receives another PC's or a monster's spell data through this payload.
+    // Scoped to character actors only (a monster/NPC has no persisted spell-slot pool).
+    let spellSlots: Record<string, SpellSlotLevel> | null = null;
+    let spells: TurnSpellEntry[] = [];
+    if (current.kind === 'character' && current.characterId !== null) {
+      spellSlots = await this.spellSlotsForCharacter(current.characterId);
+      spells = deriveTurnSpells(suggestedActions);
+    }
+
     return {
       ...base,
       current: currentActor,
@@ -6792,7 +7211,15 @@ export class EncountersService {
       suggestedActions,
       startPrompts: deriveStartTurnPrompts(current),
       endPrompts: deriveEndTurnPrompts(current, model.slots),
+      spellSlots,
+      spells,
     };
+  }
+
+  /** The character's persisted per-level spell slot map (issue #1900), `{}` when it has none. */
+  private async spellSlotsForCharacter(characterId: number): Promise<Record<string, SpellSlotLevel>> {
+    const [character] = await this.db.select({ spellSlots: characters.spellSlots }).from(characters).where(eq(characters.id, characterId)).limit(1);
+    return fromJsonText<Record<string, SpellSlotLevel>>(character?.spellSlots ?? null, {});
   }
 
   /** Resolve a combatant into a TurnActor, looking up the linked character's owner (issue #413). */
