@@ -9189,6 +9189,23 @@ export const AoeTemplate = z.object({
 export type AoeTemplate = z.infer<typeof AoeTemplate>;
 
 /**
+ * A caller-supplied template declaration (issue #1913). The server sets the
+ * declarer from the authenticated identity, so accepting `declaredByUserId`
+ * here would let a player impersonate another template owner. `.strict()` is
+ * therefore an authorization boundary, not merely DTO hygiene.
+ */
+export const AoeTemplateDeclare = AoeTemplate.omit({ declaredByUserId: true }).strict();
+export type AoeTemplateDeclare = z.infer<typeof AoeTemplateDeclare>;
+
+/**
+ * Fields a caller may change on an existing AoE template (issue #1913). Its
+ * route supplies the template id; ownership and declarer attribution always
+ * remain server-controlled.
+ */
+export const AoeTemplateUpdate = AoeTemplateDeclare.omit({ id: true }).partial().strict();
+export type AoeTemplateUpdate = z.infer<typeof AoeTemplateUpdate>;
+
+/**
  * A transient "look here" ping broadcast over SSE (issue #238). Not persisted — it rides the
  * campaign event stream as a one-shot signal that every open client renders for a moment and
  * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
