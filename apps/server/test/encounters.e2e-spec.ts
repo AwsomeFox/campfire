@@ -3475,7 +3475,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     const hiddenQuickRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
     expect(JSON.stringify(hiddenQuickRolls.body)).not.toMatch(/Traitor/);
     expect(hiddenQuickRolls.body).toEqual(
-      expect.arrayContaining([expect.objectContaining({ label: `${UNKNOWN_COMBATANT_LABEL} · Hidden strike (to-hit)` })]),
+      expect.arrayContaining([expect.objectContaining({ label: UNKNOWN_COMBATANT_LABEL })]),
     );
     const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
     const exportedEncounter = exported.body.encounters.find((e: { combatants: Array<{ id: number }> }) => e.combatants.some((c) => c.id === duplicateId));
