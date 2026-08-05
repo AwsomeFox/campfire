@@ -62,6 +62,96 @@ async function settleNoPing(page: Page, pings: MapPing[], expectedCount: number)
   expect(pings).toHaveLength(expectedCount);
 }
 
+/**
+ * Poll until an element's rendered box stops moving/resizing across two reads
+ * a beat apart (issue #1954). The fixture's own setup — and, later, a ping's
+ * mutation settling — can leave a smooth-scroll (e.g. the initiative strip's
+ * current-turn item scrolling itself into view on every re-render) still in
+ * flight. A tap dispatched mid-scroll computes its `clientX`/`clientY` from
+ * whatever rect is live at that instant, so two events in the same gesture
+ * (arm, then release) can disagree about where the surface actually is.
+ * Waiting for stability — not just presence — removes the race, the same
+ * `expect.poll` idiom `encounter-active-row-scroll.spec.ts` already uses.
+ */
+async function waitForStableBounds(locator: Locator): Promise<void> {
+  let last: { x: number; y: number; width: number; height: number } | null = null;
+  await expect
+    .poll(
+      async () => {
+        const box = await locator.boundingBox();
+        if (!box) return false;
+        const stable =
+          last != null &&
+          Math.abs(box.x - last.x) < 0.1 &&
+          Math.abs(box.y - last.y) < 0.1 &&
+          Math.abs(box.width - last.width) < 0.1 &&
+          Math.abs(box.height - last.height) < 0.1;
+        last = box;
+        return stable;
+      },
+      // Explicit, not the library default (issue #1954 review): two reads
+      // must land a real beat apart for "stable" to mean anything, and that
+      // must not silently change out from under this test on a Playwright
+      // upgrade.
+      { timeout: 10_000, intervals: [100, 250, 500, 1000] },
+    )
+    .toBeTruthy();
+}
+
+/**
+ * Dispatch the arming pointerdown of a tap and, in the same synchronous
+ * browser tick, read the surface and map-layer rects it used to compute
+ * `clientX`/`clientY` — then derive the map-percent that press should land
+ * at from those exact rects (issue #1954). This is the same geometry
+ * `pointerToMapPercent` (mapRenderedBounds.ts) resolves against, read
+ * straight off the already-rendered layer element (whose CSS box literally
+ * *is* the app's current `mapRect`), so the expectation is computed from the
+ * same reality the app acted on rather than a hardcoded value that can drift
+ * if layout is still settling between when the test aims the tap and when it
+ * asserts.
+ */
+async function dispatchArmingPointerDown(
+  target: Locator,
+  point: { xRatio: number; yRatio: number },
+  options: PointerOptions,
+): Promise<{ x: number; y: number }> {
+  return target.evaluate(
+    (element, event) => {
+      const surface = document.querySelector<HTMLElement>('[data-testid="battle-map-surface"]');
+      const layer = document.querySelector<HTMLElement>('[data-testid="battle-map-layer"]');
+      if (!surface || !layer) throw new Error('Battle-map surface/layer is missing');
+      const surfaceRect = surface.getBoundingClientRect();
+      const layerRect = layer.getBoundingClientRect();
+      const clientX = surfaceRect.left + surfaceRect.width * event.xRatio;
+      const clientY = surfaceRect.top + surfaceRect.height * event.yRatio;
+      element.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          clientX,
+          clientY,
+          pointerId: event.pointerId,
+          pointerType: event.pointerType,
+          isPrimary: event.isPrimary,
+          button: 0,
+          buttons: 1,
+        }),
+      );
+      return {
+        x: Math.max(0, Math.min(100, ((clientX - layerRect.left) / layerRect.width) * 100)),
+        y: Math.max(0, Math.min(100, ((clientY - layerRect.top) / layerRect.height) * 100)),
+      };
+    },
+    {
+      xRatio: point.xRatio,
+      yRatio: point.yRatio,
+      pointerId: options.pointerId,
+      pointerType: options.pointerType,
+      isPrimary: options.isPrimary,
+    },
+  );
+}
+
 async function openPingFixture(page: Page) {
   const { encounterId } = seed();
   const response = await page.request.get(`/api/v1/encounters/${encounterId}`);
@@ -136,8 +226,13 @@ async function openPingFixture(page: Page) {
     const box = await layer.boundingBox();
     return box != null && box.width > 50 && box.height > 50;
   }).toBeTruthy();
+  await waitForStableBounds(layer);
   await page.getByRole('button', { name: 'Ping', exact: true }).click();
   await expect(surface).toHaveAttribute('role', 'button');
+  // Focusing the tool button can itself retrigger layout (e.g. a live
+  // scroll-into-view elsewhere on the page) — settle once more before any
+  // test starts aiming taps at this surface (issue #1954).
+  await waitForStableBounds(layer);
   return { surface, pings };
 }
 
@@ -153,22 +248,48 @@ test.describe('battle-map ping tap completion', () => {
 
     const mouseSpot = { xRatio: 0.3, yRatio: 0.4 };
     const mouse = { pointerId: 1, pointerType: 'mouse', isPrimary: true } as const;
-    await dispatchPointer(surface, 'pointerdown', mouseSpot, mouse);
+    const mouseExpected = await dispatchArmingPointerDown(surface, mouseSpot, mouse);
     await settleNoPing(page, pings, 0);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await dispatchPointer(surface, 'lostpointercapture', mouseSpot, mouse);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await expect.poll(() => pings.length).toBe(1);
-    expect(pings[0].x).toBeCloseTo(30, 1);
-    expect(pings[0].y).toBeCloseTo(40, 1);
+    // Independent oracle (issue #1954 review): deriving the expectation from
+    // the same geometry used to aim the tap made the test self-consistent —
+    // a systematic offset in the rendered map layer would shift the derived
+    // value and the published ping together, so a `toBeCloseTo(..., 0)` check
+    // (±0.5) could still pass at up to ~0.49pp of real drift. The fixture's
+    // 16:9 map fills the whole surface with no letterbox, so the derived
+    // value must land within the same precision-1 tolerance as the
+    // ping-vs-derived comparison below, or a genuine geometry regression
+    // would slip through undetected.
+    expect(mouseExpected.x).toBeCloseTo(30, 1);
+    expect(mouseExpected.y).toBeCloseTo(40, 1);
+    expect(pings[0].x).toBeCloseTo(mouseExpected.x, 1);
+    expect(pings[0].y).toBeCloseTo(mouseExpected.y, 1);
+
+    // The first ping's mutation settling re-renders the page and can
+    // retrigger layout (issue #1954) — settle again before aiming the next
+    // tap so its down/up pair reads a stationary rect throughout.
+    await waitForStableBounds(page.getByTestId('battle-map-layer'));
 
     const touchSpot = { xRatio: 0.7, yRatio: 0.55 };
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
-    await dispatchPointer(surface, 'pointerdown', touchSpot, touch);
-    await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
+    const touchExpected = await dispatchArmingPointerDown(surface, touchSpot, touch);
+    // Deliberately inside the slop budget with headroom, not sitting on it.
+    // `mapPingTapDistancePx` uses Math.hypot and cancels above the threshold, so a
+    // release at exactly MAP_PING_TAP_SLOP_PX has zero tolerance for the residual
+    // vertical drift waitForStableBounds still permits — sqrt(slop² + dy²) > slop for
+    // any dy > 0, which would re-introduce the timeout this spec exists to prevent.
+    // The exact boundary is covered by map-ping-tap.unit.spec.ts; here the point is
+    // that an ordinary tap with a little movement still publishes.
+    await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX - 4, y: 0 });
     await expect.poll(() => pings.length).toBe(2);
-    expect(pings[1].x).toBeCloseTo(70, 1);
-    expect(pings[1].y).toBeCloseTo(55, 1);
+    // Same independent-oracle reasoning as the mouse tap above.
+    expect(touchExpected.x).toBeCloseTo(70, 1);
+    expect(touchExpected.y).toBeCloseTo(55, 1);
+    expect(pings[1].x).toBeCloseTo(touchExpected.x, 1);
+    expect(pings[1].y).toBeCloseTo(touchExpected.y, 1);
   });
 
   test('pointerdown alone never publishes; cancel and capture-loss drop the armed tap', async ({ page }) => {

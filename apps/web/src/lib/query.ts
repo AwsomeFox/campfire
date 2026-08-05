@@ -84,6 +84,26 @@ export function invalidateCampaignCharacters(client: QueryClient, campaignId: nu
 }
 
 /**
+ * Invalidate ONLY the derived usable-action reads for one encounter (issue #1901 review:
+ * devin-ai-integration) — the per-combatant merged actions list (`CharacterStatCard`, keyed
+ * `[...queryKeys.encounter(id), 'actions', combatantId]`) and the turn workspace's
+ * `suggestedActions` (`queryKeys.encounterTurn`). A character sheet's equip/unequip change can
+ * only ever affect these two derived reads; it never changes the encounter root (name, status,
+ * round, combatant roster), its difficulty derivation, or its combat log. Calling the broader
+ * {@link invalidateEncounter} for every character.updated frame — as this PR originally did —
+ * busts ALL of those too, turning a burst of concurrent sheet edits during live play (party
+ * rest follow-ups, several players editing sheets at once) into a refetch storm on the app's
+ * heaviest screen. `predicate` is needed (rather than a prefix `queryKey`) because the actions
+ * cache key carries a per-combatant id this call site doesn't know.
+ */
+export function invalidateEncounterActions(client: QueryClient, encounterId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.encounterTurn(encounterId) });
+  void client.invalidateQueries({
+    predicate: (query) => query.queryKey[0] === 'encounter' && query.queryKey[1] === encounterId && query.queryKey[2] === 'actions',
+  });
+}
+
+/**
  * Invalidate the DM check-request feed (issue #415). Called from the run-session SSE handler on
  * `check.requested` / `check.resolved` so the DM's request panel and the targeted player's prompt
  * reconcile without a manual reload.

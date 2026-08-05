@@ -30,7 +30,7 @@ describe('encounter live play notifications', () => {
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
-    const campaignLibrary = new CampaignLibraryService(orm, audit);
+    const campaignLibrary = new CampaignLibraryService(orm, audit, events);
     notifications = {
       notifyCampaign: jest.fn().mockResolvedValue(undefined),
       notifyUser: jest.fn().mockResolvedValue(undefined),
