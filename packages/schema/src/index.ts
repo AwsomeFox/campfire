@@ -52,7 +52,6 @@ import {
   OsrAdapter,
   OSR_RULE_SYSTEM_SLUGS,
   OSR_VARIANT_ADAPTERS,
-  createOsrVariantAdapter,
   tryCreateHomebrewRuleSystemAdapter,
   type OsrMechanicsProfile,
 } from './osr-adapter';
@@ -6010,7 +6009,7 @@ import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
 export * from './starfinder-adapter';
 import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
-// OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS, createOsrVariantAdapter, and
+// OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS, tryCreateHomebrewRuleSystemAdapter, and
 // OsrMechanicsProfile are imported near the top of this file (see the #1502/#765 note there) —
 // `Campaign` needs HomebrewMechanicsProfile from the same module ahead of this block.
 export * from './osr-adapter';
