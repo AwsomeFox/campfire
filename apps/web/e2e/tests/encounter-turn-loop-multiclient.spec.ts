@@ -113,17 +113,29 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
       const playerEndBtn = playerPage.getByTestId('workspace-end-turn');
       const dmNextBtn = dmPage.getByTestId('encounter-header-next-turn');
 
+      // Both buttons are confirmed actionable right above (the awaited toBeVisible() on
+      // Hero's turn). But Playwright's `.click()` is not a single atomic dispatch: it
+      // hit-tests, waits for the element to be stable across animation frames, then
+      // synthesizes input over CDP — several sequential round-trips that, empirically,
+      // take longer than this same-machine test server needs to answer the DM's request,
+      // push the SSE tick, and have the player's page refetch the turn workspace. That
+      // refetch flips `canEndTurn` false (it's no longer Hero's turn) and unmounts the
+      // button out from under Playwright's still-in-flight actionability wait, which then
+      // hangs forever waiting for a button that is never coming back — not a genuine
+      // "the UI correctly prevented this click" case (the awaited assertion above already
+      // proved it was clickable at the start of the race), just Playwright's own dispatch
+      // pipeline losing a real race to the server. Dispatch the underlying DOM click
+      // directly instead — `locator.evaluate` only waits for the element to be attached,
+      // not for the full visible/stable/enabled chain — so both requests actually leave
+      // the browser before either round-trip can land.
       const [playerClickOutcome, dmClickOutcome] = await Promise.allSettled([
-        playerEndBtn.click(),
-        dmNextBtn.click(),
+        playerEndBtn.evaluate((el) => (el as HTMLButtonElement).click()),
+        dmNextBtn.evaluate((el) => (el as HTMLButtonElement).click()),
       ]);
-      // Both clicks must actually land for this to be a real race. Playwright's `.click()`
-      // waits for actionability (visible, stable, enabled) first — if an SSE re-render from
-      // the OTHER page's click makes a button momentarily disabled or detached, the click
-      // can reject instead of firing, and `Promise.allSettled` alone swallows that silently.
-      // A single request would still satisfy "advances exactly once" below for the wrong
-      // reason, and no client would ever error, so the banner assertion could never pass —
-      // that would be a broken race, not proof the client fails to surface a real conflict.
+      // Both clicks must actually land for this to be a real race. A single request would
+      // still satisfy "advances exactly once" below for the wrong reason, and no client
+      // would ever error, so the banner assertion could never pass — that would be a
+      // broken race, not proof the client fails to surface a real conflict.
       expect(playerClickOutcome.status, 'player end-turn click').toBe('fulfilled');
       expect(dmClickOutcome.status, 'dm next-turn click').toBe('fulfilled');
 
