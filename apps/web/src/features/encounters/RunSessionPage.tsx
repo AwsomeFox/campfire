@@ -2717,7 +2717,19 @@ export default function RunSessionPage() {
   }, [eid, queryClient]);
   const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
     setActionError(null);
-    await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current
+        ? { ...current, aoe: current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template)) }
+        : current,
+    );
+    try {
+      await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    } catch (error) {
+      // A refetch is a rollback that does not clobber a later local nudge that
+      // may already have updated the same cache entry.
+      invalidateEncounter(queryClient, eid);
+      throw error;
+    }
     invalidateEncounter(queryClient, eid);
   }, [eid, queryClient]);
   const removeAoeTemplate = useCallback(async (templateId: string) => {

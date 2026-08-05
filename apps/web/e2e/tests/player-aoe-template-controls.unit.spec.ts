@@ -39,6 +39,13 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(RUN_SESSION).toContain('throw error;');
   });
 
+  test('player movement updates the local encounter before the scoped PATCH settles', () => {
+    const updateAoe = RUN_SESSION.slice(RUN_SESSION.indexOf('const updateAoeTemplate'), RUN_SESSION.indexOf('const removeAoeTemplate'));
+    expect(updateAoe).toContain('queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)');
+    expect(updateAoe).toContain('current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template))');
+    expect(updateAoe).toContain('invalidateEncounter(queryClient, eid);');
+  });
+
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {
     const damageBar = RUN_SESSION.slice(RUN_SESSION.indexOf('<ApplyDamageBar'));
     expect(damageBar).not.toContain('onDeclareAoe');
