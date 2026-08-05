@@ -89,6 +89,39 @@ describe('#874 comprehension profile — the baseline is the default, not an opt
   });
 });
 
+describe('#874 comprehension profile — the phase direction outranks the ending shape (review)', () => {
+  it('names the lifecycle phases where the "What can you do" ending does not apply', () => {
+    // The baseline mandates an ending shape written for a turn of PLAY, and the same prompt
+    // carries PHASE_DIRECTION: wrap_up says not to ask the players anything, `ended` says
+    // logistics only and do not narrate, greeting has nothing that "changed" yet. Without
+    // this the prompt held a contradiction the model resolved on its own — possibly by
+    // closing a session with a menu of next actions.
+    const section = renderComprehensionSection(null);
+    expect(section).toMatch(/unless the phase direction says otherwise/i);
+    for (const phase of ['greeting', 'wrap-up', 'ended']) {
+      expect(section.toLowerCase()).toContain(phase);
+    }
+  });
+
+  it('subordinates ONLY the ending shape — the rest still applies on every turn', () => {
+    // Gating the whole section on phase would drop chunking, plain-language mechanics and
+    // simplify/recap/explain from exactly the turns (a wrap-up summary) that need them most.
+    // The qualification therefore sits ON the ending-shape line, not on the section.
+    const section = renderComprehensionSection(null);
+    const endingLine = section.split('\n').find((l) => l.includes('What changed'));
+    expect(endingLine).toMatch(/unless the phase direction says otherwise/i);
+    for (const unqualified of [
+      'Chunk narration into short, readable beats',
+      'Keep mechanical outcomes',
+      'Answer simplify/recap/explain',
+    ]) {
+      const line = section.split('\n').find((l) => l.includes(unqualified));
+      expect(line).toBeDefined();
+      expect(line).not.toMatch(/unless the phase direction/i);
+    }
+  });
+});
+
 describe('#874 comprehension profile — optional per-axis fine-tuning', () => {
   it('renders only the axes that were actually set', () => {
     const section = renderComprehensionSection(profile({ readingComplexity: 'simple' }));

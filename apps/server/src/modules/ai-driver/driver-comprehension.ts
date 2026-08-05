@@ -94,7 +94,15 @@ export function isDefaultComprehensionProfile(profile: AiDmComprehensionProfile 
 const BASELINE_LINES: readonly string[] = [
   'Readability structure, separate from voice/style above; a request, not enforced.',
   '- Chunk narration into short, readable beats rather than one long block.',
-  '- End each turn with two labeled parts, in order: "What changed" then "What can you do".',
+  // The qualification is FOLDED INTO this line rather than added as a bullet of its own
+  // (review). The prompt also carries a lifecycle phase direction — wrap-up says not to ask
+  // the players anything because they are packing up, `ended` says logistics only, a greeting
+  // has nothing that "changed" yet — so an unconditional ending shape was a direct
+  // contradiction the model had to resolve on its own, possibly by closing a session with a
+  // menu of next actions. It qualifies the suggestions line below too, which only ever
+  // applies "under" this heading. Folding it in keeps the section inside its declared token
+  // ceiling, which the combined #1038 x #1049 x #874 prompt budget leaves no room to raise.
+  '- End each turn with two labeled parts, in order: "What changed" then "What can you do" — unless the phase direction says otherwise (greeting, wrap-up, ended).',
   '- Under "What can you do", give 2 to 4 NON-EXCLUSIVE suggestions with a one-line consequence each. NEVER the only input accepted — the player may always instead describe anything else in their own words, and never present the suggestions as a menu that replaces free text.',
   '- Keep mechanical outcomes (dice, DCs, damage, rule citations) on their own line, apart from prose.',
   '- Answer simplify/recap/explain instead of advancing: simplify = shorter, plainer; recap = recent events; explain = the rule just used; "whose turn" = restate the cue.',

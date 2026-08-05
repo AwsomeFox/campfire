@@ -7742,6 +7742,11 @@ export type AiDmComprehensionProfile = z.infer<typeof AiDmComprehensionProfile>;
  * share a prompt with elastic consumers without crowding them. Unlike the style section this
  * ceiling is never zero-cost — the baseline alone is a real, unconditional per-turn cost — so
  * the unit test also pins the baseline-only figure to keep it a reviewable number on its own.
+ *
+ * Held at 290 through review. Subordinating the ending shape to the session phase direction
+ * was first written as its own bullet, which took the worst case to ~321 and the COMBINED
+ * #1038 x #1049 x #874 budget past half a 4k context window. The guards caught it, so the
+ * qualification was folded into the ending-shape line instead of the ceiling being raised.
  */
 export const AI_DM_COMPREHENSION_SECTION_MAX_TOKENS = 290;
 
