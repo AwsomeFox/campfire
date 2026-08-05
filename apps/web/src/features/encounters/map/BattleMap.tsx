@@ -2396,8 +2396,9 @@ export function BattleMap({
                       key={c.id}
                       data-testid={`map-token-${c.id}`}
                       role="button"
-                      tabIndex={movable ? 0 : -1}
+                      tabIndex={movable || legalTarget ? 0 : -1}
                       aria-label={tokenLabel}
+                      aria-pressed={legalTarget ? selectedTarget : undefined}
                       aria-describedby="map-keyboard-help"
                       aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
@@ -2422,9 +2423,17 @@ export function BattleMap({
                       onClick={(event) => {
                         if (legalTarget) event.stopPropagation();
                         // A drag ends with a click; only a stationary token tap may select.
-                        if (legalTarget && !isDragging && event.detail === 1) targeting?.onToggle(c.id);
+                        if (legalTarget && !isDragging) targeting?.onToggle(c.id);
                       }}
-                      onKeyDown={(e) => onTokenKeyDown(e, c)}
+                      onKeyDown={(e) => {
+                        if (legalTarget && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          targeting?.onToggle(c.id);
+                          return;
+                        }
+                        onTokenKeyDown(e, c);
+                      }}
                       onFocus={(e) => {
                         setSelectedTokenId(c.id);
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });

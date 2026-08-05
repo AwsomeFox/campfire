@@ -20,3 +20,16 @@ test('targeting lifecycle contracts keep preview and Back transitions explicit',
   expect(source).toContain('onBackToTargets();');
   expect(source).toContain('onPreview();');
 });
+
+test('legal target affordances support repeated pointer and keyboard selection', async () => {
+  const [mapSource, rosterSource] = await Promise.all([
+    readFile(resolve(process.cwd(), 'src/features/encounters/map/BattleMap.tsx'), 'utf8'),
+    readFile(resolve(process.cwd(), 'src/features/encounters/combat/CombatantRow.tsx'), 'utf8'),
+  ]);
+
+  expect(mapSource).toContain('tabIndex={movable || legalTarget ? 0 : -1}');
+  expect(mapSource).toContain("e.key === 'Enter' || e.key === ' '");
+  expect(mapSource).not.toContain('event.detail === 1');
+  expect(rosterSource).toContain("role={targeting?.legal ? 'button' : undefined}");
+  expect(rosterSource).toContain('aria-pressed={targeting?.legal ? targeting.selected : undefined}');
+});

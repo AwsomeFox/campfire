@@ -293,6 +293,10 @@ export function CombatantRow({
       data-current-turn={isCurrentTurn ? 'true' : undefined}
       data-target-legal={targeting?.legal ? 'true' : undefined}
       data-target-selected={targeting?.selected ? 'true' : undefined}
+      role={targeting?.legal ? 'button' : undefined}
+      tabIndex={targeting?.legal ? 0 : undefined}
+      aria-label={targeting?.legal ? `Select ${combatant.name} as a target` : undefined}
+      aria-pressed={targeting?.legal ? targeting.selected : undefined}
       className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
@@ -308,7 +312,13 @@ export function CombatantRow({
       }}
       onClick={(event) => {
         if (!targeting?.legal) return;
-        if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return;
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]');
+        if (interactive && interactive !== event.currentTarget) return;
+        targeting.onToggle();
+      }}
+      onKeyDown={(event) => {
+        if (!targeting?.legal || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
         targeting.onToggle();
       }}
     >
