@@ -3802,6 +3802,7 @@ export default function RunSessionPage() {
           targetIds={actionTargetIds}
           onToggleTarget={toggleActionTarget}
           onPreview={() => setActionTargetsDeclared(true)}
+          onBackToTargets={() => setActionTargetsDeclared(false)}
           isDm={isDm}
           // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
           // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the

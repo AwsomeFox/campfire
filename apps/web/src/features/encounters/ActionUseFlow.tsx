@@ -64,6 +64,7 @@ export function ActionUsePanel({
   onApplied,
   onError,
   onPreview,
+  onBackToTargets,
 }: {
   encounterId: number;
   actorCombatantId: number;
@@ -87,6 +88,7 @@ export function ActionUsePanel({
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
   onPreview: () => void;
+  onBackToTargets: () => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -320,6 +322,7 @@ export function ActionUsePanel({
                 setPreview(null);
                 setCommitSubmitted(false);
                 setIsUnconfirmed(false);
+                onBackToTargets();
               }}
             >
               Back
