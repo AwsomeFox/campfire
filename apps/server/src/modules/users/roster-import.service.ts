@@ -25,6 +25,7 @@ import {
   users,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { generateResetCode, hashResetCode } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
@@ -566,8 +567,14 @@ export class RosterImportService {
         .where(eq(campaignMembers.id, existing.id))
         .run();
       if (input.characterId != null) {
+        // Issue #1902 rework (round 15, codex P2 sweep): PER CHARACTER, not the batch-wide
+        // `input.ts` (computed ONCE for the whole roster import — every row linking a
+        // DIFFERENT character would otherwise share one timestamp, the same class of bug
+        // as `restParty`'s original defect, just spread across one-row-at-a-time writes
+        // instead of a single bulk statement).
+        const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, input.characterId)).get();
         tx.update(characters)
-          .set({ ownerUserId: String(input.userId), updatedAt: input.ts })
+          .set({ ownerUserId: String(input.userId), updatedAt: nextUpdatedAt(current?.updatedAt ?? input.ts) })
           .where(eq(characters.id, input.characterId))
           .run();
       }
@@ -585,8 +592,9 @@ export class RosterImportService {
       })
       .run();
     if (input.characterId != null) {
+      const current = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, input.characterId)).get();
       tx.update(characters)
-        .set({ ownerUserId: String(input.userId), updatedAt: input.ts })
+        .set({ ownerUserId: String(input.userId), updatedAt: nextUpdatedAt(current?.updatedAt ?? input.ts) })
         .where(eq(characters.id, input.characterId))
         .run();
     }

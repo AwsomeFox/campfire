@@ -3106,15 +3106,24 @@ export class McpToolsService {
       'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. ' +
         'A spend that exceeds the slots remaining FAILS with an error carrying `remaining` and `max`, so it is safe ' +
         'to treat success as "the slot was consumed" — do not narrate a spell as cast if this call errored. ' +
-        'Restores clamp at zero. 400 if the character has no slots configured at that level.',
+        'Restores clamp at zero. 400 if the character has no slots configured at that level. Optional ' +
+        '`expectedUpdatedAt` (the character\'s `updatedAt` you last read) rejects the write with 409 if the sheet ' +
+        'changed since — omit for an unconditional write.',
       { characterId: Id.describe('Character id'), ...SpellSlotPatch.shape },
-      async ({ characterId, level, delta }) => {
+      // Issue #1902 rework (round 5): `expectedUpdatedAt` MUST be pulled out and forwarded
+      // explicitly, matching update_quest/update_npc/update_faction above — spreading
+      // `SpellSlotPatch.shape` into this tool's declared input widens what it ADVERTISES,
+      // but nothing forwards a field the handler never names. Before this fix an MCP
+      // caller (the AI DM) that supplied `expectedUpdatedAt` believing it opted into the
+      // 409 STALE_WRITE guard got an unconditional write instead — the token was silently
+      // dropped, not honoured.
+      async ({ characterId, level, delta, expectedUpdatedAt }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const before = await this.characters.spellSlotsLeft(characterId as number, level as number);
         const updated = await this.characters.patchSpellSlots(
           characterId as number,
-          { level: level as number, delta: delta as number },
+          { level: level as number, delta: delta as number, expectedUpdatedAt: expectedUpdatedAt as string | undefined },
           user,
           role,
         );
@@ -3170,7 +3179,10 @@ export class McpToolsService {
         'never a silent clamp — so it is safe to treat success as "the resource was actually spent/restored"; do not ' +
         'narrate a Second Wind or a Ki technique the call errored on. `key` is not restricted to ' +
         'list_character_resources\' vocabulary: an unrecognised key creates a custom resource from `max`/`name`/' +
-        '`recharge` (or their defaults) the first time it is touched.',
+        '`recharge` (or their defaults) the first time it is touched. Optional `expectedUpdatedAt` (the character\'s ' +
+        '`updatedAt` you last read) rejects the write with 409 if the sheet changed since — this matters especially ' +
+        'here because `used` is an ABSOLUTE overwrite: without it, a concurrent spend or rest from another caller ' +
+        'between your read and this write is silently undone. Omit for an unconditional write.',
       { characterId: Id.describe('Character id'), ...ResourcePatch.shape },
       async ({ characterId, ...patch }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
@@ -5389,9 +5401,11 @@ export class McpToolsService {
       server,
       user,
       'import_ddb_character',
-      'Import a character from a public D&D Beyond sheet (player+ role). Pass either `ddbId` (numeric character id) ' +
-        'or `url` (a D&D Beyond character/share link). The sheet must be set to Public on DDB. Only available for D&D 5e ' +
-        'campaigns — rejected with 400 for other rule systems.',
+      'Import a character from a public D&D Beyond sheet (player+ role), including attacks, spells, and spell slots. ' +
+        'Pass either `ddbId` (numeric character id) or `url` (a D&D Beyond character/share link). The sheet must be set ' +
+        'to Public on DDB. Only available for D&D 5e campaigns — rejected with 400 for other rule systems. Returns ' +
+        '`{ character, summary }`: the created character plus counts of imported actions/spells/slots and the names of ' +
+        'any entries that came in text-only (unparseable, never silently dropped).',
       {
         campaignId: CampaignIdArg,
         ddbId: z.string().max(200).optional().describe('D&D Beyond numeric character id'),

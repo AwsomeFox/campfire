@@ -666,6 +666,34 @@ export const DdbCharacterImport = z
   });
 export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
 
+/**
+ * What a D&D Beyond import produced beyond the character's vitals (issue #1903). The
+ * importer never drops an unparseable attack/spell entry silently — it lands as a
+ * text-only `CharacterAction` (name + notes, no resolvable `spec`) and its name is echoed
+ * here so the caller can show the DM/player what needs a manual touch-up. REST and MCP
+ * return this identically alongside the created character.
+ */
+export const DdbImportSummary = z.object({
+  actionsImported: z.number().int().min(0).default(0),
+  spellsImported: z.number().int().min(0).default(0),
+  spellSlotsImported: z.boolean().default(false),
+  // Names of imported actions/spells that came in as text-only (no resolvable spec) —
+  // never a silent drop, always visible to the importer's caller.
+  textOnly: z.array(z.string().max(120)).max(200).default([]),
+  // Count of raw sheet entries trimmed by Character.actions' schema cap (issue #1903
+  // review) — 0 for the overwhelming majority of sheets (well under the cap); reported
+  // rather than silently dropped when a sheet is large enough to exceed it.
+  entriesOmitted: z.number().int().min(0).default(0),
+});
+export type DdbImportSummary = z.infer<typeof DdbImportSummary>;
+
+/** REST/MCP result shape for a D&D Beyond import: the created character plus its summary. */
+export const DdbImportResult = z.object({
+  character: Character,
+  summary: DdbImportSummary,
+});
+export type DdbImportResult = z.infer<typeof DdbImportResult>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
@@ -740,11 +768,26 @@ export function isKnownCondition(vocab: readonly string[], name: string): boolea
   if (!needle) return false;
   return vocab.some((c) => c.toLowerCase() === needle);
 }
-/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+/**
+ * Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot
+ * maxima are edited via PATCH `spellSlots`. `expectedUpdatedAt` is the same optimistic-
+ * concurrency guard as {@link ExpectedUpdatedAt} everywhere else (issue #1902 rework): a
+ * `delta` is meaningless without knowing what it is relative to, so a caller that read
+ * `used` from a render and echoes back the character's `updatedAt` at that moment gets a
+ * 409 instead of a silently-misapplied delta if another client changed the sheet (this
+ * slot or otherwise) in between. Omitted => unconditional write, matching every other
+ * caller of this contract (AI DM/MCP tools included) exactly as before.
+ *
+ * {@link ResourcePatch} carries the identical guard for the sibling resource contract
+ * (issue #1902 rework, round 24) — the two are separate hand-written shapes, not one
+ * merged type, but the same rule.
+ */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
+export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
 /**
  * Spend, restore, or configure one bounded character resource (issue #422/#1578) —
  * `hitDice`/`rage`/`kiPoints` under 5e, `focusPoints` under PF2e, or a custom pool the
@@ -757,6 +800,13 @@ export const SpellSlotPatch = z.object({
  * resource's current `used`, `used` sets it absolutely; the service applies `used` first
  * when both are sent, then `delta`. Spending past 0 or restoring past `max` is a 400, not
  * a clamp (see `CharactersService.adjustResource`'s own doc comment for why).
+ *
+ * `expectedUpdatedAt` is the same optimistic-concurrency guard as {@link SpellSlotPatch}'s
+ * own field (issue #1902 rework, round 24): an absolute `used` is a full overwrite, not a
+ * delta, so a caller that read `used` from a stale render and echoes back the character's
+ * `updatedAt` at that moment gets a 409 instead of silently undoing a concurrent spend/rest
+ * from another tab, a REST client, or an MCP caller. Omitted => unconditional write,
+ * matching every other caller of this contract exactly as before.
  */
 export const ResourcePatch = z.object({
   key: z.string().min(1).max(80),
@@ -766,6 +816,7 @@ export const ResourcePatch = z.object({
   name: z.string().min(1).max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
   source: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([
@@ -11014,6 +11065,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('encounter.updated'),
     campaignId: Id,
     encounterId: Id,
+    // Issue #1902 rework (round 19, codex P2): most `encounter.updated` frames are pure
+    // combat-log/turn activity (a roll, a token move) with NO character-sheet write behind
+    // them — every connected client refetching the WHOLE campaign character list on each
+    // one is wasted work during a busy fight. Set `true` only by the specific writers that
+    // ACTUALLY mirror onto a linked character sheet in the same commit (the apply-action
+    // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
+    // invalidate `campaignCharacters` precisely instead of on every encounter update.
+    sheetMirrored: z.boolean().optional(),
     at: IsoDate,
   }),
   z.object({
