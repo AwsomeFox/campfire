@@ -50,7 +50,10 @@ export interface SpellbookPanelProps {
   spells: SpellItem[];
   spellSlots?: SpellSlotMap;
   activeConcentration?: string | null;
-  onUpdateSlot?: (level: number, delta: number, castContext?: SpellCastContext) => void;
+  // `level` is undefined for a cantrip cast that carries only a `castContext` (no slot to
+  // spend); `delta` is 0 in that case. A manual pip click always passes a real `level` and
+  // never a `castContext`.
+  onUpdateSlot?: (level: number | undefined, delta: number, castContext?: SpellCastContext) => void;
   onUseActionRequested?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   disabled?: boolean;
 }
@@ -188,24 +191,31 @@ export function SpellbookPanel({
 
   // Issue #1900: no client-side slot decrement here anymore — that used to fire ALONGSIDE
   // the resolver's own server-side spend for a spec-bearing spell, double-spending the same
-  // cast. A RESOLVABLE spell now routes through the resolve/apply flow exclusively, which
-  // spends the spec's own declared slot level transactionally (undo-refundable). A spec-less
-  // OR non-resolvable leveled spell (see `isResolvableSpell` — review fix) has no resolver
-  // path, so its ONLY spend event is the direct slot patch below — still exactly once.
+  // cast. A RESOLVABLE spell has EXACTLY one valid write path: the resolve/apply flow, which
+  // spends the spec's own declared slot level transactionally (undo-refundable). Review fix:
+  // this branch is now terminal for a resolvable spell — it NEVER falls through to the direct
+  // slot patch below, even when the resolver handler isn't wired (e.g. a transient
+  // encounter/turn-query disagreement right after a turn advance). Falling through there would
+  // burn a slot with no attack/save/damage ever happening and no undo to refund it; `disabled`
+  // on the Cast button (canCastBase, below) additionally prevents the click in that state — this
+  // is defense in depth, not the only guard.
   const executeCast = (spell: SpellItem, castLevel?: number) => {
-    if (isResolvableSpell(spell) && onUseActionRequested && spell.actionIndex != null && spell.spec) {
-      onUseActionRequested(spell.actionIndex, spell.name, spell.spec);
+    if (isResolvableSpell(spell)) {
+      if (onUseActionRequested && spell.actionIndex != null && spell.spec) {
+        onUseActionRequested(spell.actionIndex, spell.name, spell.spec);
+      }
       return;
     }
+    // Non-resolvable (spec-less OR descriptive spec): the direct slot-patch / turn-state
+    // path is the ONLY write. A cantrip (level 0) has no slot to spend but may still declare
+    // a real action-economy cost and/or concentration (`buildSpellCastContext`) — those must
+    // still be applied, or the Cast button is a silent no-op for every cantrip with structured
+    // data (review fix). `castContext` alone (not `level`) is what tells the parent "this is a
+    // genuine cast, apply side effects" — a manual pip click never carries one.
     const levelToSpend = castLevel ?? (spell.level > 0 ? spell.level : undefined);
-    if (levelToSpend && onUpdateSlot) {
-      // Review fix (P1): a descriptive-but-structured spec (e.g. mode:'none' with a real
-      // cost.slot and/or uses.concentration) never reaches the resolver, so THIS is the only
-      // place its action-economy cost and concentration can be applied — see
-      // `buildSpellCastContext`. The parent sequences these before the slot spend so a cast
-      // that can't actually consume its action (e.g. already used this turn) doesn't charge
-      // a slot either.
-      onUpdateSlot(levelToSpend, 1, buildSpellCastContext(spell));
+    const castContext = buildSpellCastContext(spell);
+    if (onUpdateSlot && (levelToSpend != null || castContext != null)) {
+      onUpdateSlot(levelToSpend, levelToSpend != null ? 1 : 0, castContext);
     }
   };
 
@@ -325,9 +335,13 @@ export function SpellbookPanel({
                       // level directly and exclusively via executeCast's slot-patch branch
                       // above (issue #1900; review fix — a descriptive spec with a real spell
                       // level must still be upcastable, not just a spec-less one).
-                      const isUpcastable = !isResolvableSpell(spell) && (spell.isUpcastable ?? (lvl >= 1 && lvl < 9));
+                      const resolvable = isResolvableSpell(spell);
+                      const isUpcastable = !resolvable && (spell.isUpcastable ?? (lvl >= 1 && lvl < 9));
                       const hasSlotRemaining = lvl === 0 || remainingSlots > 0;
-                      const canCastBase = hasSlotRemaining && !disabled;
+                      // Review fix: a resolvable spell's ONLY valid write path is the resolver
+                      // (see executeCast) — if that handler isn't wired, disable Cast rather
+                      // than let a click fall through to a slot burn with nothing resolved.
+                      const canCastBase = hasSlotRemaining && !disabled && (!resolvable || onUseActionRequested != null);
 
                       // Higher slot options for upcasting popover
                       const upcastLevels: Array<{ level: number; label: string; remaining: number }> = [];

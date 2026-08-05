@@ -70,7 +70,7 @@ interface TurnWorkspaceProps {
   /** Issue #1900: spend (+1) or restore (-1) one spell-slot level for the current combatant's
    *  character, via the parent's POST :id/spell-slots mutation. Undefined when the viewer
    *  isn't authorized to cast for this actor right now (mirrors onUseSuggestedAction's gate). */
-  onUpdateSpellSlot?: (level: number, delta: number, castContext?: SpellCastContext) => void;
+  onUpdateSpellSlot?: (level: number | undefined, delta: number, castContext?: SpellCastContext) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */

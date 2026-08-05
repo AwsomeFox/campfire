@@ -361,7 +361,7 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
   // screen. Also folds in the archived-campaign gate: `canDmWrite`, not just `isDm`.
   test('RunSessionPage.tsx binds spell-slot writes to turnWorkspace.current, gated on canDmWrite', () => {
     const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
-    const onUpdateSpellSlotSrc = src.slice(src.indexOf('onUpdateSpellSlot={'), src.indexOf('onUpdateSpellSlot={') + 2400);
+    const onUpdateSpellSlotSrc = src.slice(src.indexOf('onUpdateSpellSlot={'), src.indexOf('onUseSuggestedAction={'));
 
     // Bound to the SAME data the panel renders, not the separately-fetched encounter query.
     expect(onUpdateSpellSlotSrc).toContain('turnWorkspace?.current?.characterId');
@@ -370,10 +370,70 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
 
     // Archived-campaign gate: the DM branch checks canDmWrite, not just isDm.
     expect(onUpdateSpellSlotSrc).toMatch(/isDm\s*&&\s*canDmWrite/);
+  });
 
-    // The action-economy / concentration patch is sequenced BEFORE the slot spend (P1 fix),
-    // via the per-call onSuccess callback — not fired in parallel with the slot mutation.
+  // Review fix (P1 codex, atomicity): two separate REST resources (character spell slots,
+  // combatant turn-state) can never be one DB transaction without a new combined endpoint.
+  // Spend the slot FIRST — it rejects loudly with nothing else touched on insufficient slots
+  // — and compensate (refund) if the turn-state patch that follows is rejected, so a partial
+  // failure never leaves visible half-applied state either direction.
+  test('RunSessionPage.tsx spends the slot before the cast-context patch, and refunds on patch failure', () => {
+    const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    const onUpdateSpellSlotSrc = src.slice(src.indexOf('onUpdateSpellSlot={'), src.indexOf('onUseSuggestedAction={'));
+
+    // The slot mutation fires FIRST, with the cast-context patch wired as its onSuccess
+    // follow-up (applyCastContext is defined above its use, so this checks the wiring, not
+    // textual order — the wiring is what actually determines execution sequence).
+    expect(onUpdateSpellSlotSrc).toContain(
+      'updateSpellSlot.mutate({ characterId, level, delta }, { onSuccess: applyCastContext });',
+    );
     expect(onUpdateSpellSlotSrc).toContain('combatantTurnState.mutate(');
-    expect(onUpdateSpellSlotSrc).toContain('onSuccess: () => updateSpellSlot.mutate(');
+
+    // A cantrip (no slot to spend) still applies its cast context directly.
+    expect(onUpdateSpellSlotSrc).toContain('applyCastContext();');
+
+    // Compensating refund on turn-state failure: same delta, negated.
+    expect(onUpdateSpellSlotSrc).toContain('onError: () => {');
+    expect(onUpdateSpellSlotSrc).toContain('updateSpellSlot.mutate({ characterId, level, delta: -delta })');
+  });
+
+  // Review fix (P1 codex): after a turn advance, the /turn and encounter queries can
+  // temporarily disagree. `onUseSuggestedAction` used to resolve the actor through the
+  // encounter-query-derived `orderedCombatants`/`currentCombatantId` while the Spellbook
+  // renders `turnWorkspace` — the exact same drift class as the spell-slot fix.
+  test('RunSessionPage.tsx binds resolvable-action casts to turnWorkspace.current too', () => {
+    const src = readFileSync(RUN_SESSION_PAGE_PATH, 'utf8');
+    const onUseSuggestedActionSrc = src.slice(src.indexOf('onUseSuggestedAction={'), src.indexOf('onEndTurn={'));
+
+    expect(onUseSuggestedActionSrc).toContain('turnWorkspace?.current != null');
+    expect(onUseSuggestedActionSrc).toContain('turnWorkspace.current!');
+    expect(onUseSuggestedActionSrc).not.toContain('orderedCombatants.find');
+    expect(onUseSuggestedActionSrc).not.toContain('currentCombatantId != null &&');
+  });
+
+  // Review fix (codex P1 + two devin threads on PR #1952): a resolvable spec has EXACTLY one
+  // valid write path (the resolver) — it must never fall through to the direct slot patch, or
+  // a slot burns with nothing ever resolved. A non-resolvable CANTRIP (level 0) has no slot to
+  // spend but may still declare a real action-economy cost / concentration, which must still
+  // reach `onUpdateSlot` instead of being silently dropped.
+  test('SpellbookPanel.tsx: executeCast is terminal for a resolvable spell, and a cantrip with cast context still calls onUpdateSlot', () => {
+    const src = readFileSync(SPELLBOOK_PANEL_PATH, 'utf8');
+    const executeCastSrc = src.slice(src.indexOf('const executeCast ='), src.indexOf('const initiateCast ='));
+
+    // Resolvable branch is terminal (unconditional early return) — the slot-patch code below
+    // it is only reachable for a NON-resolvable spell, never as a fallback for a resolvable
+    // one whose resolver handler happens not to be wired.
+    expect(executeCastSrc).toContain('if (isResolvableSpell(spell)) {');
+    expect(executeCastSrc).toContain('return;\n    }\n    // Non-resolvable');
+
+    // The non-resolvable branch calls onUpdateSlot when EITHER a slot is spendable OR a cast
+    // context was derived — not only when a level is spendable (the cantrip case).
+    expect(executeCastSrc).toContain('levelToSpend != null || castContext != null');
+    expect(executeCastSrc).toContain('onUpdateSlot(levelToSpend, levelToSpend != null ? 1 : 0, castContext)');
+  });
+
+  test('SpellbookPanel.tsx: Cast is disabled for a resolvable spell when the resolver handler is not wired', () => {
+    const src = readFileSync(SPELLBOOK_PANEL_PATH, 'utf8');
+    expect(src).toContain("const canCastBase = hasSlotRemaining && !disabled && (!resolvable || onUseActionRequested != null);");
   });
 });

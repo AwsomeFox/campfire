@@ -3521,35 +3521,55 @@ export default function RunSessionPage() {
               ? (level, delta, castContext) => {
                   const actor = turnWorkspace.current!;
                   const characterId = actor.characterId!;
-                  // Review fix (P1): a descriptive-but-leveled spec has no resolver path, so
-                  // this direct slot-patch is the ONLY write for it — it must also apply the
-                  // action-economy cost and concentration the resolve/apply flow would have,
-                  // or the same spell can be re-cast for free and stale concentration lingers.
-                  // Sequenced BEFORE the slot spend: if the action-economy slot is already
-                  // spent this turn, `combatantTurnState` 400s and the spell slot is never
-                  // touched (no charge for a cast that didn't actually happen).
-                  if (delta > 0 && castContext) {
+                  // Review fix (P1, atomicity): a descriptive-but-structured spec has no
+                  // resolver path, so this is the ONLY write for its action-economy cost and
+                  // concentration — but two separate REST resources (character spell slots,
+                  // combatant turn-state) can never be a single DB transaction without a new
+                  // combined server endpoint. Spend the SLOT first — it rejects loudly with
+                  // NOTHING else touched if there aren't enough left. Only on success apply
+                  // the turn-state patch; if THAT rejects (e.g. the action was already used
+                  // this turn), compensate by refunding the slot rather than leaving it spent
+                  // with no action/concentration recorded. Either both land, or neither does.
+                  const applyCastContext = () => {
+                    if (!castContext) return;
                     const patch: Record<string, unknown> = {};
                     if (castContext.costSlot) patch.useSlot = castContext.costSlot;
                     if (castContext.concentrationName !== undefined) patch.concentration = castContext.concentrationName;
-                    if (Object.keys(patch).length > 0) {
-                      combatantTurnState.mutate(
-                        { combatantId: actor.combatantId, patch },
-                        { onSuccess: () => updateSpellSlot.mutate({ characterId, level, delta }) },
-                      );
-                      return;
-                    }
+                    if (Object.keys(patch).length === 0) return;
+                    combatantTurnState.mutate(
+                      { combatantId: actor.combatantId, patch },
+                      {
+                        onError: () => {
+                          if (level != null && delta !== 0) {
+                            updateSpellSlot.mutate({ characterId, level, delta: -delta });
+                          }
+                        },
+                      },
+                    );
+                  };
+                  // A cantrip has no slot to spend (`level` undefined, `delta` 0) but may
+                  // still carry a real castContext — apply it directly, nothing to sequence.
+                  if (level != null && delta !== 0) {
+                    updateSpellSlot.mutate({ characterId, level, delta }, { onSuccess: applyCastContext });
+                    return;
                   }
-                  updateSpellSlot.mutate({ characterId, level, delta });
+                  applyCastContext();
                 }
               : undefined
           }
           onUseSuggestedAction={
-            currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+            // Review fix: bind to turnWorkspace.current — the SAME data the Spellbook and the
+            // suggested-actions list render — instead of the encounter-query-derived
+            // currentCombatantId/orderedCombatants. Same cross-query drift class as the
+            // spell-slot fix above: after a turn advance, resolving the actor through the
+            // separately-refetching encounter query could apply a resolved action (and its
+            // slot/HP/effect writes) to whichever combatant that query still holds, not the
+            // one actually on screen.
+            turnWorkspace?.current != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
-                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
-                  if (!actor || !spec) return;
-                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                  if (!spec) return;
+                  const actor = turnWorkspace.current!;
+                  onUseActionRequested(actor.combatantId, actor.name, actionIndex, actionName, spec);
                 }
               : undefined
           }
