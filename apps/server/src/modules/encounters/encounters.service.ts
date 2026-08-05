@@ -8511,7 +8511,24 @@ export class EncountersService {
     role: Role,
   ): Promise<Combatant> {
     const encounter = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounter);
+    // Issue #1909 review (Codex): a hidden/prep encounter auto-adds combatants for a
+    // party's existing characters, so the OWNERSHIP branch just below could otherwise let
+    // a non-DM player reach and mutate a combatant belonging to an encounter that every
+    // sibling read/roll path (GET, /difficulty, /events, roll_death_save,
+    // roll_combatant_initiative) treats as wholesale nonexistent for them. 404, not 403 —
+    // a 403 would itself leak that a hidden encounter exists. `role` here is the caller's
+    // already-resolved CAMPAIGN role floor (dm/player/viewer), independent of this
+    // encounter's own `hidden` flag, so this check cannot be skipped by resolving role
+    // first and relying on the ownership branch alone.
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    // Issue #1909 review (Codex): a keyed retry may name a result that already committed
+    // BEFORE the encounter ended — the transaction-local replay lookup must run first and
+    // win, exactly like `updateCombatant`'s own ordering. An unkeyed (fresh) write still
+    // fails immediately here; a keyed one instead hits the identical `assertMutable` check
+    // inside each transaction below, AFTER the replay lookup finds nothing to replay.
+    if (!patch.idempotencyKey) this.assertMutable(encounter);
     const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
     const isDm = role === 'dm';
@@ -8549,70 +8566,92 @@ export class EncountersService {
 
     if (combatant.characterId !== null) {
       const characterId = combatant.characterId;
-      this.db.transaction((tx) => {
-        if (opClaim) {
-          const prior = findPriorEncounterOp(tx, opClaim, Date.now());
-          if (prior) {
-            replayed = prior.response as Combatant | null;
-            if (replayed) return;
+      try {
+        this.db.transaction((tx) => {
+          if (opClaim) {
+            const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+            if (prior) {
+              replayed = prior.response as Combatant | null;
+              if (replayed) return;
+            }
           }
-        }
-        const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
-        if (!character) throw new NotFoundException(`No such character ${characterId}`);
+          // Re-read the encounter INSIDE this transaction, after the replay lookup, so an
+          // End that committed while this request was in flight can't be bypassed with the
+          // stale outer `encounter` row (issue #1909 review, Codex) — same ordering
+          // `updateCombatant` uses. A keyed retry whose claim already committed replayed
+          // above and never reaches this line at all.
+          const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
+          if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+          this.assertMutable(freshEncounter);
+          const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
+          if (!character) throw new NotFoundException(`No such character ${characterId}`);
 
-        if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
-          const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
-          const levelKey = String(patch.spellLevel);
-          const slot = slots[levelKey];
-          if (!slot || slot.max <= 0) {
-            throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+          if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+            const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
+            const levelKey = String(patch.spellLevel);
+            const slot = slots[levelKey];
+            if (!slot || slot.max <= 0) {
+              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+            }
+            const nextUsed = slot.used + delta;
+            if (nextUsed < 0 || nextUsed > slot.max) {
+              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+            }
+            slot.used = nextUsed;
+            slots[levelKey] = slot;
+            // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
+            // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+            // EVERY spellSlots writer. `character` was read INSIDE this same transaction
+            // above, so there's no separate atomicity gap to guard here.
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+          } else if (patch.key) {
+            const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
+            const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
+            const nextUsed = res.used + delta;
+            if (nextUsed < 0 || nextUsed > res.max) {
+              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+            }
+            res.used = nextUsed;
+            resources[patch.key] = res;
+            tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+          } else {
+            throw new BadRequestException('Must supply either spellLevel or key to adjust');
           }
-          const nextUsed = slot.used + delta;
-          if (nextUsed < 0 || nextUsed > slot.max) {
-            throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-          }
-          slot.used = nextUsed;
-          slots[levelKey] = slot;
-          // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
-          // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
-          // EVERY spellSlots writer. `character` was read INSIDE this same transaction
-          // above, so there's no separate atomicity gap to guard here.
-          tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
-          eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
-        } else if (patch.key) {
-          const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
-          const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
-          const nextUsed = res.used + delta;
-          if (nextUsed < 0 || nextUsed > res.max) {
-            throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-          }
-          res.used = nextUsed;
-          resources[patch.key] = res;
-          tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
-          eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+
+          tx.insert(encounterEvents)
+            .values({
+              encounterId,
+              round: freshEncounter.round,
+              type: 'resource_changed',
+              actor: combatant.name,
+              actorId: combatant.id,
+              target: null,
+              targetId: null,
+              detail: eventDetail,
+              createdAt: nowIso(),
+            })
+            .run();
+
+          // `row` is the pre-fetched combatant snapshot: this branch never touches the
+          // `combatants` row itself (the resource lives on the linked character sheet), so
+          // there is nothing fresher to re-select here.
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+        });
+      } catch (err) {
+        // Issue #1909 review (Devin + Copilot, same defect): `recordEncounterOp` throws
+        // this plain Error — never an HttpException — when a concurrent request with the
+        // SAME idempotencyKey inserted its claim first; our own effect already rolled
+        // back. Replay the winner's stored response instead of letting the marker escape
+        // as an unhandled 500, exactly like `updateCombatant`/`removeCombatant` do.
+        if (opClaim && err instanceof EncounterOpRaceMarker) {
+          const prior = await readEncounterOpAfterRace(this.db, err.claim);
+          replayed = (prior.response as Combatant | null) ?? (await this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain));
         } else {
-          throw new BadRequestException('Must supply either spellLevel or key to adjust');
+          throw err;
         }
-
-        tx.insert(encounterEvents)
-          .values({
-            encounterId,
-            round: encounter.round,
-            type: 'resource_changed',
-            actor: combatant.name,
-            actorId: combatant.id,
-            target: null,
-            targetId: null,
-            detail: eventDetail,
-            createdAt: nowIso(),
-          })
-          .run();
-
-        // `row` is the pre-fetched combatant snapshot: this branch never touches the
-        // `combatants` row itself (the resource lives on the linked character sheet), so
-        // there is nothing fresher to re-select here.
-        if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
-      });
+      }
     } else {
       // Statblock branch (issue #1909): inline monster/NPC resources live on the
       // combatant row's `statblockJson`, not a character sheet. Same fresh-row-inside-
@@ -8620,73 +8659,119 @@ export class EncountersService {
       if (!combatant.statblockJson) {
         throw new BadRequestException('This combatant has no inline statblock resources');
       }
-      this.db.transaction((tx) => {
-        if (opClaim) {
-          const prior = findPriorEncounterOp(tx, opClaim, Date.now());
-          if (prior) {
-            replayed = prior.response as Combatant | null;
-            if (replayed) return;
+      try {
+        this.db.transaction((tx) => {
+          if (opClaim) {
+            const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+            if (prior) {
+              replayed = prior.response as Combatant | null;
+              if (replayed) return;
+            }
           }
-        }
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-        if (!fresh || !fresh.statblockJson) {
-          throw new BadRequestException('This combatant has no inline statblock resources');
-        }
-        const statblock = CombatantStatblock.parse(fromJsonText<unknown>(fresh.statblockJson, {}));
+          // Re-read the encounter row too, INSIDE this transaction, after the replay
+          // lookup, so an End that committed while this request was in flight can't be
+          // bypassed with the stale outer `encounter` row (issue #1909 review, Codex) —
+          // same ordering `updateCombatant` uses — and so the `updatedAt` this write
+          // advances from (below) is never a stale pre-transaction snapshot.
+          const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
+          if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+          this.assertMutable(freshEncounter);
+          const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
+          if (!fresh || !fresh.statblockJson) {
+            throw new BadRequestException('This combatant has no inline statblock resources');
+          }
+          const statblock = CombatantStatblock.parse(fromJsonText<unknown>(fresh.statblockJson, {}));
 
-        if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
-          const levelKey = String(patch.spellLevel);
-          const slot = statblock.spellSlots[levelKey] as { max: number; used: number } | undefined;
-          if (!slot || slot.max <= 0) {
-            throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+          if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+            const levelKey = String(patch.spellLevel);
+            const slot = statblock.spellSlots[levelKey] as { max: number; used: number } | undefined;
+            if (!slot || slot.max <= 0) {
+              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+            }
+            const nextUsed = slot.used + delta;
+            if (nextUsed < 0 || nextUsed > slot.max) {
+              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+            }
+            statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+          } else if (patch.key) {
+            const res = (statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined) ?? {
+              max: 1,
+              used: 0,
+              name: patch.key,
+              recharge: 'long-rest',
+            };
+            const nextUsed = res.used + delta;
+            if (nextUsed < 0 || nextUsed > res.max) {
+              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+            }
+            statblock.resources[patch.key] = { ...res, used: nextUsed };
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+          } else {
+            throw new BadRequestException('Must supply either spellLevel or key to adjust');
           }
-          const nextUsed = slot.used + delta;
-          if (nextUsed < 0 || nextUsed > slot.max) {
-            throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+
+          const [updated] = tx
+            .update(combatants)
+            .set({ statblockJson: toJsonText(statblock) })
+            .where(eq(combatants.id, combatantId))
+            .returning()
+            .all();
+          row = updated;
+
+          // Issue #1909 review (Devin + Copilot, same defect): this write touches the
+          // COMBATANT row directly, exactly like updateCombatant's own writes — advance the
+          // ENCOUNTER's `updatedAt` (the CAS token `PATCH .../combatants/:cid`'s
+          // `expectedUpdatedAt` validates, since there is no per-combatant revision column).
+          // Without this, a second writer holding a pre-spend token could still PATCH the
+          // whole statblock, pass `assertNotStale`, and silently revert this spend.
+          // `combatantStateVersion` moves too, mirroring `updateCombatant`'s own
+          // unconditional-when-running rule (issue #1637's action-preview ABA guard): a
+          // statblock resource spend is a real combatant-state change and must invalidate an
+          // in-flight action preview the same way any other combatant write does.
+          if (freshEncounter.status === 'running') {
+            tx.update(encounters)
+              .set({
+                combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+                updatedAt: nextUpdatedAt(freshEncounter.updatedAt),
+              })
+              .where(eq(encounters.id, encounterId))
+              .run();
+          } else {
+            tx.update(encounters)
+              .set({ updatedAt: nextUpdatedAt(freshEncounter.updatedAt) })
+              .where(eq(encounters.id, encounterId))
+              .run();
           }
-          statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
-          eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
-        } else if (patch.key) {
-          const res = (statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined) ?? {
-            max: 1,
-            used: 0,
-            name: patch.key,
-            recharge: 'long-rest',
-          };
-          const nextUsed = res.used + delta;
-          if (nextUsed < 0 || nextUsed > res.max) {
-            throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-          }
-          statblock.resources[patch.key] = { ...res, used: nextUsed };
-          eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+
+          tx.insert(encounterEvents)
+            .values({
+              encounterId,
+              round: freshEncounter.round,
+              type: 'resource_changed',
+              actor: combatant.name,
+              actorId: combatant.id,
+              target: null,
+              targetId: null,
+              detail: eventDetail,
+              createdAt: nowIso(),
+            })
+            .run();
+
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+        });
+      } catch (err) {
+        // Issue #1909 review (Devin + Copilot, same defect): same race-marker replay as
+        // the character branch above — `recordEncounterOp` throws a plain Error (never an
+        // HttpException) on a concurrent same-key insert; replay the winner instead of
+        // letting it escape as an unhandled 500.
+        if (opClaim && err instanceof EncounterOpRaceMarker) {
+          const prior = await readEncounterOpAfterRace(this.db, err.claim);
+          replayed = (prior.response as Combatant | null) ?? (await this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain));
         } else {
-          throw new BadRequestException('Must supply either spellLevel or key to adjust');
+          throw err;
         }
-
-        const [updated] = tx
-          .update(combatants)
-          .set({ statblockJson: toJsonText(statblock) })
-          .where(eq(combatants.id, combatantId))
-          .returning()
-          .all();
-        row = updated;
-
-        tx.insert(encounterEvents)
-          .values({
-            encounterId,
-            round: encounter.round,
-            type: 'resource_changed',
-            actor: combatant.name,
-            actorId: combatant.id,
-            target: null,
-            targetId: null,
-            detail: eventDetail,
-            createdAt: nowIso(),
-          })
-          .run();
-
-        if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
-      });
+      }
     }
 
     // An idempotent replay stops here: no second audit row, no duplicate combat-log event,

@@ -4097,6 +4097,70 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect((denied.content as TextContent[])[0].text).toContain('403');
     });
 
+    // Review finding (Codex): a hidden/prep encounter auto-adds combatants for a party's
+    // existing characters, so the owning player's OWN character-linked combatant is
+    // otherwise reachable through this tool even though get_encounter (and every sibling
+    // read/roll tool) treats a hidden encounter as nonexistent for them. isError with a 404,
+    // not a 403 (a 403 would itself leak that a hidden encounter exists), matching
+    // roll_combatant_initiative's own hidden-encounter parity test.
+    it('adjust_combatant_resource: a hidden encounter is nonexistent (404) for the owning player, matching get_encounter', async () => {
+      const createPlayer = await dmAgent
+        .post('/api/v1/users')
+        .send({ username: 'mcp-1909-player', password: 'player-password-1', serverRole: 'user' });
+      expect(createPlayer.status).toBe(201);
+      const playerId = createPlayer.body.id as number;
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+        name: 'MCP Hidden-Fight Hero',
+        hpMax: 20,
+        hpCurrent: 20,
+        ownerUserId: String(playerId),
+        resources: { hiddenFightResource: { max: 1, used: 0, name: 'Hidden Fight Resource', recharge: 'short-rest' } },
+      });
+      expect(charRes.status).toBe(201);
+
+      const playerAgent = request.agent(ctx.app.getHttpServer());
+      await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1909-player', password: 'player-password-1' });
+      const mint = await playerAgent
+        .post('/api/v1/tokens')
+        .send({ name: 'mcp-1909-player', scope: 'player', writeScope: 'direct', campaignId });
+      expect(mint.status).toBe(201);
+      const playerClient = await mcpClient(mint.body.token);
+
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Hidden Secrecy Fight', hidden: true });
+      expect(encRes.status).toBe(201);
+      expect(encRes.body.hidden).toBe(true);
+      const encounterId = encRes.body.id as number;
+      const combatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === charRes.body.id,
+      )?.id;
+      expect(combatantId).toBeDefined();
+
+      // get_encounter already 404s the owning player wholesale (issue #262) — the new tool
+      // must match, not 403.
+      const getEncounter = await playerClient.callTool({ name: 'get_encounter', arguments: { encounterId } });
+      expect(getEncounter.isError).toBe(true);
+      expect((getEncounter.content as TextContent[])[0].text).toContain('404');
+
+      const denied = await playerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'hiddenFightResource', delta: 1 },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('404');
+
+      // The DM (who can see the hidden encounter) is unaffected by the gate.
+      const dmClient2 = await mcpClient(dmToken);
+      const dmAdjust = await dmClient2.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'hiddenFightResource', delta: 1 },
+      });
+      expect(dmAdjust.isError).toBeFalsy();
+    });
+
     // Issue #1643 — "verify what already works first": before this PR, exhaustion was
     // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
     // the level on a character sheet — set_character_conditions only adds/removes a bare

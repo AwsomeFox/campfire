@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
 import { characters, combatants, encounters, encounterEvents, campaigns, auditLog } from '../../src/db/schema';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -568,6 +568,47 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
       const rows = db.select().from(auditLog).where(eq(auditLog.entityId, comb.id)).all();
       expect(rows.filter((r: any) => r.action === 'encounter.combatant.resource').length).toBe(1);
+    });
+
+    // Review finding (Codex): the keyed replay lookup must run BEFORE the fresh-write
+    // mutability check, exactly like updateCombatant's own ordering (`if
+    // (!patch.idempotencyKey) this.assertMutable(...)` outside, then the transaction-local
+    // replay lookup, then `assertMutable` again only on the non-replay path). A retry whose
+    // claim already committed while the encounter was still running must replay that stored
+    // outcome even if another DM ended the encounter in the meantime — an already-committed
+    // result is a safe read, not a fresh write, and the caller retrying a lost response has
+    // no way to know the encounter ended since.
+    it('a retried idempotencyKey replays its already-committed outcome even after the encounter has since ended', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const first = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-end-race' },
+        user,
+        'dm',
+      );
+      expect(first.statblock.resources['kiPoints'].used).toBe(1);
+
+      // Simulate another DM ending the fight between the original call and this retry —
+      // flip status directly rather than running the full end() lifecycle, which is
+      // orthogonal to what this test isolates (the idempotency ordering).
+      db.update(encounters).set({ status: 'ended' }).where(eq(encounters.id, enc.id)).run();
+
+      const replay = await encountersService.adjustCombatantResource(
+        enc.id,
+        comb.id,
+        { key: 'kiPoints', delta: 1, idempotencyKey: 'retry-key-end-race' },
+        user,
+        'dm',
+      );
+      expect(replay.statblock.resources['kiPoints'].used).toBe(1);
+
+      // A genuinely FRESH (unkeyed, or new-key) write against the now-ended encounter is
+      // still rejected — only an already-committed replay is exempt.
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(ConflictException);
     });
   });
 });
