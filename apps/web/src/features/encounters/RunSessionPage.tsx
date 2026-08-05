@@ -3012,7 +3012,7 @@ export default function RunSessionPage() {
                     onClick={startEncounter}
                     aria-describedby={hasNoCombatants || needsInitiativeCount > 0 ? 'start-roster-hint' : undefined}
                   >
-                    Start
+                    {t('encounters.run.start')}
                   </Btn>
                   {(hasNoCombatants || needsInitiativeCount > 0) && (
                     <p id="start-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
@@ -3072,7 +3072,7 @@ export default function RunSessionPage() {
               // linked character sheet (cross-entity, no CAS guard) — genuinely conflict-prone,
               // so it stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
-                End
+                {t('encounters.run.end')}
               </Btn>
             )}
             {lifecycle.reopen && (
@@ -3087,7 +3087,7 @@ export default function RunSessionPage() {
                   setConfirmReopen(true);
                 }}
               >
-                Reopen
+                {t('encounters.run.reopen')}
               </Btn>
             )}
             {lifecycle.delete && (
