@@ -37,13 +37,11 @@ import {
   MAX_PENDING_CONCENTRATION_CHECKS,
   PendingConcentrationCheck,
   RESOLVER_MATH_D20_5E,
-  inferActionSpecFromText,
   type CriticalDamageRule,
   type ResolverMathProfile,
   type AttackRollInput,
   type AttackRollResult,
 } from './action-resolver';
-export { inferActionSpecFromText } from './action-resolver';
 import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';

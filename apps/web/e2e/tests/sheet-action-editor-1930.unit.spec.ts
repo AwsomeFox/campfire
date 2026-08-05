@@ -46,7 +46,7 @@ test.describe('Sheet action editor spec preservation and inference (issue #1930)
     });
 
     // Simulate saving edit with renamed action name: non-inferred spec MUST be preserved as-is.
-    const updatedName = 'Flaming Longsword';
+    const _updatedName = 'Flaming Longsword';
     const nextToHit = existingAction.toHit;
     const nextDamage = existingAction.damage;
     const nextKind = existingAction.kind;
