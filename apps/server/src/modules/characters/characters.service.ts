@@ -69,6 +69,7 @@ import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog, campaigns, characters, checkRequests, combatants, encounters, partyRestBatches } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
@@ -1111,7 +1112,11 @@ export class CharactersService {
       CharactersService.assertLevelWithinCap(input.level, (await this.adapterForCampaign(existing.campaignId)).maxLevel);
     }
 
-    const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
+    // Issue #1902 rework (round 9): `nextUpdatedAt`, not `nowIso()` — `updatedAt` is a
+    // row-level CAS token now (patchSpellSlots' `expectedUpdatedAt` guard depends on it
+    // advancing on EVERY write to this row, not just spell-slot writes), so every writer
+    // of this table must guarantee monotonic advancement the same way.
+    const update: Partial<typeof characters.$inferInsert> = { updatedAt: nextUpdatedAt(existing.updatedAt) };
     if (input.name !== undefined) update.name = input.name;
     if (input.species !== undefined) update.species = input.species;
     if (input.className !== undefined) update.className = input.className;
@@ -1269,6 +1274,24 @@ export class CharactersService {
     // so a non-dm write is silently ignored, same as ownerUserId above.
     if (input.dmSecret !== undefined && role === 'dm') update.dmSecret = input.dmSecret;
 
+    // Issue #1902 rework (round 12, codex P2, corrected round 15): `existing.updatedAt` was
+    // captured before the awaited `assertProgressionAllowed`/`adapterForCampaign` checks
+    // above — a concurrent CAS-protected write (e.g. `patchSpellSlots`) can land in that
+    // gap. Round 12 re-read the row here to keep the TOKEN monotonic, but that alone did
+    // not close the gap: `opts?.expectedUpdatedAt` had already been validated against the
+    // now-stale `existing` at the top of this method, so a genuinely concurrent change in
+    // that gap was invisible to it — the write proceeded and silently overwrote whatever
+    // changed, instead of the documented 409. Re-validate against THIS fresh read too, not
+    // just use it to advance the token.
+    // The same "re-read fresh, then nextUpdatedAt from THAT" rule applies to every
+    // `updatedAt` CAS token in this codebase, not just this one — round 23 applied it to
+    // `encounters.service.ts`'s post-transaction turnIndex reconciliation write, which had
+    // been stamping a bare `nowIso()` and could tie or roll the encounter's own token
+    // backward relative to a write its own transaction had already committed.
+    const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
+    this.revisions.assertNotStale({ updatedAt: freshUpdatedAt }, opts?.expectedUpdatedAt);
+    update.updatedAt = nextUpdatedAt(freshUpdatedAt);
+
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
@@ -1336,7 +1359,8 @@ export class CharactersService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
-    await this.db.update(characters).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(characters.id, id));
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
+    await this.db.update(characters).set({ deletedAt: nowIso(), updatedAt: nextUpdatedAt(existing.updatedAt) }).where(eq(characters.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -1354,9 +1378,10 @@ export class CharactersService {
     const existing = await this.getRowOrThrow(id, true);
     if (existing.deletedAt == null) throw new NotFoundException(`Character ${id} is not in the trash`);
     this.assertCanWrite(existing, user, role);
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
     const [row] = await this.db
       .update(characters)
-      .set({ deletedAt: null, updatedAt: nowIso() })
+      .set({ deletedAt: null, updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
     await this.audit.log({
@@ -1405,7 +1430,8 @@ export class CharactersService {
       // persistent death-state echo self-consistent when a DM/player adjusts HP
       // outside an encounter instead of leaving a stale 'dead' flag on a healed
       // character or a stale 'none' on a freshly-dropped one.
-      const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nowIso() };
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see the doc comment on `update()`.
+      const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nextUpdatedAt(fresh.updatedAt) };
       if (hpCurrent > 0 && fresh.deathState !== 'none') {
         hpSet.deathState = 'none';
         hpSet.deathSaveSuccesses = 0;
@@ -1506,7 +1532,8 @@ export class CharactersService {
           .set({
             rpCurrent: Math.max(0, fresh.rpCurrent - 1),
             spCurrent: fresh.spMax,
-            updatedAt: nowIso(),
+            // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
+            updatedAt: nextUpdatedAt(fresh.updatedAt),
           })
           .where(eq(characters.id, id))
           .returning()
@@ -1521,7 +1548,7 @@ export class CharactersService {
             rpCurrent: fresh.rpMax,
             hpCurrent: Math.min(fresh.hpMax, fresh.hpCurrent + hpHealed),
             deathState: fresh.hpCurrent + hpHealed > 0 ? 'none' : fresh.deathState,
-            updatedAt: nowIso(),
+            updatedAt: nextUpdatedAt(fresh.updatedAt),
           })
           .where(eq(characters.id, id))
           .returning()
@@ -1574,9 +1601,10 @@ export class CharactersService {
 
       // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
       const requested = 'delta' in patch ? fresh.xp + patch.delta : patch.set;
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [updated] = tx
         .update(characters)
-        .set({ xp: Math.max(0, requested), updatedAt: nowIso() })
+        .set({ xp: Math.max(0, requested), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -1643,10 +1671,12 @@ export class CharactersService {
         );
       }
 
+      // Issue #1902 rework (round 9): PER CHARACTER, not the one shared `ts` for the whole
+      // award — same fix, same reason, as `restParty`'s per-character `nextUpdatedAt` above.
       const changed = targets.map((target) => {
         const [row] = tx
           .update(characters)
-          .set({ xp: target.xp + award.amount, updatedAt: ts })
+          .set({ xp: target.xp + award.amount, updatedAt: nextUpdatedAt(target.updatedAt) })
           .where(eq(characters.id, target.id))
           .returning()
           .all();
@@ -1710,12 +1740,20 @@ export class CharactersService {
       throw new BadRequestException(`Already at level ${maxLevel} — there is no level ${maxLevel + 1}`);
     }
 
-    const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
+    const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nextUpdatedAt(existing.updatedAt) };
     if (input.hpMax !== undefined) {
       const gained = input.hpMax - existing.hpMax;
       update.hpMax = input.hpMax;
       update.hpCurrent = clampHpCurrent(existing.hpCurrent + Math.max(0, gained), input.hpMax);
     }
+
+    // Issue #1902 rework (round 12, codex P2): `existing.updatedAt` predates the awaited
+    // `assertProgressionAllowed`/`adapterForCampaign` calls above — see `update()`'s matching
+    // fix and its doc comment for why a stale root here can publish a token colliding with a
+    // concurrent writer's. Re-read right before the write.
+    const freshUpdatedAt = this.db.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, id)).get()?.updatedAt ?? existing.updatedAt;
+    update.updatedAt = nextUpdatedAt(freshUpdatedAt);
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
@@ -1745,9 +1783,10 @@ export class CharactersService {
     for (const c of patch.remove ?? []) current.delete(c);
     for (const c of patch.add ?? []) current.add(c);
 
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
     const [row] = await this.db
       .update(characters)
-      .set({ ...sheetConditionWriteSetFromNames([...current], existing.conditionInstances), updatedAt: nowIso() })
+      .set({ ...sheetConditionWriteSetFromNames([...current], existing.conditionInstances), updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
 
@@ -1842,9 +1881,10 @@ export class CharactersService {
             : // `legacyConditionInstance` only returns null for an empty name; `track.name`
               // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
               [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [written] = tx
         .update(characters)
-        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
+        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -1896,6 +1936,13 @@ export class CharactersService {
    *
    * A SQL-side `json_set` delta was the alternative. It was rejected because it cannot express
    * "fail when insufficient" in one statement — it would have to clamp, which is the bug.
+   *
+   * `expectedUpdatedAt` below is the SAME optimistic-concurrency guard {@link adjustResource}
+   * carries for its `used` field (issue #1902 rework, round 24) — the two methods are
+   * separate, hand-written implementations (different columns, different decision logic:
+   * a per-level slot budget here vs. a keyed max/used/name/recharge/source map there), not
+   * one shared guarded path, but they follow the identical CAS pattern: re-read fresh inside
+   * the transaction, `assertNotStale` against THAT read, then `nextUpdatedAt` the write.
    */
   async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
@@ -1906,6 +1953,11 @@ export class CharactersService {
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
       if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+      // Issue #1902 rework: checked against the tx-scoped re-read (not the pre-transaction
+      // `existing`) for the same reason the delta itself is computed from `fresh` rather
+      // than `existing` — a caller's `expectedUpdatedAt` must be validated against the
+      // truth this transaction is about to write on top of.
+      this.revisions.assertNotStale(fresh, patch.expectedUpdatedAt);
 
       const slots = fromJsonText<Record<string, SpellSlotLevel>>(fresh.spellSlots, {});
       outcome = applySpellSlotDelta(slots, patch.level, patch.delta);
@@ -1921,9 +1973,19 @@ export class CharactersService {
         });
       }
 
+      // Issue #1902 rework (round 6): `nextUpdatedAt`, not `nowIso()` — this write is now
+      // the compare-and-set TOKEN `expectedUpdatedAt` is checked against (see
+      // `assertNotStale` above). Two spell-slot writes landing inside the same
+      // millisecond would otherwise stamp the IDENTICAL ISO string, so a caller holding
+      // the PRE-write token would pass the staleness check against the row this second
+      // write just produced — the CAS guard would look like it protected the write while
+      // actually rejecting nothing. `nextUpdatedAt` guarantees monotonic advancement even
+      // inside one millisecond, the same guarantee every other CAS-protected write in this
+      // codebase (quests, npcs, locations, sessions, factions, storylines, timeline,
+      // encounters) already relies on.
       const [updated] = tx
         .update(characters)
-        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nowIso() })
+        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -1992,8 +2054,23 @@ export class CharactersService {
     const row = this.db.transaction((tx) => {
       const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
       if (!fresh) throw new NotFoundException(`Character ${id} not found`);
+      // Issue #1902 rework (round 24, codex P1): the SAME guard `patchSpellSlots` has always
+      // had — see its own doc comment just above. An absolute `used` here is a full
+      // OVERWRITE, not a relative delta; without this, a concurrent spend or rest from
+      // another tab, a REST client, or an MCP caller between this caller's read and this
+      // write is silently undone the instant this write lands, because the resource object
+      // this method builds below is derived from `fresh` and then unconditionally replaces
+      // whatever is on the row — checked against the tx-scoped re-read (`fresh`), not the
+      // pre-transaction `existing`, for the identical reason `patchSpellSlots` validates
+      // against its own tx-scoped `fresh`.
+      this.revisions.assertNotStale(fresh, patch.expectedUpdatedAt);
 
-      const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(fresh.resources, {});
+      // Issue #1902 rework: typed against the shared `CharacterResource` contract (which
+      // also carries `source`), not a narrower server-local record missing it — the
+      // narrower type was WHY a resource's provenance silently vanished on its first pip
+      // write below (TypeScript let `resources[patch.key] = {...}` compile with `source`
+      // simply absent from the object literal).
+      const resources = fromJsonText<Record<string, CharacterResource>>(fresh.resources, {});
       const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
 
       const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
@@ -2009,16 +2086,25 @@ export class CharactersService {
         throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
       }
 
+      // Issue #1902 rework: spread `current` FIRST so any field this patch doesn't mention
+      // — `source` above all — survives a plain used-only write untouched, instead of
+      // being dropped by a from-scratch object literal that only ever named
+      // max/used/name/recharge. `source` IS a real `ResourcePatch` write field (like
+      // `name`/`recharge`), it was simply never read here — so an explicit
+      // `patch.source` still updates it, exactly like `patch.name`/`patch.recharge` do.
       resources[patch.key] = {
+        ...current,
         max,
         used,
         name: patch.name ?? current.name ?? patch.key,
         recharge: patch.recharge ?? current.recharge ?? 'long-rest',
+        ...(patch.source !== undefined ? { source: patch.source } : {}),
       };
 
+      // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
       const [written] = tx
         .update(characters)
-        .set({ resources: toJsonText(resources), updatedAt: nowIso() })
+        .set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(fresh.updatedAt) })
         .where(eq(characters.id, id))
         .returning()
         .all();
@@ -2069,6 +2155,16 @@ export class CharactersService {
     if (characterIds.length === 0) {
       throw new BadRequestException('A rest needs at least one character.');
     }
+    // Issue #1902 rework (round 12, devin): de-duplicate BEFORE anything else derives from
+    // `characterIds` (`targets`, `states`, the plan, and — since round 10 — the per-character
+    // WHERE-clause CAS write below). A caller naming the same character twice (an AI Driver's
+    // `long_rest`/`short_rest` MCP tools accept an array with no uniqueness refinement) used to
+    // be harmless: both writes applied the identical planned values. Once the CAS write started
+    // gating on `updatedAt` still matching the PRE-transaction snapshot, the second write for
+    // that same row saw the token the first write (moments earlier, same transaction) had
+    // already advanced — a self-inflicted conflict that rejected the WHOLE rest, including every
+    // other participant, with a misleading "changed after this rest was planned" error.
+    characterIds = [...new Set(characterIds)];
     const adapter = (await this.adapterForCampaign(campaignId)) as unknown as RestAdapter;
 
     const rows = await this.db
@@ -2130,7 +2226,17 @@ export class CharactersService {
     // `stacks` value has nowhere honest to persist except that same structured column — so it is
     // fixed here rather than left half-migrated a second time.
     const nameKey = (name: string) => name.trim().toLowerCase();
-    const at = nowIso();
+    // Issue #1902 rework (round 7): PER CHARACTER, not one shared timestamp for the whole
+    // batch. `restParty` writes `spellSlots` — the same field `patchSpellSlots`'s
+    // `expectedUpdatedAt` CAS guard protects — so a rest that stamped every character with
+    // one `nowIso()` value had the identical same-millisecond non-advancement risk: if that
+    // shared timestamp happened to equal a character's PRE-rest `updatedAt` (two writes
+    // landing in the same millisecond), a spell-slot request already in flight with that
+    // pre-rest token as `expectedUpdatedAt` would pass the CAS check against a sheet the
+    // rest had, in fact, just changed. `nextUpdatedAt`, keyed off each character's OWN prior
+    // `updatedAt` (captured in `targets` above), guarantees every rested character's token
+    // advances, matching `patchSpellSlots`'s own fix for the identical class of bug.
+    const priorUpdatedAtByCharacter = new Map(targets.map((row) => [row.id, row.updatedAt]));
     // Captured per character so the post-commit mirror loop below can pass the exact
     // instances just written — including any decremented `stacks` — to
     // syncActiveCombatantConditions, rather than recomputing them a second time (or
@@ -2148,7 +2254,21 @@ export class CharactersService {
           });
         nextInstancesByCharacter.set(p.characterId, nextInstances);
         const conditionWriteSet = sheetConditionWriteSetFromInstances(nextInstances);
-        tx.update(characters)
+        const priorUpdatedAt = priorUpdatedAtByCharacter.get(p.characterId)!;
+        // Issue #1902 rework (round 10, codex P1): the PLAN (`p.spellSlotsAfter` etc.) was
+        // computed from `targets`, read BEFORE this transaction — and before the `await
+        // this.adapterForCampaign(...)` and dice-rolling above it. If another write (say,
+        // a CAS-protected `patchSpellSlots` spend) lands in that gap, this UPDATE would
+        // previously overwrite it unconditionally with the stale planned blob — `nowIso`/
+        // `nextUpdatedAt` only touches the TOKEN, not whether the plan itself is still
+        // valid. Gate the write on `updatedAt` still matching what the plan was computed
+        // from (the same WHERE-clause CAS `applyPartyRecovery` already uses below) so a
+        // race is REJECTED, not silently applied on top of a stale snapshot — and because
+        // this is inside the ATOMICITY transaction (one invalid character rejects the
+        // whole rest), any character's stale read fails the whole call rather than
+        // corrupting just that one sheet.
+        const result = tx
+          .update(characters)
           .set({
             hpCurrent: p.hpAfter,
             hpTemp: p.hpTempAfter,
@@ -2158,10 +2278,13 @@ export class CharactersService {
             ...conditionWriteSet,
             spellSlots: toJsonText(p.spellSlotsAfter),
             resources: toJsonText(p.resourcesAfter),
-            updatedAt: at,
+            updatedAt: nextUpdatedAt(priorUpdatedAt),
           })
-          .where(eq(characters.id, p.characterId))
+          .where(and(eq(characters.id, p.characterId), eq(characters.updatedAt, priorUpdatedAt)))
           .run();
+        if (result.changes !== 1) {
+          throw new ConflictException(`${p.characterName} changed after this rest was planned — reload and rest again.`);
+        }
       }
     });
 
@@ -2303,9 +2426,24 @@ export class CharactersService {
       for (const item of plan.plans) {
         const snapshot = before.find((candidate) => candidate.id === item.characterId)!;
         const nextInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
-        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, ...sheetConditionWriteSetFromInstances(nextInstances), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, snapshot.updatedAt))).run();
+        // Issue #1902 rework (round 11, codex P2; corrected round 17, codex P2): PER
+        // CHARACTER, from that character's own pre-apply snapshot — not the shared `at`
+        // used for the batch/audit timestamps below. `updatedAt` is the same CAS token
+        // `patchSpellSlots`'s `expectedUpdatedAt` guard checks; the WHERE clause here
+        // already protects THIS write's own atomicity, but a shared, non-monotonic
+        // `nowIso()` stamp could still coincide with a character's pre-recovery token if
+        // both land in the same millisecond, letting a stale `patchSpellSlots` call
+        // silently pass staleness the same class of bug `restParty` and the encounter
+        // writers were fixed for. Computed ONCE (not inline in `.set()`) because
+        // `syncRecoveryCombatantsInTx` stamps the linked combatant's `sheetSyncedUpdatedAt`
+        // with this EXACT value too — that field is defined as "the sheet's `updatedAt` at
+        // the moment of sync", and `canWriteBackHp`/`endEncounter`'s CAS predicate both
+        // compare it directly against the sheet's actual `updatedAt` (see the identical
+        // `endEncounter` mismatch fixed in round 15).
+        const sheetToken = nextUpdatedAt(snapshot.updatedAt);
+        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, ...sheetConditionWriteSetFromInstances(nextInstances), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: sheetToken }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, snapshot.updatedAt))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed while recovery was applying.');
-        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.hpTempAfter, item.deathStateAfter, item.deathSaveSuccessesAfter, item.deathSaveFailuresAfter, nextInstances, at)) touchedEncounterIds.add(encounterId);
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.hpTempAfter, item.deathStateAfter, item.deathSaveSuccessesAfter, item.deathSaveFailuresAfter, nextInstances, sheetToken)) touchedEncounterIds.add(encounterId);
       }
       const result = tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText(resultBody), appliedAt: at }).where(and(eq(partyRestBatches.id, batch.id), eq(partyRestBatches.status, 'previewed'))).run();
       if (result.changes !== 1) throw new ConflictException('Recovery preview was applied concurrently.');
@@ -2349,9 +2487,21 @@ export class CharactersService {
         const item = after.find((candidate) => candidate.characterId === snapshot.id);
         if (!item) throw new ConflictException('Recovery snapshot is incomplete.');
         const afterInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
-        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, ...sheetConditionWriteSetFromInstances(readConditionInstances(snapshot.conditionInstances, snapshot.conditions)), spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(afterInstances.map((instance) => instance.name))), eq(characters.conditionInstances, toJsonText(afterInstances)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
+        // Issue #1902 rework (round 11, codex P2): this WHERE clause already pins every
+        // OTHER column to its exact post-apply value, so reading `updatedAt` fresh here
+        // (rather than reusing the shared `at`) is safe — the row is provably the one this
+        // undo is reverting. Per-character `nextUpdatedAt`, not a shared stamp, for the same
+        // reason as `applyPartyRecovery` above: this is the CAS token `patchSpellSlots`'s
+        // `expectedUpdatedAt` guard checks.
+        const currentRow = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, snapshot.id)).get();
+        // Issue #1902 rework (round 17, codex P2): computed once, then reused for the
+        // linked combatant's `sheetSyncedUpdatedAt` below too — see the matching
+        // `applyPartyRecovery` fix's fuller doc comment above for why the two must be the
+        // exact same value.
+        const sheetToken = nextUpdatedAt(currentRow?.updatedAt ?? at);
+        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, ...sheetConditionWriteSetFromInstances(readConditionInstances(snapshot.conditionInstances, snapshot.conditions)), spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: sheetToken }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(afterInstances.map((instance) => instance.name))), eq(characters.conditionInstances, toJsonText(afterInstances)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
-        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.hpTemp, snapshot.deathState, snapshot.deathSaveSuccesses, snapshot.deathSaveFailures, readConditionInstances(snapshot.conditionInstances, snapshot.conditions), at)) touchedEncounterIds.add(encounterId);
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.hpTemp, snapshot.deathState, snapshot.deathSaveSuccesses, snapshot.deathSaveFailures, readConditionInstances(snapshot.conditionInstances, snapshot.conditions), sheetToken)) touchedEncounterIds.add(encounterId);
       }
       const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at, undoIdempotencyKey: idempotencyKey, undoResultJson: toJsonText(undoResult) }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run();
       if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.');
@@ -2407,9 +2557,10 @@ export class CharactersService {
       }
     }
 
+    // Issue #1902 rework (round 9): nextUpdatedAt, not nowIso — see `update()`'s doc comment.
     const [row] = await this.db
       .update(characters)
-      .set({ spellSlots: toJsonText(slots), resources: toJsonText(resources), updatedAt: nowIso() })
+      .set({ spellSlots: toJsonText(slots), resources: toJsonText(resources), updatedAt: nextUpdatedAt(existing.updatedAt) })
       .where(eq(characters.id, id))
       .returning();
 

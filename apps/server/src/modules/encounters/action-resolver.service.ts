@@ -76,6 +76,7 @@ import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromInstances, conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -1565,6 +1566,12 @@ export class ActionResolverService {
     let actorConcentrationTouched = false;
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
+    // Issue #1902 rework (round 19, codex P2): set true only when this specific apply
+    // ACTUALLY mirrored something onto a linked character sheet (HP/condition or a
+    // spell-slot spend) — most actions (a monster-only fight, a roll with no
+    // consequence) touch no sheet at all, so the emitted `encounter.updated` should not
+    // claim one and trigger every client's `campaignCharacters` refetch for nothing.
+    let sheetMirrored = false;
 
     const earlyToken = this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
@@ -1633,7 +1640,7 @@ export class ActionResolverService {
       // "damage landed" and "the cast turned out to be unpayable". Failing before any of that
       // is written keeps the transaction simple and gives the caller (frequently the AI
       // Driver) a clean retry — nothing here to undo.
-      let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
+      let spellSlotSpend: { characterId: number; slots: SpellSlotMap; priorUpdatedAt: string } | null = null;
       if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
         const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
@@ -1651,7 +1658,11 @@ export class ActionResolverService {
               max: outcome.max,
             });
           }
-          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots };
+          // `priorUpdatedAt` carried to the write site below (issue #1902 rework, round 10)
+          // so that write can advance the character's CAS token monotonically via
+          // `nextUpdatedAt`, matching `patchSpellSlots`/`restParty` — this read is already
+          // transaction-scoped (`tx.select`), so there's no separate re-read to add.
+          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots, priorUpdatedAt: character.updatedAt };
         }
       }
 
@@ -1810,7 +1821,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState);
+          // Issue #1902 rework (round 22, codex P2): a cascade off the actor's own
+          // concentration break can mirror a DIFFERENT character's sheet.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, actor, turnState)) sheetMirrored = true;
         }
         if (resolution.startsConcentration) {
           // Queued saves belong to the PRIOR effect and must never break the new one,
@@ -1912,10 +1925,11 @@ export class ActionResolverService {
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && liveEncounter.status !== 'ended') {
           const sheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
+          const targetSheetToken = nextUpdatedAt(sheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               hpCurrent: result.hpCurrent,
@@ -1928,10 +1942,18 @@ export class ActionResolverService {
               // The live condition name list is the combatant's; the structured instance
               // prior must come from the sheet itself or legacy rows will wipe sheet detail.
               ...sheetConditionWriteSetFromNames([...conditions], sheetRow?.conditionInstances ?? null),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the
+              // spell-slot spend write's comment below for why this token must advance on
+              // every characters-row writer.
+              updatedAt: targetSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: targetSheetToken })
+            .where(eq(combatants.id, fresh.id))
+            .run();
+          sheetMirrored = true;
         }
 
         // Issue #1452: if a concentrating target is dropped by the resolved attack, break
@@ -1968,7 +1990,9 @@ export class ActionResolverService {
             }
           }
 
-          this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState);
+          // Issue #1902 rework (round 22, codex P2): same cascade-mirrors-a-third-sheet
+          // gap as the actor's own break above.
+          if (this.breakConcentration(tx, encounter.id, encounter.round, { id: fresh.id, name: fresh.name }, nextTargetTurnState)) sheetMirrored = true;
           tx.update(combatants).set({ turnState: toJsonText(nextTargetTurnState) }).where(eq(combatants.id, fresh.id)).run();
         }
 
@@ -1983,11 +2007,32 @@ export class ActionResolverService {
       }
       // The spend was already validated (and the replacement blob computed) at the top of
       // this transaction, before any consequence above was written — this is just the write.
+      // Issue #1902 rework (devin review PRRT_kwDOTdNRkM6WFOfH): re-read the character row
+      // fresh immediately before this write. `breakConcentration` or target HP/condition
+      // mirrors earlier in this transaction may have already advanced `characters.updatedAt`
+      // beyond `spellSlotSpend.priorUpdatedAt`. Derive the final token from that current state
+      // and update the linked combatant's `sheetSyncedUpdatedAt` to match.
       if (spellSlotSpend) {
+        const freshChar = tx
+          .select({ updatedAt: characters.updatedAt })
+          .from(characters)
+          .where(eq(characters.id, spellSlotSpend.characterId))
+          .get();
+        const finalToken = nextUpdatedAt(freshChar?.updatedAt ?? spellSlotSpend.priorUpdatedAt);
         tx.update(characters)
-          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nowIso() })
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: finalToken })
           .where(eq(characters.id, spellSlotSpend.characterId))
           .run();
+        tx.update(combatants)
+          .set({ sheetSyncedUpdatedAt: finalToken })
+          .where(
+            and(
+              eq(combatants.encounterId, encounter.id),
+              eq(combatants.characterId, spellSlotSpend.characterId),
+            ),
+          )
+          .run();
+        sheetMirrored = true;
       }
 
       // Issue #1449: persist the pre-apply snapshot server-side, keyed by chainId, so undo()
@@ -2042,7 +2087,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id });
+    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id, sheetMirrored });
 
     return ActionUndoToken.parse({
       encounterId: committedEncounter.id,
@@ -2095,6 +2140,11 @@ export class ActionResolverService {
    */
   undo(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role): { ok: true } {
     const encounter = this.encounterRowOrThrow(encounterId);
+    // Issue #1902 rework (round 19, codex P2 sweep continuation): mirrors `apply()`'s own
+    // `sheetMirrored` tracking (see that method's doc comment) — undo restores each
+    // target's HP/condition slice and refunds a spent spell slot, both onto the linked
+    // character sheet, so this event needs the same precise tag as apply's.
+    let sheetMirrored = false;
     if (token.encounterId !== encounterId) {
       this.auditRejectedUndo(encounter, token, user, role, 'cross_encounter_token');
       throw new BadRequestException('Undo token is for a different encounter.');
@@ -2254,7 +2304,7 @@ export class ActionResolverService {
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
           const undoSheetRow = tx
-            .select({ conditionInstances: characters.conditionInstances })
+            .select({ conditionInstances: characters.conditionInstances, updatedAt: characters.updatedAt })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
             .get();
@@ -2268,6 +2318,7 @@ export class ActionResolverService {
                 deathSaveSuccesses: t.deathSaveSuccessesBefore,
                 deathSaveFailures: t.deathSaveFailuresBefore,
               };
+          const undoSheetToken = nextUpdatedAt(undoSheetRow?.updatedAt ?? nowIso());
           tx.update(characters)
             .set({
               ...sheetHpRestore,
@@ -2275,10 +2326,18 @@ export class ActionResolverService {
               ...(conditionInstancesBefore
                 ? sheetConditionWriteSetFromInstances(conditionInstancesBefore)
                 : sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances)),
-              updatedAt: nowIso(),
+              // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — see the apply-side
+              // spell-slot write's comment below for why this CAS token must advance on
+              // EVERY characters-row writer, not just patchSpellSlots.
+              updatedAt: undoSheetToken,
             })
             .where(eq(characters.id, fresh.characterId))
             .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: undoSheetToken })
+            .where(eq(combatants.id, fresh.id))
+            .run();
+          sheetMirrored = true;
         }
       }
       // Refund the actor's resources — from the STORED chain, never the client token.
@@ -2323,7 +2382,23 @@ export class ActionResolverService {
           const slot = slots[String(chain.spellLevelSpent)];
           if (slot) {
             slot.used = Math.max(0, (slot.used ?? 0) - 1);
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
+            // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a
+            // CAS token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing
+            // on EVERY spellSlots writer. `character` was read INSIDE this same
+            // transaction just above, so there's no separate atomicity gap to guard here
+            // (unlike `restParty`'s pre-transaction plan).
+            const sheetToken = nextUpdatedAt(character.updatedAt);
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: sheetToken }).where(eq(characters.id, actor.characterId)).run();
+            tx.update(combatants)
+              .set({ sheetSyncedUpdatedAt: sheetToken })
+              .where(
+                and(
+                  eq(combatants.encounterId, committedEncounter.id),
+                  eq(combatants.characterId, actor.characterId),
+                ),
+              )
+              .run();
+            sheetMirrored = true;
           }
         }
       }
@@ -2369,7 +2444,7 @@ export class ActionResolverService {
       })
       .catch(() => undefined);
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored });
     return { ok: true };
   }
 
@@ -2385,7 +2460,13 @@ export class ActionResolverService {
     round: number,
     caster: { id: number; name: string },
     turnState: { concentration: string | null; pendingConcentrationChecks: unknown[] },
-  ): void {
+  ): boolean {
+    // Issue #1902 rework (round 22, codex P2): returns whether this cascade mirrored any
+    // character sheet, so both callers below can OR it into their own `sheetMirrored`
+    // flag — a caster/target dropping concentration can cascade a condition-removal write
+    // onto a THIRD, character-linked combatant that isn't the caster or the direct action
+    // target, which neither caller could see without this signal.
+    let sheetMirrored = false;
     const allRows = tx
       .select({
         id: combatants.id,
@@ -2409,15 +2490,28 @@ export class ActionResolverService {
       const row = withInstances.find((row2) => row2.id === combatantId);
       if (!row) continue;
       const write: Partial<typeof combatants.$inferInsert> = conditionWriteSetFromInstances(instances);
+      // Issue #1902 rework (round 13, codex P2; corrected round 18, codex P2): computed
+      // ONCE, BEFORE either write, and reused for both — `sheetSyncedUpdatedAt` on the
+      // combatant is defined as "the sheet's `updatedAt` at the moment of sync"
+      // (`CharactersService.syncActiveCombatants`/`updateCombatant`'s mirror both write
+      // one shared value to both rows), and `canWriteBackHp`/`endEncounter`'s CAS
+      // predicate compare it directly against the sheet's ACTUAL `updatedAt`. Round 13
+      // advanced the character's token per-character but still stamped the combatant
+      // with the shared `now` — the identical mismatch class already fixed for
+      // `endEncounter` (round 15) and `applyPartyRecovery`/`undoPartyRecovery` (round 17).
+      let sheetToken: string | undefined;
       if (row.characterId != null) {
-        Object.assign(write, { sheetSyncedUpdatedAt: now });
+        const currentChar = tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, row.characterId)).get();
+        sheetToken = nextUpdatedAt(currentChar?.updatedAt ?? now);
+        Object.assign(write, { sheetSyncedUpdatedAt: sheetToken });
       }
       tx.update(combatants).set(write).where(eq(combatants.id, combatantId)).run();
       if (row.characterId != null) {
         tx.update(characters)
-          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: now })
+          .set({ ...sheetConditionWriteSetFromInstances(instances), updatedAt: sheetToken! })
           .where(eq(characters.id, row.characterId))
           .run();
+        sheetMirrored = true;
       }
     }
     for (const r of removed) {
@@ -2443,5 +2537,6 @@ export class ActionResolverService {
     }
     turnState.concentration = null;
     turnState.pendingConcentrationChecks = [];
+    return sheetMirrored;
   }
 }
