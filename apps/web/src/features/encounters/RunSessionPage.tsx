@@ -45,6 +45,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
+import { withStatblockRevision } from './resourceTrackerLogic';
 import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -2118,9 +2119,13 @@ export default function RunSessionPage() {
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
       const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId, isDm) : patch;
-      combatantPatch.mutate({ combatantId, patch: enriched });
+      // Issue #1909 review (Codex): see withStatblockRevision's doc comment — a
+      // whole-statblock write from the in-app statblock editor used to carry no
+      // `expectedUpdatedAt`, so the server's CAS guard never actually fired for it.
+      const withRevision = withStatblockRevision(enriched, encounter?.updatedAt);
+      combatantPatch.mutate({ combatantId, patch: withRevision });
     },
-    [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId, encounter?.updatedAt, isDm],
   );
 
   const deathSaveRoll = useKeyedMutation({

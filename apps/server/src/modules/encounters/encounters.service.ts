@@ -8502,6 +8502,23 @@ export class EncountersService {
    * Roles mirror `updateCombatant`'s statblock rule: the DM may adjust any combatant; a
    * player may adjust only a combatant linked to a character they own; a statblock
    * combatant (no linked character) is DM-only, since it has no owning player.
+   *
+   * RESPONSE CONTRACT (issue #1909 review, Codex P2 — decided deliberately, documented
+   * here rather than left implicit): the returned `Combatant` reflects the COMMITTED write
+   * for the statblock branch (the inline statblock lives ON the combatant row), but NOT for
+   * the character branch — `Combatant` has no `resources`/`spellSlots` field at all; that
+   * state lives exclusively on the linked CHARACTER row, which this method never re-reads
+   * for its response. The returned object for a character-linked combatant is therefore
+   * byte-identical to a fresh read of that SAME unchanged combatant row (nothing on it
+   * ever writes), not because it is stale, but because the domain model has nowhere on a
+   * `Combatant` to put a character's resource state. A caller of the character branch that
+   * wants to confirm/display the new value must read the CHARACTER separately (e.g.
+   * `GET /characters/:id`, or `get_character` over MCP) — the same second read every OTHER
+   * character-resource caller (`POST /characters/:id/resources`/`.../spell-slots` returns
+   * the `Character` itself) never needed, because THEIR response type already matches
+   * what changed. This is a narrower contract than "Updated combatant" (the REST route's
+   * summary) literally promises for the character branch specifically; see that route's
+   * and the MCP tool's own doc comments for the corresponding caller-facing wording.
    */
   async adjustCombatantResource(
     encounterId: number,
@@ -8564,6 +8581,30 @@ export class EncountersService {
     let eventDetail = '';
     let row: typeof combatants.$inferSelect = combatant;
 
+    // Issue #1909 review (Devin/Codex secrecy finding): a stored response was rendered for
+    // the ROLE that committed it — a DM-only projection (exact fog-hidden token position,
+    // unbanded monster HP, an inline statblock) can be embedded in it. If the SAME actor's
+    // role has since dropped within the replay window (e.g. a co-DM demoted to player who
+    // still happens to own the linked character), replaying that body verbatim would hand
+    // them content they may no longer be entitled to see. Mirrors the
+    // `prior.responseRole === role` guard every OTHER keyed mutation that stores a
+    // role-shaped body already has (`rollCombatantInitiative`, `advanceCurrentTurn`,
+    // `undoTurn`): on a mismatch — or a missing body, which cannot happen for THIS
+    // implementation since the claim and its body are written in the same transaction, but
+    // is handled the same defensive way as those siblings anyway — fall through to a FRESH
+    // role-filtered read (`getWithCombatantsOrThrow`) rather than trust the stored
+    // projection. This never re-runs the effect a second time; only the returned VIEW is
+    // re-derived.
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
+      const body = prior.response as Combatant | null;
+      if (body && prior.responseRole === role) return body;
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      return found;
+    };
+    let priorClaim: EncounterOpPrior | null = null;
+
     if (combatant.characterId !== null) {
       const characterId = combatant.characterId;
       try {
@@ -8571,8 +8612,8 @@ export class EncountersService {
           if (opClaim) {
             const prior = findPriorEncounterOp(tx, opClaim, Date.now());
             if (prior) {
-              replayed = prior.response as Combatant | null;
-              if (replayed) return;
+              priorClaim = prior;
+              return;
             }
           }
           // Re-read the encounter INSIDE this transaction, after the replay lookup, so an
@@ -8639,15 +8680,18 @@ export class EncountersService {
           // there is nothing fresher to re-select here.
           if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
         });
+        if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
         // Issue #1909 review (Devin + Copilot, same defect): `recordEncounterOp` throws
         // this plain Error — never an HttpException — when a concurrent request with the
         // SAME idempotencyKey inserted its claim first; our own effect already rolled
         // back. Replay the winner's stored response instead of letting the marker escape
-        // as an unhandled 500, exactly like `updateCombatant`/`removeCombatant` do.
+        // as an unhandled 500, exactly like `updateCombatant`/`removeCombatant` do —
+        // through the same role-checked `resolveReplay` as the in-transaction replay above
+        // (issue #1909 review, secrecy finding), not the raw stored body.
         if (opClaim && err instanceof EncounterOpRaceMarker) {
           const prior = await readEncounterOpAfterRace(this.db, err.claim);
-          replayed = (prior.response as Combatant | null) ?? (await this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain));
+          replayed = await resolveReplay(prior);
         } else {
           throw err;
         }
@@ -8664,8 +8708,8 @@ export class EncountersService {
           if (opClaim) {
             const prior = findPriorEncounterOp(tx, opClaim, Date.now());
             if (prior) {
-              replayed = prior.response as Combatant | null;
-              if (replayed) return;
+              priorClaim = prior;
+              return;
             }
           }
           // Re-read the encounter row too, INSIDE this transaction, after the replay
@@ -8688,6 +8732,22 @@ export class EncountersService {
             if (!slot || slot.max <= 0) {
               throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
             }
+            // Issue #1909 review (Codex P2): `CombatantStatblock.spellSlots`/`.resources`
+            // are `z.record(..., z.any())` — no per-entry shape enforcement — so a stored
+            // entry can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Without
+            // this check, `slot.used + delta` below would be `NaN`, and `NaN < 0 || NaN >
+            // slot.max` is FALSE either way (every NaN comparison is false), so the
+            // overspend/over-restore guard would silently pass and persist `used: NaN` —
+            // which serializes to `null` and leaves the tracker unusable — directly
+            // contradicting this endpoint's documented contract that overspend/
+            // over-restore is always a typed 400, never a silent clamp (or, worse here, a
+            // silent corruption). A non-numeric `max` would also disable the upper bound
+            // entirely (`nextUsed > undefined` is always false). Validate numerically
+            // BEFORE computing the delta so a malformed entry 400s, naming it, instead of
+            // writing garbage.
+            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
+              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
+            }
             const nextUsed = slot.used + delta;
             if (nextUsed < 0 || nextUsed > slot.max) {
               throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
@@ -8701,6 +8761,13 @@ export class EncountersService {
               name: patch.key,
               recharge: 'long-rest',
             };
+            // Issue #1909 review (Codex P2): same malformed-entry guard as the spell-slot
+            // branch above — the fallback default just above is always well-formed, but an
+            // EXISTING stored entry (this `??` skips) is not schema-enforced and can carry
+            // a non-numeric `used`/`max`.
+            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
+              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
+            }
             const nextUsed = res.used + delta;
             if (nextUsed < 0 || nextUsed > res.max) {
               throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
@@ -8760,14 +8827,17 @@ export class EncountersService {
 
           if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
         });
+        if (priorClaim) replayed = await resolveReplay(priorClaim);
       } catch (err) {
         // Issue #1909 review (Devin + Copilot, same defect): same race-marker replay as
         // the character branch above — `recordEncounterOp` throws a plain Error (never an
         // HttpException) on a concurrent same-key insert; replay the winner instead of
-        // letting it escape as an unhandled 500.
+        // letting it escape as an unhandled 500 — through the same role-checked
+        // `resolveReplay` as the in-transaction replay above (issue #1909 review, secrecy
+        // finding), not the raw stored body.
         if (opClaim && err instanceof EncounterOpRaceMarker) {
           const prior = await readEncounterOpAfterRace(this.db, err.claim);
-          replayed = (prior.response as Combatant | null) ?? (await this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain));
+          replayed = await resolveReplay(prior);
         } else {
           throw err;
         }

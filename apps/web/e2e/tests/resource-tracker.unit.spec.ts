@@ -17,6 +17,7 @@ import {
   pendingTargetKey,
   addPendingKey,
   removePendingKey,
+  withStatblockRevision,
 } from '../../src/features/encounters/resourceTrackerLogic';
 
 const PANEL = resolve(__dirname, '../../src/features/encounters/ResourceTrackerPanel.tsx');
@@ -96,6 +97,30 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   test('combatantResourceAdjustBody sends { spellLevel, delta } for a spell slot, relative to current used', () => {
     expect(combatantResourceAdjustBody({ spellLevel: 2 }, 0, 1)).toEqual({ spellLevel: 2, delta: 1 });
     expect(combatantResourceAdjustBody({ spellLevel: 2 }, 1, 0)).toEqual({ spellLevel: 2, delta: -1 });
+  });
+
+  // Issue #1909 review (Codex P2): the in-app statblock editor's whole-statblock PATCH
+  // (RunSessionPage's patchCombatant, called from CombatantRow's onChange) sent no
+  // `expectedUpdatedAt` at all — the server's assertNotStale CAS guard is conditional on
+  // the field being present, so it was a no-op for this caller regardless of the CAS bump
+  // this PR added elsewhere. This is the regression proof for the fix: a `statblock` patch
+  // must come out carrying the encounter's current revision.
+  test('withStatblockRevision attaches expectedUpdatedAt to a statblock patch — the actual gap Codex found', () => {
+    const patch = { statblock: { resources: {}, spellSlots: {} } };
+    expect(withStatblockRevision(patch, '2026-01-01T00:00:00.000Z')).toEqual({
+      ...patch,
+      expectedUpdatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  test('withStatblockRevision leaves a non-statblock patch untouched — HP/condition/position ticks keep their token-less behavior', () => {
+    const patch = { hpDelta: -3 };
+    expect(withStatblockRevision(patch, '2026-01-01T00:00:00.000Z')).toBe(patch);
+  });
+
+  test('withStatblockRevision leaves a statblock patch untouched when the encounter revision is not yet known', () => {
+    const patch = { statblock: { resources: {}, spellSlots: {} } };
+    expect(withStatblockRevision(patch, undefined)).toBe(patch);
   });
 
   test('gating matrix: DM edits any character; owning player edits only their own; others read-only', () => {

@@ -617,7 +617,14 @@ export class EncountersController {
       'concurrent single-pip spends on DIFFERENT resources on the SAME sheet/statblock both persist. Records a ' +
       '`resource_changed` encounter event.',
   })
-  @ApiResponse({ status: 201, description: 'Updated combatant.' })
+  @ApiResponse({
+    status: 201,
+    description:
+      'The combatant. For a statblock combatant (no linked character) this reflects the committed spend/restore — ' +
+      'the statblock lives on the combatant row itself. For a character-linked combatant the resource lives on the ' +
+      'CHARACTER sheet instead, which this response does not re-read (a Combatant has no resources/spellSlots ' +
+      'field) — read GET /characters/:id separately to confirm the committed value.',
+  })
   @ApiResponse({ status: 400, description: 'Overspend/over-restore outside [0, max], or the combatant has no sheet/inline-statblock resources.' })
   @ApiResponse({ status: 403, description: 'Not the dm or the owning player, or a non-dm targeting a statblock combatant.' })
   async adjustCombatantResource(

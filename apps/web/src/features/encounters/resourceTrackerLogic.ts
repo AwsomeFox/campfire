@@ -1,6 +1,9 @@
 /**
  * Pure helpers for {@link ResourceTrackerPanel} (issue #1902), split out so the request
- * bodies and the gating matrix can be unit-tested without rendering the component.
+ * bodies and the gating matrix can be unit-tested without rendering the component. Also
+ * home to {@link withStatblockRevision} (issue #1909 review), a request-body helper for
+ * `RunSessionPage`'s combatant PATCH — not the panel itself, but the same "small pure body
+ * builder, unit-tested without rendering a page" shape as everything else here.
  */
 import type { CombatantResourceAdjust, ResourcePatch, RestOptionDef, SpellSlotPatch } from '@campfire/schema';
 
@@ -201,4 +204,29 @@ export function removePendingKey(keys: ReadonlySet<string>, key: string): Readon
   const next = new Set(keys);
   next.delete(key);
   return next;
+}
+
+/**
+ * Attach the encounter's current revision to a whole-statblock combatant PATCH (issue
+ * #1909 review, Codex P2). `expectedUpdatedAt` is the CAS token the server's
+ * `assertNotStale` guard checks against `encounters.updatedAt` — but that guard is
+ * conditional on the field being PRESENT, and `RunSessionPage`'s in-app statblock editor
+ * (`CombatantRow`'s `onChange={(next) => onPatchCombatant?.({ statblock: next })}`) sent
+ * a token-less patch, so the guard never actually fired for this caller. Without it, a DM
+ * editing AC/actions in the statblock editor in one tab while a monster's pip is spent
+ * elsewhere (another tab, another DM, an MCP-driven AI DM) would have their next keystroke
+ * silently revert that spend on save — the exact lost-update class issue #1909 exists to
+ * close, reachable through this one sibling PATCH.
+ *
+ * Scoped to `statblock` patches specifically, not every combatant patch: HP/condition/
+ * position ticks have no such revision-token history and keep their existing, deliberately
+ * token-less behavior — attaching one there would start rejecting flows this PR was never
+ * asked to touch (e.g. a fast HP tick landing just after an unrelated encounter update).
+ */
+export function withStatblockRevision(
+  patch: Record<string, unknown>,
+  expectedUpdatedAt: string | undefined,
+): Record<string, unknown> {
+  if (!('statblock' in patch) || !expectedUpdatedAt) return patch;
+  return { ...patch, expectedUpdatedAt };
 }

@@ -367,6 +367,48 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(rows.some((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor).startsWith(String(user.id)))).toBe(true);
   });
 
+  // Issue #1909 review (Codex P2): for a character-linked combatant the resource lives on
+  // the CHARACTER row, not the combatant — `Combatant` has no resources/spellSlots field at
+  // all, so the response cannot show the committed value regardless of freshness. Pins the
+  // now-documented contract (see adjustCombatantResource's own doc comment) that a caller
+  // wanting the new value must read the character separately, rather than leaving the
+  // "Updated combatant" route summary silently over-promising.
+  it("the character branch's response never carries the new resource value (it lives on the character, not the combatant) — read the character separately to confirm it", async () => {
+    const user = { id: '1', username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Response Contract Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Ezren',
+        ownerUserId: '1',
+        resources: JSON.stringify({ arcaneRecovery: { max: 3, used: 0, name: 'Arcane Recovery', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db.insert(encounters).values({ campaignId: camp.id, name: 'Contract Fight', status: 'running', createdAt: ts, updatedAt: ts }).returning().all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Ezren', sortOrder: 1 })
+      .returning()
+      .all();
+
+    const before = await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, user, 'dm');
+    const after = await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, user, 'dm');
+    // The two responses are for two DIFFERENT commits (used 0->1, then 1->2), yet the
+    // returned Combatant is identical both times: it never carried resource state to begin
+    // with, so there is nothing on it that COULD show which commit this response is for.
+    expect(after).toEqual(before);
+    expect((after as { statblock: unknown }).statblock).toBeNull();
+
+    // The actual committed value only shows up on a SEPARATE read of the character.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['arcaneRecovery'].used).toBe(2);
+  });
+
   it("issue #1909: a player adjusts their own character combatant; a different player is forbidden", async () => {
     const owner = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
     const otherPlayer = { id: '2', username: 'other', displayName: 'Other', serverRole: 'user' as const };
@@ -412,6 +454,79 @@ describe('inline spell slots & character resources (issue #422)', () => {
     await expect(
       encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'arcaneRecovery', delta: 1 }, otherPlayer, 'player'),
     ).rejects.toThrow(ForbiddenException);
+  });
+
+  // Issue #1909 review (Devin/Codex secrecy finding): a keyed replay used to return
+  // `prior.response` verbatim with no comparison against the CALLER'S CURRENT role — but
+  // the stored body was rendered for whatever role committed it, and can embed a DM-only
+  // projection (here: a fog-hidden token's EXACT position). If the SAME actor's role has
+  // since dropped (a co-DM demoted to player who still happens to own the linked
+  // character — the realistic case, since the ownership gate blocks a demoted non-owner
+  // from ever reaching replay at all), replaying that body verbatim would leak it.
+  it("a keyed replay under a REDUCED role re-derives the response instead of leaking the DM-committed body's fog-hidden token position", async () => {
+    const user = { id: '1', username: 'dm_and_owner', displayName: 'DM', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Replay Secrecy Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({
+        campaignId: camp.id,
+        name: 'Foggy Ambush',
+        status: 'running',
+        // Fog revealed only the far corner (60-100, 60-100) — the combatant below sits at
+        // (10, 10), squarely in the UNREVEALED area.
+        fog: JSON.stringify({ enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1, tokenX: 10, tokenY: 10 })
+      .returning()
+      .all();
+
+    // First commit as 'dm': the fresh-write response is never redacted regardless of role
+    // (only a DM, or the character's own owning player, can ever reach this write; a
+    // monster/npc-kind statblock write is DM-only outright), so it carries the EXACT
+    // token position — this is the DM-only projection a lower-privileged replay must not
+    // leak. Stored with responseRole: 'dm'.
+    const committed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'layOnHands', delta: 1, idempotencyKey: 'replay-secrecy' }, user, 'dm',
+    );
+    expect(committed.tokenX).toBe(10);
+    expect(committed.tokenY).toBe(10);
+
+    // SAME actor, SAME key, but now calling as 'player' — realistic if this DM is demoted
+    // to player mid-session but (as set up here) still owns the linked character, so the
+    // ownership gate lets them reach the replay lookup at all. Under the pre-fix code this
+    // would return the stored dm-role body verbatim (tokenX: 10, unredacted). Fixed: the
+    // responseRole ('dm') no longer matches the caller's current role ('player'), so the
+    // response is re-derived fresh via getWithCombatantsOrThrow('player'), which redacts
+    // the fog-hidden position.
+    const replayed = await encountersService.adjustCombatantResource(
+      enc.id, comb.id, { key: 'layOnHands', delta: 1, idempotencyKey: 'replay-secrecy' }, user, 'player',
+    );
+    expect(replayed.tokenX).toBeNull();
+    expect(replayed.tokenY).toBeNull();
+    expect(replayed.tokenHiddenByFog).toBe(true);
+
+    // The replay did not re-run the effect: still used: 1 (the first commit), not 2.
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['layOnHands'].used).toBe(1);
   });
 
   describe('issue #1909: statblock combatants', () => {
@@ -517,6 +632,57 @@ describe('inline spell slots & character resources (issue #422)', () => {
       const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
       // Still exactly 3 (the successful spend), not 4 — the rejected 4th write left nothing behind.
       expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(3);
+    });
+
+    // Issue #1909 review (Codex P2): CombatantStatblock.resources/.spellSlots are
+    // `z.record(..., z.any())` — no per-entry shape enforcement — so a stored entry can be
+    // malformed. Simulates that directly via a raw DB write (bypassing the endpoint, the
+    // only way a legacy/corrupt row like this could exist), then exercises the endpoint
+    // against it.
+    it("a resource entry missing `used` 400s naming the entry, instead of silently persisting used: NaN (Codex review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      db.update(combatants)
+        .set({ statblockJson: JSON.stringify({ resources: { kiPoints: { max: 3 } }, spellSlots: {} }) })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      // Nothing written: still the malformed pre-write shape, not `used: NaN` (which would
+      // serialize to `used: null`).
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBeUndefined();
+    });
+
+    it("a resource entry with a non-numeric `max` 400s instead of silently disabling the upper bound (Codex review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      db.update(combatants)
+        .set({ statblockJson: JSON.stringify({ resources: { kiPoints: { used: 0, max: 'three' } }, spellSlots: {} }) })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
+      // Without the fix, `nextUsed > 'three'` is false for ANY nextUsed, so a huge overspend
+      // would silently succeed instead of 400ing.
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1000 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("a spell-slot entry missing `used` 400s naming the level, instead of silently persisting used: NaN (Codex review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      db.update(combatants)
+        .set({ statblockJson: JSON.stringify({ resources: {}, spellSlots: { '2': { max: 2 } } }) })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).spellSlots['2'].used).toBeUndefined();
     });
 
     it('a non-character combatant with no inline statblock resources still 400s', async () => {

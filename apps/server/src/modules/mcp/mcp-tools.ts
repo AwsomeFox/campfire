@@ -4606,7 +4606,10 @@ export class McpToolsService {
         'was actually spent/restored." dm may adjust any combatant; a player only a combatant linked to a character ' +
         'they own; a statblock combatant (no linked character) is dm-only, matching update_combatant\'s statblock ' +
         'rule. Records a resource_changed encounter event. `idempotencyKey`: a lost-response retry with the SAME ' +
-        'key replays the original outcome instead of double-spending.',
+        'key replays the original outcome instead of double-spending. Returns the combatant: for a statblock ' +
+        'combatant this shows the new value directly (the statblock lives on the combatant); for a character-' +
+        'linked combatant the resource lives on the CHARACTER sheet instead, so this response does not show the ' +
+        'new value — call get_character separately to confirm it.',
       // CombatantResourceAdjust is a ZodEffects (.superRefine requiring exactly one of
       // key|spellLevel), so it has no `.shape` to spread — list the wire fields here and
       // re-validate with .parse below, matching adjust_character_condition_level's pattern.
