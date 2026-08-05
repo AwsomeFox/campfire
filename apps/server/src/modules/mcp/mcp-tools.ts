@@ -1253,11 +1253,18 @@ export class McpToolsService {
           .describe(
             'Filter to a single installed rule pack by slug (e.g. "open5e-srd", "pf2e-srd") — the campaign-scoped path (issue #717).',
           ),
+        campaignId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional campaign id to include campaign homebrew entries in search results for members.'),
       },
-      async ({ query, type, pack }) => {
+      async ({ query, type, pack, campaignId }) => {
         const page = await this.rules.search(
-          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
+          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined, campaignId: campaignId as number | undefined },
           5,
+          user,
         );
         return page.items.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
@@ -1277,8 +1284,16 @@ export class McpToolsService {
       'Get a single rule entry (spell/monster/item/condition/etc.) by id, including its full body and structured ' +
         'dataJson (e.g. a monster statblock\'s ability scores, HP, AC, traits, actions, reactions, and legendary actions). ' +
         'Ids come from lookup_rule.',
-      { entryId: Id.describe('Rule entry id — from lookup_rule') },
-      async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
+      {
+        entryId: Id.describe('Rule entry id — from lookup_rule'),
+        campaignId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional campaign id to resolve campaign homebrew entries for members.'),
+      },
+      async ({ entryId, campaignId }) => this.rules.getEntryOrThrow(entryId as number, campaignId as number | undefined, user),
     );
 
     this.tool(server, 'list_campaign_homebrew', 'List non-archived private homebrew for one campaign.', { campaignId: CampaignIdArg, includeArchived: z.boolean().optional() }, async ({ campaignId, includeArchived }) => this.rules.listCampaignHomebrew(campaignId as number, user, Boolean(includeArchived)));

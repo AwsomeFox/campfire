@@ -3705,6 +3705,12 @@ export default function RunSessionPage() {
                       ? cid
                       : undefined
                   }
+                  // Issue #1898 review: the statblock read is a plain GET, not a write —
+                  // it has none of the staleness/edit-permission concerns campaignId above
+                  // guards against, so it must not go `undefined` (and 404 for homebrew) in
+                  // exactly the read-only/offline states this prop exists to detect. Always
+                  // the real route campaign id.
+                  routeCampaignId={cid}
                   onRollError={surfaceActionError}
                   onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
                   onUseAction={
@@ -3954,6 +3960,7 @@ function CombatantRow({
   openCardByDefault,
   openCardOnActiveTurn,
   campaignId,
+  routeCampaignId,
   onRollError,
   onApplyDamage,
   onUseAction,
@@ -4021,6 +4028,13 @@ function CombatantRow({
    * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
    */
   campaignId: number | undefined;
+  /**
+   * The real route campaign id, unconditionally (issue #1898 review) — for the plain
+   * read-only statblock GET, which has none of `campaignId` above's staleness/edit
+   * concerns and must not 404 for a homebrew-linked combatant just because sheets are
+   * offline or this combatant isn't currently editable.
+   */
+  routeCampaignId: number;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
@@ -5008,7 +5022,7 @@ function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {canViewStatblock && combatant.ruleEntryId != null && (
-          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
+          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} campaignId={routeCampaignId} />
         )}
         {onUseMonsterAction && (
           <CombatantActionsList
@@ -5260,7 +5274,7 @@ function CombatantRow({
  * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
  * default so the initiative row stays scannable mid-fight.
  */
-function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; ruleSystem: string | null }) {
+function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: { ruleEntryId: number; ruleSystem: string | null; campaignId?: number }) {
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     // No regionLabel: StatBlock inside already exposes a labelled "Creature
@@ -5278,7 +5292,8 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
       setLoading(true);
       setFailed(false);
       try {
-        const e = await api.get<RuleEntry>(`${API}/rules/entries/${ruleEntryId}`);
+        const url = `${API}/rules/entries/${ruleEntryId}${campaignId ? `?campaignId=${campaignId}` : ''}`;
+        const e = await api.get<RuleEntry>(url);
         setEntry(e);
       } catch {
         setFailed(true);
@@ -5493,6 +5508,7 @@ function AddCombatantPanel({
       try {
         const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
         if (rulePack) baseParams.set('pack', rulePack);
+        if (cid) baseParams.set('campaignId', String(cid));
         // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
         // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
         const types = tab === 'compendium' ? (['monster', 'hazard'] as const) : (['monster'] as const);
@@ -5520,7 +5536,12 @@ function AddCombatantPanel({
     return () => {
       cancelled = true;
     };
-  }, [tab, debouncedQuery, rulePack]);
+    // `cid` (issue #1898 review): the encounter route renders the same component tree
+    // across campaigns, so navigating to another campaign's encounter can update this
+    // prop without remounting AddCombatantPanel. Without cid in the dependency list the
+    // effect kept a stale closed-over campaign id until tab/query/rulePack happened to
+    // change too, scoping the search (and any add) to the PREVIOUS campaign.
+  }, [tab, debouncedQuery, rulePack, cid]);
 
   async function addManual(e: FormEvent) {
     e.preventDefault();
@@ -5642,7 +5663,8 @@ function AddCombatantPanel({
       // Resolve the FULL entry from the rules read path (the drag payload only carries
       // id/name/type, but RuleEntry requires many more fields — trusting a cast would
       // mask bugs). Confirm the resolved type still matches what was dragged before adding.
-      const entry = await api.get<RuleEntry>(`${API}/rules/entries/${droppedId}`);
+      const url = `${API}/rules/entries/${droppedId}${cid ? `?campaignId=${cid}` : ''}`;
+      const entry = await api.get<RuleEntry>(url);
       if (entry.type !== droppedType) {
         setError("That compendium entry doesn't match the dragged monster/hazard anymore.");
         return;
@@ -5734,6 +5756,7 @@ function AddCombatantPanel({
   return (
     <Card
       className="space-y-3"
+      data-testid="add-combatant-dropzone"
       onDragOver={(event: React.DragEvent) => {
         if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
           event.preventDefault();
@@ -5910,6 +5933,11 @@ function AddCombatantPanel({
                   onClick={() => addFromCompendium(entry)}
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                  {entry.campaignId != null && (
+                    <span className="tag tag-amber" data-testid="homebrew-badge">
+                      {t('compendium.homebrew', 'Homebrew')}
+                    </span>
+                  )}
                   <span className="tag tag-neutral">
                     {entry.type}
                   </span>
@@ -6067,6 +6095,11 @@ function AddCombatantPanel({
                       onClick={() => void addFromNpc(entry)}
                     >
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                      {entry.campaignId != null && (
+                        <span className="tag tag-amber" data-testid="homebrew-badge">
+                          {t('compendium.homebrew', 'Homebrew')}
+                        </span>
+                      )}
                       <span className="tag tag-neutral">
                         statblock
                       </span>

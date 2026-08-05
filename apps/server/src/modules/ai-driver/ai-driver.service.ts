@@ -7192,11 +7192,17 @@ export class AiDriverService {
       return { query, result: renderNoRuleSystem(query) };
     }
 
-    const page = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    // Issue #1898 review: campaignId/user were already both in scope on this method's
+    // own signature — this is a fourth internal caller of the same read the issue's
+    // three other call sites (REST search, REST entry, MCP lookup_rule) now scope,
+    // not the MCP tokenContext case (which would have needed a novel ambient default).
+    // Without it, the AI-DM's rules lookup silently stayed pack-only and reported no
+    // match for a campaign's own homebrew rulings.
+    const page = await this.rules.search({ q: query, pack: pack.slug, campaignId }, 5, user);
     if (page.items.length === 0) {
       return { query, result: renderNoMatch(query, pack) };
     }
-    return { query, result: renderRulesAnswer(query, pack, page.items) };
+    return { query, result: renderRulesAnswer(query, pack, page.items, campaignId) };
   }
 
   /**
@@ -8066,8 +8072,18 @@ function excerptRuleBody(body: string | undefined | null): string {
  * table transcript (#717). Includes the entry type, the pack/system it came from, its
  * source line, a trimmed body excerpt, and a compendium link so the table can read the
  * full entry without the AI narrating raw JSON. Secondary matches are listed by name only.
+ *
+ * Issue #1898 review: `search()` can now return the campaign's own homebrew alongside
+ * `pack`'s global entries, so the top match is not necessarily FROM `pack` — homebrew
+ * lives under a separate internal pack entirely. Crediting a homebrew top match to the
+ * installed pack's name and license (the previous unconditional behavior, harmless only
+ * because homebrew could never win the lookup before this issue's fix) would tell the
+ * table their own house rule is official licensed source material — factually wrong, and
+ * this codebase already treats per-entry provenance as load-bearing (issue #734's reader
+ * credits an entry under its OWN license/attribution, never blindly the pack's). Branch on
+ * `top.campaignId != null` and use the entry's own rights fields instead.
  */
-function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[]): string {
+function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], campaignId: number): string {
   const [top, ...rest] = results;
   const lines: string[] = [];
   lines.push(`**${top.name}**${top.type ? ` *(${top.type})*` : ''}`);
@@ -8077,8 +8093,20 @@ function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[]):
     lines.push(body);
   }
   lines.push('');
-  lines.push(`*Source: ${pack.name}${pack.license ? ` · ${pack.license}` : ''}*`);
-  lines.push(`[Open in compendium](/compendium/${top.id})`);
+  if (top.campaignId != null) {
+    const credit = [top.author, top.attribution].filter((v) => v && v.trim()).join(' — ');
+    // Only an explicitly open_licensed homebrew entry names a real license to credit;
+    // private_original/permission_granted homebrew has none to show (and must never
+    // inherit the installed pack's).
+    const rights = top.rightsStatus === 'open_licensed' && top.license ? top.license : undefined;
+    lines.push(`*Source: Campaign homebrew${credit ? ` · ${credit}` : ''}${rights ? ` · ${rights}` : ''}*`);
+  } else {
+    lines.push(`*Source: ${pack.name}${pack.license ? ` · ${pack.license}` : ''}*`);
+  }
+  // The web router only registers the campaign-scoped reader route (/c/:campaignId/
+  // compendium/:entryId) — there is no global /compendium/:id — so the link needs the
+  // campaign id regardless of whether the top match is homebrew or global.
+  lines.push(`[Open in compendium](/c/${campaignId}/compendium/${top.id})`);
   if (rest.length > 0) {
     lines.push('');
     lines.push(`Other matches: ${rest.map((r) => r.name).join(', ')}.`);
@@ -8086,10 +8114,16 @@ function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[]):
   return lines.join('\n');
 }
 
-/** No matches in the campaign's rule system — distinguish from failure and suggest refinements (#717). */
+/**
+ * No matches in the campaign's rule system — distinguish from failure and suggest
+ * refinements (#717). Issue #1898 review: the search this responds to now covers the
+ * campaign's own homebrew alongside `pack` (rulesLookup always passes `campaignId`
+ * whenever `pack` is resolved), so the miss was never limited to the installed pack —
+ * the wording must not claim it was.
+ */
 function renderNoMatch(query: string, pack: RulePack): string {
   return [
-    `No entry in **${pack.name}** matches “${query.trim()}”.`,
+    `No entry in **${pack.name}** or your campaign's homebrew matches “${query.trim()}”.`,
     '',
     'Try a broader term, the exact name (e.g. a spell or condition), or check the spelling.',
   ].join('\n');
