@@ -235,7 +235,7 @@ test.describe('Player Display controls', () => {
     });
 
     await installFullscreenMock(page);
-    await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await page.route(`**/api/v1/campaigns/${campaignId}/player-display/summary`, async (route) => {
       await summaryGate;
       await route.continue();
     });
