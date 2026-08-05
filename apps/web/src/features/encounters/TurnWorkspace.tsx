@@ -368,17 +368,13 @@ export function TurnWorkspace({
                 <SlotChip
                   key={slot.key}
                   slot={slot}
-                  // `|| !turn.canEndTurn` is load-bearing, not belt-and-braces: `GatedControl`
-                  // only swallows the click while a `reason` is present, and the dedupe above
-                  // deliberately passes `undefined` when the standing line already says it —
-                  // which takes GatedControl's passthrough branch and leaves the child fully
-                  // live. `controlsDisabled` is `busy || actionsDisabled` and knows nothing
-                  // about permission, so without this a player under `dmControlsTurns` could
-                  // press End turn and get a bare server rejection (issue #1933 review).
-                  //
-                  // The general rule this cost us: the wrapper is an AFFORDANCE, not an
-                  // authorization. A control's own `disabled` has to be correct on its own.
-                  disabled={controlsDisabled || !turn.canEndTurn}
+                  // Deliberately NOT gated on `turn.canEndTurn` (issue #1933 review). Under
+                  // `dmControlsTurns` a player cannot ADVANCE the turn, but the server still
+                  // accepts their own `/turn-state` writes — movement, action slots — and the
+                  // standard-action bar, spell slots and concentration controls beside these
+                  // chips stay usable. Keying them to the end-turn permission would disable
+                  // half the workspace for exactly the players it belongs to.
+                  disabled={controlsDisabled}
                   unit={unit}
                   step={step}
                   onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: step } : { useSlot: slot.key })}
@@ -712,7 +708,19 @@ export function TurnWorkspace({
             {showButton && (
               <GatedControl reason={tooltipReason}>
                 <Btn
-                  disabled={controlsDisabled}
+                  // `|| !turn.canEndTurn` is load-bearing, not belt-and-braces: `GatedControl`
+                  // only swallows the click while a `reason` is present, and the dedupe just
+                  // above deliberately passes `undefined` when the standing line already says
+                  // it — which takes GatedControl's passthrough branch and leaves the child
+                  // fully live. `controlsDisabled` is `busy || actionsDisabled` and knows
+                  // nothing about permission, so without this a player under `dmControlsTurns`
+                  // could press End turn and get a bare server rejection (issue #1933 review).
+                  //
+                  // The general rule this cost us: the wrapper is an AFFORDANCE, not an
+                  // authorization. A control's own `disabled` has to be correct on its own.
+                  // Scope it to this button only — the action-economy chips above are a
+                  // different permission and must stay live for this same player.
+                  disabled={controlsDisabled || !turn.canEndTurn}
                   onClick={() => onEndTurn?.(turn.current!.combatantId)}
                   aria-describedby={standingReason ? TURN_END_STANDING_ID : undefined}
                   data-testid="workspace-end-turn"

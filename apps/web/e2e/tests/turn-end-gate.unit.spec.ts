@@ -133,6 +133,28 @@ test.describe('turnEndStandingReason (issue #1933) — standing, not transient',
     // undefined — so relying on the wrapper to block the write leaves the button live for a
     // player who may never end their turn (issue #1933 review). The wrapper is an affordance,
     // not an authorization.
-    expect(code).toMatch(/disabled=\{controlsDisabled \|\| !turn\.canEndTurn\}/);
+    //
+    // Anchored on the End-turn button, NOT grepped file-wide. The first version of this
+    // assertion searched for the literal anywhere in TurnWorkspace.tsx, so it went green
+    // while the guard actually sat on `SlotChip` three hundred lines away — disabling the
+    // action-economy chips for that same player while End turn stayed live. A placement bug
+    // the placement test could not see; Codex and Devin both caught it, neither did this.
+    const endTurnAnchor = code.indexOf('data-testid="workspace-end-turn"');
+    expect(endTurnAnchor).toBeGreaterThan(-1);
+    const endTurnBtn = code.slice(code.lastIndexOf('<Btn', endTurnAnchor), endTurnAnchor);
+    expect(endTurnBtn).toMatch(/disabled=\{controlsDisabled \|\| !turn\.canEndTurn\}/);
+
+    // ...and the action-economy chips must NOT inherit it. `canEndTurn` is
+    // `isDm || (isYourTurn && !dmControlsTurns)`, but nothing server-side gates a player's
+    // own /turn-state writes on ending the turn — movement and slot use stay theirs, and the
+    // standard-action bar beside these chips is keyed to `actionDisabled` alone.
+    const chipAnchor = code.indexOf('<SlotChip');
+    expect(chipAnchor).toBeGreaterThan(-1);
+    const chip = code.slice(chipAnchor, code.indexOf('/>', chipAnchor));
+    expect(chip).toMatch(/disabled=\{controlsDisabled\}/);
+    // Scoped to the `disabled` expression, not the whole chip: the comment sitting on this
+    // prop explains why the permission is deliberately absent, so it names `canEndTurn` in
+    // prose. A bare substring search would fail on the documentation of the very rule.
+    expect(chip).not.toMatch(/disabled=\{[^}]*canEndTurn/);
   });
 });
