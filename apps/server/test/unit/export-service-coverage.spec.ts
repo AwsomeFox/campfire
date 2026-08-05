@@ -107,7 +107,9 @@ describe('ExportService unit coverage tests', () => {
     } as unknown as InventoryService;
     const revisions = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as RevisionsService;
     rollsListForCampaignMock = jest.fn().mockResolvedValue([]);
-    const rolls = { listForCampaign: rollsListForCampaignMock } as unknown as RollsService;
+    const rolls: Pick<RollsService, 'listForCampaign'> = {
+      listForCampaign: rollsListForCampaignMock as unknown as RollsService['listForCampaign'],
+    };
     const library = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as CampaignLibraryService;
     const campaignService = { getOrThrow: jest.fn().mockResolvedValue({ id: 1, name: 'Test Campaign' }) } as unknown as CampaignsService;
 
@@ -134,7 +136,7 @@ describe('ExportService unit coverage tests', () => {
       supportPreferences,
       inventory,
       revisions,
-      rolls,
+      rolls as unknown as RollsService,
       library,
     );
 
