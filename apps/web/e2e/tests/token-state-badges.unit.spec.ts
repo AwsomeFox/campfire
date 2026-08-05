@@ -81,7 +81,7 @@ test.describe('token condition badges (issue #1905)', () => {
 
   test('keeps condition hit targets inside their token and clear of one another', () => {
     for (const size of [18, 24, 32, 64, 128]) {
-      const capacity = Math.max(1, Math.min(3, Math.floor(size / 18)));
+      const capacity = Math.max(1, Math.min(4, Math.floor(size / 18)));
       const placements = tokenBadgePlacements(size, capacity);
       for (const badge of placements) {
         expect(badge.targetSize).toBeGreaterThanOrEqual(18);
@@ -107,6 +107,12 @@ test.describe('token condition badges (issue #1905)', () => {
         }
       }
     }
+  });
+
+  test('returns a distinct fourth placement for an overflow control on wide tokens', () => {
+    const placements = tokenBadgePlacements(72, 4);
+    expect(placements).toHaveLength(4);
+    expect(new Set(placements.map(({ left, top }) => `${left}:${top}`)).size).toBe(4);
   });
 });
 

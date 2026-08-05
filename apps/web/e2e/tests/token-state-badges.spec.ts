@@ -49,19 +49,27 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerArc).toHaveAttribute('aria-label', 'Health: healthy');
     await expect(playerBoss).not.toContainText('30');
     await expect(playerBoss).not.toContainText('12');
-    await expect(playerPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveText('+2');
+    const overflowCondition = playerPage.getByTestId(`map-token-condition-overflow-${bossId}`);
+    // Grid-off medium tokens have room for the single overflow control, but no
+    // individual condition controls. Keep that compact marker visible.
+    await expect(overflowCondition).toHaveText('+4');
     await expect(playerPage.getByTestId(`map-token-concentration-${bossId}`)).toBeVisible();
-    const firstCondition = playerPage.getByTestId(`map-token-condition-${bossId}-0`);
-    const conditionBox = await firstCondition.boundingBox();
+    const conditionBox = await overflowCondition.boundingBox();
     expect(conditionBox?.width).toBeGreaterThanOrEqual(18);
     expect(conditionBox?.height).toBeGreaterThanOrEqual(18);
-    await firstCondition.click();
+    await overflowCondition.focus();
+    await playerPage.keyboard.press('Enter');
+    await expect(playerPage.locator(`#combatant-${bossId}-conditions`)).toBeFocused();
+    await overflowCondition.focus();
+    await playerPage.keyboard.press('Delete');
+    await expect(playerBoss).toBeVisible();
+    await overflowCondition.click();
     await expect(playerPage.locator(`#combatant-${bossId}-conditions`)).toBeFocused();
 
     // Map-surface tools own their gestures, even when one begins over a badge.
     await dmPage.getByTestId('map-tool-reveal').click();
     await expect(dmPage.getByTestId('map-tool-reveal')).toHaveAttribute('aria-pressed', 'true');
-    await expect(dmPage.getByTestId(`map-token-condition-${bossId}-0`)).toHaveCSS('pointer-events', 'none');
+    await expect(dmPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveCSS('pointer-events', 'none');
     await dmPage.getByTestId('map-tool-move').click();
 
     // The viewer never clicks: the DM advances the real encounter and its SSE update

@@ -123,8 +123,11 @@ export function tokenBadgePlacements(sizePx: number, count: number): TokenBadgeP
   const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
   const targetSize = Math.max(18, visualSize);
   const inset = Math.min(50, (targetSize / sizePx) * 50);
-  const anchors = count <= 1 ? [50] : count === 2 ? [inset, 100 - inset] : [inset, 50, 100 - inset];
-  return anchors.slice(0, Math.min(3, count)).map((left) => ({
+  const slots = Math.max(0, Math.min(4, Math.floor(count)));
+  const anchors = slots <= 1
+    ? [50]
+    : Array.from({ length: slots }, (_, index) => inset + ((100 - 2 * inset) * index) / (slots - 1));
+  return anchors.map((left) => ({
     left,
     // Controls remain inside the lower part of the token, never over a token
     // in the neighboring map cell.

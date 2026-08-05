@@ -56,6 +56,7 @@ describe('Player Display cast sessions (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
   let encounterId: number;
+  let monsterId: number;
   /** A second encounter left in `preparing` — never castable, even by id. */
   let preparingEncounterId: number;
   const battleMap = makePng(4, 2);
@@ -106,10 +107,11 @@ describe('Player Display cast sessions (e2e)', () => {
       .set(dm)
       .send({ name: 'Goblin Ambush', hidden: false });
     encounterId = encounter.body.id;
-    await request(server)
+    const monster = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)
       .send({ kind: 'monster', name: 'Glass Goblin', hpMax: 22, initMod: 2 });
+    monsterId = monster.body.id;
 
     // Attach a fogged battle map: only the left half is revealed, so the source
     // attachment must never be reachable from the cast display.
@@ -127,6 +129,14 @@ describe('Player Display cast sessions (e2e)', () => {
 
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${encounterId}/combatants/${monsterId}/turn-state`)
+          .set(dm)
+          .send({ concentration: 'Invisible ward' })
+      ).status,
+    ).toBe(201);
 
     const prepping = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
@@ -219,6 +229,51 @@ describe('Player Display cast sessions (e2e)', () => {
 
     expect((await request(server).post(`/api/v1/cast/${token}/exit`).send({ pin: '000000' })).status).toBe(403);
     expect((await request(server).post(`/api/v1/cast/${token}/exit`).send({ pin: created.body.exitPin })).status).toBe(201);
+  });
+
+  it('server-redacts the authenticated Player Display preview before it reaches a DM browser', async () => {
+    const server = ctx.app.getHttpServer();
+    const dmEncounter = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const dmMonster = dmEncounter.body.combatants.find((c: { id: number }) => c.id === monsterId);
+    expect(dmMonster).toEqual(expect.objectContaining({ hpCurrent: 22, hpMax: 22 }));
+    expect(dmMonster.turnState.concentration).toBe('Invisible ward');
+
+    const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/player-display/summary`).set(dm);
+    expect(summary.status).toBe(200);
+    expect(JSON.stringify(summary.body)).not.toContain('Ember is the heir');
+    expect(JSON.stringify(summary.body)).not.toContain('The duke is a lich');
+
+    const list = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/player-display/encounters`)
+      .query({ status: 'running' })
+      .set(dm);
+    expect(list.status).toBe(200);
+    expect(list.body).toEqual([expect.objectContaining({ id: encounterId, status: 'running' })]);
+
+    const display = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/player-display/encounters/${encounterId}`)
+      .set(dm);
+    expect(display.status).toBe(200);
+    const monster = display.body.combatants.find((c: { id: number }) => c.id === monsterId);
+    expect(monster).toEqual(expect.objectContaining({ hpCurrent: null, hpMax: null, hpBand: 'healthy' }));
+    expect(monster.turnState).toEqual({
+      used: {},
+      movementUsedFt: 0,
+      concentration: null,
+      pendingConcentrationChecks: [],
+      delaying: false,
+      readied: null,
+    });
+    expect(JSON.stringify(display.body)).not.toContain('Invisible ward');
+    expect(JSON.stringify(display.body)).not.toContain('"hpCurrent":22');
+
+    expect(
+      (
+        await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/player-display/encounters/${preparingEncounterId}`)
+          .set(dm)
+      ).status,
+    ).toBe(404);
   });
 
   it('404s an invalid capability even for an unsupported status filter', async () => {

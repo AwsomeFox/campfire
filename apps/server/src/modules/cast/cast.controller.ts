@@ -125,6 +125,56 @@ export class CampaignCastSessionsController {
   }
 }
 
+/**
+ * Authenticated Player Display previews are table-facing even when a DM opens
+ * them. These endpoints authorize membership, then force the CastService's
+ * server-side viewer projection rather than returning the caller's DM-shaped
+ * campaign data for the browser to redact.
+ */
+@ApiTags('cast')
+@Controller('campaigns/:campaignId/player-display')
+export class CampaignPlayerDisplayController {
+  constructor(
+    private readonly cast: CastService,
+    private readonly access: CampaignAccessService,
+  ) {}
+
+  @Get('summary')
+  @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display summary', description: 'Requires campaign membership. The response is always projected as a viewer for the table-facing display.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe campaign summary.' })
+  async summary(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<CampaignSummary> {
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplaySummary(campaignId);
+  }
+
+  @Get('encounters')
+  @ApiOperation({ summary: 'List server-redacted running encounters for the authenticated Player Display preview', description: 'Requires campaign membership. Only running encounters are part of the table-facing display.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe running encounter list.' })
+  async encounters(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('status') status: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ): Promise<Encounter[]> {
+    if (status !== undefined && status !== 'running') {
+      throw new BadRequestException("status must be 'running' (or omitted)");
+    }
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplayRunningEncounters(campaignId);
+  }
+
+  @Get('encounters/:encounterId')
+  @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display encounter', description: 'Requires campaign membership. Only running, viewer-safe encounters are returned.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe running encounter with combatants.' })
+  async encounter(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('encounterId', ParseIntPipe) encounterId: number,
+    @CurrentUser() user: RequestUser,
+  ): Promise<EncounterWithCombatants> {
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplayEncounter(campaignId, encounterId);
+  }
+}
+
 @ApiTags('cast')
 @Controller('cast/:token')
 export class PublicCastController {
