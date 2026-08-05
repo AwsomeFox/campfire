@@ -73,6 +73,17 @@
     "sceneFieldPlaceholder": "Set the scene (optional)",
     "composerLabel": "Your action",
     "composerHelp": "Describe what your character does. Ctrl or ⌘+Enter to send.",
+    "quickActions": {
+      "groupLabel": "Quick requests",
+      "simplify": "Simplify",
+      "simplifyText": "Simplify that — say it more plainly.",
+      "recap": "Recap",
+      "recapText": "Recap what's happened so far.",
+      "repeatCue": "Repeat turn cue",
+      "repeatCueText": "Remind me whose turn it is and what I can do.",
+      "explain": "Explain",
+      "explainText": "Explain the rule you just used."
+    },
     "send": "Send",
     "sending": "Sending…",
     "viewerHint": "You're watching as a viewer — only players can act.",

@@ -15,7 +15,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -1593,6 +1593,15 @@ export default function RunSessionPage() {
   }, [eid, encounter, announce]);
 
   const myUserId = me?.user.id;
+  const membersQuery = useQuery({
+    queryKey: queryKeys.campaignMembers(cid),
+    queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`),
+    enabled: encounter?.mapAttachmentId != null,
+  });
+  const aoeDeclarerNames = useMemo(
+    () => new Map((membersQuery.data ?? []).map((member) => [String(member.userId), member.displayName || member.username || String(member.userId)])),
+    [membersQuery.data],
+  );
   const ownedCharacterIds = useMemo(
     () =>
       new Set(
@@ -2699,6 +2708,44 @@ export default function RunSessionPage() {
   }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+  // Player declarations use scoped routes so the server, not the browser, owns
+  // declarer attribution and per-template authorization (#1913).
+  const declareAoeTemplate = useCallback(async (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+    setActionError(null);
+    await api.post(`${API}/encounters/${eid}/aoe-templates`, template);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+    setActionError(null);
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current
+        ? { ...current, aoe: current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template)) }
+        : current,
+    );
+    try {
+      await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    } catch (error) {
+      // A refetch is a rollback that does not clobber a later local nudge that
+      // may already have updated the same cache entry.
+      invalidateEncounter(queryClient, eid);
+      throw error;
+    }
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const removeAoeTemplate = useCallback(async (templateId: string) => {
+    setActionError(null);
+    await api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const clearPlayerAoeTemplates = useCallback(async () => {
+    const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
+    if (playerTemplates.length === 0) return;
+    setActionError(null);
+    const results = await Promise.allSettled(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    invalidateEncounter(queryClient, eid);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }, [eid, encounter?.aoe, queryClient]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
@@ -3529,6 +3576,19 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
+          aoeDeclarerNames={aoeDeclarerNames}
+          canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
+          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
+          onUpdateAoe={async (templateId, patch) => {
+            try {
+              await updateAoeTemplate(templateId, patch);
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
+          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
+          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
@@ -3566,7 +3626,10 @@ export default function RunSessionPage() {
             const actorId = hpLogActorId(currentCombatantId, id);
             hpDelta.mutate({ combatantId: id, delta, actorId });
           }}
-          onSetHpMax={(id, max) => patchCombatant(id, { hpMax: max })}
+          onSetHpMax={(id, max) => {
+            if (reconcileBlocks) return;
+            patchCombatant(id, { hpMax: max });
+          }}
         />
       )}
 

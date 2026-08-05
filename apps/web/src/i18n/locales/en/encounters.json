@@ -1,6 +1,11 @@
 {
   "encounters": {
     "title": "Encounters",
+    "vitals": {
+      "editMaxHp": "Edit max HP",
+      "maxHp": "Max HP",
+      "setMax": "Set Max"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -144,6 +149,15 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "AoE",
+        "addCircle": "Add a circular burst",
+        "addCone": "Add a cone",
+        "addLine": "Add a line",
+        "clearPlayers": "Clear player templates",
+        "clearPlayersHint": "Remove every player-declared template",
+        "declaredBy": "Declared by {{name}}"
       }
     },
     "workspace": {

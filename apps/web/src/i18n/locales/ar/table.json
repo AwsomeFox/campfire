@@ -66,6 +66,17 @@
     "sceneFieldPlaceholder": "Set the scene (optional)",
     "composerLabel": "Your action",
     "composerHelp": "Describe what your character does. Ctrl or ⌘+Enter to send.",
+    "quickActions": {
+      "groupLabel": "طلبات سريعة",
+      "simplify": "تبسيط",
+      "simplifyText": "بسّط ذلك — قله بشكل أوضح.",
+      "recap": "تلخيص",
+      "recapText": "لخّص ما حدث حتى الآن.",
+      "repeatCue": "تذكير بالدور",
+      "repeatCueText": "ذكّرني بدور من الآن وماذا يمكنني أن أفعل.",
+      "explain": "اشرح",
+      "explainText": "اشرح القاعدة التي استخدمتها للتو."
+    },
     "send": "Send",
     "sending": "Sending…",
     "viewerHint": "You're watching as a viewer — only players can act.",

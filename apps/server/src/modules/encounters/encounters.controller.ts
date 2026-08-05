@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -549,6 +549,52 @@ export class EncountersController {
     return { ok: true };
   }
 
+  @Post(':id/aoe-templates')
+  @ApiOperation({
+    summary: 'Declare an AoE template',
+    description: 'Any writing DM or player may declare one template. The server records a player caller as declarer; DM templates remain unattributed and callers cannot supply attribution.',
+  })
+  @ApiResponse({ status: 201, description: 'Created template.' })
+  async declareAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AoeTemplateDeclareDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    // Do not run the archive gate before the service's hidden-encounter check:
+    // a non-DM must receive the same 404 for a hidden encounter and a missing id.
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.declareAoeTemplate(id, body, user, role);
+  }
+
+  @Patch(':id/aoe-templates/:templateId')
+  @ApiOperation({ summary: 'Update an AoE template', description: 'A player may change only their own declaration; a DM may change any template while preserving its declarer.' })
+  @ApiResponse({ status: 200, description: 'Updated template.' })
+  async updateAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('templateId') templateId: string,
+    @Body() body: AoeTemplateUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.updateAoeTemplate(id, templateId, body, user, role);
+  }
+
+  @Delete(':id/aoe-templates/:templateId')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Remove an AoE template', description: 'A player may remove only their own declaration; a DM may remove any template.' })
+  @ApiResponse({ status: 200, description: 'Removed template.' })
+  async removeAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('templateId') templateId: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.removeAoeTemplate(id, templateId, user, role);
+  }
+
   @Get(':id/events')
   @ApiOperation({
     summary: "List an encounter's persistent combat log",
@@ -1067,4 +1113,3 @@ export class EncountersController {
     return this.encounters.quickRoll(id, body, user, role);
   }
 }
-

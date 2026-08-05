@@ -106,6 +106,8 @@ export interface AiEvalHarness {
       /** #1049 structured table style. Loosely typed so a spec can also post an INVALID value
        *  and assert the strict DTO rejects it. */
       stylePresets?: Record<string, string>;
+      /** #874 comprehension profile. Same loose typing as stylePresets, for the same reason. */
+      comprehensionProfile?: Record<string, string>;
     },
   ): Promise<request.Response>;
   /** Configure a per-campaign `mock` AI provider (needed before switching a seat to Driver mode). */

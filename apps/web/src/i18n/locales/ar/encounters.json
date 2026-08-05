@@ -1,6 +1,11 @@
 {
   "encounters": {
     "title": "المواجهات",
+    "vitals": {
+      "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "setMax": "تعيين الحد الأقصى"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -144,6 +149,15 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "منطقة التأثير",
+        "addCircle": "أضف دائرة تأثير",
+        "addCone": "أضف مخروط تأثير",
+        "addLine": "أضف خط تأثير",
+        "clearPlayers": "امسح قوالب اللاعبين",
+        "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
+        "declaredBy": "أعلنه {{name}}"
       }
     },
     "workspace": {

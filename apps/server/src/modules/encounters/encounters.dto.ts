@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -45,6 +45,10 @@ export class ActionRollRequestDto extends createZodDto(ActionRollRequest.strict(
 export class ManualRollRequestDto extends createZodDto(ManualRollRequest.strict()) {}
 // Transient battle-map ping (issue #238) — a one-shot SSE broadcast, nothing persisted.
 export class MapPingDto extends createZodDto(MapPing.strict()) {}
+// Player AoE routes deliberately use shapes that exclude `declaredByUserId` (#1913):
+// attribution is stamped from the authenticated request inside EncountersService.
+export class AoeTemplateDeclareDto extends createZodDto(AoeTemplateDeclare) {}
+export class AoeTemplateUpdateDto extends createZodDto(AoeTemplateUpdate) {}
 // Issue #466: reopen may carry per-character HP resync directions when the sheet
 // advanced after the previous /end.
 export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {}
@@ -82,4 +86,3 @@ export class EncounterAftermathLootTransferInputDto extends createZodDto(Encount
 export class EncounterAftermathQuestUpdateInputDto extends createZodDto(EncounterAftermathQuestUpdateInput.strict()) {}
 export class EncounterAftermathBeatUpdateInputDto extends createZodDto(EncounterAftermathBeatUpdateInput.strict().default({})) {}
 export class EncounterAftermathTimelineEventInputDto extends createZodDto(EncounterAftermathTimelineEventInput.strict()) {}
-

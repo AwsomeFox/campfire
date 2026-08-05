@@ -182,6 +182,12 @@ export type BattleMapProps = {
   onSetFog: (fog: FogState | null) => void;
   pendingFog?: FogState | null;
   onSetAoe: (aoe: AoeTemplate[]) => void;
+  canDeclareAoe?: boolean;
+  onDeclareAoe?: (template: Omit<AoeTemplate, 'declaredByUserId'>) => void;
+  onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void | Promise<void>;
+  onRemoveAoe?: (templateId: string) => void;
+  onClearPlayerAoe?: () => void;
+  aoeDeclarerNames?: ReadonlyMap<string, string>;
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
@@ -219,6 +225,12 @@ export function BattleMap({
   onSetFog,
   pendingFog,
   onSetAoe,
+  canDeclareAoe = false,
+  onDeclareAoe = () => undefined,
+  onUpdateAoe = () => undefined,
+  onRemoveAoe = () => undefined,
+  onClearPlayerAoe,
+  aoeDeclarerNames = new Map(),
   onGenerateMap,
   onImportMap,
   showGuidance,
@@ -238,6 +250,7 @@ export function BattleMap({
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
+  const effectiveCanDeclareAoe = isCast ? false : canDeclareAoe;
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -306,6 +319,9 @@ export function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
+  const [editingAoeDraft, setEditingAoeDraft] = useState(false);
+  const pendingAoeDraftRef = useRef<string | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -1197,7 +1213,8 @@ export function BattleMap({
     }
     if (gesture.kind === 'aoe') {
       const point = finalPoint ?? gesture.point;
-      onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
+      if (effectiveCanDmWrite) updateAoe(gesture.templateId, { x: point.x, y: point.y });
+      else updatePlayerAoeFromDraft(gesture.templateId, { x: point.x, y: point.y });
       return;
     }
     if (gesture.kind === 'calibrate') {
@@ -1293,7 +1310,7 @@ export function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canDmWrite) return;
+    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canEditAoe(t)) return;
     e.currentTarget.focus();
     setSelectedAoeId(t.id);
     e.preventDefault();
@@ -1331,6 +1348,7 @@ export function BattleMap({
   }
 
   function onAoeHandleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, t: AoeTemplate) {
+    if (!canEditAoe(t)) return;
     e.stopPropagation();
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -1340,7 +1358,8 @@ export function BattleMap({
       e.preventDefault();
       e.stopPropagation();
       const next = nudgeMapPoint({ x: t.x, y: t.y }, e);
-      onSetAoe(aoeTemplates.map((item) => (item.id === t.id ? { ...item, x: next.x, y: next.y } : item)));
+      if (effectiveCanDmWrite) updateAoe(t.id, { x: next.x, y: next.y });
+      else updatePlayerAoeFromDraft(t.id, { x: next.x, y: next.y });
       announce(`${t.shape} template moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
       return;
     }
@@ -1352,19 +1371,48 @@ export function BattleMap({
     }
   }
 
-  // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
+  function canEditAoe(t: AoeTemplate): boolean {
+    return effectiveCanDmWrite || (effectiveCanDeclareAoe && t.declaredByUserId === viewerUserId);
+  }
+
+  // DMs retain the whole-list PATCH workflow; players use the scoped endpoints so
+  // their ownership remains server-enforced (issue #1913).
   function addAoe(shape: AoeShape) {
     const sizeFt = shape === 'circle' ? (gridScale ?? 5) * 2 : (gridScale ?? 5) * BASE_AOE_LENGTH_MULT;
     const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null, declaredByUserId: null };
     setSelectedAoeId(t.id);
-    onSetAoe([...aoeTemplates, t]);
+    if (effectiveCanDmWrite) onSetAoe([...aoeTemplates, t]);
+    else {
+      // Omit at runtime, not merely in the TypeScript annotation: the server's
+      // strict declaration schema rejects caller-supplied attribution.
+      const { declaredByUserId: _serverOwnedDeclarer, ...declaration } = t;
+      onDeclareAoe(declaration);
+    }
   }
-  function updateAoe(id: string, patch: Partial<AoeTemplate>) {
-    onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>): void | Promise<void> {
+    if (effectiveCanDmWrite) return onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    return onUpdateAoe(id, patch);
+  }
+  function updatePlayerAoeFromDraft(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
+    void Promise.resolve().then(() => updateAoe(id, patch)).catch(() => {
+      // The server rejected this edit. Restore an editable draft from the
+      // last known template; clearing it leaves a focused controlled input
+      // without a draft for its onChange handler to update.
+      if (pendingAoeDraftRef.current === id) pendingAoeDraftRef.current = null;
+      const template = aoeTemplates.find((candidate) => candidate.id === id);
+      setAoeDraft(template ? {
+        id: template.id,
+        x: String(template.x),
+        y: String(template.y),
+        sizeFt: String(template.sizeFt),
+        angleDeg: String(template.angleDeg),
+      } : null);
+    });
   }
   function removeAoe(id: string) {
     if (selectedAoeId === id) setSelectedAoeId(null);
-    onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    if (effectiveCanDmWrite) onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    else onRemoveAoe(id);
   }
 
   // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
@@ -1393,6 +1441,27 @@ export function BattleMap({
     );
   }, [fog?.revealed, fogRegionDrag]);
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
+  useEffect(() => {
+    if (!selectedAoe || effectiveCanDmWrite) {
+      setAoeDraft(null);
+      return;
+    }
+    // Keep unfocused fields truthful after a drag, keyboard nudge, or concurrent
+    // DM update, but never replace text while the player is actively typing it.
+    if (editingAoeDraft) return;
+    if (pendingAoeDraftRef.current === selectedAoe.id && aoeDraft) {
+      if (aoeDraft.x === String(selectedAoe.x) && aoeDraft.y === String(selectedAoe.y) && aoeDraft.sizeFt === String(selectedAoe.sizeFt) && aoeDraft.angleDeg === String(selectedAoe.angleDeg)) pendingAoeDraftRef.current = null;
+      else return;
+    }
+    setAoeDraft({
+      id: selectedAoe.id,
+      x: String(selectedAoe.x),
+      y: String(selectedAoe.y),
+      sizeFt: String(selectedAoe.sizeFt),
+      angleDeg: String(selectedAoe.angleDeg),
+    });
+  }, [editingAoeDraft, effectiveCanDmWrite, selectedAoe]);
+  const playerAoeDraft = !effectiveCanDmWrite && selectedAoe && aoeDraft?.id === selectedAoe.id ? aoeDraft : null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
   // Condition chips already carry their detailed title/metadata in the roster. A
@@ -1671,12 +1740,15 @@ export function BattleMap({
               </>
             )}
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {effectiveCanDmWrite && canAoe && (
+            {effectiveCanDeclareAoe && canAoe && (
               <>
-                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters.map.aoe.label')}:</span>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
+                {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
+                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters.map.aoe.clearPlayers')}</button>
+                )}
               </>
             )}
             <div style={{ flex: 1 }} />
@@ -1797,8 +1869,8 @@ export function BattleMap({
             </div>
           )}
 
-          {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {!isCast && effectiveCanDmWrite && selectedAoe && canAoe && (
+          {/* Selected AoE editor: players only receive controls for their own templates. */}
+          {!isCast && selectedAoe && canAoe && canEditAoe(selectedAoe) && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -1808,8 +1880,19 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.x}
-                  onChange={(e) => updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.x ?? selectedAoe.x}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, x: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const x = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, x: String(x) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { x });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1820,8 +1903,19 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.y}
-                  onChange={(e) => updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.y ?? selectedAoe.y}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, y: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const y = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, y: String(y) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { y });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1831,8 +1925,19 @@ export function BattleMap({
                   type="number"
                   min={0}
                   step={gridScale ?? 5}
-                  value={selectedAoe.sizeFt}
-                  onChange={(e) => updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) })}
+                  value={playerAoeDraft?.sizeFt ?? selectedAoe.sizeFt}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) });
+                    else setAoeDraft((draft) => draft && { ...draft, sizeFt: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const sizeFt = Math.max(1, Number(e.currentTarget.value) || 1);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, sizeFt: String(sizeFt) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { sizeFt });
+                  }}
                   style={{ width: 56 }}
                 />
                 {gridUnit}
@@ -1843,8 +1948,19 @@ export function BattleMap({
                   <input
                     type="number"
                     step={15}
-                    value={selectedAoe.angleDeg}
-                    onChange={(e) => updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 })}
+                    value={playerAoeDraft?.angleDeg ?? selectedAoe.angleDeg}
+                    onFocus={() => setEditingAoeDraft(true)}
+                    onChange={(e) => {
+                      if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 });
+                      else setAoeDraft((draft) => draft && { ...draft, angleDeg: e.target.value });
+                    }}
+                    onBlur={(e) => {
+                      const angleDeg = Number(e.currentTarget.value) || 0;
+                      if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, angleDeg: String(angleDeg) });
+                      pendingAoeDraftRef.current = selectedAoe.id;
+                      setEditingAoeDraft(false);
+                      if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { angleDeg });
+                    }}
                     style={{ width: 56 }}
                   />
                 </label>
@@ -2604,7 +2720,8 @@ export function BattleMap({
                       const lengthPx = (t.sizeFt / gridScale!) * cellPx;
                       if (lengthPx <= 0) return null;
                       const selected = t.id === selectedAoeId;
-                      const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                      const playerDeclared = t.declaredByUserId != null;
+                      const stroke = selected ? 'rgba(56,189,248,.95)' : playerDeclared ? 'rgba(99,102,241,.9)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
                         if (gridType === 'hex' && calibrationPx) {
@@ -2613,30 +2730,31 @@ export function BattleMap({
                           return (
                             <g key={t.id}>
                               {hexPolys.map((pts, i) => (
-                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />
                               ))}
                             </g>
                           );
                         }
-                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                     })}
                   </svg>
                 )}
-                {effectiveCanDmWrite && canAoe &&
-                  aoeTemplates.map((t) => {
-                    const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                    const x = drag ? drag.x : t.x;
-                    const y = drag ? drag.y : t.y;
-                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}`;
+                {(effectiveCanDmWrite || effectiveCanDeclareAoe) && canAoe &&
+                  aoeTemplates.filter((template) => canEditAoe(template)).map((template) => {
+                    const drag = aoeDrag && aoeDrag.id === template.id ? aoeDrag : null;
+                    const x = drag ? drag.x : template.x;
+                    const y = drag ? drag.y : template.y;
+                    const declarerName = template.declaredByUserId == null ? null : (aoeDeclarerNames.get(template.declaredByUserId) ?? template.declaredByUserId);
+                    const aoeLabel = `${template.shape} template · ${template.sizeFt} ${gridUnit}${template.shape !== 'circle' ? ` · ${template.angleDeg}°` : ''}${declarerName ? ` · ${t('encounters.map.aoe.declaredBy', { name: declarerName })}` : ''}`;
                     return (
                       <div
-                        key={t.id}
-                        data-testid={`map-aoe-${t.id}`}
+                        key={template.id}
+                        data-testid={`map-aoe-${template.id}`}
                         role="button"
-                        tabIndex={tool === 'move' ? 0 : -1}
+                        tabIndex={tool === 'move' && canEditAoe(template) ? 0 : -1}
                         aria-label={aoeLabel}
                         aria-describedby="map-keyboard-help"
                         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
@@ -2647,17 +2765,17 @@ export function BattleMap({
                           width: 14,
                           height: 14,
                           borderRadius: '50%',
-                          background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                          background: template.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' && !viewportPan ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan && canEditAoe(template) ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,
                         }}
-                        onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                        onKeyDown={(e) => onAoeHandleKeyDown(e, t)}
-                        onFocus={() => setSelectedAoeId(t.id)}
+                        onPointerDown={(e) => onAoeHandlePointerDown(e, template)}
+                        onKeyDown={(e) => onAoeHandleKeyDown(e, template)}
+                        onFocus={() => setSelectedAoeId(template.id)}
                         title={`${aoeLabel} — drag to move, click to edit`}
                       />
                     );

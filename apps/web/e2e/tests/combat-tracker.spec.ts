@@ -100,8 +100,36 @@ test.describe('combat tracker — DM view', () => {
     const page = await context.newPage();
     await openEncounter(page);
     for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
-      await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      // Assert REACHABILITY, not scroll position (issue #1994).
+      //
+      // What goes wrong without this: the encounter document is 4-6x the viewport tall at
+      // this size, these controls sit near its top, and the page auto-scrolls shortly after
+      // load — measured, `window.scrollY` settles around 1786, putting all three roughly
+      // 1600px above the fold. `toBeVisible` still passes (they are rendered); a viewport
+      // check reports ratio 0 and keeps reporting it, because once scrolled that state is
+      // stable. So the assertion was really testing whether it had won a race against the
+      // auto-scroll, which is why it failed intermittently rather than consistently.
+      //
+      // Why the scroll is INSIDE the poll: the auto-scroll fires at an unpredictable moment,
+      // so scrolling once before a retrying assertion just moves the same race later — the
+      // retry re-measures but never re-scrolls. Each attempt re-establishes position.
+      //
+      // Why full containment rather than a viewport ratio: `toBeInViewport` passes on any
+      // non-zero overlap, so a partially clipped control satisfied it. `left >= 0 &&
+      // right <= innerWidth` is what preserves #762's actual guarantee — these controls were
+      // unusable at tablet width — and scrolling cannot paper over it, because this layout
+      // does not scroll horizontally.
+      await expect
+        .poll(async () => {
+          await control.scrollIntoViewIfNeeded();
+          return control.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth;
+          });
+        })
+        .toBe(true);
     }
     await expect(page.getByTestId('player-display-status')).toBeVisible();
     await expect(page).toHaveURL(encounterUrl());

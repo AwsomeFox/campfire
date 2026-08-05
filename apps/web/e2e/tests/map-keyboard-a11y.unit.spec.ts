@@ -30,10 +30,11 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
     expect(src).toMatch(/announce\(`\$\{c\.name\} moved to/);
   });
 
-  test('AoE template handles are focusable and keyboard-movable', () => {
-    expect(src).toMatch(/data-testid=\{`map-aoe-\$\{t\.id\}`\}/);
+  test('editable AoE template handles are focusable and keyboard-movable', () => {
+    expect(src).toMatch(/data-testid=\{`map-aoe-\$\{template\.id\}`\}/);
     expect(src).toMatch(/role="button"/);
-    expect(src).toMatch(/onKeyDown=\{\(e\) => onAoeHandleKeyDown\(e, t\)\}/);
+    expect(src).toMatch(/tabIndex=\{tool === 'move' && canEditAoe\(template\) \? 0 : -1\}/);
+    expect(src).toMatch(/onKeyDown=\{\(e\) => onAoeHandleKeyDown\(e, template\)\}/);
     expect(src).toMatch(/onAoeHandleKeyDown/);
     expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
   });

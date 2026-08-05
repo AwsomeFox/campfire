@@ -255,6 +255,15 @@ describe('driver-tool-policy (#474)', () => {
       expect(isDriverToolAllowed({ name: 'adjust_combatant_resource', mutating: true, proposalCapable: false })).toBe(true);
     });
 
+    it('#1913: AoE declaration and removal are allowed live-play map operations with explicit unguarded accounting', () => {
+      for (const name of ['declare_aoe_template', 'remove_aoe_template']) {
+        expect(DRIVER_LIVE_PLAY_TOOL_NAMES).toContain(name);
+        expect(DRIVER_UNGUARDED_LIVE_PLAY_TOOLS.has(name)).toBe(true);
+        expect(DRIVER_GUARDED_LIVE_PLAY_TOOLS.has(name)).toBe(false);
+        expect(isDriverToolAllowed({ name, mutating: true, proposalCapable: false })).toBe(true);
+      }
+    });
+
     it('mechanically proves every DRIVER_GUARDED_LIVE_PLAY_TOOLS entry has a REAL branch, not a fall-through (the exact #1495 bug)', () => {
       // For each tool claimed guarded, feed it a hostile arg shape that MUST be rejected (or, for
       // create_encounter, MUST be silently stripped) if the branch genuinely exists. A tool that
