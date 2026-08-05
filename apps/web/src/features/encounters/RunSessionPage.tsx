@@ -99,6 +99,7 @@ import {
 import { isDown, endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import {
   canStabilizeCombatant,
   hasRestoredTrashedEncounter,
@@ -1645,15 +1646,12 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
-          // Issue #1901 review (devin-ai-integration): an inventory equip/unequip also
-          // emits character.updated (the combat-action list changed, not just the sheet
-          // fields campaignCharacters covers) — but a character change can only ever affect
-          // the DERIVED action reads (the per-combatant actions query, the turn workspace's
-          // suggestedActions), never the encounter root, its difficulty derivation, or its
-          // combat log. The broader invalidateEncounter() used here originally busted all of
-          // those on every sheet edit — a refetch storm during busy play (party rest
-          // follow-ups, several players editing sheets at once) on the app's heaviest screen.
+          // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
+          // character.updated — invalidate derived encounter actions AND the turn workspace query.
           invalidateEncounterActions(queryClient, eid);
+          if (event.type === 'character.updated' && Number.isFinite(eid)) {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+          }
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
@@ -1699,6 +1697,10 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      // Same staleness the character.updated SSE branch above fixes (issue #1900
+      // review): a dropped-then-recovered stream must not leave the Spellbook's
+      // /turn-sourced slots/spells stale either.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1706,6 +1708,7 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     }, [queryClient, eid, cid]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -1911,6 +1914,36 @@ export default function RunSessionPage() {
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  // Issue #1900: the in-combat Spellbook's slot spend/restore. Optimistically flips the
+  // affected pip in the SHARED /turn cache entry (the same `queryKeys.encounterTurn(eid)`
+  // TurnWorkspace itself now reads, since the duplicate child query was removed) so a click
+  // feels instant; a 4xx/5xx rolls the cache back to its pre-click snapshot and surfaces a
+  // toast, rather than leaving a pip showing a spend that never happened server-side.
+  const updateSpellSlot = useMutation({
+    mutationFn: ({ characterId, level, delta }: { characterId: number; level: number; delta: number }) =>
+      api.post<Character>(`${API}/characters/${characterId}/spell-slots`, { level, delta }),
+    onMutate: async ({ level, delta }) => {
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      const previous = queryClient.getQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid));
+      if (previous) {
+        queryClient.setQueryData<TurnWorkspaceData>(queryKeys.encounterTurn(eid), {
+          ...previous,
+          spellSlots: applyOptimisticSpellSlotDelta(previous.spellSlots, level, delta),
+        });
+      }
+      return { previous };
+    },
+    onError: (err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKeys.encounterTurn(eid), context.previous);
+      setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.spellSlot' })));
+    },
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
     },
   });
 
@@ -3551,8 +3584,7 @@ export default function RunSessionPage() {
       {encounter.status === 'running' && (
         <TurnWorkspace
           encounterId={eid}
-          round={encounter.round}
-          currentCombatantId={currentCombatantId ?? null}
+          turn={turnWorkspace}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
@@ -3562,12 +3594,69 @@ export default function RunSessionPage() {
           gridUnit={encounter.gridUnit}
           gridScale={encounter.gridScale}
           onRollDeathSave={rollDeathSave}
+          onUpdateSpellSlot={
+            // Review fix: derive the actor from turnWorkspace.current (the SAME data the
+            // Spellbook itself renders), not the separately-fetched `currentCombatant` — the
+            // encounter and /turn queries refetch independently, so right after a turn
+            // advance one can briefly hold the new actor while the other still holds the
+            // previous one. Binding to `currentCombatant.characterId` in that window could
+            // debit a different character's slots than the one on screen. `canDmWrite`
+            // (not just `isDm`) also gates the DM branch — an archived/ended campaign must
+            // disable the control, not just have the server reject the write.
+            turnWorkspace?.current?.characterId != null &&
+            ((isDm && canDmWrite) || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+              ? (level, delta, castContext) => {
+                  const actor = turnWorkspace.current!;
+                  const characterId = actor.characterId!;
+                  // Review fix (P1, atomicity): a descriptive-but-structured spec has no
+                  // resolver path, so this is the ONLY write for its action-economy cost and
+                  // concentration — but two separate REST resources (character spell slots,
+                  // combatant turn-state) can never be a single DB transaction without a new
+                  // combined server endpoint. Spend the SLOT first — it rejects loudly with
+                  // NOTHING else touched if there aren't enough left. Only on success apply
+                  // the turn-state patch; if THAT rejects (e.g. the action was already used
+                  // this turn), compensate by refunding the slot rather than leaving it spent
+                  // with no action/concentration recorded. Either both land, or neither does.
+                  const applyCastContext = () => {
+                    if (!castContext) return;
+                    const patch: Record<string, unknown> = {};
+                    if (castContext.costSlot) patch.useSlot = castContext.costSlot;
+                    if (castContext.concentrationName !== undefined) patch.concentration = castContext.concentrationName;
+                    if (Object.keys(patch).length === 0) return;
+                    combatantTurnState.mutate(
+                      { combatantId: actor.combatantId, patch },
+                      {
+                        onError: () => {
+                          if (level != null && delta !== 0) {
+                            updateSpellSlot.mutate({ characterId, level, delta: -delta });
+                          }
+                        },
+                      },
+                    );
+                  };
+                  // A cantrip has no slot to spend (`level` undefined, `delta` 0) but may
+                  // still carry a real castContext — apply it directly, nothing to sequence.
+                  if (level != null && delta !== 0) {
+                    updateSpellSlot.mutate({ characterId, level, delta }, { onSuccess: applyCastContext });
+                    return;
+                  }
+                  applyCastContext();
+                }
+              : undefined
+          }
           onUseSuggestedAction={
-            currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
+            // Review fix: bind to turnWorkspace.current — the SAME data the Spellbook and the
+            // suggested-actions list render — instead of the encounter-query-derived
+            // currentCombatantId/orderedCombatants. Same cross-query drift class as the
+            // spell-slot fix above: after a turn advance, resolving the actor through the
+            // separately-refetching encounter query could apply a resolved action (and its
+            // slot/HP/effect writes) to whichever combatant that query still holds, not the
+            // one actually on screen.
+            turnWorkspace?.current != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
               ? (actionIndex, actionName, spec) => {
-                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
-                  if (!actor || !spec) return;
-                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                  if (!spec) return;
+                  const actor = turnWorkspace.current!;
+                  onUseActionRequested(actor.combatantId, actor.name, actionIndex, actionName, spec);
                 }
               : undefined
           }

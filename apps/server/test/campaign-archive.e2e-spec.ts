@@ -30,6 +30,7 @@ describe('campaign archive read-only enforcement (e2e)', () => {
   let attachmentId: number;
   let proposalId: number;
   let scheduleId: number;
+  let characterId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -82,6 +83,21 @@ describe('campaign archive read-only enforcement (e2e)', () => {
       .send({ scheduledAt: '2099-01-01T18:00:00Z', durationMinutes: 180 });
     expect(scheduleRes.status).toBe(201);
     scheduleId = scheduleRes.body.id;
+
+    // Issue #1900 review: a character with a configured spell-slot pool, created while
+    // active, so the archived-campaign gate can be exercised against the dedicated
+    // POST :id/spell-slots endpoint (not just the generic character PATCH).
+    const charRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Retired Caster' });
+    expect(charRes.status).toBe(201);
+    characterId = charRes.body.id;
+    const slotsRes = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ spellSlots: { '1': { max: 2, used: 0 } } });
+    expect(slotsRes.status).toBe(200);
   });
 
   afterAll(async () => {
@@ -129,6 +145,24 @@ describe('campaign archive read-only enforcement (e2e)', () => {
       expect((await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Too Late Fight' })).status).toBe(403);
       expect((await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Too Late Hero' })).status).toBe(403);
       expect((await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 999, role: 'player' })).status).toBe(403);
+    });
+
+    // Issue #1900 review: the in-combat Spellbook's slot-spend endpoint must be rejected
+    // server-side while the campaign is archived — the client disabling the control is a
+    // UX nicety, not the enforcement boundary (AGENTS.md: archived-campaign write
+    // protection is server-enforced). Confirms `requireRole()`'s default `assertWritable`
+    // gate (campaign-access.service.ts) covers this endpoint, and that the refused write
+    // left the slot pool untouched.
+    it('spell-slot spend is rejected read-only, and writes nothing', async () => {
+      const spend = await request(server)
+        .post(`/api/v1/characters/${characterId}/spell-slots`)
+        .set(dm)
+        .send({ level: 1, delta: 1 });
+      expect(spend.status).toBe(403);
+      expect(spend.body.message).toContain('read-only');
+
+      const after = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+      expect(after.body.spellSlots).toEqual({ '1': { max: 2, used: 0 } });
     });
 
     it('member-level writes: notes, inbox, note edit/delete, dice roll', async () => {
