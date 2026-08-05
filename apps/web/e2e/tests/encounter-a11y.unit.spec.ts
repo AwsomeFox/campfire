@@ -7,12 +7,14 @@ import { resolve } from 'node:path';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
+const COMBATANT_ROW = resolve(__dirname, '../../src/features/encounters/combat/CombatantRow.tsx');
 const GENERATE_WIZARD = resolve(__dirname, '../../src/features/encounters/GenerateEncounterWizard.tsx');
 const INDEX_CSS = resolve(__dirname, '../../src/index.css');
 
 test.describe('encounter accessibility (#476)', () => {
   const runSession = readFileSync(RUN_SESSION_PAGE, 'utf8');
   const battleMap = readFileSync(BATTLE_MAP, 'utf8');
+  const combatantRow = readFileSync(COMBATANT_ROW, 'utf8');
   const wizard = readFileSync(GENERATE_WIZARD, 'utf8');
   const css = readFileSync(INDEX_CSS, 'utf8');
 
@@ -41,8 +43,8 @@ test.describe('encounter accessibility (#476)', () => {
     // which is aria-hidden by construction (GameIcon sets aria-hidden={true}
     // whenever no `title` is passed — see GameIcon.tsx). The accessible name
     // still comes entirely from each button's own `aria-label`, unchanged.
-    expect(runSession).toMatch(/aria-label=\{`Remove \$\{combatant\.name\}`\}[\s\S]*<UIIcon name="close"/);
-    expect(runSession).toMatch(/aria-label=\{`Remove \$\{inst\.name\}`\}[\s\S]*<UIIcon name="close"/);
+    expect(combatantRow).toMatch(/aria-label=\{`Remove \$\{combatant\.name\}`\}[\s\S]*<UIIcon name="close"/);
+    expect(combatantRow).toMatch(/aria-label=\{`Remove \$\{inst\.name\}`\}[\s\S]*<UIIcon name="close"/);
     expect(battleMap).toMatch(/aria-label=\{`Dismiss apply \$\{amount\} \$\{label\} bar`\}/);
     expect(wizard).toMatch(/aria-label=\{`Remove \$\{slot\.name\}`\}[\s\S]*<UIIcon name="close"/);
   });
