@@ -248,6 +248,19 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     });
   });
 
+  it('combines half-caster levels (Paladin 3 / Ranger 3) before flooring', () => {
+    const slots = computeSpellSlots([
+      { level: 3, definition: { name: 'Paladin' } },
+      { level: 3, definition: { name: 'Ranger' } },
+    ]);
+    // Paladin 3 + Ranger 3 = 6 half-caster levels -> floor(6/2) = 3 full-caster equivalent ->
+    // row 3 = 4 first, 2 second. (Flooring individually would wrongly produce level 2).
+    expect(slots).toEqual({
+      '1': { max: 4, used: 0 },
+      '2': { max: 2, used: 0 },
+    });
+  });
+
   it('Artificer uses the same solo half-caster curve as Paladin/Ranger', () => {
     const slots = computeSpellSlots([{ level: 5, definition: { name: 'Artificer' } }]);
     expect(slots).toEqual({
@@ -1104,6 +1117,40 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     const feature = c.actions?.find((a) => a.name === 'Toughness');
     expect(feature?.notes).not.toMatch(/<[^>]+>/);
     expect(feature?.notes).toContain('You gain 2 extra hit points & more.');
+  });
+
+  it('retains unprepared Wizard rituals while excluding non-ritual unprepared spells', () => {
+    const wizardSheet = {
+      classes: [{ id: 1, definition: { name: 'Wizard' } }],
+      classSpells: [
+        {
+          characterClassId: 1,
+          spells: [
+            { definition: { name: 'Detect Magic', level: 1, ritual: true, description: 'Sense magic' }, prepared: false },
+            { definition: { name: 'Shield', level: 1, ritual: false, description: 'AC bonus' }, prepared: false },
+          ],
+        },
+      ],
+    };
+    const cWizard = mapDdbCharacter(wizardSheet);
+    expect(cWizard.actions?.map((a) => a.name)).toContain('Detect Magic');
+    expect(cWizard.actions?.map((a) => a.name)).not.toContain('Shield');
+    expect(computeDdbActionEntryCount(wizardSheet)).toBe(1);
+
+    const clericSheet = {
+      classes: [{ id: 2, definition: { name: 'Cleric' } }],
+      classSpells: [
+        {
+          characterClassId: 2,
+          spells: [
+            { definition: { name: 'Detect Magic', level: 1, ritual: true, description: 'Sense magic' }, prepared: false },
+          ],
+        },
+      ],
+    };
+    const cCleric = mapDdbCharacter(clericSheet);
+    expect(cCleric.actions?.map((a) => a.name)).not.toContain('Detect Magic');
+    expect(computeDdbActionEntryCount(clericSheet)).toBe(0);
   });
 
   it('tolerates a sparse sheet without throwing', () => {

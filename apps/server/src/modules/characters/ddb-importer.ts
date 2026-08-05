@@ -91,6 +91,8 @@ interface DdbModifier {
   value?: number | null;
 }
 interface DdbClass {
+  id?: number;
+  characterClassId?: number;
   level?: number;
   definition?: { name?: string } | null;
   subclassDefinition?: { name?: string } | null;
@@ -978,9 +980,30 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
   return out;
 }
 
-/** True unless a prepared caster's entry explicitly marks the spell unprepared. */
-function isKnownOrPrepared(entry: DdbSpellEntry): boolean {
-  return entry.prepared !== false;
+function isWizardClass(data: DdbCharacterData, characterClassId?: number | null): boolean {
+  const classes = Array.isArray(data.classes) ? data.classes : [];
+  if (classes.length === 0) return false;
+
+  if (characterClassId != null) {
+    const matched = classes.find(
+      (c) => c.id === characterClassId || c.characterClassId === characterClassId,
+    );
+    if (matched) {
+      return matched.definition?.name?.toLowerCase() === 'wizard';
+    }
+  }
+
+  if (classes.length === 1) {
+    return classes[0].definition?.name?.toLowerCase() === 'wizard';
+  }
+
+  return false;
+}
+
+/** True unless a prepared caster's entry explicitly marks the spell unprepared (except unprepared Wizard rituals). */
+function isKnownOrPrepared(entry: DdbSpellEntry, isWizard = false): boolean {
+  if (entry.prepared !== false) return true;
+  return isWizard && Boolean(entry.definition?.ritual);
 }
 
 /**
@@ -994,9 +1017,9 @@ function isKnownOrPrepared(entry: DdbSpellEntry): boolean {
 function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
   const out: CharacterActionType[] = [];
   const seen = new Set<string>();
-  const pushEntry = (entry: DdbSpellEntry | null | undefined) => {
+  const pushEntry = (entry: DdbSpellEntry | null | undefined, isWizard: boolean) => {
     if (!entry || out.length >= RAW_ENTRY_SAFETY_CAP) return;
-    if (!isKnownOrPrepared(entry)) return;
+    if (!isKnownOrPrepared(entry, isWizard)) return;
     const def = entry.definition;
     // Clamp to CharacterAction's 120-char name cap (mirrors expandRawStatblockAction) so an
     // unusually long DDB spell name can never abort the whole import with a Zod throw.
@@ -1033,12 +1056,14 @@ function computeSpellActions(data: DdbCharacterData): CharacterActionType[] {
     );
   };
   for (const group of Array.isArray(data.classSpells) ? data.classSpells : []) {
-    for (const entry of Array.isArray(group?.spells) ? group.spells : []) pushEntry(entry);
+    const isWizard = isWizardClass(data, group?.characterClassId);
+    for (const entry of Array.isArray(group?.spells) ? group.spells : []) pushEntry(entry, isWizard);
   }
   const granted = data.spells;
   if (granted && typeof granted === 'object') {
-    for (const list of Object.values(granted)) {
-      if (Array.isArray(list)) for (const entry of list) pushEntry(entry);
+    for (const [section, list] of Object.entries(granted)) {
+      const isWizard = section === 'class' && isWizardClass(data, null);
+      if (Array.isArray(list)) for (const entry of list) pushEntry(entry, isWizard);
     }
   }
   return out;
@@ -1161,46 +1186,31 @@ export function computeSpellSlots(
   // or more spellcasting progressions. See the comment on FULL_CASTER_SLOT_TABLE.
   const solo = casterEntries.length === 1 ? casterEntries[0] : null;
   let fullEquivalentLevel = 0;
-  for (const entry of casterEntries) {
-    if (entry.progression === 'full') {
-      fullEquivalentLevel += entry.level;
-    } else if (entry.progression === 'half') {
-      // A solo Paladin/Ranger gets no Spellcasting at all until class level 2 under the
-      // 2014 PHB — the ceil(level/2) read of the full-caster table is only equivalent to
-      // their own class table from level 2 up; at level 1 it would wrongly read row 1 (2
-      // first-level slots).
-      //
-      // KNOWN LIMITATION (issue #1903 review): the 2024 PHB revision moved Paladin/Ranger
-      // Spellcasting to level 1 (2 first-level slots), so this level<2 guard under-reports
-      // for a 2024-rules character. Distinguishing a 2014 vs. 2024 class definition would
-      // need a DDB field this importer cannot presently verify the shape of on the public
-      // sheet endpoint (the same category of gap already documented throughout this file
-      // for a spell's target-save ability and a weapon's magic bonus) — guessing at an
-      // unconfirmed field risks being wrong in a DIFFERENT, worse way: overstating slots a
-      // 2014 character doesn't have. Keeping the conservative (never-overstate) 2014 default
-      // is deliberate and consistent with every other simplification in this importer; a DM
-      // importing a 2024-rules level-1 Paladin/Ranger adds the 2 slots by hand.
-      // The multiclass floor(level/2) branch doesn't need this guard: floor(1/2) is already 0
-      // either way.
-      fullEquivalentLevel += entry === solo ? (entry.level < 2 ? 0 : Math.ceil(entry.level / 2)) : Math.floor(entry.level / 2);
-    } else if (entry.progression === 'halfRoundUp') {
-      // Artificer rounds up whether solo or multiclassed, AND (unlike Paladin/Ranger) does
-      // get its first slots at level 1 — see HALF_CASTER_ROUND_UP_CLASSES.
-      fullEquivalentLevel += Math.ceil(entry.level / 2);
-    } else {
-      // Same level-floor guard as the half-caster case: Eldritch Knight/Arcane Trickster
-      // spellcasting doesn't begin before class level 3.
-      //
-      // CORRECTION (review finding on PR #1950 round 9): an earlier round of this PR added a
-      // `Math.min(6, ...)` clamp here on the strength of two independent-but-both-wrong review
-      // claims that the real third-caster table "stops progressing" at 4/3/3 for class levels
-      // 16-20. It does not — the actual PHB Fighter/Rogue class tables give Eldritch
-      // Knight/Arcane Trickster exactly ONE 4th-level spell slot starting at class level 19
-      // (4/3/3/1), which is precisely what the unclamped `ceil(19/3) = ceil(20/3) = 7` ->
-      // FULL_CASTER_SLOT_TABLE row 7 (`[0,4,3,3,1,...]`) already produced before that clamp was
-      // added. The clamp was silently removing a real, legitimate slot. Reverted.
-      fullEquivalentLevel += entry === solo ? (entry.level < 3 ? 0 : Math.ceil(entry.level / 3)) : Math.floor(entry.level / 3);
+  if (solo) {
+    if (solo.progression === 'full') {
+      fullEquivalentLevel = solo.level;
+    } else if (solo.progression === 'half') {
+      fullEquivalentLevel = solo.level < 2 ? 0 : Math.ceil(solo.level / 2);
+    } else if (solo.progression === 'halfRoundUp') {
+      fullEquivalentLevel = Math.ceil(solo.level / 2);
+    } else if (solo.progression === 'third') {
+      fullEquivalentLevel = solo.level < 3 ? 0 : Math.ceil(solo.level / 3);
     }
+  } else {
+    let halfLevels = 0;
+    let thirdLevels = 0;
+    for (const entry of casterEntries) {
+      if (entry.progression === 'full') {
+        fullEquivalentLevel += entry.level;
+      } else if (entry.progression === 'half') {
+        halfLevels += entry.level;
+      } else if (entry.progression === 'halfRoundUp') {
+        fullEquivalentLevel += Math.ceil(entry.level / 2);
+      } else if (entry.progression === 'third') {
+        thirdLevels += entry.level;
+      }
+    }
+    fullEquivalentLevel += Math.floor(halfLevels / 2) + Math.floor(thirdLevels / 3);
   }
 
   const slots: Record<string, { max: number; used: number }> = {};
@@ -1349,9 +1359,9 @@ function countFeatureEntries(data: DdbCharacterData): number {
 function countSpellEntries(data: DdbCharacterData): number {
   const seen = new Set<string>();
   let n = 0;
-  const consider = (entry: DdbSpellEntry | null | undefined) => {
+  const consider = (entry: DdbSpellEntry | null | undefined, isWizard: boolean) => {
     if (!entry || n >= COUNT_ENTRY_SAFETY_CAP) return;
-    if (!isKnownOrPrepared(entry)) return;
+    if (!isKnownOrPrepared(entry, isWizard)) return;
     const name = typeof entry.definition?.name === 'string' ? entry.definition.name.trim().slice(0, 120) : '';
     if (!name) return;
     const key = name.toLowerCase();
@@ -1360,12 +1370,14 @@ function countSpellEntries(data: DdbCharacterData): number {
     n++;
   };
   for (const group of Array.isArray(data.classSpells) ? data.classSpells : []) {
-    for (const entry of Array.isArray(group?.spells) ? group.spells : []) consider(entry);
+    const isWizard = isWizardClass(data, group?.characterClassId);
+    for (const entry of Array.isArray(group?.spells) ? group.spells : []) consider(entry, isWizard);
   }
   const granted = data.spells;
   if (granted && typeof granted === 'object') {
-    for (const list of Object.values(granted)) {
-      if (Array.isArray(list)) for (const entry of list) consider(entry);
+    for (const [section, list] of Object.entries(granted)) {
+      const isWizard = section === 'class' && isWizardClass(data, null);
+      if (Array.isArray(list)) for (const entry of list) consider(entry, isWizard);
     }
   }
   return n;
