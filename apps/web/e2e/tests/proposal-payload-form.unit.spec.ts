@@ -141,6 +141,20 @@ test.describe('proposalPayloadForm: buildProposalDraftPayload', () => {
     expect('reward' in data).toBe(false);
   });
 
+  test('an omitted key IS reported as a change on a create, where nothing is left alone', () => {
+    // Round 3, second pass (review). The omission rule above is update semantics — `.set({
+    // ...input })` leaves an absent column as it was. A create has no row to leave alone: the
+    // key falls back to a schema/service default, so the created entity really does differ from
+    // what the proposal asked for. Reporting "no changes" there is the worse error, and its
+    // sharpest form is a secrecy one: dropping an explicit `hidden: false` from a create is the
+    // #754 flip to DM-only-by-default that this whole feature exists to make visible.
+    expect(diffProposalChangedKeys({ title: 'Q', status: 'active' }, { title: 'Q' }, 'create')).toEqual(['status']);
+    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' }, 'create')).toEqual(['hidden']);
+    // ...and unchanged for an update, which is the default when no action is given.
+    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' }, 'update')).toEqual([]);
+    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' })).toEqual([]);
+  });
+
   test('an omitted key is not reported as a changed field — omission changes nothing server-side', () => {
     // The preview's half of the same defect. A number/select field has no empty
     // representation, so clearing it can only omit the key; the diff used to report that as

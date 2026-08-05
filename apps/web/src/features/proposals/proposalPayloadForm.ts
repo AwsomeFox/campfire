@@ -419,15 +419,30 @@ function sameJson(a: unknown, b: unknown): boolean {
 
 /** Top-level keys whose value differs (structurally) between the original proposal
  *  payload and a candidate next payload — drives the preview's changed-fields list. */
-export function diffProposalChangedKeys(original: Record<string, unknown>, next: Record<string, unknown>): string[] {
+export function diffProposalChangedKeys(
+  original: Record<string, unknown>,
+  next: Record<string, unknown>,
+  /**
+   * Which approve path this payload will take. It decides what an OMITTED key means, and the
+   * two meanings are opposite (round 3 review, Devin):
+   *
+   *  - `'update'` — `.set({ ...input })` leaves an absent column exactly as it was, so an
+   *    omission changes nothing and reporting `reward  Gold → —` promises a clear the request
+   *    cannot perform.
+   *  - `'create'` — there is no existing row to leave alone. An absent key falls back to the
+   *    schema/service default, so the created entity really does differ from what the proposal
+   *    said. Silence there is worse than a false positive: dropping an explicit `hidden: false`
+   *    from a create is exactly the #754 secrecy flip this feature exists to make visible, and
+   *    the preview would have said "no changes".
+   *
+   * Encounter proposals take the create path too — their payload is a generator request that is
+   * re-run on approve, never a patch over a stored row.
+   */
+  action: ProposalEditableAction = 'update',
+): string[] {
   const keys = new Set([...Object.keys(original), ...Object.keys(next)]);
   return [...keys].filter((key) => {
-    // A key the submitted payload OMITS changes nothing (round 3 review). Every update path
-    // this editor feeds applies `.set({ ...input })`, so an absent key leaves the column
-    // exactly as it was. Reporting `reward  Gold → —` for an omission promised a clear the
-    // request could not perform — the inverse of the explicit-`null` case `sameJson` above
-    // exists to surface, which DOES clear and must stay visible.
-    if (key in original && !(key in next)) return false;
+    if (action === 'update' && key in original && !(key in next)) return false;
     return !sameJson(original[key], next[key]);
   });
 }
@@ -449,9 +464,11 @@ export function computeProposalPreviewFromData(
   data: Record<string, unknown>,
   originalPayload: Record<string, unknown>,
   schema: z.ZodTypeAny | null,
+  /** See `diffProposalChangedKeys` — decides what an omitted key means for this payload. */
+  action: ProposalEditableAction = 'update',
 ): ProposalPreviewResult {
   if (!schema) {
-    return { draft: data, fieldErrors: {}, formError: null, changedKeys: diffProposalChangedKeys(originalPayload, data), normalized: data };
+    return { draft: data, fieldErrors: {}, formError: null, changedKeys: diffProposalChangedKeys(originalPayload, data, action), normalized: data };
   }
   const validated = validateProposalPayload(schema, data);
   if (!validated.ok) {
@@ -459,7 +476,7 @@ export function computeProposalPreviewFromData(
       draft: data,
       fieldErrors: validated.fieldErrors,
       formError: validated.formError,
-      changedKeys: diffProposalChangedKeys(originalPayload, data),
+      changedKeys: diffProposalChangedKeys(originalPayload, data, action),
       normalized: null,
     };
   }
@@ -483,7 +500,7 @@ export function computeProposalPreviewFromData(
     draft: data,
     fieldErrors: {},
     formError: null,
-    changedKeys: diffProposalChangedKeys(originalPayload, normalized),
+    changedKeys: diffProposalChangedKeys(originalPayload, normalized, action),
     normalized,
   };
 }
@@ -511,10 +528,12 @@ export function computeGuidedProposalPreview(
    * proposal and must not drift as the user edits.
    */
   passthroughBase: Record<string, unknown> = originalPayload,
+  /** See `diffProposalChangedKeys` — decides what an omitted key means for this payload. */
+  action: ProposalEditableAction = 'update',
 ): ProposalPreviewResult {
   const { data, fieldErrors } = buildProposalDraftPayload(fields, jsonKeys, text, bool, originalPayload, passthroughBase);
   if (Object.keys(fieldErrors).length > 0) {
-    return { draft: data, fieldErrors, formError: null, changedKeys: diffProposalChangedKeys(originalPayload, data), normalized: null };
+    return { draft: data, fieldErrors, formError: null, changedKeys: diffProposalChangedKeys(originalPayload, data, action), normalized: null };
   }
-  return computeProposalPreviewFromData(data, originalPayload, schema);
+  return computeProposalPreviewFromData(data, originalPayload, schema, action);
 }

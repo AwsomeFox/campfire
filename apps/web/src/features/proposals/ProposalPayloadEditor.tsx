@@ -78,6 +78,11 @@ function parseJsonObject(raw: string): { ok: true; data: Record<string, unknown>
 export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, ProposalPayloadEditorProps>(
   function ProposalPayloadEditor({ idPrefix, entityType, action, originalPayload }, ref) {
     const schema = useMemo(() => schemaForProposal(entityType, action), [entityType, action]);
+    // What an OMITTED key means for THIS payload — see `diffProposalChangedKeys`. An encounter
+    // proposal is create-like whatever its `action` says: its payload is a generator request
+    // that approving re-runs, never a patch over a stored row, so a dropped key falls back to a
+    // default rather than leaving something alone.
+    const omissionSemantics: ProposalEditableAction = action === 'create' || entityType === 'encounter' ? 'create' : 'update';
     const fields = useMemo(() => (schema ? describeProposalFields(schema) : []), [schema]);
     const jsonKeys = useMemo(() => (schema ? jsonFieldKeys(schema) : []), [schema]);
 
@@ -98,8 +103,8 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     const [passthroughBase, setPassthroughBase] = useState<Record<string, unknown>>(originalPayload);
 
     const guidedPreview = useMemo(
-      () => computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase),
-      [fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase],
+      () => computeGuidedProposalPreview(fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase, omissionSemantics),
+      [fields, jsonKeys, text, bool, originalPayload, schema, passthroughBase, omissionSemantics],
     );
 
     const advancedPreview = useMemo<ProposalPreviewResult>(() => {
@@ -107,7 +112,7 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       if (!parsed.ok) {
         return { draft: originalPayload, fieldErrors: {}, formError: parsed.message, changedKeys: [], normalized: null };
       }
-      return computeProposalPreviewFromData(parsed.data, originalPayload, schema);
+      return computeProposalPreviewFromData(parsed.data, originalPayload, schema, omissionSemantics);
     }, [rawText, originalPayload, schema]);
 
     const preview = mode === 'guided' ? guidedPreview : advancedPreview;
