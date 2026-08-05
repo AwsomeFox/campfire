@@ -2417,7 +2417,7 @@ export function BattleMap({
                       aria-pressed={legalTarget ? selectedTarget : undefined}
                       aria-disabled={legalTarget && !targetAvailable ? true : undefined}
                       aria-describedby="map-keyboard-help"
-                      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
+                      aria-keyshortcuts={movable ? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined}
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                       style={{
                         left: `${left}%`,

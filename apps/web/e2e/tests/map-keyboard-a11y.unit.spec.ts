@@ -23,7 +23,7 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
     expect(src).not.toMatch(/else if \(targetClickable\) e\.stopPropagation\(\);/);
     expect(src).toMatch(/onKeyDown=\{onViewportKeyDown\}/);
     expect(src).toMatch(/onTokenKeyDown\(e, c\);/);
-    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
+    expect(src).toMatch(/aria-keyshortcuts=\{movable \? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined\}/);
     expect(src).toMatch(/aria-describedby="map-keyboard-help"/);
     expect(src).toMatch(/onTokenKeyDown/);
     expect(src).toMatch(/nudgeMapPoint/);
