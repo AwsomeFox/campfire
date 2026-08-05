@@ -101,6 +101,19 @@
       "openTable": "Open full table"
     },
     "map": {
+      "tokenDetails": {
+        "label": "تفاصيل الرمز",
+        "full": "كاملة",
+        "minimal": "مختصرة",
+        "off": "إيقاف",
+        "hp": "الصحة: {{state}}",
+        "currentTurn": "الدور الحالي",
+        "dying": "يحتضر",
+        "dead": "ميت",
+        "concentration": "التركيز: {{effect}}",
+        "conditions": "حالات {{name}}: {{conditions}}",
+        "moreConditions": "{{count}} حالات إضافية لـ {{name}}"
+      },
       "derivatives": {
         "processing": "Preparing faster map sizes — showing the full-size board for now.",
         "stale": "Showing an optimised copy made before this map last changed.",

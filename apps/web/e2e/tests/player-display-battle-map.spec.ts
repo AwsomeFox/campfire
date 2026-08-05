@@ -69,7 +69,7 @@ async function patchEncounterMapFixture(
 test.describe('Player Display battle map (issue #484)', () => {
   test.use({ storageState: stateFor('dm'), viewport: { width: 1920, height: 1080 } });
 
-  test('shows a revealed token and AoE on the map scene', async ({ page, baseURL }) => {
+  test('shows a revealed token while keeping Cast-only map state safe', async ({ page, baseURL }) => {
     const { campaignId, encounterId, bossId, skirmisherId } = seed();
     await patchEncounterMapFixture(baseURL!, campaignId, encounterId, bossId, skirmisherId);
 
@@ -83,8 +83,8 @@ test.describe('Player Display battle map (issue #484)', () => {
     await expect(castMap).toBeVisible();
     await expect(page.getByTestId('battle-map-surface')).toBeVisible();
     await expect(page.getByTestId(`map-token-${bossId}`)).toBeVisible();
+    await expect(page.getByTestId(`map-token-${skirmisherId}`)).toHaveCount(0);
     await expect(page.getByTestId(`map-aoe-${AOE_ID}`)).toHaveCount(0);
-    await expect(page.locator('[data-testid="battle-map-layer"] circle')).toHaveCount(1);
   });
 
   test('never shows fog-hidden tokens or unrevealed AoE on /screen', async ({ page, baseURL }) => {

@@ -101,6 +101,19 @@
       "openTable": "Open full table"
     },
     "map": {
+      "tokenDetails": {
+        "label": "Token detail",
+        "full": "Full",
+        "minimal": "Minimal",
+        "off": "Off",
+        "hp": "Health: {{state}}",
+        "currentTurn": "Current turn",
+        "dying": "Dying",
+        "dead": "Dead",
+        "concentration": "Concentrating: {{effect}}",
+        "conditions": "Conditions for {{name}}: {{conditions}}",
+        "moreConditions": "{{count}} more conditions for {{name}}"
+      },
       "derivatives": {
         "processing": "Preparing faster map sizes — showing the full-size board for now.",
         "stale": "Showing an optimised copy made before this map last changed.",

@@ -1,0 +1,156 @@
+/**
+ * Presentation-only token state calculations (issue #1905).
+ *
+ * This module deliberately has no React or DOM dependency. BattleMap can lift it
+ * unchanged when its token layer is extracted, while the renderer continues to
+ * consume the role-shaped Combatant it was handed by the server.
+ */
+import type { Combatant, HpBand } from '@campfire/schema';
+
+export type TokenDetailMode = 'full' | 'minimal' | 'off';
+
+export const TOKEN_DETAIL_STORAGE_KEY = 'campfire.encounters.token-detail';
+
+/** The exact four visual fractions already used by the redacted roster bar. */
+export const HP_BAND_FRACTION: Record<HpBand, number> = {
+  healthy: 1,
+  bloodied: 0.5,
+  critical: 0.2,
+  down: 0,
+};
+
+export type TokenHpState = Pick<Combatant, 'hpCurrent' | 'hpMax' | 'hpBand'>;
+
+/**
+ * Exact HP is safe only when present in the role-shaped combatant. A redacted
+ * value therefore never gets inferred or interpolated: it is one of precisely
+ * the four server-provided bands.
+ */
+export function tokenHpFraction({ hpCurrent, hpMax, hpBand }: TokenHpState): number | null {
+  if (hpCurrent != null && hpMax != null) {
+    return hpMax > 0 ? Math.max(0, Math.min(1, hpCurrent / hpMax)) : 0;
+  }
+  return hpBand == null ? null : HP_BAND_FRACTION[hpBand];
+}
+
+export function tokenHpTone(fraction: number | null): 'healthy' | 'bloodied' | 'critical' | 'down' | null {
+  if (fraction == null) return null;
+  if (fraction <= 0) return 'down';
+  if (fraction <= 0.25) return 'critical';
+  if (fraction <= 0.5) return 'bloodied';
+  return 'healthy';
+}
+
+export function tokenArcGeometry(sizePx: number): { radius: number; circumference: number; strokeWidth: number } {
+  const strokeWidth = Math.max(2, Math.min(4, sizePx * 0.11));
+  const radius = Math.max(1, sizePx / 2 - strokeWidth / 2 - 1);
+  return { radius, circumference: 2 * Math.PI * radius, strokeWidth };
+}
+
+/** Normalized condition names map to dependable game-icons.net glyphs. */
+const CONDITION_GLYPHS: Record<string, string> = {
+  blinded: 'blindfold',
+  charmed: 'heart-inside',
+  deafened: 'earbuds',
+  frightened: 'terror',
+  grappled: 'grab',
+  incapacitated: 'daze',
+  invisible: 'invisible',
+  paralyzed: 'body-balance',
+  petrified: 'stone-block',
+  poisoned: 'poison-bottle',
+  prone: 'foot-trip',
+  restrained: 'rope-coil',
+  stunned: 'stun-grenade',
+  unconscious: 'sleepy',
+  exhaustion: 'sprint',
+  bleeding: 'bleeding-wound',
+  burning: 'fire',
+  frozen: 'frozen-body',
+};
+
+export function tokenConditionGlyph(condition: string): string | null {
+  return CONDITION_GLYPHS[condition.trim().toLocaleLowerCase()] ?? null;
+}
+
+export function tokenConditionFallback(condition: string): string {
+  const first = [...condition.trim()][0];
+  return first ? first.toLocaleUpperCase() : '?';
+}
+
+export type TokenConditionBadge = {
+  condition: string;
+  glyph: string | null;
+  fallback: string;
+};
+
+export function tokenConditionBadges(conditions: readonly string[]): { visible: TokenConditionBadge[]; overflow: number } {
+  const normalized = conditions.filter((condition) => condition.trim().length > 0);
+  return {
+    visible: normalized.slice(0, 3).map((condition) => ({
+      condition,
+      glyph: tokenConditionGlyph(condition),
+      fallback: tokenConditionFallback(condition),
+    })),
+    overflow: Math.max(0, normalized.length - 3),
+  };
+}
+
+export type TokenBadgePlacement = {
+  left: number;
+  top: number;
+  visualSize: number;
+  targetSize: number;
+};
+
+/**
+ * Badge targets live along the lower edge, clear of the top-right unplace
+ * control. The visual chip may be compact, while its hit target never falls
+ * below 18px.
+ */
+export function tokenBadgePlacements(sizePx: number, count: number): TokenBadgePlacement[] {
+  const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
+  const targetSize = Math.max(18, visualSize);
+  const anchors = count <= 1 ? [50] : count === 2 ? [30, 70] : [18, 50, 82];
+  return anchors.slice(0, Math.min(3, count)).map((left) => ({
+    left,
+    // Keeping targets just below the disc avoids the top-right unplace corner
+    // even at the 18px minimum token diameter.
+    top: 116,
+    visualSize,
+    targetSize,
+  }));
+}
+
+export function tokenDeathMarker(combatant: Pick<Combatant, 'kind' | 'hpCurrent' | 'hpBand' | 'deathState'>): 'dying' | 'dead' | null {
+  if (combatant.deathState === 'dying') return 'dying';
+  if (combatant.deathState === 'dead') return 'dead';
+  if (combatant.kind !== 'character' && (combatant.hpCurrent != null ? combatant.hpCurrent <= 0 : combatant.hpBand === 'down')) {
+    return 'dead';
+  }
+  return null;
+}
+
+export function parseTokenDetailMode(value: string | null | undefined): TokenDetailMode {
+  return value === 'minimal' || value === 'off' || value === 'full' ? value : 'full';
+}
+
+export function readTokenDetailMode(storage: Pick<Storage, 'getItem'> | null | undefined): TokenDetailMode {
+  try {
+    return parseTokenDetailMode(storage?.getItem(TOKEN_DETAIL_STORAGE_KEY));
+  } catch {
+    return 'full';
+  }
+}
+
+export function writeTokenDetailMode(
+  mode: TokenDetailMode,
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+): boolean {
+  try {
+    storage?.setItem(TOKEN_DETAIL_STORAGE_KEY, mode);
+    return storage != null;
+  } catch {
+    return false;
+  }
+}
