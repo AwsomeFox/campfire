@@ -183,7 +183,9 @@ export class RollsService implements OnApplicationBootstrap {
         .limit(limit);
       return rows.map(toDomain);
     }
-    // Issue #1904 review finding (2 rounds): applying the LIMIT before dropping
+    // Issue #1904 review finding (2 rounds; reconciled with a concurrently-pushed
+    // bounded-cursor-loop attempt at the same fix — see the PR thread reply for why this
+    // SQL-pushdown approach was kept instead): applying the LIMIT before dropping
     // hidden-encounter rolls can hand a non-DM caller a short (or empty) page while older
     // VISIBLE rolls exist just past the cutoff. The first fix widened the candidate window
     // and redacted in app code — CORRECT, but it made every non-DM poll of this endpoint
@@ -191,7 +193,9 @@ export class RollsService implements OnApplicationBootstrap {
     // page actually asked for, ~20x the DB/JSON-decode work per poll. Pushing the exclusion
     // into the query itself removes the amplification rather than bounding it: a correlated
     // NOT EXISTS drops a row whose encounter is hidden RIGHT THERE, so the existing LIMIT is
-    // already correct and the SQL engine (not this process) does the filtering work.
+    // already correct and the SQL engine (not this process) does the filtering work — with
+    // no iteration cap that could still under-fill a page if more than N consecutive newest
+    // rolls turn out to be hidden.
     //
     // Hidden-NPC label masking deliberately stays OUT of this query: unlike the
     // encounter-hidden case, it never removes a row (see maskHiddenNpcLabels below) — only
