@@ -2263,7 +2263,7 @@ export class EncountersService {
         if (current.length >= 50) {
           throw new ConflictException('An encounter may have at most 50 AoE templates');
         }
-        declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: user.id };
+        declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: role === 'dm' ? null : user.id };
         current.push(declared);
       }
       tx.update(encounters)

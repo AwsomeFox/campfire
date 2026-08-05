@@ -1215,7 +1215,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       declaredByUserId: string | null;
     };
     expect(created).toMatchObject({ id: 'mcp-cone', x: 20 });
-    expect(created.declaredByUserId).not.toBeNull();
+    expect(created.declaredByUserId).toBeNull();
 
     const moved = parseResult(
       await client.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),

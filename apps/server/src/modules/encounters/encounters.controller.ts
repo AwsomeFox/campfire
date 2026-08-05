@@ -552,7 +552,7 @@ export class EncountersController {
   @Post(':id/aoe-templates')
   @ApiOperation({
     summary: 'Declare an AoE template',
-    description: 'Any writing DM or player may declare one template. The server records the authenticated caller as its declarer; callers cannot supply attribution.',
+    description: 'Any writing DM or player may declare one template. The server records a player caller as declarer; DM templates remain unattributed and callers cannot supply attribution.',
   })
   @ApiResponse({ status: 201, description: 'Created template.' })
   async declareAoeTemplate(

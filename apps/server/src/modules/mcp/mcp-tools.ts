@@ -1372,7 +1372,7 @@ export class McpToolsService {
       user,
       'declare_aoe_template',
       'Declare or move an area-of-effect template in an encounter (issue #1913). Any DM or player may call this. ' +
-        'On first use, the server stamps the authenticated caller as declarer; calling again with the same templateId ' +
+        'On first use, the server stamps a player caller as declarer while DM templates remain unattributed; calling again with the same templateId ' +
         'updates that caller’s own template. A DM may update any template but never changes its original declarer. ' +
       'Callers cannot supply declarer identity. Player templates remain visible only to their owner and DMs in unrevealed fog.',
       {

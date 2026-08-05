@@ -320,7 +320,7 @@ export function BattleMap({
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
   const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
-  const aoeDraftTemplateIdRef = useRef<string | null>(null);
+  const [editingAoeDraft, setEditingAoeDraft] = useState(false);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -1424,12 +1424,12 @@ export function BattleMap({
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
   useEffect(() => {
     if (!selectedAoe || effectiveCanDmWrite) {
-      aoeDraftTemplateIdRef.current = null;
       setAoeDraft(null);
       return;
     }
-    if (aoeDraftTemplateIdRef.current === selectedAoe.id) return;
-    aoeDraftTemplateIdRef.current = selectedAoe.id;
+    // Keep unfocused fields truthful after a drag, keyboard nudge, or concurrent
+    // DM update, but never replace text while the player is actively typing it.
+    if (editingAoeDraft) return;
     setAoeDraft({
       id: selectedAoe.id,
       x: String(selectedAoe.x),
@@ -1437,7 +1437,7 @@ export function BattleMap({
       sizeFt: String(selectedAoe.sizeFt),
       angleDeg: String(selectedAoe.angleDeg),
     });
-  }, [effectiveCanDmWrite, selectedAoe]);
+  }, [editingAoeDraft, effectiveCanDmWrite, selectedAoe]);
   const playerAoeDraft = !effectiveCanDmWrite && selectedAoe && aoeDraft?.id === selectedAoe.id ? aoeDraft : null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
@@ -1858,11 +1858,13 @@ export function BattleMap({
                   max={100}
                   step={0.5}
                   value={playerAoeDraft?.x ?? selectedAoe.x}
+                  onFocus={() => setEditingAoeDraft(true)}
                   onChange={(e) => {
                     if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) });
                     else setAoeDraft((draft) => draft && { ...draft, x: e.target.value });
                   }}
                   onBlur={(e) => {
+                    setEditingAoeDraft(false);
                     if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.currentTarget.value) || 0) });
                   }}
                   style={{ width: 56 }}
@@ -1876,11 +1878,13 @@ export function BattleMap({
                   max={100}
                   step={0.5}
                   value={playerAoeDraft?.y ?? selectedAoe.y}
+                  onFocus={() => setEditingAoeDraft(true)}
                   onChange={(e) => {
                     if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) });
                     else setAoeDraft((draft) => draft && { ...draft, y: e.target.value });
                   }}
                   onBlur={(e) => {
+                    setEditingAoeDraft(false);
                     if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.currentTarget.value) || 0) });
                   }}
                   style={{ width: 56 }}
@@ -1893,11 +1897,13 @@ export function BattleMap({
                   min={0}
                   step={gridScale ?? 5}
                   value={playerAoeDraft?.sizeFt ?? selectedAoe.sizeFt}
+                  onFocus={() => setEditingAoeDraft(true)}
                   onChange={(e) => {
                     if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) });
                     else setAoeDraft((draft) => draft && { ...draft, sizeFt: e.target.value });
                   }}
                   onBlur={(e) => {
+                    setEditingAoeDraft(false);
                     if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.currentTarget.value) || 1) });
                   }}
                   style={{ width: 56 }}
@@ -1911,11 +1917,13 @@ export function BattleMap({
                     type="number"
                     step={15}
                     value={playerAoeDraft?.angleDeg ?? selectedAoe.angleDeg}
+                    onFocus={() => setEditingAoeDraft(true)}
                     onChange={(e) => {
                       if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 });
                       else setAoeDraft((draft) => draft && { ...draft, angleDeg: e.target.value });
                     }}
                     onBlur={(e) => {
+                      setEditingAoeDraft(false);
                       if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.currentTarget.value) || 0 });
                     }}
                     style={{ width: 56 }}

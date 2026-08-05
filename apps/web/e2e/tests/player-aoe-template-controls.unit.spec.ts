@@ -27,6 +27,13 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(RUN_SESSION).toContain('queryKeys.campaignMembers(cid)');
   });
 
+  test('player numeric drafts preserve typing but resync after an unfocused marker move', () => {
+    expect(BATTLE_MAP).toContain('const [editingAoeDraft, setEditingAoeDraft] = useState(false);');
+    expect(BATTLE_MAP).toContain('if (editingAoeDraft) return;');
+    expect(BATTLE_MAP).toContain('onFocus={() => setEditingAoeDraft(true)}');
+    expect(BATTLE_MAP).toContain('setEditingAoeDraft(false);');
+  });
+
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {
     const damageBar = RUN_SESSION.slice(RUN_SESSION.indexOf('<ApplyDamageBar'));
     expect(damageBar).not.toContain('onDeclareAoe');
