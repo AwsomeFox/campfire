@@ -169,6 +169,9 @@ CREATE TABLE IF NOT EXISTS characters (
   ac INTEGER,
   eac INTEGER,
   kac INTEGER,
+  -- Issue #1910: movement speed. NULL = unset; the turn workspace falls back to the
+  -- rule system adapter's movement-slot max (30 ft for 5e).
+  speed INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
   sp_current INTEGER NOT NULL DEFAULT 0,
@@ -1775,6 +1778,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   rp_max INTEGER NOT NULL DEFAULT 0,
   eac INTEGER,
   kac INTEGER,
+  -- Issue #1910: add-time snapshot of the linked character's speed. NULL for
+  -- monster/npc combatants and for combatants added before this column existed.
+  speed INTEGER,
   hp_temp INTEGER NOT NULL DEFAULT 0,
   death_state TEXT NOT NULL DEFAULT 'none',
   death_save_successes INTEGER NOT NULL DEFAULT 0,

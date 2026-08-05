@@ -21,6 +21,7 @@ export const CHARACTER_FIELD = {
   background: 'background',
   level: 'level',
   ac: 'ac',
+  speed: 'speed',
   hpMax: 'hpMax',
   status: 'status',
 } as const;
@@ -39,6 +40,7 @@ export const CHARACTER_CLASS_LABEL = 'Class';
 export const CHARACTER_BACKGROUND_LABEL = 'Background';
 export const CHARACTER_LEVEL_LABEL = 'Level';
 export const CHARACTER_AC_LABEL = 'Armor class';
+export const CHARACTER_SPEED_LABEL = 'Speed';
 export const CHARACTER_HP_MAX_LABEL = 'Max HP';
 export const CHARACTER_STATUS_LABEL = 'Status';
 export const CHARACTER_STATUS_HELP =

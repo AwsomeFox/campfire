@@ -56,6 +56,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'death_state',
           'death_save_successes',
           'death_save_failures',
+          'speed', // 0161 (#1910): movement speed, additive nullable column.
         ]),
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
@@ -76,7 +77,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
-        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot']),
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot', 'speed']),
       );
       expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
@@ -166,6 +167,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['series_id', 'occurrence_id', 'recurrence_local_date', 'kind', 'from_scheduled_at', 'to_scheduled_at']),
       );
       expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
+      expect(MIGRATION_NAMES).toContain('0161_character_combatant_speed_1910');
     } finally {
       sqlite.close();
     }
@@ -240,6 +242,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(character.death_state).toBe('none');
       expect(character.death_save_successes).toBe(0);
       expect(character.death_save_failures).toBe(0);
+      // 0161 (#1910): speed ADD COLUMN — a pre-existing character row reads null
+      // (unset), not a fabricated 30, so the turn workspace supplies the adapter
+      // default at read time instead of the migration guessing a value.
+      expect(character.speed).toBeNull();
 
       expect((sqlite.prepare('SELECT hidden FROM quests WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       expect((sqlite.prepare('SELECT hidden FROM npcs WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
@@ -263,6 +269,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
       expect(combatant.npc_id).toBeNull(); // 0044: npc_id ADD COLUMN — null for the pre-existing row
+      expect(combatant.speed).toBeNull(); // 0161 (#1910): pre-existing combatant row reads null too.
 
 
 

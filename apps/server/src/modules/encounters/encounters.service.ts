@@ -442,6 +442,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     rpMax: row.rpMax ?? 0,
     eac: row.eac ?? null,
     kac: row.kac ?? null,
+    speed: row.speed ?? null,
     hpTemp: row.hpTemp,
     hpBand: null,
     deathState: row.deathState as Combatant['deathState'],
@@ -3644,6 +3645,9 @@ export class EncountersService {
     let rpMax = 0;
     let eac: number | null = null;
     let kac: number | null = null;
+    // Issue #1910: add-time snapshot of the linked character's speed, same convention
+    // as eac/kac/the HP-model fields below — stays null for monster/npc combatants.
+    let speed: number | null = null;
     let statblockJson: string | null = null;
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
@@ -3739,6 +3743,7 @@ export class EncountersService {
       rpMax = character.rpMax;
       eac = character.eac;
       kac = character.kac;
+      speed = character.speed;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
@@ -3881,6 +3886,7 @@ export class EncountersService {
             rpMax,
             eac,
             kac,
+            speed,
             // Issue #711: only a character combatant carries the persistent
             // death/temp-HP slice in; monsters/NPCs default to alive/temp-less
             // (the Combatant schema defaults handle the unset monster case).
@@ -7222,16 +7228,35 @@ export class EncountersService {
 
     const model = actionEconomyForAdapter(adapter);
     const used = current.turnState.used;
+    const movementSlot = model.slots.find((s) => s.kind === 'movement');
+    // Issue #1910: resolve the real per-combatant movement max instead of always
+    // reporting the adapter's flat constant. Priority: the combatant's own add-time
+    // speed snapshot (frozen so a mid-fight sheet edit never retroactively changes a
+    // running encounter's movement budget) -> the linked character's live speed
+    // (covers combatants added before this column existed) -> the adapter's
+    // movement-slot max as the last resort (e.g. 30 ft for 5e).
+    let resolvedMovementMax = movementSlot?.max ?? 0;
+    if (movementSlot) {
+      if (current.speed != null) {
+        resolvedMovementMax = current.speed;
+      } else if (current.kind === 'character' && current.characterId !== null) {
+        const [characterSpeedRow] = await this.db
+          .select({ speed: characters.speed })
+          .from(characters)
+          .where(eq(characters.id, current.characterId))
+          .limit(1);
+        if (characterSpeedRow?.speed != null) resolvedMovementMax = characterSpeedRow.speed;
+      }
+    }
     const actionEconomy = model.slots.map((slot) => ({
       key: slot.key,
       label: slot.label,
       help: slot.help,
       kind: slot.kind,
-      max: slot.max,
+      max: slot.kind === 'movement' ? resolvedMovementMax : slot.max,
       used: slot.kind === 'movement' ? current.turnState.movementUsedFt : used[slot.key] ?? 0,
       resetsAt: slot.resetsAt,
     }));
-    const movementSlot = model.slots.find((s) => s.kind === 'movement');
     const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
     const suggestedActions = await this.suggestedActionsForCombatant(current);
 
@@ -7253,7 +7278,7 @@ export class EncountersService {
       isYourTurn,
       canEndTurn,
       actionEconomy,
-      movement: movementSlot ? { maxFt: movementSlot.max, usedFt: current.turnState.movementUsedFt } : null,
+      movement: movementSlot ? { maxFt: resolvedMovementMax, usedFt: current.turnState.movementUsedFt } : null,
       reactionAvailable: reactionSlot ? (used[reactionSlot.key] ?? 0) < reactionSlot.max : false,
       concentration: current.turnState.concentration,
       activeEffects: current.activeEffects,

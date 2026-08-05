@@ -12,6 +12,7 @@ export type CharacterSheetDraft = {
   background: string;
   level: string;
   ac: string;
+  speed: string;
   hpMax: string;
   status: CharacterStatus;
   stats: Record<string, string>;
@@ -30,6 +31,7 @@ export function characterSheetDraftFrom(character: Character, adapter: RuleSyste
     background: character.background,
     level: String(character.level),
     ac: character.ac != null ? String(character.ac) : '',
+    speed: character.speed != null ? String(character.speed) : '',
     hpMax: String(character.hpMax),
     status: character.status,
     stats,
@@ -48,6 +50,7 @@ export function characterSheetDraftsEqual(a: CharacterSheetDraft, b: CharacterSh
     a.background === b.background &&
     a.level === b.level &&
     a.ac === b.ac &&
+    a.speed === b.speed &&
     a.hpMax === b.hpMax &&
     a.status === b.status &&
     recordsEqual(a.stats, b.stats)
@@ -61,6 +64,7 @@ export function snapshotCharacterSheetDraft(input: {
   background: string;
   level: string;
   ac: string;
+  speed: string;
   hpMax: string;
   status: CharacterStatus;
   stats: Record<string, string>;
@@ -72,6 +76,7 @@ export function snapshotCharacterSheetDraft(input: {
     background: input.background,
     level: input.level,
     ac: input.ac,
+    speed: input.speed,
     hpMax: input.hpMax,
     status: input.status,
     stats: { ...input.stats },

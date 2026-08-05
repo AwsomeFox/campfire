@@ -13,6 +13,21 @@ interface PlayerVitalsHeaderProps {
   currentCombatantId?: number;
 }
 
+/**
+ * Movement speed shown in the sticky vitals header (issue #1910). The character
+ * sheet's own `speed` is the live source of truth (mirrors the AC lookup just above
+ * this component, which also reads `char?.ac` first); the combatant's add-time
+ * snapshot is the fallback for a combatant whose character record didn't resolve;
+ * 30 is the same adapter-default fallback the untyped `(stats as any).speed ?? '30'`
+ * guess used previously — this just replaces the fabricated guess with the real,
+ * typed fields.
+ */
+export function vitalsSpeedFor(character: Character | undefined, combatant: Combatant): number {
+  if (character?.speed != null) return character.speed;
+  if (combatant.speed != null) return combatant.speed;
+  return 30;
+}
+
 export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId }: PlayerVitalsHeaderProps) {
   useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
@@ -35,8 +50,7 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
-        // Use any since speed is adapter-specific and not in base schema
-        const speed = (char?.stats as any)?.speed ?? (c.statblock as any)?.speed ?? '30';
+        const speed = vitalsSpeedFor(char, c);
         const spellSaveDc = (char?.stats as any)?.spellSaveDc ?? (char?.stats as any)?.spell_save_dc ?? '—';
         const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
         

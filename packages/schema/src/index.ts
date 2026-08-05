@@ -586,6 +586,15 @@ export const Character = z.object({
   ac: z.number().int().nullable().default(null),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: movement speed in the adapter's movement unit (feet for 5e/PF2e; no
+  // 5e-specific naming since a future adapter may use meters/squares). Nullable, default
+  // null rather than a baked-in 30 — null means "unset", so the turn workspace's movement
+  // slot resolution (combatant snapshot -> this field -> adapter movement-slot max) can
+  // tell "a 30-speed PC" apart from "no speed on file yet" and still supply the adapter's
+  // own default (e.g. DND5E_ACTION_ECONOMY's movement max) rather than writing a guessed
+  // 30 onto every existing row. min(0): a homebrew "speed 0" (e.g. petrified) is valid;
+  // negative is not.
+  speed: z.number().int().min(0).nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(0).default(10),
   spCurrent: z.number().int().min(0).default(0),
@@ -10173,6 +10182,13 @@ export const Combatant = z.object({
   rpMax: z.number().int().min(0).nullable().default(0),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
+  // Issue #1910: add-time snapshot of the linked character's speed, mirroring the
+  // hp/death-state snapshot convention above — a mid-fight sheet edit must not
+  // retroactively change a running encounter's movement budget. Populated only for
+  // kind==='character' combatants at addCombatant time; monsters/NPCs and combatants
+  // added before this column existed keep it null, in which case getTurnWorkspace
+  // falls back to the linked character's live speed, then the adapter's movement max.
+  speed: z.number().int().min(0).nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.
   // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).

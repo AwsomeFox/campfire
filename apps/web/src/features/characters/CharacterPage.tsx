@@ -96,6 +96,7 @@ import {
   CHARACTER_LEVEL_LABEL,
   CHARACTER_NAME_LABEL,
   CHARACTER_SPECIES_LABEL,
+  CHARACTER_SPEED_LABEL,
   CHARACTER_STATUS_HELP,
   CHARACTER_STATUS_LABEL,
   CHARACTER_STORY_HELP,
@@ -785,6 +786,7 @@ function SheetEditForm({
   const [background, setBackground] = useState(baseline.background);
   const [level, setLevel] = useState(baseline.level);
   const [ac, setAc] = useState(baseline.ac);
+  const [speed, setSpeed] = useState(baseline.speed);
   const [hpMax, setHpMax] = useState(baseline.hpMax);
   const [status, setStatus] = useState<CharacterStatus>(baseline.status);
   const [stats, setStats] = useState<Record<string, string>>(baseline.stats);
@@ -808,6 +810,7 @@ function SheetEditForm({
     background,
     level,
     ac,
+    speed,
     hpMax,
     status,
     stats,
@@ -825,6 +828,14 @@ function SheetEditForm({
       const acParsed = parseLocalizedInteger(ac, formatLocale);
       if (!acParsed.ok) errs.ac = acParsed.error;
       else acValue = acParsed.value;
+    }
+    // Issue #1910: optional, locale-parsed like AC. min:0 mirrors the schema's
+    // speed.min(0) — no upper bound, unlike AC's implicit sanity ceiling.
+    let speedValue: number | null = null;
+    if (speed.trim() !== '') {
+      const speedParsed = parseLocalizedInteger(speed, formatLocale, { min: 0 });
+      if (!speedParsed.ok) errs.speed = speedParsed.error;
+      else speedValue = speedParsed.value;
     }
     const hpMaxParsed = parseLocalizedInteger(hpMax, formatLocale, { min: 1 });
     if (!hpMaxParsed.ok) errs.hpMax = hpMaxParsed.error;
@@ -851,6 +862,7 @@ function SheetEditForm({
         background: background.trim(),
         level: levelNum,
         ac: acValue,
+        speed: speedValue,
         hpMax: hpMaxNum,
         status,
         stats: { ...character.stats, ...statNums },
@@ -881,6 +893,7 @@ function SheetEditForm({
     onError,
     onSaved,
     species,
+    speed,
     stats,
     status,
   ]);
@@ -902,6 +915,7 @@ function SheetEditForm({
       setBackground(restored.background);
       setLevel(restored.level);
       setAc(restored.ac);
+      setSpeed(restored.speed);
       setHpMax(restored.hpMax);
       setStatus(restored.status);
       setStats({ ...restored.stats });
@@ -996,6 +1010,23 @@ function SheetEditForm({
             setFieldErrors((fe) => ({ ...fe, ac: '' }));
           }}
           placeholder={defenseLabel}
+          optional
+        />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.speed}
+          label={CHARACTER_SPEED_LABEL}
+          labelClassName={cardLabel}
+          type="text"
+          inputMode="numeric"
+          min={0}
+          value={speed}
+          error={fieldErrors.speed || null}
+          onChange={(e) => {
+            setSpeed(e.target.value);
+            setFieldErrors((fe) => ({ ...fe, speed: '' }));
+          }}
+          placeholder={CHARACTER_SPEED_LABEL}
           optional
         />
       </div>

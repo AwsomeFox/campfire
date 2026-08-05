@@ -74,6 +74,7 @@ function character(overrides: Partial<Character> = {}): Character {
     ac: 16,
     eac: null,
     kac: null,
+    speed: null,
     hpCurrent: 20,
     hpMax: 20,
     spCurrent: 0,
@@ -204,5 +205,21 @@ test.describe('character sheet dirty detection (issue #641)', () => {
     expect(baseline.stats.ENERGY).toBe('3');
     expect(baseline.stats.CUSTOM_NATIVE).toBe('7');
     expect(Object.keys(baseline.stats)).toContain('PRESCIENCE');
+  });
+
+  // Issue #1910: a character created before the `speed` column existed reads null —
+  // the draft must render that as an empty field, not a fabricated "0" or "30", and a
+  // real value must round-trip so editing then clearing it back to null is detectable.
+  test('speed is empty for a legacy null-speed character and round-trips a real value', () => {
+    const legacy = characterSheetDraftFrom(character({ speed: null }), Dnd5eAdapter);
+    expect(legacy.speed).toBe('');
+
+    const dwarf = characterSheetDraftFrom(character({ speed: 25 }), Dnd5eAdapter);
+    expect(dwarf.speed).toBe('25');
+    expect(isCharacterSheetDirty(legacy, dwarf)).toBe(true);
+    expect(characterSheetDraftsEqual(dwarf, characterSheetDraftFrom(character({ speed: 25 }), Dnd5eAdapter))).toBe(true);
+
+    // Clearing a set speed back to '' (-> null on save) must register as a change.
+    expect(isCharacterSheetDirty({ ...dwarf, speed: '' }, dwarf)).toBe(true);
   });
 });

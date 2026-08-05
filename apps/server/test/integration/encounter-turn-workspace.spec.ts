@@ -1107,6 +1107,61 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(other.actionEconomy).toHaveLength(0);
   });
 
+  describe('movement speed resolution (issue #1910)', () => {
+    /** Resolves the movement slot's reported max from a fetched turn workspace. */
+    function movementMax(workspace: { actionEconomy: Array<{ kind: string; max: number }> }): number | undefined {
+      return workspace.actionEconomy.find((s) => s.kind === 'movement')?.max;
+    }
+
+    it('a null-speed character (nothing set anywhere) shows the adapter default (30 for 5e)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId } = seed(orm);
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(30);
+      expect(workspace.movement?.maxFt).toBe(30);
+    });
+
+    it('a combatant add-time speed snapshot resolves the movement max (a dwarf at 25)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, c1)).run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(25);
+      expect(workspace.movement?.maxFt).toBe(25);
+    });
+
+    it('a legacy combatant with no snapshot falls back to the linked character live speed', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      orm.update(characters).set({ speed: 35 }).where(eq(characters.id, c1row.characterId!)).run();
+      // combatant.speed stays null (as if added before the column existed).
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(35);
+    });
+
+    it('a mid-fight sheet edit does not retroactively change a running encounter movement budget', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, c1)).run();
+
+      // The DM edits the sheet mid-encounter to 40 (e.g. a Haste spell on the sheet, not
+      // through the combat tracker) — the combatant's frozen snapshot must still win.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, c1row.characterId!)).run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(25);
+    });
+  });
+
   describe('spellbook data — spells/spellSlots on the turn workspace (issue #1900)', () => {
     /** Gives c1's linked character a cantrip, a leveled spell, a non-spell action, and slots. */
     function seedSpellbookCharacter(orm: ReturnType<typeof build>['orm'], c1: number): void {
