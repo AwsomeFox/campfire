@@ -10,9 +10,10 @@ interface PlayerVitalsHeaderProps {
   onHpDelta?: (combatantId: number, delta: number) => void;
   onSetHpMax?: (combatantId: number, max: number) => void;
   turnPulse?: boolean;
+  currentCombatantId?: number;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId }: PlayerVitalsHeaderProps) {
   useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
@@ -40,7 +41,7 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
         const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
         
         return (
-          <Card key={c.id} className={`flex flex-col md:flex-row flex-wrap gap-4 items-center bg-neutral-900 border-b-4 border-accent p-3 shadow-md mb-2 ${turnPulse ? 'cf-turn-beat-pulse' : ''}`}>
+          <Card key={c.id} className={`flex flex-col md:flex-row flex-wrap gap-4 items-center bg-neutral-900 border-b-4 border-accent p-3 shadow-md mb-2 ${turnPulse && c.id === currentCombatantId ? 'cf-turn-beat-pulse' : ''}`}>
             <div className="flex flex-col flex-1 min-w-[120px]">
               <span className="font-bold text-lg leading-tight text-white">{c.name}</span>
               <span className="text-xs text-muted">

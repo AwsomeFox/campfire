@@ -3104,6 +3104,7 @@ export default function RunSessionPage() {
           combatants={myCombatants} 
           charactersById={charactersById}
           turnPulse={turnPulse}
+          currentCombatantId={currentCombatantId}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);

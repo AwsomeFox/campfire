@@ -66,6 +66,14 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(beat\.kind !== 'your-turn'\) \{\s*setShowTakeover\(false\);/);
   });
 
+  test('keeps the transient takeover click-through and pulses only its active vitals card', () => {
+    const takeover = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
+    const vitals = readFileSync(resolve(process.cwd(), 'src/features/encounters/PlayerVitalsHeader.tsx'), 'utf8');
+    expect(takeover).not.toMatch(/data-testid="turn-takeover"[\s\S]*pointer-events-auto/);
+    expect(takeover).not.toMatch(/data-testid="turn-takeover"[\s\S]*onClick/);
+    expect(vitals).toMatch(/turnPulse && c\.id === currentCombatantId \? 'cf-turn-beat-pulse'/);
+  });
+
   test('clears turn ownership and transient cues when combat stops', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*setTurnOwnerFromEvent\(null\);\s*setTurnBeat\(null\);/);

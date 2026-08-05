@@ -103,9 +103,8 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
       {showTakeover && beat && (
         <div
           data-testid="turn-takeover"
-          className={`cf-turn-takeover ${reducedMotion ? '' : 'cf-turn-beat-motion'} pointer-events-auto w-full max-w-2xl rounded-lg border border-accent px-5 py-4 text-center shadow-2xl`}
+          className={`cf-turn-takeover ${reducedMotion ? '' : 'cf-turn-beat-motion'} w-full max-w-2xl rounded-lg border border-accent px-5 py-4 text-center shadow-2xl`}
           style={{ background: beat.identityBackground }}
-          onClick={() => setShowTakeover(false)}
         >
           <strong className="text-xl tracking-wide text-white">
             {t('encounters.turnBeat.takeover', { name: beat.name })}
