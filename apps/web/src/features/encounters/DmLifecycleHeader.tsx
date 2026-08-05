@@ -118,13 +118,21 @@ export function DmLifecycleHeader({
             // is showing.
             const standingHintKey = startRosterHintReason({ hasNoCombatants, needsInitiativeCount });
             const standingHint = gateReasonText(standingHintKey, t);
+            // When the winning gate reason IS the roster reason, the paragraph below is
+            // already saying it — and `GatedControl` would emit a second, visually-hidden
+            // copy and merge it into the button's `aria-describedby`, so a screen reader
+            // announces the same sentence twice and `getByText` resolves to two nodes
+            // (issue #1933 review). The paragraph is the better single source: it is
+            // visible to everyone, not only on hover/focus. So pass a tooltip reason only
+            // when it is something the paragraph is NOT already carrying.
+            const tooltipReason = startReasonKey === standingHintKey ? undefined : startReason;
             return (
               <div className="flex flex-col gap-0.5 items-stretch">
                 {/* `w-full` on the WRAPPER, not the Btn: the wrapper is the flex item of
                     this `items-stretch` column, and it is `inline-flex`, so without this
                     it shrinks to the button's content and Start stops matching the hint
                     paragraph's width (issue #1933 review). */}
-                <GatedControl reason={startReason} className="w-full">
+                <GatedControl reason={tooltipReason} className="w-full">
                   {/* `w-full` on BOTH: the wrapper stretches to the column, and the Btn —
                       a flex item of that inline-flex wrapper with default `flex: 0 1 auto`
                       — has to be told to fill it, or it sizes to its text and the fix is

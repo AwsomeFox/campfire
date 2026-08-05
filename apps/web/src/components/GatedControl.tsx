@@ -80,6 +80,22 @@ const COARSE_POINTER_QUERY = '(hover: none) and (pointer: coarse)';
  * `(hover: none)` media feature), so this component treats them as no-ops there and lets only
  * the tap-hint timer (`onPointerUp` below) drive visibility.
  */
+/**
+ * Whether this focus is the kind a browser would style with `:focus-visible` — keyboard and
+ * assistive-tech focus, but not the focus a tap or click synthesises. Guarded because
+ * `matches` is absent on non-element targets and `:focus-visible` throws on browsers that
+ * do not know the selector; both fall back to "treat it as visible", which errs toward
+ * SHOWING the reason rather than silently withholding it.
+ */
+function isFocusVisible(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return true;
+  try {
+    return target.matches(':focus-visible');
+  } catch {
+    return true;
+  }
+}
+
 function isCoarsePointerNow(): boolean {
   return typeof window !== 'undefined'
     && typeof window.matchMedia === 'function'
@@ -187,11 +203,21 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
       existing.onMouseLeave?.(event);
     },
     onFocus: (event: FocusEvent<HTMLElement>) => {
-      setHint((prev) => applyGatedHintEvent(prev, 'focus', isCoarsePointerNow()));
+      // A coarse pointer alone must NOT suppress focus (issue #1933 review): a tablet or
+      // 2-in-1 with a hardware keyboard reports `(hover: none) and (pointer: coarse)` AND
+      // has genuine keyboard focus, so blanket-ignoring focus there would delete the
+      // keyboard affordance this component exists to provide, on exactly the devices where
+      // the tap hint is the only other route. What must be ignored is the COMPATIBILITY
+      // focus a tap synthesises — which is precisely the distinction `:focus-visible`
+      // encodes, so let the browser answer it rather than hand-rolling pointer tracking.
+      setHint((prev) => applyGatedHintEvent(prev, 'focus', isCoarsePointerNow() && !isFocusVisible(event.target)));
       existing.onFocus?.(event);
     },
     onBlur: (event: FocusEvent<HTMLElement>) => {
-      setHint((prev) => applyGatedHintEvent(prev, 'blur', isCoarsePointerNow()));
+      // Blur stays unconditional: a latched focus hint must clear on ANY device, and
+      // treating blur as a no-op on coarse pointers would strand a bubble opened by the
+      // keyboard path above.
+      setHint((prev) => applyGatedHintEvent(prev, 'blur', false));
       existing.onBlur?.(event);
     },
     onPointerUp: (event: PointerEvent<HTMLElement>) => {
