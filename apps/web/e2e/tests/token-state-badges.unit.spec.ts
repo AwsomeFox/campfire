@@ -13,6 +13,7 @@ import {
   tokenDeathMarker,
   tokenHpFraction,
   tokenHpTone,
+  tokenOverflowPlacement,
   writeTokenDetailMode,
 } from '../../src/features/encounters/tokenStateBadges';
 import { hpBandFor } from '../../src/features/screen/playerSafe';
@@ -23,6 +24,7 @@ test.describe('token HP state (issue #1905)', () => {
     expect(tokenHpFraction({ hpCurrent: -5, hpMax: 100, hpBand: null })).toBe(0);
     expect(tokenHpFraction({ hpCurrent: 150, hpMax: 100, hpBand: null })).toBe(1);
     expect(tokenHpFraction({ hpCurrent: null, hpMax: null, hpBand: null })).toBeNull();
+    expect(tokenHpFraction({ hpCurrent: null, hpMax: null, hpBand: 'future-band' as never })).toBeNull();
   });
 
   test('redacted values expose exactly the existing four bands', () => {
@@ -63,6 +65,7 @@ test.describe('token condition badges (issue #1905)', () => {
   test('maps familiar conditions to glyphs and homebrew conditions to an initial', () => {
     expect(tokenConditionGlyph('Poisoned')).toBe('poison-bottle');
     expect(tokenConditionGlyph('restrained')).toBe('rope-coil');
+    expect(tokenConditionGlyph('INVISIBLE')).toBe('invisible');
     expect(tokenConditionGlyph('Gravity-sick')).toBeNull();
     expect(tokenConditionFallback('Gravity-sick')).toBe('G');
     expect(tokenConditionFallback('  ')).toBe('?');
@@ -89,6 +92,28 @@ test.describe('token condition badges (issue #1905)', () => {
           bottom: y + badge.targetSize / 2,
         };
         const intersects = rect.left < unplace.right && rect.right > unplace.left && rect.top < unplace.bottom && rect.bottom > unplace.top;
+        expect(intersects).toBe(false);
+      }
+    }
+  });
+
+  test('puts overflow on a separate non-overlapping row', () => {
+    for (const size of [18, 24, 32, 64, 128]) {
+      const overflow = tokenOverflowPlacement(size);
+      const overflowRect = {
+        left: (overflow.left / 100) * size - overflow.targetSize / 2,
+        top: (overflow.top / 100) * size - overflow.targetSize / 2,
+        right: (overflow.left / 100) * size + overflow.targetSize / 2,
+        bottom: (overflow.top / 100) * size + overflow.targetSize / 2,
+      };
+      for (const badge of tokenBadgePlacements(size, 3)) {
+        const badgeRect = {
+          left: (badge.left / 100) * size - badge.targetSize / 2,
+          top: (badge.top / 100) * size - badge.targetSize / 2,
+          right: (badge.left / 100) * size + badge.targetSize / 2,
+          bottom: (badge.top / 100) * size + badge.targetSize / 2,
+        };
+        const intersects = badgeRect.left < overflowRect.right && badgeRect.right > overflowRect.left && badgeRect.top < overflowRect.bottom && badgeRect.bottom > overflowRect.top;
         expect(intersects).toBe(false);
       }
     }

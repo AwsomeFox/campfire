@@ -107,6 +107,12 @@
         "minimal": "مختصرة",
         "off": "إيقاف",
         "hp": "الصحة: {{state}}",
+        "hpStates": {
+          "healthy": "بصحة جيدة",
+          "bloodied": "ينزف",
+          "critical": "حرج",
+          "down": "سقط"
+        },
         "currentTurn": "الدور الحالي",
         "dying": "يحتضر",
         "dead": "ميت",

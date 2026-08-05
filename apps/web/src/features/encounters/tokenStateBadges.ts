@@ -30,7 +30,7 @@ export function tokenHpFraction({ hpCurrent, hpMax, hpBand }: TokenHpState): num
   if (hpCurrent != null && hpMax != null) {
     return hpMax > 0 ? Math.max(0, Math.min(1, hpCurrent / hpMax)) : 0;
   }
-  return hpBand == null ? null : HP_BAND_FRACTION[hpBand];
+  return hpBand == null ? null : HP_BAND_FRACTION[hpBand] ?? null;
 }
 
 export function tokenHpTone(fraction: number | null): 'healthy' | 'bloodied' | 'critical' | 'down' | null {
@@ -70,7 +70,7 @@ const CONDITION_GLYPHS: Record<string, string> = {
 };
 
 export function tokenConditionGlyph(condition: string): string | null {
-  return CONDITION_GLYPHS[condition.trim().toLocaleLowerCase()] ?? null;
+  return CONDITION_GLYPHS[condition.trim().toLowerCase()] ?? null;
 }
 
 export function tokenConditionFallback(condition: string): string {
@@ -120,6 +120,23 @@ export function tokenBadgePlacements(sizePx: number, count: number): TokenBadgeP
     visualSize,
     targetSize,
   }));
+}
+
+/**
+ * Overflow occupies its own second row so it never obscures a visible condition
+ * target in the first row, including on an 18px token.
+ */
+export function tokenOverflowPlacement(sizePx: number): TokenBadgePlacement {
+  const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
+  const targetSize = Math.max(18, visualSize);
+  return {
+    left: 50,
+    // Keep this just one target-height below the badge row rather than a
+    // fixed percentage, so it remains close to large tokens too.
+    top: 116 + (targetSize / sizePx) * 100 + 6,
+    visualSize,
+    targetSize,
+  };
 }
 
 export function tokenDeathMarker(combatant: Pick<Combatant, 'kind' | 'hpCurrent' | 'hpBand' | 'deathState'>): 'dying' | 'dead' | null {

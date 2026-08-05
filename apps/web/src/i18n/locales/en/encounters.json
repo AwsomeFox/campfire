@@ -107,6 +107,12 @@
         "minimal": "Minimal",
         "off": "Off",
         "hp": "Health: {{state}}",
+        "hpStates": {
+          "healthy": "healthy",
+          "bloodied": "bloodied",
+          "critical": "critical",
+          "down": "down"
+        },
         "currentTurn": "Current turn",
         "dying": "Dying",
         "dead": "Dead",

@@ -58,6 +58,12 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await firstCondition.click();
     await expect(playerPage.locator(`#combatant-${bossId}-conditions`)).toBeFocused();
 
+    // Map-surface tools own their gestures, even when one begins over a badge.
+    await dmPage.getByTestId('map-tool-reveal').click();
+    await expect(dmPage.getByTestId('map-tool-reveal')).toHaveAttribute('aria-pressed', 'true');
+    await expect(dmPage.getByTestId(`map-token-condition-${bossId}-0`)).toHaveCSS('pointer-events', 'none');
+    await dmPage.getByTestId('map-tool-move').click();
+
     // The viewer never clicks: the DM advances the real encounter and its SSE update
     // moves the accent ring on the second client.
     await expect(playerPage.getByTestId(`map-token-current-turn-${bossId}`)).toBeVisible();
@@ -93,6 +99,13 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
       await cast.close();
       await dm.request.delete(`/api/v1/campaigns/${campaignId}/cast-sessions/${session.id}`);
     }
+
+    // Off restores the plain disc even after a token becomes defeated.
+    const downed = await dm.request.patch(`/api/v1/encounters/${encounterId}/combatants/${bossId}`, {
+      data: { hpSet: 0 },
+    });
+    expect(downed.ok()).toBeTruthy();
+    await expect(dmBoss.locator(':scope > div > span').first()).toHaveCSS('opacity', '1');
   } finally {
     await restoreSeedEncounter();
     await dm.request.patch(`/api/v1/encounters/${encounterId}`, { data: { fog: { enabled: true, revealed: [] } } });
