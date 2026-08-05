@@ -124,6 +124,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const updateCombatant = tools.find((t) => t.name === 'update_combatant');
     expect(updateCombatant?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     expect(updateCombatant?.description).toContain('addConditionInstance');
+    const endTurn = tools.find((t) => t.name === 'end_turn');
+    const endTurnProps = endTurn?.inputSchema.properties as Record<string, unknown>;
+    expect(endTurnProps).toHaveProperty('idempotencyKey');
+    expect(endTurn?.description).toContain('reused verbatim on every retry');
     const summary = tools.find((t) => t.name === 'get_campaign_summary');
     expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
@@ -1290,7 +1294,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`)).body).toHaveLength(beforeRolls);
   });
 
-  it('end_turn and set_turn_state (delay/readied) via MCP (issue #487)', async () => {
+  it('end_turn replays one MCP advance while preserving key-reuse and stale-turn conflicts (issue #1915)', async () => {
     const dmClient = await mcpClient(dmToken);
 
     const live = parseResult(
@@ -1365,13 +1369,41 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       'When hostile moves',
     );
 
-    const endTurnResult = await dmClient.callTool({
-      name: 'end_turn',
-      arguments: { encounterId: encounter.id, expectedCurrentCombatantId: hero!.id },
-    });
+    const endTurnArguments = {
+      encounterId: encounter.id,
+      expectedCurrentCombatantId: hero!.id,
+      idempotencyKey: 'mcp-end-turn-replay',
+    };
+    const endTurnResult = await dmClient.callTool({ name: 'end_turn', arguments: endTurnArguments });
     expect(endTurnResult.isError).toBeFalsy();
     const afterEnd = parseResult(endTurnResult) as { currentCombatantId: number | null };
     expect(afterEnd.currentCombatantId).toBe(expectedNextId);
+
+    // A lost-response retry is the same logical advance: it replays the receipt and
+    // leaves the server on the once-advanced combatant rather than skipping another turn.
+    const replay = await dmClient.callTool({ name: 'end_turn', arguments: endTurnArguments });
+    expect(replay.isError).toBeFalsy();
+    expect(parseResult(replay)).toEqual(afterEnd);
+    const persisted = parseResult(
+      await dmClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { currentCombatantId: number | null };
+    expect(persisted.currentCombatantId).toBe(expectedNextId);
+
+    // Reusing the key for a different intent must fail instead of silently replaying.
+    const keyReuse = await dmClient.callTool({
+      name: 'end_turn',
+      arguments: { ...endTurnArguments, expectedCurrentCombatantId: expectedNextId },
+    });
+    expect(keyReuse.isError).toBe(true);
+    expect(parseResult(keyReuse)).toMatchObject({ error: { status: 409, code: 'IDEMPOTENCY_KEY_REUSE' } });
+
+    // A fresh intent still respects the stale-turn compare-and-swap guard.
+    const stale = await dmClient.callTool({
+      name: 'end_turn',
+      arguments: { ...endTurnArguments, idempotencyKey: 'mcp-end-turn-stale' },
+    });
+    expect(stale.isError).toBe(true);
+    expect(parseResult(stale)).toMatchObject({ error: { status: 409, code: 'TURN_ALREADY_ADVANCED' } });
 
     await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: encounter.id } });
   });

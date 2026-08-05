@@ -13,7 +13,9 @@ test.describe('quick fight & party bulk add (issue #1477)', () => {
   test('default encounter name allows one-tap encounter creation', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/encounters`);
-    await page.getByRole('button', { name: '+ New encounter' }).click();
+    const newEncounterBtn = page.getByTestId('new-encounter-button');
+    await expect(newEncounterBtn).toBeVisible();
+    await newEncounterBtn.click();
     await expect(page.getByTestId('encounter-create-form')).toBeVisible();
 
     const nameInput = page.getByLabel(/Encounter name/i);
@@ -45,7 +47,9 @@ test.describe('quick fight & party bulk add (issue #1477)', () => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/encounters`);
 
-    await page.getByRole('button', { name: '+ New encounter' }).click();
+    const newEncounterBtn = page.getByTestId('new-encounter-button');
+    await expect(newEncounterBtn).toBeVisible();
+    await newEncounterBtn.click();
     await page.getByRole('button', { name: 'Create', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/encounters/\\d+`));
 

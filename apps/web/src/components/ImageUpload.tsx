@@ -153,6 +153,11 @@ export function castEncounterMapUrl(castToken: string, encounterId: number, revi
   return `${API}/cast/${encodeURIComponent(castToken)}/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
 }
 
+/** Authenticated Player Display preview map endpoint, always server-rendered as viewer. */
+export function playerDisplayEncounterMapUrl(campaignId: number, encounterId: number, revision: string): string {
+  return `${API}/campaigns/${campaignId}/player-display/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
+}
+
 /** Dev-auth headers (mirrors the JSON api client) for the multipart helpers below. */
 function devAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};

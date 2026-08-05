@@ -2,9 +2,10 @@
  * Player Display — the cast-to-TV / "present" mode (issue #60).
  *
  * A read-only, full-bleed, secret-free view a DM can throw on a TV at the table.
- * Authenticated DMs can preview it from /c/:campaignId/screen. Shared devices use
- * /cast/:campaignId/:token, which fetches only server-redacted cast endpoints with
- * cookies omitted, so unredacted DM payloads never reach the cast client.
+ * Authenticated DMs can preview it from /c/:campaignId/screen through dedicated
+ * server-redacted preview endpoints. Shared devices use /cast/:campaignId/:token,
+ * which fetches the same viewer projection with cookies omitted. Neither route
+ * receives an unredacted DM encounter payload.
  *
  * Route: /c/:campaignId/screen — mounted OUTSIDE the app chrome (Layout) so it
  * fills the screen with no sidebar/tabbar, but INSIDE AuthedLayout (members only).
@@ -180,14 +181,16 @@ function fullscreenFailure(action: 'enter' | 'exit', error: unknown): string {
   return `Fullscreen couldn't start${detail}. Keep this tab active, allow fullscreen for this site, then try again.`;
 }
 
-const displayFetchers: PlayerDisplayFetchers = {
-  getSummary: (campaignId, signal) =>
-    api.get<CampaignSummary>(`${API}/campaigns/${campaignId}/summary`, { signal }),
-  getRunningEncounters: (campaignId, signal) =>
-    api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters?status=running`, { signal }),
-  getEncounter: (encounterId, signal) =>
-    api.get<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { signal }),
-};
+function authenticatedDisplayFetchers(campaignId: number): PlayerDisplayFetchers {
+  return {
+    getSummary: (_campaignId, signal) =>
+      api.get<CampaignSummary>(`${API}/campaigns/${campaignId}/player-display/summary`, { signal }),
+    getRunningEncounters: (_campaignId, signal) =>
+      api.get<Encounter[]>(`${API}/campaigns/${campaignId}/player-display/encounters?status=running`, { signal }),
+    getEncounter: (encounterId, signal) =>
+      api.get<EncounterWithCombatants>(`${API}/campaigns/${campaignId}/player-display/encounters/${encounterId}`, { signal }),
+  };
+}
 
 async function castRequest<T>(token: string, path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -275,7 +278,7 @@ export default function PlayerDisplayPage() {
   const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
 
   const activeFetchers = useMemo<PlayerDisplayFetchers>(() => {
-    if (!isCastMode || !castToken) return displayFetchers;
+    if (!isCastMode || !castToken) return authenticatedDisplayFetchers(cid);
     return {
       getSummary: (_campaignId, signal) =>
         castRequest<CampaignSummary>(castToken, `${API}/cast/${castToken}/summary`, { signal }),
@@ -284,7 +287,7 @@ export default function PlayerDisplayPage() {
       getEncounter: (encounterId, signal) =>
         castRequest<EncounterWithCombatants>(castToken, `${API}/cast/${castToken}/encounters/${encounterId}`, { signal }),
     };
-  }, [castToken, isCastMode]);
+  }, [castToken, cid, isCastMode]);
 
   const summary = projection?.campaignId === cid ? projection.summary : null;
   const encounter = projection?.campaignId === cid ? projection.encounter : null;
@@ -529,6 +532,10 @@ export default function PlayerDisplayPage() {
           addMapPing(event.ping);
           return;
         }
+        // A turn advance emits an encounter.updated frame immediately before
+        // this edge frame. The display projection only needs the former; do
+        // not start a second full-board load for the same change.
+        if (event.type === 'encounter.turn_changed') return;
         void load();
       },
       [load, addMapPing],

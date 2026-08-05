@@ -131,7 +131,24 @@ export async function fetchPlayerDisplayProjection(
     return { campaignId, summary, encounter: null };
   }
 
-  const detail = await fetchers.getEncounter(live.id, signal);
+  let detail: EncounterWithCombatants;
+  try {
+    detail = await fetchers.getEncounter(live.id, signal);
+  } catch (error) {
+    // The running list can win the race immediately before the DM ends the
+    // fight. Player Display detail endpoints intentionally 404 non-running
+    // encounters, but a cast capability can also 404 when it was revoked. A
+    // successful re-check that no longer contains this fight proves it ended;
+    // otherwise preserve the error rather than masking lost display access.
+    if (error instanceof ApiError && error.status === 404) {
+      const stillRunning = await fetchers.getRunningEncounters(campaignId, signal);
+      throwIfAborted(signal);
+      if (!stillRunning.some((encounter) => encounter.id === live.id && encounter.status === 'running')) {
+        return { campaignId, summary, encounter: null };
+      }
+    }
+    throw error;
+  }
   throwIfAborted(signal);
 
   // End-during-load: a detail body can still arrive after the DM ends combat.

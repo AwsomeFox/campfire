@@ -4,6 +4,8 @@ import { expect, test } from '@playwright/test';
 
 const source = readFileSync(resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'), 'utf8');
 const runSessionSource = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+const combatantRowSource = readFileSync(resolve(__dirname, '../../src/features/encounters/combat/CombatantRow.tsx'), 'utf8');
+const deathSavesSource = readFileSync(resolve(__dirname, '../../src/features/encounters/combat/DeathSaves.tsx'), 'utf8');
 
 test('TurnWorkspace keeps the server-authoritative death save single-flight', () => {
   expect(source).toContain('deathSavePending?: boolean');
@@ -35,8 +37,8 @@ test('an ambiguous death-save outcome reconciles before allowing another roll', 
 });
 
 test('only a dying 0-HP character can roll while terminal-state pips remain visible', () => {
-  expect(runSessionSource).toContain("canRoll={combatant.deathState === 'dying'}");
-  expect(runSessionSource).toContain("combatant.deathState === 'stable'");
-  expect(runSessionSource).toContain("combatant.deathState === 'dead'");
-  expect(runSessionSource).toContain('{canEditPermission && canRoll && (');
+  expect(combatantRowSource).toContain("canRoll={combatant.deathState === 'dying'}");
+  expect(combatantRowSource).toContain("combatant.deathState === 'stable'");
+  expect(combatantRowSource).toContain("combatant.deathState === 'dead'");
+  expect(deathSavesSource).toContain('{canEditPermission && canRoll && (');
 });

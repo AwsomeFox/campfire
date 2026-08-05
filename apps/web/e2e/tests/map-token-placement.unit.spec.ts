@@ -16,7 +16,7 @@ import {
   partitionMapTokens,
 } from '../../src/features/encounters/mapTokenPlacement';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 type Token = {
   id: number;
@@ -80,7 +80,7 @@ test.describe('map token placement trays (issue #418)', () => {
   });
 
   test('RunSessionPage uses partitionMapTokens and never place-at-center for fog-hidden tokens', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toMatch(/partitionMapTokens/);
     expect(source).toMatch(/FOG_HIDDEN_TOKEN_LABEL/);
     expect(source).toMatch(/map-token-fog-hidden/);

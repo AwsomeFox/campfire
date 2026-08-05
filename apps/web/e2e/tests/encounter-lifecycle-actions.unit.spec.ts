@@ -15,6 +15,7 @@ import {
 } from '../../src/features/encounters/encounterLifecycleActions';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const DM_LIFECYCLE_HEADER = resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx');
 
 const STATUSES: EncounterLifecycleStatus[] = ['preparing', 'running', 'ended'];
 
@@ -61,12 +62,15 @@ test.describe('encounter lifecycle actions matrix (issue #420)', () => {
     expect(ended.body).toMatch(/Combatants/i);
   });
 
-  test('RunSessionPage renders End from the lifecycle matrix, not status !== ended', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/dmLifecycleActions/);
-    expect(source).toMatch(/lifecycle\.end/);
+  test('the DM lifecycle header renders End from the lifecycle matrix, not status !== ended', () => {
+    const runSessionSource = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const lifecycleHeaderSource = readFileSync(DM_LIFECYCLE_HEADER, 'utf8');
+    expect(runSessionSource).toMatch(/dmLifecycleActions/);
+    expect(lifecycleHeaderSource).toMatch(/export type Props/);
+    expect(lifecycleHeaderSource).toMatch(/if \(!canDmWrite\) return null/);
+    expect(lifecycleHeaderSource).toMatch(/lifecycle\.end/);
     // The old bug: End for every non-ended state (including preparing).
-    expect(source).not.toMatch(/encounter\.status\s*!==\s*['"]ended['"]\s*&&\s*\n\s*<Btn[^>]*danger[^>]*>\s*\n\s*End/m);
-    expect(source).not.toMatch(/status !== 'ended' && \(\s*\n\s*<Btn ghost danger[^>]*>\s*End/m);
+    expect(lifecycleHeaderSource).not.toMatch(/status\s*!==\s*['"]ended['"]\s*&&\s*\n\s*<Btn[^>]*danger[^>]*>\s*\n\s*End/m);
+    expect(lifecycleHeaderSource).not.toMatch(/status !== 'ended' && \(\s*\n\s*<Btn ghost danger[^>]*>\s*End/m);
   });
 });

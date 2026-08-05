@@ -19,7 +19,9 @@ test.describe('generate-encounter wizard — issue #412', () => {
     const countBefore = ((await before.json()) as Array<{ id: number }>).length;
 
     await page.goto(listUrl);
-    await page.getByRole('button', { name: 'Generate encounter' }).click();
+    const generateBtn = page.getByRole('button', { name: 'Generate encounter' });
+    await expect(generateBtn).toBeVisible();
+    await generateBtn.click();
 
     const wizard = page.getByTestId('generate-encounter-wizard');
     await expect(wizard).toBeVisible();

@@ -8,7 +8,7 @@ import type { AoeTemplate, Combatant, EncounterWithCombatants } from '@campfire/
 import { safeEncounterForCast } from '../../src/features/screen/playerSafe';
 
 const PLAYER_DISPLAY_PAGE = resolve(__dirname, '../../src/features/screen/PlayerDisplayPage.tsx');
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 function combatant(partial: Partial<Combatant> & Pick<Combatant, 'id' | 'name'>): Combatant {
   return {
@@ -57,7 +57,7 @@ test.describe('Player Display battle map (issue #484)', () => {
   });
 
   test('BattleMap exports a cast projection mode for the table-facing surface', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toContain("export function BattleMap");
     expect(source).toContain("projection?: 'session' | 'cast'");
     expect(source).toContain("data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}");
@@ -74,7 +74,15 @@ test.describe('Player Display battle map (issue #484)', () => {
       aoe,
       combatants: [
         combatant({ id: 1, name: 'Hidden', tokenX: 10, tokenY: 10 }),
-        combatant({ id: 2, name: 'Visible', tokenX: 80, tokenY: 80 }),
+        combatant({
+          id: 2,
+          name: 'Visible',
+          tokenX: 80,
+          tokenY: 80,
+          hpCurrent: 75,
+          hpMax: 100,
+          turnState: { concentration: 'Bless' } as Combatant['turnState'],
+        }),
       ],
     });
 
@@ -84,7 +92,13 @@ test.describe('Player Display battle map (issue #484)', () => {
       tokenY: null,
       tokenHiddenByFog: true,
     });
-    expect(safe.combatants.find((c) => c.id === 2)?.tokenX).toBe(80);
+    expect(safe.combatants.find((c) => c.id === 2)).toMatchObject({
+      tokenX: 80,
+      hpCurrent: null,
+      hpMax: null,
+      hpBand: 'healthy',
+      turnState: { concentration: null, used: {}, movementUsedFt: 0, pendingConcentrationChecks: [], delaying: false, readied: null },
+    });
     expect(safe.aoe?.map((t) => t.id)).toEqual(['lit']);
   });
 });

@@ -56,7 +56,7 @@ export function buildSrcSet(
  * and every `srcset` rung authenticate from the session COOKIE instead. On a TV that
  * happens to still carry a DM's cookie, a single srcset rung would therefore be served
  * the DM's UNFOGGED SOURCE map — reintroducing exactly the fog-of-war leak that the
- * cast capability (#547) exists to close. So when `castToken` is set, responsive
+ * cast capability (#547) exists to close. So when a cast projection is active, responsive
  * delivery is off ENTIRELY: no manifest fetch, no retry, no srcset. The board still
  * renders, at full size, through its capability URL.
  *
@@ -77,11 +77,12 @@ export function planEncounterMapResponsive(input: {
   encounterId: number;
   mapAttachmentId: number | null | undefined;
   castToken: string | null | undefined;
+  isCastProjection?: boolean;
   canDmWrite: boolean;
 }): EncounterMapResponsivePlan {
-  const { encounterId, mapAttachmentId, castToken, canDmWrite } = input;
+  const { encounterId, mapAttachmentId, castToken, isCastProjection = false, canDmWrite } = input;
   // A cast display, or an encounter with no map at all, gets nothing.
-  if (mapAttachmentId == null || castToken) {
+  if (mapAttachmentId == null || castToken || isCastProjection) {
     return { manifestUrl: null, retryUrl: null, responsive: false };
   }
   return {

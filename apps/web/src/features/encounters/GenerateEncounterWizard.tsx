@@ -215,7 +215,7 @@ export function GenerateEncounterWizard({
 
       {/* ── Step 1: parameters ── */}
       <fieldset className="space-y-3 border-0 p-0 m-0">
-        <legend className="text-xs text-slate-400 font-semibold">1. Parameters</legend>
+        <legend className="text-xs text-slate-400 font-semibold">{t('encounters.wizard.step1')}</legend>
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
           <Field
             idPrefix="gen-enc"
@@ -319,7 +319,7 @@ export function GenerateEncounterWizard({
           {/* ── Step 2: roster + tune ── */}
           <fieldset className="space-y-2 border-0 p-0 m-0">
             <legend className="text-xs text-slate-400 font-semibold flex items-center justify-between w-full">
-              <span>2. Roster</span>
+              <span>{t('encounters.wizard.step2')}</span>
             </legend>
             <div className="flex gap-2 flex-wrap">
               <Btn ghost type="button" onClick={() => void runPreview({ op: 'reroll-all' })} disabled={loading}>
@@ -343,13 +343,13 @@ export function GenerateEncounterWizard({
                   onCount={(count) => void runPreview({ op: 'adjust-count', slotId: slot.slotId, count })}
                 />
               ))}
-              {preview.roster.length === 0 && <p className="text-xs text-slate-400">No creatures — adjust the filters and regenerate, or add one.</p>}
+              {preview.roster.length === 0 && <p className="text-xs text-slate-400">{t('encounters.wizard.noCreatures')}</p>}
             </div>
           </fieldset>
 
           {/* ── Step 3: commit ── */}
           <fieldset className="space-y-3 border-0 p-0 m-0">
-            <legend className="text-xs text-slate-400 font-semibold">3. Save encounter</legend>
+            <legend className="text-xs text-slate-400 font-semibold">{t('encounters.wizard.step3')}</legend>
             <Field
               idPrefix="gen-enc"
               name="name"
@@ -363,7 +363,7 @@ export function GenerateEncounterWizard({
             />
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
               <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
-                <option value="">— none —</option>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name ?? `#${l.id}`}
@@ -371,7 +371,7 @@ export function GenerateEncounterWizard({
                 ))}
               </Field>
               <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
-                <option value="">— none —</option>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {quests.map((q) => (
                   <option key={q.id} value={q.id}>
                     {q.title ?? `#${q.id}`}
@@ -379,7 +379,7 @@ export function GenerateEncounterWizard({
                 ))}
               </Field>
               <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
-                <option value="">— none —</option>
+                <option value="">{t('encounters.wizard.none')}</option>
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.title || `Session ${s.number ?? s.id}`}
@@ -475,6 +475,7 @@ function RosterSlotRow({
   onRemove: () => void;
   onCount: (count: number) => void;
 }) {
+  const { t } = useTranslation();
   const insp = slot.inspection;
   return (
     <div className="rounded-lg border border-white/10 p-2">
@@ -560,7 +561,7 @@ function RosterSlotRow({
               <span className="text-slate-200 font-medium">{a.name}.</span> {a.text}
             </div>
           ))}
-          {!insp.hasStatblock && <p className="text-amber-300">No statblock detail — HP/CR may be incomplete.</p>}
+          {!insp.hasStatblock && <p className="text-amber-300">{t('encounters.wizard.noStatblock')}</p>}
         </div>
       )}
     </div>

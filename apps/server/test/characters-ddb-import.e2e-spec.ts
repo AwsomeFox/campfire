@@ -4,6 +4,7 @@ import { startFakeDdb, PUBLIC_DDB_CHARACTER, PUBLIC_DDB_CHARACTER_ID, CASTER_DDB
 import { mapDdbCharacter, summarizeDdbImport, computeSpellSlots, computeDdbActionEntryCount, parseDdbId } from '../src/modules/characters/ddb-importer';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { rulePacks } from '../src/db/schema';
+import { applyDamageModifiers, DND5E_DAMAGE_TYPES } from '@campfire/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'ddb-owner' };
@@ -534,15 +535,17 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       stats,
       // `dice` is required so the feature has a representable outcome (round-13 fix below) —
       // an attack-shaped feature with no damage at all would land text-only regardless of
-      // activation type, which isn't what this test is exercising.
-      actions: { class: [{ name: 'Bonus Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 3 } }] },
+      // activation type, which isn't what this test is exercising. `damageTypeId` is required
+      // for the same reason since issue #1958 (1 = bludgeoning, what a real DDB sheet sends for
+      // an unarmed/martial-arts strike).
+      actions: { class: [{ name: 'Bonus Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId: 1, activation: { activationType: 3 } }] },
     }).actions?.find((a) => a.name === 'Bonus Strike');
     expect(bonusFeature?.spec?.cost.slot).toBe('bonus');
 
     const reactionFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Reaction Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 4 } }] },
+      actions: { class: [{ name: 'Reaction Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId: 1, activation: { activationType: 4 } }] },
     }).actions?.find((a) => a.name === 'Reaction Strike');
     expect(reactionFeature?.spec?.cost.slot).toBe('reaction');
 
@@ -550,7 +553,7 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     const actionFeature = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats,
-      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 1 } }] },
+      actions: { class: [{ name: 'Plain Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId: 1, activation: { activationType: 1 } }] },
     }).actions?.find((a) => a.name === 'Plain Strike');
     expect(actionFeature?.spec?.cost.slot).toBe('action');
 
@@ -742,7 +745,7 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     // outcome-free-save gate and actually resolves).
     const fine = mapDdbCharacter({
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
-      actions: { class: [{ name: 'Fine DC Breath', fixedSaveDc: 15, saveStatId: 2, dice: { diceString: '2d6' }, activation: { activationType: 1 } }] },
+      actions: { class: [{ name: 'Fine DC Breath', fixedSaveDc: 15, saveStatId: 2, dice: { diceString: '2d6' }, damageTypeId: 7, activation: { activationType: 1 } }] },
     });
     expect(fine.actions?.find((a) => a.name === 'Fine DC Breath')?.spec).toBeDefined();
   });
@@ -823,7 +826,7 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats: [{ id: 1, value: 16 }],
       actions: {
-        class: [{ name: 'Fine Value Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, value: 3, activation: { activationType: 1 } }],
+        class: [{ name: 'Fine Value Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, value: 3, damageTypeId: 1, activation: { activationType: 1 } }],
       },
     });
     expect(fine.actions?.find((a) => a.name === 'Fine Value Strike')?.spec).toBeDefined();
@@ -840,12 +843,14 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats: [{ id: 1, value: 16 }], // STR 16 -> +3 modifier
       actions: {
-        class: [{ name: 'Unarmed Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, activation: { activationType: 1 } }],
+        class: [{ name: 'Unarmed Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId: 1, activation: { activationType: 1 } }],
       },
     });
     const feature = c.actions?.find((a) => a.name === 'Unarmed Strike');
     expect(feature?.spec).toBeDefined();
-    expect(feature?.damage).toBe('1d6+3');
+    // The trailing type comes from issue #1958 — feature damage is now typed from the sheet's
+    // `damageTypeId` instead of being untyped, so the display string reads like a weapon's.
+    expect(feature?.damage).toBe('1d6+3 bludgeoning');
   });
 
   // Regression for a PR #1950 review finding: `DamagePart.formula` is a plain
@@ -882,7 +887,7 @@ describe('D&D Beyond character import — mapper (unit)', () => {
       classes: [{ level: 1, definition: { name: 'Fighter' } }],
       stats: [{ id: 1, value: 16 }],
       actions: {
-        class: [{ name: 'Fine Die Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d8' }, activation: { activationType: 1 } }],
+        class: [{ name: 'Fine Die Strike', attackTypeRange: 5, abilityModifierStatId: 1, dice: { diceString: '1d8' }, damageTypeId: 1, activation: { activationType: 1 } }],
       },
     });
     expect(fine.actions?.find((a) => a.name === 'Fine Die Strike')?.spec).toBeDefined();
@@ -1179,6 +1184,168 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(c.hpMax).toBe(123);
     expect(c.className).toBe('Wizard'); // single class, no subclass -> bare class name
     expect(c.level).toBe(4);
+  });
+
+  // ---- Feature damage types (issue #1958) -----------------------------------------------
+  //
+  // `computeFeatureActions` used to hardcode every feature's `DamagePart.type` to `''`, and
+  // `applyDamageModifiers` skips resistance/immunity/vulnerability entirely for an empty type
+  // — so an imported breath weapon or smite dealt FULL damage against a creature that resists
+  // or is immune to it, with nothing in `summary.textOnly` to flag it. PR #1950's round-17
+  // review concluded no damage-type field existed on a DDB action entry; `damageTypeId` does,
+  // verified against real public sheets (see DDB_DAMAGE_TYPE_ID_TO_NAME's own doc comment for
+  // the three-way verification and the four empirically-pinned IDs).
+
+  it('an attack-shaped feature carries its DDB damage type into the resolvable spec', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Monk' } }],
+      stats: [{ id: 1, value: 16 }], // STR 16 -> +3
+      actions: {
+        class: [
+          // The shape a real DDB sheet sends for a martial-arts strike: damageTypeId 1 = bludgeoning.
+          { name: 'Martial Arts Strike', attackTypeRange: 1, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId: 1, activation: { activationType: 1 } },
+        ],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Martial Arts Strike');
+    expect(feature?.spec).toBeDefined();
+    expect(feature?.spec?.outcomes.hit?.damage).toEqual([{ formula: '1d6', flat: 3, type: 'bludgeoning' }]);
+    expect(feature?.damage).toBe('1d6+3 bludgeoning');
+    expect(summarizeDdbImport(c).textOnly).not.toContain('Martial Arts Strike');
+  });
+
+  it('a save-shaped feature carries its DDB damage type into both the failure and half-damage branches', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Sorcerer' } }],
+      actions: {
+        // A racial breath weapon's element varies by ancestry and cannot be inferred from the
+        // feature NAME — but the sheet states it outright as damageTypeId (7 = fire).
+        race: [{ name: 'Breath Weapon', fixedSaveDc: 13, saveStatId: 2, dice: { diceString: '3d6' }, damageTypeId: 7, activation: { activationType: 1 } }],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Breath Weapon');
+    expect(feature?.spec?.mode).toBe('save');
+    expect(feature?.spec?.outcomes.failure?.damage).toEqual([{ formula: '3d6', flat: 0, type: 'fire' }]);
+    expect(feature?.spec?.outcomes.success?.halfDamage).toBe(true);
+    expect(summarizeDdbImport(c).textOnly).not.toContain('Breath Weapon');
+  });
+
+  // The whole point of the fix: an imported feature must actually be resisted/absorbed by a
+  // target whose defenses list its damage type. Asserted through the resolver itself rather
+  // than by re-reading the spec, so a future change that reintroduces `type: ''` fails here
+  // even if the spec shape still looks right.
+  it("an imported feature's damage is halved by resistance and zeroed by immunity, not applied in full", () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 5, definition: { name: 'Sorcerer' } }],
+      actions: {
+        race: [{ name: 'Breath Weapon', fixedSaveDc: 13, saveStatId: 2, dice: { diceString: '3d6' }, damageTypeId: 7, activation: { activationType: 1 } }],
+      },
+    });
+    const type = c.actions?.find((a) => a.name === 'Breath Weapon')?.spec?.outcomes.failure?.damage?.[0]?.type ?? '';
+    expect(type).toBe('fire');
+
+    const defenses = { resistances: ['Fire'], vulnerabilities: [], immunities: [] };
+    expect(applyDamageModifiers(10, type, defenses)).toEqual({ final: 5, applied: 'resistant' });
+    expect(applyDamageModifiers(10, type, { resistances: [], vulnerabilities: [], immunities: ['fire'] })).toEqual({
+      final: 0,
+      applied: 'immune',
+    });
+    // Revert the fix (the pre-#1958 hardcoded empty type) and the same target takes full damage.
+    expect(applyDamageModifiers(10, '', defenses)).toEqual({ final: 10, applied: 'normal' });
+  });
+
+  // A DDB entry whose `damageTypeId` is missing, null, or an ID this importer does not
+  // recognize (homebrew, or a type DDB adds later) must NOT fall back to untyped-but-
+  // resolvable — that is exactly the silent resistance bypass being fixed. Same rule
+  // `computeWeaponActions` already applies to a weapon with no `damageType` (round 16).
+  it('a damaging feature with no recognizable damage type lands text-only instead of resolving untyped', () => {
+    for (const damageTypeId of [undefined, null, 0, 99, 2.5]) {
+      const attackShaped = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        stats: [{ id: 1, value: 16 }],
+        actions: {
+          class: [{ name: 'Untyped Strike', attackTypeRange: 1, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId, activation: { activationType: 1 } }],
+        },
+      });
+      const attackFeature = attackShaped.actions?.find((a) => a.name === 'Untyped Strike');
+      expect(attackFeature).toBeDefined();
+      expect(attackFeature?.spec).toBeUndefined();
+      expect(summarizeDdbImport(attackShaped).textOnly).toContain('Untyped Strike');
+
+      const saveShaped = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        actions: {
+          class: [{ name: 'Untyped Breath', fixedSaveDc: 13, saveStatId: 2, dice: { diceString: '3d6' }, damageTypeId, activation: { activationType: 1 } }],
+        },
+      });
+      const saveFeature = saveShaped.actions?.find((a) => a.name === 'Untyped Breath');
+      expect(saveFeature).toBeDefined();
+      expect(saveFeature?.spec).toBeUndefined();
+      expect(summarizeDdbImport(saveShaped).textOnly).toContain('Untyped Breath');
+    }
+  });
+
+  it('keeps a dice-only healing or utility feature rollable for display when it is already text-only', () => {
+    const c = mapDdbCharacter({
+      classes: [{ level: 1, definition: { name: 'Fighter' } }],
+      actions: {
+        // DDB does not send a damage type for a non-damaging feature such as Second Wind, but
+        // its dice still drive the character sheet's roll chip. No attack/save shape means this
+        // remains text-only independently of its missing `damageTypeId`.
+        class: [{ name: 'Second Wind', dice: { diceString: '1d10' }, value: 5, activation: { activationType: 3 } }],
+      },
+    });
+    const feature = c.actions?.find((a) => a.name === 'Second Wind');
+    expect(feature?.spec).toBeUndefined();
+    expect(feature?.damage).toBe('1d10+5');
+    expect(summarizeDdbImport(c).textOnly).toContain('Second Wind');
+  });
+
+  // Every ID this importer recognizes must map to a name the 5e vocabulary actually contains,
+  // and one short enough for `DamagePart.type` (`z.string().max(24)`). A mapped-but-misspelled
+  // name would silently never match a target's resistance list — the same wrong-math failure
+  // the empty type caused, just harder to spot.
+  it('every mapped DDB damage-type id resolves to a canonical 5e damage type the resolver can match', () => {
+    // 1..13 are the ids observed on real sheets; see DDB_DAMAGE_TYPE_ID_TO_NAME.
+    for (let damageTypeId = 1; damageTypeId <= 13; damageTypeId++) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Fighter' } }],
+        stats: [{ id: 1, value: 10 }], // STR 10 -> +0, so the damage part is a clean 1d6
+        actions: {
+          class: [{ name: 'Typed Strike', attackTypeRange: 1, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId, activation: { activationType: 1 } }],
+        },
+      });
+      const part = c.actions?.find((a) => a.name === 'Typed Strike')?.spec?.outcomes.hit?.damage?.[0];
+      expect(part).toBeDefined();
+      const type = part?.type ?? '';
+      expect(DND5E_DAMAGE_TYPES).toContain(type);
+      expect(type.length).toBeLessThanOrEqual(24);
+      // And the resolver actually applies a defense keyed by that name.
+      expect(applyDamageModifiers(10, type, { resistances: [], vulnerabilities: [], immunities: [type] }).applied).toBe('immune');
+    }
+  });
+
+  // The four ids below were read out of real public D&D Beyond sheets on features whose damage
+  // type is fixed by the core rules, so they pin the numbering rather than restating the table:
+  // a Monk's Unarmed Strike is bludgeoning, a Dhampir's Fanged Bite piercing, a Way of Mercy
+  // Monk's Hand of Harm necrotic, and a Circle of Stars Druid's Starry Form: Archer radiant.
+  it('maps the damage-type ids observed on real DDB sheets to the types those features deal by the rules', () => {
+    const cases: Array<[number, string, string]> = [
+      [1, 'Unarmed Strike', 'bludgeoning'],
+      [2, 'Fanged Bite', 'piercing'],
+      [4, 'Hand of Harm', 'necrotic'],
+      [12, 'Starry Form: Archer', 'radiant'],
+    ];
+    for (const [damageTypeId, name, expected] of cases) {
+      const c = mapDdbCharacter({
+        classes: [{ level: 1, definition: { name: 'Monk' } }],
+        stats: [{ id: 1, value: 10 }],
+        actions: {
+          class: [{ name, attackTypeRange: 1, abilityModifierStatId: 1, dice: { diceString: '1d6' }, damageTypeId, activation: { activationType: 1 } }],
+        },
+      });
+      expect(c.actions?.find((a) => a.name === name)?.spec?.outcomes.hit?.damage?.[0]?.type).toBe(expected);
+    }
   });
 });
 

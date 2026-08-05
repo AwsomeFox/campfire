@@ -51,7 +51,7 @@ async function patchEncounterMapFixture(
     if (!patch.ok()) throw new Error(`encounter patch -> ${patch.status()}: ${await patch.text()}`);
 
     const placeBoss = await ctx.patch(`/api/v1/encounters/${encounterId}/combatants/${bossId}`, {
-      data: { tokenX: 80, tokenY: 80, tokenSize: 'medium' },
+      data: { tokenX: 80, tokenY: 80, tokenSize: 'medium', addConditions: ['Poisoned'] },
     });
     if (!placeBoss.ok()) throw new Error(`place boss token -> ${placeBoss.status()}: ${await placeBoss.text()}`);
 
@@ -69,22 +69,30 @@ async function patchEncounterMapFixture(
 test.describe('Player Display battle map (issue #484)', () => {
   test.use({ storageState: stateFor('dm'), viewport: { width: 1920, height: 1080 } });
 
-  test('shows a revealed token and AoE on the map scene', async ({ page, baseURL }) => {
+  test('shows a revealed token while keeping Cast-only map state safe', async ({ page, baseURL }) => {
     const { campaignId, encounterId, bossId, skirmisherId } = seed();
     await patchEncounterMapFixture(baseURL!, campaignId, encounterId, bossId, skirmisherId);
 
     await page.addInitScript((id) => {
       localStorage.setItem(`cf.screen.scene.${id}`, 'map');
     }, campaignId);
-    await page.goto(`/c/${campaignId}/screen`);
+    const [mapResponse] = await Promise.all([
+      page.waitForResponse((response) => response.url().includes(`/campaigns/${campaignId}/player-display/encounters/${encounterId}/map`)),
+      page.goto(`/c/${campaignId}/screen`),
+    ]);
 
     await expect(page.getByTestId('cf-stage')).toHaveAttribute('data-scene', 'map');
+    expect(mapResponse.headers()['x-campfire-map-view']).toBe('fog-protected');
     const castMap = page.getByTestId('cf-cast-battle-map');
     await expect(castMap).toBeVisible();
     await expect(page.getByTestId('battle-map-surface')).toBeVisible();
     await expect(page.getByTestId(`map-token-${bossId}`)).toBeVisible();
+    await expect(page.getByTestId(`map-token-${skirmisherId}`)).toHaveCount(0);
+    await expect(page.getByTestId(`map-aoe-shape-${AOE_ID}`)).toBeVisible();
     await expect(page.getByTestId(`map-aoe-${AOE_ID}`)).toHaveCount(0);
-    await expect(page.locator('[data-testid="battle-map-layer"] circle')).toHaveCount(1);
+    const condition = page.getByTestId(`map-token-condition-${bossId}-0`);
+    await expect(condition).toHaveAttribute('tabindex', '-1');
+    await expect(condition).toHaveCSS('pointer-events', 'none');
   });
 
   test('never shows fog-hidden tokens or unrevealed AoE on /screen', async ({ page, baseURL }) => {
@@ -98,6 +106,7 @@ test.describe('Player Display battle map (issue #484)', () => {
 
     await expect(page.getByTestId(`map-token-${bossId}`)).toBeVisible();
     await expect(page.getByTestId(`map-token-${skirmisherId}`)).toHaveCount(0);
+    await expect(page.getByTestId(`map-aoe-shape-${AOE_DARK_ID}`)).toHaveCount(0);
     await expect(page.getByTestId(`map-aoe-${AOE_DARK_ID}`)).toHaveCount(0);
   });
 });

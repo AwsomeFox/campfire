@@ -56,6 +56,50 @@ describe('campaign homebrew (e2e)', () => {
     const deniedImport = await playerTools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'player-import', name: 'Player import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(deniedImport.isError).toBe(true);
     const appliedImport = await tools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'dm-import', name: 'DM import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(appliedImport.isError).toBe(false);
   });
+
+  // Issue #1898: /rules/entries/:id and /rules/search accept an optional campaignId so a
+  // member can resolve their own campaign's homebrew from the same read paths that serve
+  // the global compendium (the encounter picker/statblock use exactly these routes). REST
+  // and MCP (get_rule_entry / lookup_rule) share the same RulesService methods, so this
+  // proves the wiring end-to-end for both surfaces; cross-campaign membership rejection
+  // is proven separately below with real (non-devRole) sessions, since DEV_AUTH's devRole
+  // shortcut (role-resolver.service.ts) bypasses per-campaign membership by design.
+  it('resolves campaign homebrew via /rules/entries/:id and /rules/search with campaignId (REST + MCP)', async () => {
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({ slug: 'scoped-goblin', name: 'Scoped Goblin', type: 'monster', summary: '', body: '', rightsStatus: 'private_original' });
+    expect(created.status).toBe(201);
+    const entryId = created.body.id as number;
+
+    // Regression: omitting campaignId is unchanged — homebrew stays invisible on the global route.
+    expect((await request(server).get(`/api/v1/rules/entries/${entryId}`).set(dm)).status).toBe(404);
+
+    const scopedGet = await request(server).get(`/api/v1/rules/entries/${entryId}?campaignId=${campaignId}`).set(dm);
+    expect(scopedGet.status).toBe(200);
+    expect(scopedGet.body.name).toBe('Scoped Goblin');
+
+    const scopedSearch = await request(server).get(`/api/v1/rules/search?q=Scoped+Goblin&campaignId=${campaignId}`).set(dm);
+    expect(scopedSearch.status).toBe(200);
+    expect(scopedSearch.body.items.some((i: { name: string }) => i.name === 'Scoped Goblin')).toBe(true);
+
+    const unscopedSearch = await request(server).get(`/api/v1/rules/search?q=Scoped+Goblin`).set(dm);
+    expect(unscopedSearch.status).toBe(200);
+    expect(unscopedSearch.body.items.some((i: { name: string }) => i.name === 'Scoped Goblin')).toBe(false);
+
+    // Malformed campaignId is a client input error, not a silent fall-through to unscoped.
+    expect((await request(server).get(`/api/v1/rules/entries/${entryId}?campaignId=abc`).set(dm)).status).toBe(400);
+    expect((await request(server).get(`/api/v1/rules/search?q=x&campaignId=0`).set(dm)).status).toBe(400);
+
+    const scopedTools = ctx.app.get(McpToolsService).buildToolset({ id: 'mcp-scoped-goblin', name: 'MCP scoped', devRole: 'dm', serverRole: 'admin', tokenContext: undefined });
+    const mcpEntry = await scopedTools.call('get_rule_entry', { entryId, campaignId });
+    expect(mcpEntry.isError).toBe(false);
+    expect((JSON.parse(mcpEntry.text) as { name: string }).name).toBe('Scoped Goblin');
+
+    const mcpSearch = await scopedTools.call('lookup_rule', { query: 'Scoped Goblin', campaignId });
+    expect(mcpSearch.isError).toBe(false);
+    expect((JSON.parse(mcpSearch.text) as Array<{ name: string }>).some((i) => i.name === 'Scoped Goblin')).toBe(true);
+  });
 });
 
 describe('campaign homebrew membership and encounter isolation (e2e)', () => {
@@ -72,10 +116,39 @@ describe('campaign homebrew membership and encounter isolation (e2e)', () => {
     const b = request.agent(server); await b.post('/api/v1/auth/login').send({ username: 'hb-b', password: 'password-b-1' });
     const ca = await a.post('/api/v1/campaigns').send({ name: 'A' }); const cb = await b.post('/api/v1/campaigns').send({ name: 'B' });
     const monster = { slug: 'private-beast', name: 'Private Beast', type: 'monster', data: { hp: 12, ac: 13, cr: 1 }, rightsStatus: 'private_original' };
-    const ea = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew`).send(monster); const eb = await b.post(`/api/v1/campaigns/${cb.body.id}/homebrew`).send({ ...monster, slug: 'b-beast' });
+    const ea = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew`).send(monster); const eb = await b.post(`/api/v1/campaigns/${cb.body.id}/homebrew`).send({ ...monster, slug: 'b-beast', name: 'Private Beast B' });
     expect((await b.get(`/api/v1/campaigns/${ca.body.id}/homebrew`)).status).toBe(403);
     expect((await b.get(`/api/v1/campaigns/${ca.body.id}/homebrew/${ea.body.id}`)).status).toBe(403);
     expect((await b.patch(`/api/v1/campaigns/${ca.body.id}/homebrew/${ea.body.id}`).send({ name: 'stolen' })).status).toBe(403);
+
+    // Issue #1898: /rules/entries/:id?campaignId= and /rules/search?campaignId= carry the
+    // same membership boundary as the dedicated /campaigns/:id/homebrew routes above, using
+    // REAL per-campaign membership (unlike the DEV_AUTH devRole tests above, which bypass it).
+    // `a` is a genuine member of ca only.
+    const aOwnEntryScoped = await a.get(`/api/v1/rules/entries/${ea.body.id}?campaignId=${ca.body.id}`);
+    expect(aOwnEntryScoped.status).toBe(200);
+    expect(aOwnEntryScoped.body.name).toBe('Private Beast');
+    // B's homebrew id, queried with A's OWN (real, member) campaignId — must 404, not leak
+    // that the id exists in a campaign `a` isn't in.
+    expect((await a.get(`/api/v1/rules/entries/${eb.body.id}?campaignId=${ca.body.id}`)).status).toBe(404);
+    // A campaignId `a` isn't a member of at all is a rejection, not a silent empty/404 result.
+    expect((await a.get(`/api/v1/rules/entries/${eb.body.id}?campaignId=${cb.body.id}`)).status).toBe(403);
+    expect((await a.get(`/api/v1/rules/search?q=Private+Beast&campaignId=${cb.body.id}`)).status).toBe(403);
+
+    const scopedSearch = await a.get(`/api/v1/rules/search?q=Private+Beast&campaignId=${ca.body.id}`);
+    const scopedNames = scopedSearch.body.items.map((i: { name: string }) => i.name);
+    expect(scopedNames).toContain('Private Beast');
+    expect(scopedNames).not.toContain('Private Beast B');
+
+    // Archived homebrew drops out of scoped search results (issue #1898 acceptance criterion).
+    // A separate entry (not `ea`, which is still needed below to prove same-campaign combat
+    // use still works) so archiving it doesn't perturb the rest of this test.
+    const toArchive = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew`).send({ ...monster, slug: 'archivable-beast', name: 'Archivable Beast' });
+    expect((await a.get(`/api/v1/rules/search?q=Archivable+Beast&campaignId=${ca.body.id}`)).body.items.some((i: { name: string }) => i.name === 'Archivable Beast')).toBe(true);
+    const archived = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew/${toArchive.body.id}/archive`).send({});
+    expect(archived.status).toBe(201);
+    const afterArchiveSearch = await a.get(`/api/v1/rules/search?q=Archivable+Beast&campaignId=${ca.body.id}`);
+    expect((afterArchiveSearch.body.items as Array<{ name: string }>).some((i) => i.name === 'Archivable Beast')).toBe(false);
     const encounter = await a.post(`/api/v1/campaigns/${ca.body.id}/encounters`).send({ name: 'Fight' });
     expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: ea.body.id })).status).toBe(201);
     expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: eb.body.id })).status).toBe(400);

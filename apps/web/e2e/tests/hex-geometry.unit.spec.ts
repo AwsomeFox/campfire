@@ -26,7 +26,7 @@ import {
 } from '../../src/features/encounters/mapRenderedBounds';
 import { DEFAULT_GRID_DISTANCE_RULE } from '@campfire/schema';
 
-const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const SURFACE = { w: 800, h: 600 };
 const SQUARE = { w: 1000, h: 1000 };
 
@@ -113,8 +113,8 @@ test.describe('hex overlay (issue #467)', () => {
 
 test.describe('RunSessionPage wiring (issue #467)', () => {
   test('imports shared hexGeometry module', () => {
-    const source = readFileSync(RUN_SESSION, 'utf8');
-    expect(source).toMatch(/from '\.\/hexGeometry'/);
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    expect(source).toMatch(/from '\.\.\/hexGeometry'/);
     expect(source).toMatch(/snapMapPercentToHex/);
     expect(source).toMatch(/mapPercentGridDistance/);
     expect(source).not.toMatch(/function hexPolygons\(/);

@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import type { AoeTemplate } from '@campfire/schema';
 import { filterAoeTemplatesForViewer } from '@campfire/schema';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 function aoe(partial: Partial<AoeTemplate> & Pick<AoeTemplate, 'id'>): AoeTemplate {
   return {
@@ -24,7 +24,7 @@ function aoe(partial: Partial<AoeTemplate> & Pick<AoeTemplate, 'id'>): AoeTempla
 
 test.describe('AoE fog visibility (issue #465)', () => {
   test('BattleMap filters non-DM AoE templates instead of relying on z-index alone', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toContain('filterAoeTemplatesForViewer');
     expect(source).toContain('viewerUserId');
     expect(source).not.toMatch(/canAoe && encounter\.aoe/);

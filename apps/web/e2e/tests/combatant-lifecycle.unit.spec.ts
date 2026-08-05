@@ -220,7 +220,10 @@ test.describe('combatant lifecycle (issue #1469)', () => {
   });
 
   test('replacement undo tokens remount, survive older undo completions, and cannot cross encounter routes', () => {
-    const source = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const source = [
+      readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8'),
+      readFileSync(resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx'), 'utf8'),
+    ].join('\n');
     expect(source).toContain('key={pendingCombatantUndo.undoToken}');
     expect(source).toContain('pendingCombatantUndo.encounterId !== eid');
     expect(source).toContain('setPendingCombatantUndo(null);');
