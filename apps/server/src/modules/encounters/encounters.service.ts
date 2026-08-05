@@ -4474,7 +4474,7 @@ export class EncountersService {
 
       let roll: DiceRoll | null = null;
       const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
-      const updated = await this.updateCombatant(
+      await this.updateCombatant(
         encounterId,
         combatantId,
         deathSavePatch,
@@ -4565,17 +4565,14 @@ export class EncountersService {
           replayCombatant: (response) => replayResponse(response)?.combatant ?? null,
         },
       );
-      if (roll === null) {
-        // updateCombatant replayed (or lost a race to) an existing keyed result.
-        // Recover the full death-save response, re-derived for the caller's role.
-        const replay = await replayCommittedDeathSave();
-        if (replay) return replay;
-        throw new Error('Death-save dice roll was not persisted');
+      // `roll` may be the loser's discarded die if `updateCombatant` lost a same-key
+      // race, so the authoritative response is always the stored replay.
+      const replay = await replayCommittedDeathSave();
+      if (replay) {
+        this.rolls.emitDiceRolled?.(replay.roll);
+        return replay;
       }
-
-      this.rolls.emitDiceRolled?.(roll);
-
-      return { combatant: updated, roll };
+      throw new Error('Death-save dice roll was not persisted');
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but
       // before a mutable-row preflight (for example, before another DM removes the
