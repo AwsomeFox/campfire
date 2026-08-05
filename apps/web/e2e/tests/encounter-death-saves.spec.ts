@@ -138,6 +138,11 @@ test.describe('encounter death saves (#1465)', () => {
       const nextTurnBody = (await nextTurnRes.json()) as { currentCombatantId: number | null };
       expect(nextTurnBody.currentCombatantId, 'turn must have advanced to the monster').toBe(monster.id);
       await page.reload();
+      // Wait for the reloaded turn workspace to actually resolve to the monster's turn
+      // before checking the card is absent — otherwise this can trivially pass against
+      // the post-reload loading state (workspace not yet rendered) even if a monster-turn
+      // regression would show the card once the query settles.
+      await expect(page.getByTestId('turn-workspace')).toContainText(monster.name);
       await expect(page.getByTestId('turn-death-save-card')).toHaveCount(0);
 
     } finally {
@@ -235,6 +240,12 @@ test.describe('encounter death saves (#1465)', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      // 'Running' only proves the encounter header loaded — the death-save card is gated
+      // by the separate turn-workspace data path. Wait for that workspace to actually
+      // resolve to this dying PC's turn before asserting the card stays absent, otherwise
+      // a slow load could pass this check before the workspace (and any regression in it)
+      // ever renders.
+      await expect(page.getByTestId('turn-workspace')).toContainText(character.name);
 
       // Card must be absent even though this combatant is 0-HP and `dying` — Open Legend
       // has no 5e-style death saves, so `hasDeathSavesForAdapter` must gate the card off.
