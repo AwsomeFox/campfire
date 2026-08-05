@@ -7,12 +7,16 @@ import { resolve } from 'node:path';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
+const ADD_COMBATANT_PANEL = resolve(__dirname, '../../src/features/encounters/combat/AddCombatantPanel.tsx');
 const COMBATANT_ROW = resolve(__dirname, '../../src/features/encounters/combat/CombatantRow.tsx');
 const GENERATE_WIZARD = resolve(__dirname, '../../src/features/encounters/GenerateEncounterWizard.tsx');
 const INDEX_CSS = resolve(__dirname, '../../src/index.css');
 
 test.describe('encounter accessibility (#476)', () => {
-  const runSession = readFileSync(RUN_SESSION_PAGE, 'utf8');
+  const runSession = [
+    readFileSync(RUN_SESSION_PAGE, 'utf8'),
+    readFileSync(ADD_COMBATANT_PANEL, 'utf8'),
+  ].join('\n');
   const battleMap = readFileSync(BATTLE_MAP, 'utf8');
   const combatantRow = readFileSync(COMBATANT_ROW, 'utf8');
   const wizard = readFileSync(GENERATE_WIZARD, 'utf8');
