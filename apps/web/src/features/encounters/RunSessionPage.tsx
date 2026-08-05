@@ -977,6 +977,14 @@ export default function RunSessionPage() {
     characterOwnershipPendingDataUpdatedAtRef.current = null;
   }, [charactersQuery.dataUpdatedAt, charactersQuery.isFetching]);
 
+  // Every campaign-character invalidation retains the previous successful
+  // roster while its replacement loads. Mark that roster stale first so any
+  // turn frame arriving in the gap cannot use a former owner's identity.
+  const invalidateCampaignCharactersForOwnership = useCallback(() => {
+    characterOwnershipPendingDataUpdatedAtRef.current = charactersQuery.dataUpdatedAt;
+    invalidateCampaignCharacters(queryClient, cid);
+  }, [charactersQuery.dataUpdatedAt, cid, queryClient]);
+
   // An owned turn can initially be a private pending beat, then promote once
   // the authorized roster and /turn workspace arrive. Keep the visual cues
   // tied to that one beat even if those reads cause several rerenders.
@@ -1219,19 +1227,13 @@ export default function RunSessionPage() {
         if (event.type === 'party.rest.updated') {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
-          invalidateCampaignCharacters(queryClient, cid);
+          invalidateCampaignCharactersForOwnership();
           return;
         }
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
-          if (event.type === 'character.updated') {
-            // `data` remains available while this background refetch runs. Record
-            // its version before invalidating so a following turn frame cannot
-            // identify a seat's former owner as the current actor.
-            characterOwnershipPendingDataUpdatedAtRef.current = charactersQuery.dataUpdatedAt;
-          }
-          invalidateCampaignCharacters(queryClient, cid);
+          invalidateCampaignCharactersForOwnership();
           // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
           // character.updated — invalidate derived encounter actions AND the turn workspace query.
           invalidateEncounterActions(queryClient, eid);
@@ -1339,29 +1341,29 @@ export default function RunSessionPage() {
         // The server now tags exactly the frames that mirrored a sheet with
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
-        if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
+        if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.dataUpdatedAt, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
       setResyncPending(true);
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       // Same staleness the character.updated SSE branch above fixes (issue #1900
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
-    }, [queryClient, eid, cid]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
-    }, [queryClient, eid, cid]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
@@ -1595,7 +1597,7 @@ export default function RunSessionPage() {
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
     },
   });
 

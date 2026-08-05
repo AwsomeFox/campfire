@@ -144,15 +144,18 @@ test.describe('In-combat Spellbook — real data, no fabrication (issue #1900)',
     );
     expect(characterUpdatedBranch).toContain("event.type === 'character.updated'");
     expect(characterUpdatedBranch).toContain('queryKeys.encounterTurn(eid)');
+    expect(characterUpdatedBranch).toContain('invalidateCampaignCharactersForOwnership();');
 
     const onReconnectBranch = src.slice(src.indexOf('onReconnect: useCallback'), src.indexOf('onReconnect: useCallback') + 600);
     expect(onReconnectBranch).toContain('queryKeys.encounterTurn(eid)');
+    expect(onReconnectBranch).toContain('invalidateCampaignCharactersForOwnership();');
 
     const onStreamRecoveryBranch = src.slice(
       src.indexOf('onStreamRecovery: useCallback'),
       src.indexOf('onStreamRecovery: useCallback') + 500,
     );
     expect(onStreamRecoveryBranch).toContain('queryKeys.encounterTurn(eid)');
+    expect(onStreamRecoveryBranch).toContain('invalidateCampaignCharactersForOwnership();');
   });
 
   test('formatCastingTime converts verbose strings to standard abbreviations', () => {

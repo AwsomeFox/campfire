@@ -145,10 +145,24 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('does not promote a turn from character ownership data pending refresh', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const characterOwnershipPendingDataUpdatedAtRef = useRef<number \| null>\(null\);/);
-    expect(source).toMatch(/characterOwnershipPendingDataUpdatedAtRef\.current = charactersQuery\.dataUpdatedAt;/);
+    expect(source).toMatch(/const invalidateCampaignCharactersForOwnership = useCallback\(\(\) => \{\s*characterOwnershipPendingDataUpdatedAtRef\.current = charactersQuery\.dataUpdatedAt;\s*invalidateCampaignCharacters\(queryClient, cid\);/);
     expect(source).toMatch(/charactersQuery\.dataUpdatedAt <= pendingDataUpdatedAt/);
     expect(source).toMatch(/!charactersQuery\.isFetching\s*&&\s*characterOwnershipPendingDataUpdatedAtRef\.current == null/);
     expect(source).toMatch(/if \(characterOwnershipPendingDataUpdatedAtRef\.current != null\) return;/);
+  });
+
+  test('uses the ownership freshness watermark for reconnect, recovery, and membership revocation', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const inlineCharactersStart = source.indexOf('if (shouldInvalidateInlineCharacters(event))');
+    const inlineCharactersBranch = source.slice(inlineCharactersStart, source.indexOf('// Issue #415:', inlineCharactersStart));
+    expect(inlineCharactersBranch).toContain('invalidateCampaignCharactersForOwnership();');
+    expect(inlineCharactersBranch).not.toContain('invalidateCampaignCharacters(queryClient, cid);');
+
+    const reconnectBranch = source.slice(source.indexOf('onReconnect: useCallback'), source.indexOf('onReconnect: useCallback') + 600);
+    expect(reconnectBranch).toContain('invalidateCampaignCharactersForOwnership();');
+
+    const recoveryBranch = source.slice(source.indexOf('onStreamRecovery: useCallback'), source.indexOf('onStreamRecovery: useCallback') + 500);
+    expect(recoveryBranch).toContain('invalidateCampaignCharactersForOwnership();');
   });
 
   test('keeps Player Display to the paired encounter update load', () => {
