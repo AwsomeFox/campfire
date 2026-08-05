@@ -3111,7 +3111,9 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0
+                    ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                    : t('encounters.run.rollInitiative')}
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
@@ -3119,7 +3121,7 @@ export default function RunSessionPage() {
                     onClick={startEncounter}
                     aria-describedby={hasNoCombatants || needsInitiativeCount > 0 ? 'start-roster-hint' : undefined}
                   >
-                    Start
+                    {t('encounters.run.start')}
                   </Btn>
                   {(hasNoCombatants || needsInitiativeCount > 0) && (
                     <p id="start-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
@@ -3161,7 +3163,9 @@ export default function RunSessionPage() {
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
-                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
+                  {needsInitiativeCount > 0
+                    ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                    : t('encounters.run.rollInitiative')}
                 </Btn>
                 <Btn
                   data-testid="encounter-header-next-turn"
@@ -3170,7 +3174,7 @@ export default function RunSessionPage() {
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
                   title={`Next turn${nextTurnShortcut.titleSuffix}`}
                 >
-                  Next turn →
+                  {t('encounters.run.nextTurn')}
                 </Btn>
               </>
             )}
@@ -3179,7 +3183,7 @@ export default function RunSessionPage() {
               // linked character sheet (cross-entity, no CAS guard) — genuinely conflict-prone,
               // so it stays gated (confirmable via the override, not ungated outright).
               <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
-                End
+                {t('encounters.run.end')}
               </Btn>
             )}
             {lifecycle.reopen && (
@@ -3194,7 +3198,7 @@ export default function RunSessionPage() {
                   setConfirmReopen(true);
                 }}
               >
-                Reopen
+                {t('encounters.run.reopen')}
               </Btn>
             )}
             {lifecycle.delete && (
@@ -3989,10 +3993,10 @@ export default function RunSessionPage() {
 
       {confirmEnd && (
         <ConfirmDialog
-          title="End this encounter?"
-          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
-          confirmLabel="End encounter"
-          pendingLabel="Ending encounter…"
+          title={t('encounters.run.endDialog.title')}
+          body={t('encounters.run.endDialog.body')}
+          confirmLabel={t('encounters.run.endDialog.confirm')}
+          pendingLabel={t('encounters.run.endDialog.pending')}
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -4000,17 +4004,15 @@ export default function RunSessionPage() {
       )}
       {confirmReopen && (
         <ConfirmDialog
-          title="Reopen this encounter?"
+          title={t('encounters.run.reopenDialog.title')}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <p style={{ margin: 0 }}>
-                It returns to Running where combat left off. Character sheets were synced when it
-                ended — if a sheet has healed, rested, or otherwise changed since then, choose which
-                HP to keep before reopening.
+                {t('encounters.run.reopenDialog.body')}
               </p>
               {hpSyncConflicts.length === 0 ? (
                 <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                  No sheet HP conflicts — combatant snapshots still match the sheets.
+                  {t('encounters.run.reopenDialog.noConflicts')}
                 </p>
               ) : (
                 <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -4061,8 +4063,8 @@ export default function RunSessionPage() {
               )}
             </div>
           }
-          confirmLabel="Reopen encounter"
-          pendingLabel="Reopening encounter…"
+          confirmLabel={t('encounters.run.reopenDialog.confirm')}
+          pendingLabel={t('encounters.run.reopenDialog.pending')}
 
           busy={runControl.isPending}
           confirmDisabled={!reopenChoicesComplete}
@@ -8898,14 +8900,14 @@ function AddCombatantPanel({
       }}
       onDrop={(event: React.DragEvent<HTMLElement>) => void addDroppedRuleEntry(event)}
     >
-      <span className="card-kicker">Add combatant</span>
+      <span className="card-kicker">{t('encounters.run.addCombatant')}</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
-        Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
+        {t('encounters.run.addCombatantHint')}
       </p>
       <div
         className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
-        aria-label="Add combatant"
+        aria-label={t('encounters.run.addCombatant')}
         data-testid="add-combatant-tabs"
       >
         {ADD_TAB_ORDER.map((t) => {
