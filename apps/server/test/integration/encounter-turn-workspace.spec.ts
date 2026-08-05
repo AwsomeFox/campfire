@@ -212,7 +212,13 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     dataDir = makeTempDataDir();
     const { orm, service, events } = build();
     const { campaignId, encounterId, c1, c2 } = seed(orm);
-    const frames: Array<{ type: string; currentCombatantId?: number | null; round?: number; combatantKind?: string | null }> = [];
+    const frames: Array<{
+      type: string;
+      currentCombatantId?: number | null;
+      round?: number;
+      combatantKind?: string | null;
+      turnReverted?: true;
+    }> = [];
     const subscription = events.streamFor(campaignId).subscribe((event) => frames.push(event));
 
     await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
@@ -228,6 +234,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         currentCombatantId: c1,
         round: 1,
         combatantKind: 'character',
+        turnReverted: true,
       }),
     ]);
     expect(c2).not.toBe(c1);

@@ -7038,6 +7038,7 @@ export class EncountersService {
       round: newRound,
       currentCombatantId: newCurrentId,
       combatantKind: newCurrentKind,
+      turnReverted: true,
     });
     return this.getWithCombatantsOrThrow(encounterId, role);
   }

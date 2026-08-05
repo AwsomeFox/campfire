@@ -39,11 +39,15 @@ test.describe('turn-change beat (issue #1906)', () => {
     })).toBe(true);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
-      round: 2, currentCombatantId: 15, combatantKind: 'monster',
+      round: 2, currentCombatantId: 15, combatantKind: 'monster', turnReverted: true,
     })).toBe(true);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       round: -1,
+    })).toBe(false);
+    expect(isCampaignEvent({
+      type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
+      turnReverted: false,
     })).toBe(false);
   });
 
@@ -71,5 +75,11 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('keeps Player Display to the paired encounter update load', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/screen/PlayerDisplayPage.tsx'), 'utf8');
     expect(source).toMatch(/if \(event\.type === 'encounter\.turn_changed'\) return;/);
+  });
+
+  test('keeps the safe turn-workspace scroll when reduced motion is preferred', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{\s*if \(!prefersReducedMotion\(\)\) \{[\s\S]*setTurnPulse/);
+    expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{[\s\S]*scrollIntoView\(\{/);
   });
 });

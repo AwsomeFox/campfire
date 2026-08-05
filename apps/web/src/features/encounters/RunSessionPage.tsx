@@ -1238,10 +1238,12 @@ export default function RunSessionPage() {
               round: next.round,
               identityBackground: combatant ? tokenIdentityBackground(combatant) : 'var(--color-neutral-900)',
             });
-            if (kind === 'your-turn' && combatant && !prefersReducedMotion()) {
-              setTurnPulse(true);
-              if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
-              turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
+            if (kind === 'your-turn' && combatant) {
+              if (!prefersReducedMotion()) {
+                setTurnPulse(true);
+                if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+                turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
+              }
               // A turn change must not pull a player away from an active form or dialog.
               const active = document.activeElement as HTMLElement | null;
               if (!active?.closest('form, [role="dialog"], input, textarea, select')) {

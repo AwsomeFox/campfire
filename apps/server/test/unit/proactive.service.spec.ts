@@ -196,6 +196,20 @@ describe('ProactiveService', () => {
     );
   });
 
+  it('does not trigger a proactive turn for an undone NPC turn', async () => {
+    service.startWatching(1, {
+      enabled: true,
+      triggers: { encounterEnded: false, hpCritical: false, objectiveCompleted: false, npcTurn: true },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    });
+
+    eventStream.next({ type: 'encounter.turn_changed', combatantKind: 'npc', turnReverted: true } as any);
+    await new Promise(setImmediate);
+
+    expect(driver.runTurn).not.toHaveBeenCalled();
+  });
+
   it('manualTrigger executes immediately', async () => {
     await service.manualTrigger(1, 'encounterEnded', 'custom prompt');
 
