@@ -122,7 +122,7 @@ export type CombatantRowProps = {
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
-  targeting?: { legal: boolean; selected: boolean; onToggle: () => void } | null;
+  targeting?: { legal: boolean; selected: boolean; declared: boolean; onToggle: () => void } | null;
 };
 
 export function CombatantRow({
@@ -307,7 +307,7 @@ export function CombatantRow({
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
       onClick={(event) => {
-        if (!targeting?.legal) return;
+        if (!targeting?.legal || targeting.declared) return;
         const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]');
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
@@ -321,6 +321,7 @@ export function CombatantRow({
           data-testid={`combatant-target-toggle-${combatant.id}`}
           aria-label={`${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
           aria-pressed={targeting.selected}
+          disabled={targeting.declared}
           onClick={targeting.onToggle}
           style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
         >

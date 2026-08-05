@@ -2378,7 +2378,7 @@ export function BattleMap({
                   const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
                   // Map gestures retain precedence outside move mode, and movable tokens keep
                   // their drag behavior.
-                  const targetClickable = legalTarget && tool === 'move' && !viewportPan && !movable;
+                  const targetClickable = legalTarget && !targeting?.declared && tool === 'move' && !viewportPan && !movable;
                   const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
@@ -2444,7 +2444,7 @@ export function BattleMap({
                         if (targetClickable && !isDragging) targeting?.onToggle(c.id);
                       }}
                       onKeyDown={(e) => {
-                        if (legalTarget && (e.key === 'Enter' || e.key === ' ')) {
+                        if (legalTarget && !targeting?.declared && (e.key === 'Enter' || e.key === ' ')) {
                           e.preventDefault();
                           e.stopPropagation();
                           targeting?.onToggle(c.id);

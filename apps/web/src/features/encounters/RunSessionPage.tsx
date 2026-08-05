@@ -4013,7 +4013,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
-                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), onToggle: () => toggleActionTarget(c.id) } : null}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}
