@@ -10510,7 +10510,24 @@ export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
 export const TurnSuggestedAction = z.object({
   name: z.string().min(1).max(160),
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  // ALWAYS the action-economy/kind hint, never a display label — the web client keys BOTH
+  // the Action/Bonus/Reaction/Other tab bucketing and the fallback spell-list detection off
+  // this string (see TurnWorkspace.tsx), so overloading it with something else (e.g. an
+  // equipping item's name) breaks both for any equipped item whose economy slot isn't
+  // explicit in `spec.cost.slot` — or, worse, silently renders a mundane item as a
+  // fabricated spell entry the moment its name happens to contain "spell" (issue #1901
+  // review: devin-ai-integration on PR #1951).
   source: z.string().max(40),
+  /**
+   * The equipping item's name (issue #1901), for a row contributed by a character's
+   * equipped-item action — `null` for a hand-authored sheet action or a monster/NPC
+   * statblock action. Kept SEPARATE from `source` (see above) precisely so the "equipped:
+   * <item>" label the web UI renders alongside an action never contaminates `source`'s
+   * economy-hint meaning. Capped at 200 to match `InventoryItem.name` (review:
+   * chatgpt-codex-connector P2) — a shorter limit here would reject an otherwise-valid
+   * item's full name once forwarded into this field, failing this exported response schema.
+   */
+  equippedItemName: z.string().max(200).nullable().default(null),
   summary: z.string().max(600).default(''),
   toHit: z.string().default(''),
   damage: z.string().default(''),
@@ -10777,6 +10794,27 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   equipped: z.boolean().optional(),
   equipSlot: z.string().max(60).nullable().optional(),
   equippedAction: CharacterAction.nullable().optional(),
+  /**
+   * Issue #1901 rework: when equipping (equipped:true) into a slot another of this
+   * character's items already occupies, the server normally rejects with 409
+   * INVENTORY_SLOT_CONFLICT so the caller can choose what to do. Setting this true
+   * instead makes the whole swap ATOMIC — the incumbent is unequipped in the SAME
+   * transaction as this equip, rather than the caller issuing an unequip PATCH followed
+   * by a separate equip PATCH (a sequence with a real window: another writer can claim
+   * the slot between the two requests, or the second request can simply fail, leaving
+   * the character wearing neither item). Ignored when there is no conflict, or when
+   * this write isn't an equip transition at all.
+   */
+  displaceEquipped: z.boolean().optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P2): an optional CAS-style guard for
+   * `displaceEquipped` — the id of the incumbent item the caller is confirming displacement
+   * of (from an earlier 409 INVENTORY_SLOT_CONFLICT body). If another writer has since
+   * changed who occupies the target slot, the server rejects with a FRESH 409 naming the new
+   * incumbent instead of silently displacing whichever item happens to be there when this
+   * request lands.
+   */
+  expectedConflictingItemId: Id.optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).

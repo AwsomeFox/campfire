@@ -81,6 +81,38 @@
         "label": "Notes",
         "help": "Optional short description or usage notes."
       }
+    },
+    "equip": {
+      "badge": "مُجهَّز",
+      "equippedInSlot": "مُجهَّز · {{slot}}",
+      "equipButton": "تجهيز",
+      "unequipButton": "إزالة التجهيز",
+      "equipAria": "تجهيز {{name}}",
+      "unequipAria": "إزالة تجهيز {{name}}",
+      "slotLabel": "الموضع",
+      "slotPlaceholder": "اليد الرئيسية، الدرع، الخاتم…",
+      "slotHelp": "أين يُرتدى أو يُستخدم — أي تسمية تصلح.",
+      "slotRequired": "الموضع مطلوب لتجهيز العنصر.",
+      "grantsAction": "يمنح إجراء قتالي: {{name}}",
+      "conflictTitle": "الموضع مشغول",
+      "conflictBody": "\"{{incumbent}}\" مُجهَّز بالفعل في \"{{slot}}\" على هذه الشخصية.",
+      "swapButton": "استبدال {{incumbent}}",
+      "swapping": "جارٍ الاستبدال…",
+      "slotSuggestions": {
+        "mainHand": "اليد الرئيسية",
+        "offHand": "اليد الثانوية",
+        "twoHanded": "بيدين",
+        "armor": "الدرع",
+        "head": "الرأس",
+        "neck": "الرقبة",
+        "cloak": "العباءة",
+        "belt": "الحزام",
+        "boots": "الحذاء",
+        "gloves": "القفازات",
+        "ring1": "الخاتم 1",
+        "ring2": "الخاتم 2",
+        "wondrous": "غرض عجائبي"
+      }
     }
   }
 }
