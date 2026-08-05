@@ -4415,7 +4415,7 @@ export class EncountersService {
     idempotencyKey: string,
     user: RequestUser,
     role: Role,
-  ): Promise<{ combatant: Combatant; roll: DiceRoll }> {
+  ): Promise<{ combatant: Combatant; roll: DiceRoll | null }> {
     // A retained trashed row is sufficient to authorize an existing keyed replay;
     // fresh writes still fail in updateCombatant's transaction-local mutable check.
     const encounter = await this.getRowOrThrow(encounterId, true);
@@ -4431,16 +4431,16 @@ export class EncountersService {
       campaignId: encounter.campaignId,
       fingerprint: encounterOpFingerprint(operationFingerprint),
     };
-    const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll } | null => {
-      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
-      return candidate.combatant && candidate.roll ? { combatant: candidate.combatant, roll: candidate.roll } : null;
+    const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll | null } | null => {
+      const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll | null }>;
+      return candidate.combatant ? { combatant: candidate.combatant, roll: candidate.roll ?? null } : null;
     };
 
     // A committed response is safe to replay even if the combatant has since been
     // removed or the campaign became read-only. The controller/MCP tool has already
     // checked current campaign membership and role; this lookup performs no domain
     // write and is keyed to that authorized actor, encounter, and target.
-    const replayCommittedDeathSave = async (): Promise<{ combatant: Combatant; roll: DiceRoll } | null> => {
+    const replayCommittedDeathSave = async (): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
       const prior = this.db.transaction((tx) => findPriorEncounterOp(tx, deathSaveClaim, Date.now()));
       if (!prior) return null;
       const parsed = replayResponse(prior.response);
@@ -4449,7 +4449,8 @@ export class EncountersService {
       const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
       const found = snapshot.combatants.find((c) => c.id === combatantId);
       if (!found) return null;
-      return { combatant: found, roll: parsed.roll };
+      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+      return { combatant: found, roll };
     };
     const earlyReplay = await replayCommittedDeathSave();
     if (earlyReplay) return earlyReplay;
@@ -4517,6 +4518,7 @@ export class EncountersService {
             }
             const result = this.rollDeathSaveD20();
             result.label = `${fresh.name} · death save`;
+            result.encounterId = encounterId;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
