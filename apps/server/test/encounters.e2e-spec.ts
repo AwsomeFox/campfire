@@ -3676,7 +3676,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       .set(dm)
       .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: replacementEntry.id });
     expect(replacement.status).toBe(201);
-    expect(replacement.body).toMatchObject({ initMod: 4, eac: 21, kac: 23, spCurrent: 9, spMax: 9, rpCurrent: 5, rpMax: 5 });
+    expect(replacement.body).toMatchObject({ hpCurrent: 22, hpMax: 22, initMod: 4, eac: 21, kac: 23, spCurrent: 9, spMax: 9, rpCurrent: 5, rpMax: 5 });
   });
 
   it('derives manual combatant defaults from the duplicate source for REST and MCP callers', async () => {

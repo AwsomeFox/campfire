@@ -3671,7 +3671,7 @@ export class EncountersService {
         throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
       }
       name ??= source.name;
-      hpMax ??= source.hpMax ?? undefined;
+      if (input.ruleEntryId === undefined) hpMax ??= source.hpMax ?? undefined;
       if (input.initMod === undefined) {
         initMod = source.initMod;
       }
