@@ -3,9 +3,16 @@
  * priority between a safety hold, the sync gate, and each button's own roster/turn-state
  * condition can be pinned in a `.unit.spec.ts` without a browser.
  *
- * Only `start`, `nextTurn`, and `undoTurn` are guarded server-side by `assertNoSafetyHold`
- * (`EncountersService` — issue #599); `end`/`reopen`/`delete`/`rollInitiative` are not, so
- * `safetyHoldActive` is only a resolver input where the server actually rejects the write.
+ * Which writes the safety hold actually stops, so a gate reason never claims more than the
+ * server enforces (issue #599). `EncountersService.assertNoSafetyHold` guards `start`,
+ * `nextTurn`, `undoTurn` and `endTurn`; `ActionResolverService.apply` has its own
+ * `assertNotHeld` (see {@link actionApplyGateReason}). `end`/`reopen`/`delete`/
+ * `rollInitiative` are NOT guarded, and neither is `resolve` — the action PREVIEW stays
+ * open during a hold on purpose, since computing a number nobody has committed is harmless
+ * and hiding it would keep the table from seeing what was about to happen. So
+ * `safetyHoldActive` is only a resolver input where the server actually rejects the write:
+ * gating a control the server would have allowed is the same defect as leaving one
+ * ungated, pointed the other way.
  * `headerBusy` (a request already in flight) intentionally has no reason of its own — every
  * resolver below returns `null` for it, leaving the button plain-disabled as before.
  */
@@ -95,6 +102,26 @@ export function syncOnlyGateReason(riskyBlocked: boolean): LifecycleGateReason {
 }
 
 /**
+ * Applying a resolved action — guarded by `ActionResolverService.apply`'s own
+ * `assertNotHeld`, which is a SEPARATE gate from `EncountersService.assertNoSafetyHold`
+ * (issue #1933 review). Applying writes damage, conditions and death saves to the board:
+ * that is play advancing, and it is exactly what someone raising an X-Card mid-swing is
+ * asking to stop.
+ *
+ * Scoped to the Apply control only. The preview/roll controls beside it are deliberately
+ * left alone — the server keeps `resolve` open during a hold, so gating them would disable
+ * something it would have allowed.
+ */
+export function actionApplyGateReason(input: {
+  safetyHoldActive: boolean;
+  riskyBlocked: boolean;
+}): LifecycleGateReason {
+  if (input.safetyHoldActive) return 'safetyHold';
+  if (input.riskyBlocked) return 'syncBlocked';
+  return null;
+}
+
+/**
  * `t()`-resolve a gate reason key, or `undefined` when there is none.
  *
  * Lives beside the resolvers rather than in one component because `nextTurn` has three
@@ -105,6 +132,16 @@ export function syncOnlyGateReason(riskyBlocked: boolean): LifecycleGateReason {
 export function gateReasonText(
   key: LifecycleGateReason,
   t: (key: string, options?: Record<string, unknown>) => string,
+  busy = false,
 ): string | undefined {
+  // `busy` (a request already in flight) suppresses the reason entirely rather than
+  // competing with it (issue #1933 review). `GatedControl` strips the native `disabled`
+  // attribute whenever a reason is present, so a control that is disabled BECAUSE a request
+  // is in flight, and which also happens to match some other gate, would otherwise become
+  // focusable and announce a reason that is not the operative blocker — telling the DM the
+  // table is paused when the truth is "your last click is still going". Returning undefined
+  // leaves it natively disabled with no reason claimed, which is honest and matches the rule
+  // `syncGateReason` already applies to the death-save controls.
+  if (busy) return undefined;
   return key ? t(`run.gate.${key}`) : undefined;
 }

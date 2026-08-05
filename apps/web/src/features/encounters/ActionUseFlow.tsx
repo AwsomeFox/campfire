@@ -19,6 +19,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
 import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { useAnnounce } from '../../components/Announcer';
 import { QuickRollButtons } from './QuickRollButtons';
 
@@ -56,6 +57,7 @@ export function ActionUsePanel({
   combatants,
   isDm,
   applyDisabled = false,
+  applyGateReason,
   onDismiss,
   onApplied,
   onError,
@@ -69,6 +71,13 @@ export function ActionUsePanel({
   combatants: Combatant[];
   isDm: boolean;
   applyDisabled?: boolean;
+  /**
+   * Localized reason the Apply control is gated right now, or `undefined` when it is not
+   * (issue #1933 review). Scoped to Apply alone: `ActionResolverService.apply` calls
+   * `assertNotHeld`, but `resolve` (the preview) stays open during a safety hold on
+   * purpose, so the roll/preview controls beside it must NOT inherit this.
+   */
+  applyGateReason?: string;
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
@@ -307,16 +316,23 @@ export function ActionUsePanel({
               Back
             </button>
             {!isUnconfirmed && (preview.canApply || (isDm && !preview.applied)) && (
-              <Btn
-                data-testid="action-use-apply"
-                disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
-                onClick={() => {
-                  if (commitSubmitted || commit.isPending) return;
-                  commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
-                }}
+              <GatedControl
+                // Suppressed while the commit is in flight or already applied: `busy` is
+                // the operative blocker then, not the hold, and GatedControl strips the
+                // native `disabled` whenever a reason is present (issue #1933 review).
+                reason={commit.isPending || commitSubmitted || preview.applied ? undefined : applyGateReason}
               >
-                {commit.isPending ? 'Applying…' : 'Apply'}
-              </Btn>
+                <Btn
+                  data-testid="action-use-apply"
+                  disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
+                  onClick={() => {
+                    if (commitSubmitted || commit.isPending) return;
+                    commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
+                  }}
+                >
+                  {commit.isPending ? 'Applying…' : 'Apply'}
+                </Btn>
+              </GatedControl>
             )}
             {!preview.canApply && !isDm && !isUnconfirmed && (
               <Btn data-testid="action-use-done" onClick={onDismiss}>

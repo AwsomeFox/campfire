@@ -80,7 +80,7 @@ export function DmLifecycleHeader({
               roster is partial (e.g. a manually-set combatant alongside unrolled
               ones). Hidden entirely rather than dead weight once Start is live. */}
           <GatedControl
-            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t)}
+            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
           >
             <Btn
               ghost
@@ -99,7 +99,7 @@ export function DmLifecycleHeader({
               hasNoCombatants,
               needsInitiativeCount,
             });
-            const startReason = gateReasonText(startReasonKey, t);
+            const startReason = gateReasonText(startReasonKey, t, headerBusy);
             // Issue #1933 review finding: the roster-state reasons (no combatants yet /
             // initiative incomplete) are a standing "what to do next" instruction, not a
             // transient one like the sync gate or a safety hold — this used to be a
@@ -120,7 +120,11 @@ export function DmLifecycleHeader({
             const standingHint = gateReasonText(standingHintKey, t);
             return (
               <div className="flex flex-col gap-0.5 items-stretch">
-                <GatedControl reason={startReason}>
+                {/* `w-full` on the WRAPPER, not the Btn: the wrapper is the flex item of
+                    this `items-stretch` column, and it is `inline-flex`, so without this
+                    it shrinks to the button's content and Start stops matching the hint
+                    paragraph's width (issue #1933 review). */}
+                <GatedControl reason={startReason} className="w-full">
                   <Btn
                     disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
                     onClick={onStart}
@@ -141,7 +145,7 @@ export function DmLifecycleHeader({
       )}
       {lifecycle.undoTurn && (
         <GatedControl
-          reason={gateReasonText(undoTurnGateReason({ safetyHoldActive, riskyBlocked, undoTurnDisabled }), t)}
+          reason={gateReasonText(undoTurnGateReason({ safetyHoldActive, riskyBlocked, undoTurnDisabled }), t, headerBusy)}
         >
           <Btn
             ghost
@@ -161,7 +165,7 @@ export function DmLifecycleHeader({
               combatant has a value, disable the control rather than firing a no-op
               roll (issue #702), and surface how many still need rolling. */}
           <GatedControl
-            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t)}
+            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
           >
             <Btn
               ghost
@@ -173,7 +177,7 @@ export function DmLifecycleHeader({
                 : t('encounters.run.rollInitiative')}
             </Btn>
           </GatedControl>
-          <GatedControl reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t)}>
+          <GatedControl reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}>
             <Btn
               data-testid="encounter-header-next-turn"
               disabled={headerBusy || riskyBlocked}
@@ -192,14 +196,14 @@ export function DmLifecycleHeader({
         // so it stays gated (confirmable via the override, not ungated outright). Not
         // safety-hold guarded server-side (see lifecycleGate.ts), so only the sync gate
         // gets a GatedControl reason here.
-        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t)}>
+        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t, headerBusy)}>
           <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={onRequestEnd}>
             {t('encounters.run.end')}
           </Btn>
         </GatedControl>
       )}
       {lifecycle.reopen && (
-        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t)}>
+        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t, headerBusy)}>
           <Btn ghost disabled={headerBusy || riskyBlocked} onClick={onRequestReopen}>
             {t('encounters.run.reopen')}
           </Btn>
@@ -211,7 +215,7 @@ export function DmLifecycleHeader({
         // another DM/the AI driver is actively updating. Racing a destructive,
         // effectively unrecoverable action is worse than racing a turn advance, so
         // this stays gated (confirmable via the override, not ungated outright).
-        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t)}>
+        <GatedControl reason={gateReasonText(syncOnlyGateReason(riskyBlocked), t, headerBusy)}>
           <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={onRequestDelete}>
             {deleteLabel}
           </Btn>

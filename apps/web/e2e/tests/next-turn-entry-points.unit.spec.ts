@@ -42,9 +42,18 @@ test.describe('nextTurn entry points (issue #1933)', () => {
     const bindings = [...code.matchAll(/onClick=\{nextTurn\}/g)];
     expect(bindings.length).toBeGreaterThan(0);
     for (const binding of bindings) {
-      const preceding = code.slice(Math.max(0, binding.index - 700), binding.index);
-      expect(preceding).toMatch(/<GatedControl reason=\{gateReasonText\(nextTurnGateReason\(/);
+      const preceding = code.slice(Math.max(0, binding.index - 900), binding.index);
+      // Matched loosely across the opening tag so a wrapper `className` (needed to keep the
+      // flex-item utilities working — see the layout note below) does not break the check.
+      expect(preceding).toMatch(/<GatedControl[\s\S]*?reason=\{gateReasonText\(nextTurnGateReason\(/);
     }
+
+    // Layout: `GatedControl`'s wrapper span is the flex item, not the button, so any
+    // flex-item-scoped utility has to sit on the wrapper. `ml-auto` on the Btn silently
+    // stopped right-aligning the lair Done button when it was wrapped (issue #1933 review).
+    const lair = code.slice(Math.max(0, code.lastIndexOf('onClick={nextTurn}') - 900));
+    expect(lair).toMatch(/<GatedControl\s+className="ml-auto"/);
+    expect(lair.slice(0, lair.indexOf('Done'))).not.toMatch(/<Btn className="ml-auto"/);
 
     // (2) The header's binding is the `onNextTurn` prop, gated inside DmLifecycleHeader —
     // out of reach of the loop above, so assert it at its own source.
@@ -52,11 +61,11 @@ test.describe('nextTurn entry points (issue #1933)', () => {
       resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx'),
       'utf8',
     );
-    expect(header).toMatch(/<GatedControl reason=\{gateReasonText\(nextTurnGateReason\(\{ safetyHoldActive, riskyBlocked \}\), t\)\}>/);
+    expect(header).toMatch(/<GatedControl reason=\{gateReasonText\(nextTurnGateReason\(\{ safetyHoldActive, riskyBlocked \}\), t, headerBusy\)\}>/);
 
     // One shared resolver, one shared string lookup — `gateReasonText` lives in
     // lifecycleGate.ts precisely so a per-component copy cannot drift again.
-    expect(code).toMatch(/import \{ gateReasonText, nextTurnGateReason \} from '\.\/lifecycleGate'/);
+    expect(code).toMatch(/import \{[^}]*gateReasonText[^}]*nextTurnGateReason[^}]*\} from '\.\/lifecycleGate'/);
     expect(header).not.toMatch(/function gateReasonText/);
   });
 });

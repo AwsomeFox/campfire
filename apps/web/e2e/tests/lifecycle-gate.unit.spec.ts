@@ -9,6 +9,8 @@ import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  actionApplyGateReason,
+  gateReasonText,
   nextTurnGateReason,
   rollInitiativeGateReason,
   startGateReason,
@@ -118,6 +120,102 @@ test.describe('DmLifecycleHeader adoption (issue #1933)', () => {
     expect(code).not.toMatch(/startReasonKey === 'needsCombatantsToStart'/);
     // ...and it stays wired to the button for assistive tech, as it was before #1933.
     expect(code).toMatch(/aria-describedby=\{standingHint \? START_ROSTER_HINT_ID : undefined\}/);
+  });
+});
+
+/**
+ * `busy` suppresses the reason entirely (issue #1933 review round 4).
+ *
+ * `GatedControl` strips the native `disabled` attribute whenever a reason is present. So a
+ * lifecycle button disabled BECAUSE a request is in flight, which also happens to match some
+ * other gate, would become focusable and announce a reason that is not the operative
+ * blocker — telling a DM the table is paused when the truth is "your last click is still
+ * going". Every resolver deliberately ignores `headerBusy`, so the suppression has to happen
+ * where the key is turned into a string. Same rule `syncGateReason` already applies to the
+ * death-save controls; this is it applied to the lifecycle header.
+ */
+test.describe('gateReasonText busy suppression (issue #1933)', () => {
+  const t = (key: string) => key;
+
+  test('resolves a reason when nothing is in flight', () => {
+    expect(gateReasonText('safetyHold', t)).toBe('run.gate.safetyHold');
+    expect(gateReasonText('safetyHold', t, false)).toBe('run.gate.safetyHold');
+  });
+
+  test('claims no reason while a request is in flight, even with a live gate', () => {
+    for (const key of ['safetyHold', 'syncBlocked', 'needsCombatantsToStart', 'allInitiativeRolled'] as const) {
+      expect(gateReasonText(key, t, true)).toBeUndefined();
+    }
+  });
+
+  test('no key and not busy is still no reason', () => {
+    expect(gateReasonText(null, t, false)).toBeUndefined();
+  });
+
+  test('every lifecycle-header control passes its busy flag', () => {
+    const header = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx'),
+      'utf8',
+    );
+    // A resolver call that forgets the third argument is the regression — the reason would
+    // resolve normally while a request is in flight. Enumerated rather than counted, so a
+    // NEW control added to this header fails here too.
+    const calls = [...header.matchAll(/gateReasonText\(/g)].map((m) => {
+      // Balanced-paren scan — the resolver arguments contain nested calls and object
+      // literals, so a non-greedy regex would stop at the first inner `)` and every
+      // assertion below would pass vacuously.
+      let depth = 0;
+      for (let i = m.index + 'gateReasonText'.length; i < header.length; i += 1) {
+        if (header[i] === '(') depth += 1;
+        else if (header[i] === ')') {
+          depth -= 1;
+          if (depth === 0) return header.slice(m.index, i + 1);
+        }
+      }
+      throw new Error('unbalanced gateReasonText( call');
+    });
+    expect(calls.length).toBeGreaterThanOrEqual(8);
+    for (const call of calls) {
+      // The standing roster hint is the one deliberate exception: it is a paragraph, not a
+      // gated control, so `GatedControl` never touches it and `busy` is irrelevant to it.
+      if (call.includes('standingHintKey')) continue;
+      expect(call).toMatch(/,\s*headerBusy\s*\)$/);
+    }
+  });
+});
+
+test.describe('actionApplyGateReason (issue #1933)', () => {
+  const base = { safetyHoldActive: false, riskyBlocked: false };
+
+  test('nothing blocking: no reason', () => {
+    expect(actionApplyGateReason(base)).toBeNull();
+  });
+  // `ActionResolverService.apply` calls its OWN `assertNotHeld` — a separate gate from
+  // `EncountersService.assertNoSafetyHold`, and the one this resolver mirrors.
+  test('a safety hold wins over the sync gate', () => {
+    expect(actionApplyGateReason({ safetyHoldActive: true, riskyBlocked: true })).toBe('safetyHold');
+  });
+  test('sync gate alone', () => {
+    expect(actionApplyGateReason({ ...base, riskyBlocked: true })).toBe('syncBlocked');
+  });
+
+  test('the Apply control is gated, and the preview/roll controls are deliberately not', () => {
+    const page = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'),
+      'utf8',
+    );
+    expect(page).toMatch(/applyGateReason=\{gateReasonText\(actionApplyGateReason\(\{ safetyHoldActive, riskyBlocked \}\), t\)\}/);
+    expect(page).toMatch(/applyDisabled=\{riskyBlocked \|\| safetyHoldActive\}/);
+
+    const flow = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/ActionUseFlow.tsx'),
+      'utf8',
+    );
+    // Scoped to Apply: the server keeps `resolve` open during a hold, so gating the roll
+    // buttons would disable something it would have allowed — the mirror-image defect.
+    expect(flow).toMatch(/data-testid="action-use-apply"/);
+    const quickRolls = flow.slice(flow.indexOf('<QuickRollButtons'), flow.indexOf('<QuickRollButtons') + 400);
+    expect(quickRolls).not.toMatch(/applyGateReason/);
   });
 });
 

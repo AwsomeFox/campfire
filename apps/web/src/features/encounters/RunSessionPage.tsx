@@ -5,7 +5,7 @@ import { CombatantRow, hpDisplay } from './combat/CombatantRow';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
-import { gateReasonText, nextTurnGateReason } from './lifecycleGate';
+import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -3496,8 +3496,13 @@ export default function RunSessionPage() {
               // bare error — the exact "server rejects and the UI cannot say why" outcome
               // this issue exists to remove. Same shared resolver as the header, so all
               // three agree by construction rather than by three people remembering.
-              <GatedControl reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t)}>
-                <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
+              // `ml-auto` moves to the WRAPPER: it is the flex item of this row now, so the
+              // button's own auto margin would push nothing (issue #1933 review).
+              <GatedControl
+                className="ml-auto"
+                reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}
+              >
+                <Btn disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
                   Done →
                 </Btn>
               </GatedControl>
@@ -3709,7 +3714,14 @@ export default function RunSessionPage() {
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
           isDm={isDm}
-          applyDisabled={riskyBlocked}
+          // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
+          // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
+          // lifecycle controls left this Apply enabled during a pause, so raising an X-Card
+          // after a preview produced a bare server conflict instead of the gate reason.
+          // Scoped to Apply: the server keeps `resolve` (the preview) open during a hold,
+          // so the roll/preview controls in this panel stay as they were.
+          applyDisabled={riskyBlocked || safetyHoldActive}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {

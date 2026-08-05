@@ -107,12 +107,24 @@ export type GatedControlProps = {
    * namespace of its own; every adoption site owns its own `run.gate.*` key.
    */
   reason: string | null | undefined;
+  /**
+   * Extra classes for the WRAPPER span, not the child.
+   *
+   * Because the wrapper is unconditional (see the module doc comment), it — not the child —
+   * is the flex/grid item of whatever contains this control. Any utility that only means
+   * something to a flex item (`ml-auto`, a full-width stretch) therefore has to live here,
+   * or it silently stops applying the moment a control adopts `GatedControl`. That is a
+   * layout regression with no error and no failing test, so it is worth the extra prop
+   * rather than asking every call site to notice (issue #1933 review).
+   */
+  className?: string;
   /** The single interactive element to gate — typically a `<button>` or `<Btn>`. */
   children: ReactElement<GatableProps>;
 };
 
 /** Shared gating-reason affordance — see the module doc comment above. */
-export function GatedControl({ reason, children }: GatedControlProps): ReactElement {
+export function GatedControl({ reason, className, children }: GatedControlProps): ReactElement {
+  const wrapperClass = className ? `cf-gated-control ${className}` : 'cf-gated-control';
   // React's useId() returns colon-delimited values (e.g. ":r1:"), which are invalid inside a
   // CSS id selector (`#gated-control-reason-:r1:` throws) — sanitizeFieldPrefix strips them,
   // the same helper Field.tsx and its other callers already use for this exact purpose.
@@ -150,7 +162,7 @@ export function GatedControl({ reason, children }: GatedControlProps): ReactElem
     // Passthrough — no wrapper props changed, but the wrapper span itself stays mounted
     // (see the module doc comment on why) so the child's DOM node identity is preserved
     // across a later gated transition.
-    return <span className="cf-gated-control">{children}</span>;
+    return <span className={wrapperClass}>{children}</span>;
   }
 
   const existing = children.props;
@@ -198,7 +210,7 @@ export function GatedControl({ reason, children }: GatedControlProps): ReactElem
   const tooltipVisible = gatedTooltipVisible(hint);
 
   return (
-    <span className="cf-gated-control" data-gated="true">
+    <span className={wrapperClass} data-gated="true">
       {child}
       <span id={reasonId} className="sr-only">
         {reason}
