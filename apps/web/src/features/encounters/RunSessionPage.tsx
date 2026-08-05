@@ -953,6 +953,7 @@ export default function RunSessionPage() {
   const [turnBeat, setTurnBeat] = useState<TurnChangeBeatEvent | null>(null);
   const [turnPulse, setTurnPulse] = useState(false);
   const [turnOwnerFromEvent, setTurnOwnerFromEvent] = useState<boolean | null>(null);
+  const [turnOwnerPendingCombatantId, setTurnOwnerPendingCombatantId] = useState<number | null>(null);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
   const turnPulseTimerRef = useRef<number | null>(null);
@@ -976,13 +977,17 @@ export default function RunSessionPage() {
   useEffect(() => () => {
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
   }, []);
-  useEffect(() => setTurnOwnerFromEvent(null), [eid]);
+  useEffect(() => {
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+  }, [eid]);
   // Ending an encounter emits an encounter.updated frame rather than a turn edge.
   // Clear every transient turn signal here so a disabled /turn query cannot keep
   // a prior owned turn (including the hidden-tab title) alive after combat stops.
   useEffect(() => {
     if (encounter?.status === 'running') return;
     setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
     setTurnPulse(false);
   }, [encounter?.status]);
@@ -1215,7 +1220,9 @@ export default function RunSessionPage() {
           // frame received before its owner list or encounter roster is available
           // stays unknown so it cannot pin an incorrect negative result for the
           // rest of the turn.
-          setTurnOwnerFromEvent(rosterCombatantKnown && (ownerDataReady || combatant?.characterId == null) ? isYourTurn : null);
+          const ownerKnown = rosterCombatantKnown && (ownerDataReady || combatant?.characterId == null);
+          setTurnOwnerFromEvent(ownerKnown ? isYourTurn : null);
+          setTurnOwnerPendingCombatantId(ownerKnown ? null : event.currentCombatantId ?? null);
           const next: TurnBeatSnapshot = {
             encounterId: eid,
             combatantId: event.currentCombatantId ?? null,
@@ -2417,9 +2424,16 @@ export default function RunSessionPage() {
   // hidden-tab title), while a matching, later authoritative /turn result
   // repairs an optimistic positive after a missed SSE frame or reconnect.
   useEffect(() => {
-    if (!turnWorkspace || turnWorkspace.current?.combatantId !== currentCombatantId) return;
+    if (!turnWorkspace) return;
+    if (turnOwnerPendingCombatantId != null) {
+      if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) return;
+      setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
+      setTurnOwnerPendingCombatantId(null);
+      return;
+    }
+    if (turnWorkspace.current?.combatantId !== currentCombatantId) return;
     setTurnOwnerFromEvent(turnWorkspace.isYourTurn);
-  }, [currentCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+  }, [currentCombatantId, turnOwnerPendingCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   // If the character list was still loading when an owned frame arrived, the
   // authoritative workspace can safely promote its already-visible ticker to
@@ -3226,7 +3240,7 @@ export default function RunSessionPage() {
       )}
       <TurnChangeBeat
         beat={turnBeat}
-        isYourTurn={encounter?.status === 'running' && (turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true))}
+        isYourTurn={encounter?.status === 'running' && turnOwnerPendingCombatantId == null && (turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true))}
       />
 
       {pendingApply && (

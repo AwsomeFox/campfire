@@ -19,7 +19,7 @@
  * `CampaignEventsHandlers.onForbidden`) stops without clearing identity (retrying won't help).
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import type { CampaignEvent } from '@campfire/schema';
+import { CombatantKind, type CampaignEvent } from '@campfire/schema';
 import { useAuth } from '../app/auth';
 import { API } from './api';
 import { getSessionResumeEpoch, subscribeSessionResume } from './sessionExpiry';
@@ -76,7 +76,7 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
       (v.round === undefined || (typeof v.round === 'number' && Number.isInteger(v.round) && v.round >= 0))
       && (v.turnIndex === undefined || (typeof v.turnIndex === 'number' && Number.isInteger(v.turnIndex) && v.turnIndex >= 0))
       && (v.currentCombatantId === undefined || v.currentCombatantId === null || typeof v.currentCombatantId === 'number')
-      && (v.combatantKind === undefined || v.combatantKind === null || ['character', 'monster', 'npc'].includes(String(v.combatantKind)))
+      && (v.combatantKind === undefined || v.combatantKind === null || CombatantKind.safeParse(v.combatantKind).success)
       && (v.turnReverted === undefined || v.turnReverted === true)
     );
   }

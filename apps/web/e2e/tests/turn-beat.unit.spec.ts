@@ -50,6 +50,8 @@ test.describe('turn-change beat (issue #1906)', () => {
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       round: -1,
     })).toBe(false);
+    const source = readFileSync(resolve(process.cwd(), 'src/lib/useCampaignEvents.ts'), 'utf8');
+    expect(source).toMatch(/CombatantKind\.safeParse\(v\.combatantKind\)\.success/);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       turnReverted: false,
@@ -81,14 +83,15 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears turn ownership and transient cues when combat stops', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*setTurnOwnerFromEvent\(null\);\s*setTurnBeat\(null\);/);
+    expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);/);
     expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running' &&/);
   });
 
   test('keeps ownership unknown until an SSE combatant is present in the cached roster', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const rosterCombatantKnown = event\.currentCombatantId == null \|\| combatant != null;/);
-    expect(source).toMatch(/setTurnOwnerFromEvent\(rosterCombatantKnown && \(ownerDataReady \|\| combatant\?\.characterId == null\) \? isYourTurn : null\);/);
+    expect(source).toMatch(/const ownerKnown = rosterCombatantKnown && \(ownerDataReady \|\| combatant\?\.characterId == null\);/);
+    expect(source).toMatch(/setTurnOwnerPendingCombatantId\(ownerKnown \? null : event\.currentCombatantId \?\? null\);/);
     expect(source).toMatch(/pending: combatant == null && event\.currentCombatantId != null,/);
   });
 
