@@ -2726,6 +2726,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const suggestion = parseResult(gen) as {
       combatants: Array<{ ruleEntryId: number; count: number; xp: number }>;
       difficulty: { band: string };
+      difficultySupport: string;
       targetBand: string;
       matchedBand: boolean;
       seed: number;
@@ -2733,6 +2734,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(suggestion.targetBand).toBe('deadly');
     expect(suggestion.matchedBand).toBe(true);
     expect(suggestion.difficulty.band).toBe('deadly');
+    // Issue #1928: this campaign's ruleSystem falls back to 5e — the same math produced the
+    // band above, so it is honestly reported as 'supported', not a heuristic guess.
+    expect(suggestion.difficultySupport).toBe('supported');
     expect(suggestion.combatants.length).toBeGreaterThan(0);
     expect(suggestion.combatants.every((c) => c.xp > 0)).toBe(true);
     expect(suggestion.seed).toBe(42);
@@ -2773,6 +2777,53 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const suggestion = parseResult(gen) as { targetBand: string; seed: number };
     expect(suggestion.targetBand).toBe('easy');
     expect(suggestion.seed).toBe(1);
+  });
+
+  /**
+   * Issue #1928 — REST/MCP parity for resolve_action's honesty fields. resolve_action's
+   * handler `return`s `this.actionResolver.resolve(...)` directly (mcp-tools.ts) and the
+   * `tool()` wrapper's `ok(data)` JSON.stringifies whatever the handler returned with no
+   * field allowlist/outputSchema — so this is a real, over-the-wire proof the two new fields
+   * survive the MCP transport, not just a read of the source.
+   */
+  it('resolve_action carries systemMathSupported/mathProfile over MCP for a non-5e campaign (issue #1928)', async () => {
+    const client = await mcpClient(dmToken);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e Resolver' });
+    const pf2eCampaignId = campRes.body.id as number;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eCampaignId));
+
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId: pf2eCampaignId, name: 'MCP PF2e Fight', hidden: false } }),
+    ) as { id: number };
+    const actor = parseResult(
+      await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'Attacker', hpMax: 20 } }),
+    ) as { id: number };
+    const target = parseResult(
+      await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'Defender', hpMax: 20 } }),
+    ) as { id: number };
+
+    const resolved = await client.callTool({
+      name: 'resolve_action',
+      arguments: {
+        encounterId: enc.id,
+        actorCombatantId: actor.id,
+        spec: {
+          mode: 'save',
+          save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+          cost: { slot: 'action', count: 1 },
+          targets: { count: 1, allow: 'any' },
+          outcomes: { failure: { damage: [{ flat: 4, type: 'force' }] }, success: { halfDamage: true } },
+        },
+        targetIds: [target.id],
+        commit: true,
+      },
+    });
+    expect(resolved.isError).toBeFalsy();
+    const result = parseResult(resolved) as { applied: boolean; systemMathSupported: boolean; mathProfile: string | null };
+    expect(result.applied).toBe(true); // never refused — label, don't block
+    expect(result.systemMathSupported).toBe(false);
+    expect(result.mathProfile).toBeNull();
   });
 
   it('get_session_recaps / read_audit_log push limit/offset into SQL (issue #71)', async () => {

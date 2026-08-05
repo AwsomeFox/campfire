@@ -7496,6 +7496,15 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.body.targetBand).toBe('deadly');
       expect(res.body.matchedBand).toBe(true);
       expect(res.body.difficulty.band).toBe('deadly');
+      expect(res.body.difficulty.status).toBe('ok');
+      // Issue #1928: this campaign never set a ruleSystem — the same 5e fallback the combat
+      // math already uses — so the REPORTED difficulty is the system's own audited math.
+      expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp stays the real adjusted-XP total (byte-identical to
+      // pre-#1928 output) and agrees with the reported difficulty's own adjustedXp for a
+      // supported system — never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
       expect(res.body.combatants.length).toBeGreaterThan(0);
       // Every suggested line references a real compendium statblock and carries CR/XP.
       for (const c of res.body.combatants) {
@@ -7602,6 +7611,12 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(Array.isArray(res.body.warnings)).toBe(true);
       // The plan round-trips.
       expect(res.body.plan[0].slotId).toBe(slot.slotId);
+      // Issue #1928: default (empty) ruleSystem falls back to 5e's own audited math.
+      expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp agrees with the reported difficulty's own adjustedXp for
+      // a supported system, and is never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
     });
 
     it('tunes deterministically: reroll one slot is reproducible and pin survives reroll-all', async () => {
@@ -8449,6 +8464,141 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
       sub.unsubscribe();
     });
+  });
+});
+
+/**
+ * Issue #1928 — generator/preview difficulty honesty for a registered non-5e rule system.
+ * `generateEncounter`'s reported difficulty now routes through the SAME adapter-owned
+ * `estimateEncounterDifficultyForRuleSystem` call `previewEncounter`/`getDifficulty` already
+ * use, instead of the raw 5e math the internal count/CR heuristic still sizes the roster
+ * with — so a non-5e campaign gets an explicit `unsupported` band, never a confident 5e
+ * Deadly/Medium/etc. label presented as this system's own math. `difficultySupport` on
+ * generate + preview and the `GET :id/difficulty` `status` must all agree per rule system.
+ */
+describe('encounters — issue #1928: generator/preview difficulty honesty for a non-5e system (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let orcEntryId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Generator Campaign' });
+    campaignId = camp.body.id;
+
+    // 'pf2e' is a registered adapter family id (not an installed-pack slug), set directly —
+    // same DB-write bypass of the installed-pack REST validation characters.e2e-spec.ts uses.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, campaignId));
+
+    for (const name of ['Aria', 'Borin']) {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name, level: 5, hpCurrent: 30, hpMax: 30 });
+      expect(res.status).toBe(201);
+    }
+
+    const ts = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: 'pf2e-gen-pack', name: 'PF2e Gen Pack', version: '1', license: 'ORC', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning();
+    const [orc] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'pf2e-orc',
+        name: 'Orc Warrior',
+        type: 'monster',
+        summary: 'Level 3',
+        body: '',
+        dataJson: JSON.stringify({ challengeRating: 3, hitPoints: 30, type: 'humanoid' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    orcEntryId = orc.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('generate reports an honest unsupported band with difficultySupport:\'heuristic\' — the roster is still valid', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 5 } });
+    expect(res.status).toBe(200);
+    // Label, don't block: the roster is still populated by the internal count/CR heuristic...
+    expect(res.body.combatants.length).toBeGreaterThan(0);
+    expect(res.body.combatants.every((c: { ruleEntryId: number }) => c.ruleEntryId === orcEntryId)).toBe(true);
+    expect(res.body.combatants.every((c: { xp: number }) => c.xp > 0)).toBe(true);
+    // ...but the REPORTED difficulty is explicit and unsupported, not a confident 5e band.
+    expect(res.body.difficulty.status).toBe('unsupported');
+    expect(res.body.difficulty.band).toBeNull();
+    expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): `totalXp` must NOT be zeroed alongside the honest 'unsupported'
+    // status — `unsupportedEncounterDifficulty` always reports `adjustedXp:0` internally, but
+    // presenting that as `totalXp` here would be a FALSE zero sitting next to the positive
+    // per-combatant `xp` values above, not an honest absence. `totalXp` stays the real
+    // (heuristic) total that actually sized this roster; `difficulty`/`difficultySupport`
+    // alone carry the "not this system's own math" signal.
+    expect(res.body.totalXp).toBeGreaterThan(0);
+    // Devin review (#1981): `matchedBand` describes the 5e-shaped roster-SIZING pass, so it may
+    // legitimately be `true` beside `difficulty.band: null`. That pairing is only honest while
+    // the interpretive signal travels with it — a consumer seeing `matchedBand` MUST also see
+    // `difficultySupport` to know the match is about sizing, not about this system rating the
+    // fight. Pin that: whenever the reported band is absent, `difficultySupport` must be
+    // present and 'heuristic', so `matchedBand` can never be read as an achieved difficulty
+    // without the qualifier beside it.
+    expect(typeof res.body.matchedBand).toBe('boolean');
+    if (res.body.difficulty.band === null) {
+      expect(res.body.difficultySupport).toBe('heuristic');
+    }
+  });
+
+  it('preview reports the same unsupported band + difficultySupport for the identical roster, and a positive totalXp', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 5 } });
+    expect(res.status).toBe(200);
+    expect(res.body.difficulty.status).toBe('unsupported');
+    expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): same invariant as generate — this also corrects a PRE-EXISTING
+    // zeroing in previewEncounter (predates #1928; `reported.adjustedXp` was already used
+    // here), not just the copy #1928 introduced in generateEncounter.
+    expect(res.body.totalXp).toBeGreaterThan(0);
+  });
+
+  it('GET :id/difficulty on a committed PF2e encounter agrees with generate/preview (all three unsupported)', async () => {
+    const server = ctx.app.getHttpServer();
+    const committed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/generate?commit=true`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 12, name: 'PF2e Skirmish', filters: { maxCr: 5 } });
+    expect(committed.status).toBe(200);
+    expect(committed.body.suggestion.difficultySupport).toBe('heuristic');
+
+    const got = await request(server).get(`/api/v1/encounters/${committed.body.encounter.id}/difficulty`).set(dm);
+    expect(got.status).toBe(200);
+    expect(got.body.status).toBe('unsupported');
+    expect(got.body.band).toBeNull();
+  });
+
+  it('the target difficulty param is still accepted (never rejected) for this heuristic system', async () => {
+    const server = ctx.app.getHttpServer();
+    for (const difficulty of ['trivial', 'easy', 'medium', 'hard', 'deadly'] as const) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty, seed: 20, filters: { maxCr: 5 } });
+      expect(res.status).toBe(200);
+      expect(res.body.targetBand).toBe(difficulty);
+    }
   });
 });
 
