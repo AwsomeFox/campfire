@@ -264,6 +264,13 @@ export function ActionUsePanel({
               ))}
             </ul>
           </div>
+          {preview.systemMathSupported === false && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }} data-testid="action-use-system-math-notice">
+              {t('encounters.actionFlow.systemMathNotice', {
+                defaultValue: 'Resolved with 5e-style d20 math — verify against your system.',
+              })}
+            </p>
+          )}
           {preview.policy === 'dm-confirmed' && !isDm && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
               Your DM will apply the consequences — this is a declaration only.

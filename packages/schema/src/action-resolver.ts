@@ -267,7 +267,8 @@ export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'cri
  * narrow "make proficiency adapter-owned" scope this issue asked for. OSR/Open Legend remain
  * excluded for the original, unchanged reason above.
  */
-export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+export const ResolverMathProfile = z.literal('d20-ascending-ac-5e-proficiency');
+export type ResolverMathProfile = z.infer<typeof ResolverMathProfile>;
 
 /** The only {@link ResolverMathProfile} that exists today. */
 export const RESOLVER_MATH_D20_5E: ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
@@ -796,6 +797,25 @@ export const ActionResolveResult = z.object({
    * client-echoed resolution — so the applied numbers can only ever be the server's own roll.
    */
   chainId: z.string().min(1).max(64),
+  /**
+   * Issue #1928: whether the resolver's OWN attack/save maths (d20 vs ascending AC, 5e-shaped
+   * proficiency — see {@link resolverImplementsSystemMath}) is audited for the campaign's
+   * active rule system. `true` for 5e and for an empty/unrecognized slug (the same 5e fallback
+   * combat math already uses elsewhere); `false` for a registered adapter that has not declared
+   * {@link ResolverAdapter.resolverMath} (PF2e, OSR, Open Legend, …). Defaults to `true` so a
+   * payload shaped before this field existed keeps parsing — every system that DID parse before
+   * this field existed was, in fact, run through the 5e-shaped math this flag is naming.
+   *
+   * Label, don't block: `false` never refuses or alters resolution (see
+   * {@link resolverImplementsSystemMath}'s doc comment) — it only tells a caller the numbers it
+   * just got are 5e-shaped, not audited for the table's own rules.
+   */
+  systemMathSupported: z.boolean().default(true),
+  /**
+   * Issue #1928: the audited math profile actually in force, or `null` when
+   * `systemMathSupported` is false (an unaudited system) — never guessed at.
+   */
+  mathProfile: ResolverMathProfile.nullable().default(null),
 });
 export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
 

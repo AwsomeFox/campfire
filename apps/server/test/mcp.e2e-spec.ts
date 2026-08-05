@@ -2600,6 +2600,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const suggestion = parseResult(gen) as {
       combatants: Array<{ ruleEntryId: number; count: number; xp: number }>;
       difficulty: { band: string };
+      difficultySupport: string;
       targetBand: string;
       matchedBand: boolean;
       seed: number;
@@ -2607,6 +2608,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(suggestion.targetBand).toBe('deadly');
     expect(suggestion.matchedBand).toBe(true);
     expect(suggestion.difficulty.band).toBe('deadly');
+    // Issue #1928: this campaign's ruleSystem falls back to 5e — the same math produced the
+    // band above, so it is honestly reported as 'supported', not a heuristic guess.
+    expect(suggestion.difficultySupport).toBe('supported');
     expect(suggestion.combatants.length).toBeGreaterThan(0);
     expect(suggestion.combatants.every((c) => c.xp > 0)).toBe(true);
     expect(suggestion.seed).toBe(42);

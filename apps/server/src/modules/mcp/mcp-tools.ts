@@ -1599,12 +1599,17 @@ export class McpToolsService {
     this.tool(
       server,
       'generate_encounter',
-      'Generate a balanced monster group from the installed compendium to hit a target 5e difficulty band for the ' +
-        'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data). NON-MUTATING: returns ' +
-        'a read-only suggestion { combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, ' +
-        'matchedBand } and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly). Party ' +
-        'is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional filters: ' +
-        'creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
+      'Generate a balanced monster group from the installed compendium to hit a target difficulty band for the ' +
+        'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data) sized by a 5e-shaped ' +
+        'count/CR heuristic for every rule system. NON-MUTATING: returns a read-only suggestion ' +
+        '{ combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, matchedBand, difficultySupport } ' +
+        'and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly) — accepted and used ' +
+        'to size the roster for every system, but the REPORTED `difficulty` result is only the rule system\'s own ' +
+        'audited XP/CR math when `difficultySupport:\'supported\'` (5e and an empty/homebrew slug); a registered ' +
+        'non-5e system (PF2e, OSR, …) returns `difficultySupport:\'heuristic\'` with `difficulty.status:\'unsupported\'` ' +
+        '— issue #1928, label don\'t block: the roster is still valid, judge its balance yourself for that system. ' +
+        'Party is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional ' +
+        'filters: creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
         'monsters) bound the group. Reproduce a group by passing back its `seed`; re-roll by changing/omitting it. ' +
         'TO COMMIT: call create_encounter (hidden:true keeps it DM-only prep) then add_combatant once per line with ' +
         'its ruleEntryId + count — those tools honor write-mode (#158)/proposals (#124), so this preview→commit split ' +
@@ -1659,7 +1664,9 @@ export class McpToolsService {
       'preview_encounter',
       'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
         'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
-        'just a band), actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
+        'just a band), a `difficultySupport` flag (\'supported\' for 5e/homebrew, \'heuristic\' for a registered ' +
+        'non-5e system whose reported difficulty is 5e-shaped rather than that system\'s own math — issue #1928), ' +
+        'actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
         'unsupported-system math, swinginess), and actionable fallbacks when the compendium is empty or the system ' +
         'lacks budget math. First call with just `difficulty` (+ optional party/filters/shape/count/seed) to generate; ' +
         'then pass back `roster` (the returned plan[]) with a `tune` op to reroll-all / reroll-slot / swap-slot / ' +
@@ -4810,7 +4817,13 @@ export class McpToolsService {
         'player can finish an attack against a monster end-to-end. Pass commit:true to apply atomically in the same ' +
         'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
         'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
-        'statblock). Returns { resolution, applied, canApply, policy, undoToken }.',
+        'statblock). Returns { resolution, applied, canApply, policy, undoToken, systemMathSupported, mathProfile }. ' +
+        'The resolver\'s OWN attack/save maths (the d20 roll, ascending-AC comparison, proficiency bonus) are 5e-shaped; ' +
+        '`systemMathSupported` is true only when the campaign\'s rule system is 5e or an empty/unrecognized slug ' +
+        '(the same 5e fallback combat math already uses) — false for a registered non-5e system (PF2e, OSR, …) that ' +
+        'has not been audited against this maths (issue #1928, label don\'t block: resolution still runs and, under ' +
+        '`commit:true`, still applies — this only flags that the numbers are 5e-shaped, not this table\'s own rules). ' +
+        '`mathProfile` names the audited profile in force, or null when unsupported.',
       { encounterId: Id.describe('Encounter id'), ...ActionResolveRequest.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

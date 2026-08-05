@@ -37,6 +37,8 @@ import {
   normalizeStats,
   pickOutcomeBranch,
   resolveAbilityModifier,
+  RESOLVER_MATH_D20_5E,
+  resolverImplementsSystemMath,
   rollBranchDamage,
   ruleSystemAdapter,
   signedModifier,
@@ -715,7 +717,12 @@ export class ActionResolverService {
       undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round, encounter.turnVersion);
       applied = true;
     }
-    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
+    // Issue #1928: label, don't block — signal whether the maths just run above (d20 vs AC,
+    // 5e-shaped proficiency) is actually audited for this campaign's rule system, rather than
+    // presenting it as universally correct. Never gates `commit`; see the field's doc comment.
+    const systemMathSupported = resolverImplementsSystemMath(adapter);
+    const mathProfile = systemMathSupported ? RESOLVER_MATH_D20_5E : null;
+    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId, systemMathSupported, mathProfile });
   }
 
   /** Resolve a single target: roll attack or the target's save, classify, roll damage, apply defences. */

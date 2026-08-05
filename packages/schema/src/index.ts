@@ -9780,6 +9780,17 @@ export const EncounterSuggestionCombatant = z.object({
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
 /**
+ * Issue #1928: whether a reported encounter difficulty is the rule system's own audited
+ * XP/CR budget math (`supported`, {@link encounterDifficultySupported} true — 5e and the
+ * empty/unrecognized-slug fallback) or a 5e-shaped estimate not owned by the active system
+ * (`heuristic` — PF2e, OSR, Open Legend, …). Never blocks generation/preview — the roster is
+ * still valid and still sized by the internal count/CR heuristic either way; this only labels
+ * whether the REPORTED band is the system's own.
+ */
+export const DifficultySupport = z.enum(['supported', 'heuristic']);
+export type DifficultySupport = z.infer<typeof DifficultySupport>;
+
+/**
  * Read-only result of a generation: the selected monster lines, the computed 5e
  * difficulty (reusing the #58 math), the adjusted total XP, and the seed that produced
  * it. Nothing is persisted — the caller commits via create_encounter + add_combatant.
@@ -9794,6 +9805,8 @@ export const EncounterSuggestion = z.object({
   // True when the produced band matches the target; false when the compendium couldn't
   // field a group in the requested band (a best-effort closest group is still returned).
   matchedBand: z.boolean(),
+  /** Issue #1928: whether `difficulty` is the system's own audited math or a 5e-shaped heuristic. */
+  difficultySupport: DifficultySupport,
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
@@ -9947,6 +9960,8 @@ export const EncounterPreview = z.object({
   warnings: z.array(EncounterWarning),
   /** Actionable next steps when the compendium is empty or the system lacks budget math. */
   fallbacks: z.array(z.string().max(400)),
+  /** Issue #1928: whether `difficulty` is the system's own audited math or a 5e-shaped heuristic. */
+  difficultySupport: DifficultySupport,
 });
 export type EncounterPreview = z.infer<typeof EncounterPreview>;
 
