@@ -142,6 +142,18 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(awardProps.characterIds.type).toBe('array');
     expect(awardProps.includeNonActive.type).toBe('boolean');
     expect(awardProps.includeNonActive.description).toContain('explicit opt-in');
+
+    const declareAoe = tools.find((t) => t.name === 'declare_aoe_template');
+    expect(declareAoe?.inputSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: expect.arrayContaining(['operation', 'encounterId', 'templateId']),
+    });
+    const rules = (declareAoe?.inputSchema.allOf ?? []) as Array<{ if?: { properties?: { operation?: { const?: string } } }; then?: { required?: string[]; anyOf?: Array<{ required?: string[] }> } }>;
+    const createRule = rules.find((rule) => rule.if?.properties?.operation?.const === 'create');
+    const updateRule = rules.find((rule) => rule.if?.properties?.operation?.const === 'update');
+    expect(createRule?.then?.required).toEqual(expect.arrayContaining(['shape', 'x', 'y', 'sizeFt']));
+    expect(updateRule?.then?.anyOf).toEqual(expect.arrayContaining([{ required: ['x'] }]));
   });
 
   it('runs the campaign-library taxonomy, search, bulk, undo, and template flow through MCP', async () => {
@@ -1202,12 +1214,12 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
-  it('declare_aoe_template upserts without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
+  it('declare_aoe_template creates or patches without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
     const client = await mcpClient(dmToken);
     const encounter = parseResult(
       await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Player AoE', hidden: false } }),
     ) as { id: number };
-    const declaration = { encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
+    const declaration = { operation: 'create' as const, encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
 
     const created = parseResult(await client.callTool({ name: 'declare_aoe_template', arguments: declaration })) as {
       id: string;
@@ -1218,7 +1230,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(created.declaredByUserId).toBeNull();
 
     const moved = parseResult(
-      await client.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
+      await client.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
     ) as { id: string; x: number; angleDeg: number; color: string | null; declaredByUserId: string | null };
     expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, angleDeg: 45, color: '#663399', declaredByUserId: created.declaredByUserId });
 
@@ -1228,6 +1240,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(spoof.isError).toBe(true);
     expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+    const incompleteCreate = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { operation: 'create', encounterId: encounter.id, templateId: 'mcp-incomplete', x: 60 },
+    });
+    expect(incompleteCreate.isError).toBe(true);
+    expect(parseResult(incompleteCreate)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+    const missingUpdate = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-missing', x: 60 },
+    });
+    expect(missingUpdate.isError).toBe(true);
+    expect(parseResult(missingUpdate)).toMatchObject({ error: { status: 404 } });
 
     expect(
       parseResult(await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone' } })),
@@ -1240,7 +1266,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const playerClient = await mcpClient(playerTokenRes.body.token);
     const dmClient = await mcpClient(dmToken);
     const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP fog owner AoE', hidden: false } })) as { id: number };
-    const declared = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'fog-owner', shape: 'circle', x: 20, y: 20, sizeFt: 10 } });
+    const declared = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'create', encounterId: encounter.id, templateId: 'fog-owner', shape: 'circle', x: 20, y: 20, sizeFt: 10 } });
     expect(declared.isError).toBeFalsy();
     expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
 
@@ -1257,10 +1283,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const playerClient = await mcpClient(playerTokenRes.body.token);
     const dmClient = await mcpClient(dmToken);
     const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP hidden existing AoE', hidden: false } })) as { id: number };
-    expect((await dmClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'dm-hidden', shape: 'circle', x: 20, y: 20, sizeFt: 10 } })).isError).toBeFalsy();
+    expect((await dmClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'create', encounterId: encounter.id, templateId: 'dm-hidden', shape: 'circle', x: 20, y: 20, sizeFt: 10 } })).isError).toBeFalsy();
     expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
 
-    const upsert = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'dm-hidden', x: 60 } });
+    const upsert = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'dm-hidden', x: 60 } });
     expect(upsert.isError).toBe(true);
     expect(parseResult(upsert)).toMatchObject({ error: { status: 404 } });
   });
@@ -1281,7 +1307,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const db = ctx.app.get<DrizzleDb>(DB);
     await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, archivedCampaign.body.id));
 
-    const declaration = { encounterId: hidden.id, templateId: 'hidden-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+    const declaration = { operation: 'create' as const, encounterId: hidden.id, templateId: 'hidden-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
     const declared = await client.callTool({ name: 'declare_aoe_template', arguments: declaration });
     expect(declared.isError).toBe(true);
     expect(parseResult(declared)).toMatchObject({ error: { status: 404 } });

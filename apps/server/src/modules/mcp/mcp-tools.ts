@@ -306,6 +306,62 @@ const BulkNotificationArgs = {
 };
 
 /**
+ * `declare_aoe_template` has two distinct state transitions. Keeping them
+ * discriminated makes the MCP schema honest: creation requires a complete
+ * template, while an update can remain a one-field patch.
+ */
+const AoeTemplateMcpCreate = AoeTemplateDeclare.omit({ id: true })
+  .extend({
+    operation: z.literal('create').describe('Create a new template; shape, x, y, and sizeFt are required.'),
+    encounterId: Id.describe('Encounter id — from list_encounters'),
+    templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id for the new template'),
+  })
+  .strict();
+const AoeTemplateMcpUpdate = AoeTemplateUpdate.extend({
+  operation: z.literal('update').describe('Patch an existing template; provide at least one editable field.'),
+  encounterId: Id.describe('Encounter id — from list_encounters'),
+  templateId: AoeTemplateDeclare.shape.id.describe('Id of the existing template to patch'),
+})
+  .strict();
+const AoeTemplateMcpInput = z
+  .discriminatedUnion('operation', [AoeTemplateMcpCreate, AoeTemplateMcpUpdate])
+  .refine(
+    (input) =>
+      input.operation !== 'update' ||
+      (() => {
+        const { shape, x, y, sizeFt, angleDeg, color } = input;
+        return shape !== undefined || x !== undefined || y !== undefined || sizeFt !== undefined || angleDeg !== undefined || color !== undefined;
+      })(),
+    'An update must include at least one editable template field.',
+  );
+const AoeTemplateMcpShape = {
+  operation: z.enum(['create', 'update']).describe('Create a new template or patch an existing one.'),
+  encounterId: Id.describe('Encounter id — from list_encounters'),
+  templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen template id'),
+  ...AoeTemplateUpdate.shape,
+};
+// The MCP protocol requires each advertised tool schema to be a top-level
+// object. Represent the runtime discriminated union as an object plus standard
+// JSON-Schema conditionals, rather than publishing the SDK's empty-object
+// fallback for unions.
+const AoeTemplateMcpListingSchema = {
+  ...zodToJsonSchema(
+    z.object(AoeTemplateMcpShape).strict(),
+    { $refStrategy: 'none' },
+  ),
+  allOf: [
+    {
+      if: { properties: { operation: { const: 'create' } }, required: ['operation'] },
+      then: { required: ['shape', 'x', 'y', 'sizeFt'] },
+    },
+    {
+      if: { properties: { operation: { const: 'update' } }, required: ['operation'] },
+      then: { anyOf: ['shape', 'x', 'y', 'sizeFt', 'angleDeg', 'color'].map((field) => ({ required: [field] })) },
+    },
+  ],
+};
+
+/**
  * Deep-clone a zod schema so every node gets a fresh `_def` object.
  *
  * Why: the MCP SDK serializes each tool's inputSchema for `tools/list` with
@@ -592,21 +648,28 @@ export class McpToolsService {
    * `strictUnions:true`), which emits nullable constrained-number FKs as an untyped
    * `anyOf` union — see flattenNullableNumericFks(). We can't change the SDK's
    * converter, so wrap its already-registered ListTools handler and flatten each
-   * tool's inputSchema on the way out. Defensive: if the SDK's internals ever move,
-   * we simply leave the handler untouched rather than break tools/list.
+   * tool's inputSchema on the way out. The SDK only serializes object schemas for
+   * tools/list; `declare_aoe_template` deliberately uses a discriminated union so
+   * its create and update requirements are truthful, so supply that union's JSON
+   * Schema here instead of letting the SDK advertise an empty object. Defensive: if
+   * the SDK's internals ever move, we simply leave the handler untouched rather than
+   * break tools/list.
    */
   private patchListToolsSchemas(server: McpServer): void {
     const low = (server as unknown as { server?: { _requestHandlers?: Map<string, unknown> } }).server;
     const handlers = low?._requestHandlers;
     const original = handlers?.get('tools/list') as
-      | ((request: unknown, extra: unknown) => Promise<{ tools?: { inputSchema?: unknown }[] }>)
+      | ((request: unknown, extra: unknown) => Promise<{ tools?: { name?: string; inputSchema?: unknown }[] }>)
       | undefined;
     if (!handlers || !original) return;
     handlers.set('tools/list', async (request: unknown, extra: unknown) => {
       const result = await original(request, extra);
       if (result && Array.isArray(result.tools)) {
         for (const tool of result.tools) {
-          if (tool && tool.inputSchema) tool.inputSchema = flattenNullableNumericFks(tool.inputSchema);
+          if (!tool?.inputSchema) continue;
+          tool.inputSchema = tool.name === 'declare_aoe_template'
+            ? flattenNullableNumericFks(AoeTemplateMcpListingSchema)
+            : flattenNullableNumericFks(tool.inputSchema);
         }
       }
       return result;
@@ -1372,16 +1435,13 @@ export class McpToolsService {
       server,
       user,
       'declare_aoe_template',
-      'Declare or move an area-of-effect template in an encounter (issue #1913). Any DM or player may call this. ' +
-        'On first use, the server stamps a player caller as declarer while DM templates remain unattributed; calling again with the same templateId ' +
-        'updates that caller’s own template. A DM may update any template but never changes its original declarer. ' +
+      'Create or update an area-of-effect template in an encounter (issue #1913). Any DM or player may call this. ' +
+        'Use operation=create with a complete template, or operation=update with one or more editable fields on an existing template. ' +
+        'The server stamps a player creator as declarer while DM templates remain unattributed; a DM may update any template but never changes its original declarer. ' +
       'Callers cannot supply declarer identity. Player templates remain visible only to their owner and DMs in unrevealed fog.',
-      {
-        encounterId: Id.describe('Encounter id — from list_encounters'),
-        templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id: a repeated id upserts this template'),
-        ...AoeTemplateUpdate.shape,
-      },
-      async ({ encounterId, templateId, ...template }) => {
+      AoeTemplateMcpShape,
+      async (args) => {
+        const { operation, encounterId, templateId, ...template } = AoeTemplateMcpInput.parse(args);
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         // Keep the hidden encounter's 404 behavior inside EncountersService before
         // archive enforcement, just like REST.
@@ -1393,7 +1453,7 @@ export class McpToolsService {
           { ...template, id: templateId },
           user,
           role,
-          true,
+          operation,
         );
       },
     );

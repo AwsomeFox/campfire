@@ -2243,14 +2243,14 @@ export class EncountersService {
     input: unknown,
     user: RequestUser,
     role: Role,
-    /** MCP upsert retries/moves retain the original declarer; REST create remains conflict-only. */
-    upsert = false,
+    /** REST stays create-only; MCP exposes explicit create/update operations. */
+    operation: 'create' | 'update' = 'create',
   ): Promise<AoeTemplateType> {
-    // REST declarations are complete; MCP's upsert form deliberately permits a
-    // partial payload when the id already exists. Keep its raw key presence so
+    // REST and MCP creations are complete; MCP updates deliberately permit a
+    // partial payload. Keep raw key presence so
     // schema defaults cannot overwrite fields the caller did not intend to change.
     const rawInput = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
-    const createTemplate = upsert ? undefined : AoeTemplateDeclare.parse(input);
+    const createTemplate = operation === 'update' ? undefined : AoeTemplateDeclare.parse(input);
     const templateId = createTemplate?.id ?? AoeTemplate.shape.id.parse(rawInput.id);
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
     let declared: AoeTemplateType | undefined;
@@ -2270,7 +2270,7 @@ export class EncountersService {
         if (role !== 'dm' && !this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).some((candidate) => candidate.id === templateId)) {
           throw new NotFoundException(`AoE template ${templateId} not found`);
         }
-        if (!upsert) throw new ConflictException(`AoE template ${templateId} already exists`);
+        if (operation === 'create') throw new ConflictException(`AoE template ${templateId} already exists`);
         if (role !== 'dm' && existing.declaredByUserId !== user.id) {
           throw new ForbiddenException('Players may modify only their own AoE templates.');
         }
@@ -2283,6 +2283,7 @@ export class EncountersService {
         current[existingIndex] = declared;
         action = 'encounter.aoe.update';
       } else {
+        if (operation === 'update') throw new NotFoundException(`AoE template ${templateId} not found`);
         if (current.length >= 50) {
           throw new ConflictException('An encounter may have at most 50 AoE templates');
         }
