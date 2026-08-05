@@ -53,6 +53,42 @@ describe('shared-instance governance (issue #851, e2e)', () => {
     expect(res.body.canCreate).toBe(true);
   });
 
+  it('derives the filed request\'s audit role from the actor instead of hard-coding it', async () => {
+    // Review asked for the requester's real role here. Worth being precise about what that can
+    // mean: `AuditActorRole` is only 'admin' | 'dm', and `auditActorRole` returns 'dm' for any
+    // non-admin — so an ordinary user's request is recorded as 'dm' either way, and the review's
+    // stated impact (restricted users appearing as game masters) is a property of that
+    // vocabulary, not of the hard-coding. What the change does fix is the ADMIN case, which the
+    // literal 'dm' got wrong, and it stops the value drifting from `decide()` in the same
+    // service. This test pins the derivation, which is the part that is actually true.
+    await adminAgent.patch('/api/v1/settings').send({ campaignCreationPolicy: 'approved_organizers' });
+    const filed = await adminAgent.post('/api/v1/campaigns/creation-requests').send({ note: 'please' });
+    expect(filed.status).toBe(201);
+
+    // Read from storage: the audit REST surface is campaign-scoped (`/campaigns/:id/audit`)
+    // and this row has no campaign, so there is no endpoint that can show it.
+    const db = new Database(path.join(ctx.dataDir, 'campfire.db'), { readonly: true });
+    let row: { actor_role: string } | undefined;
+    try {
+      row = db
+        .prepare("SELECT actor_role FROM audit_log WHERE action = 'campaign_creation_request.create' ORDER BY id DESC LIMIT 1")
+        .get() as { actor_role: string } | undefined;
+    } finally {
+      db.close();
+    }
+    expect(row).toBeDefined();
+    expect(row?.actor_role).toBe('admin');
+  });
+
+  it('refuses a second pending request rather than filing a duplicate', async () => {
+    await adminAgent.patch('/api/v1/settings').send({ campaignCreationPolicy: 'approved_organizers' });
+    const user = await createUser('dupereq1');
+    const first = await user.post('/api/v1/campaigns/creation-requests').send({ note: 'one' });
+    expect(first.status).toBe(201);
+    const second = await user.post('/api/v1/campaigns/creation-requests').send({ note: 'two' });
+    expect(second.status).toBe(409);
+  });
+
   it('withholds server-wide campaign counts from a non-admin caller', async () => {
     // Review: every other campaign read in this product is membership-scoped — GET /campaigns
     // is, even for a server admin — so returning an aggregate over campaigns the caller has no

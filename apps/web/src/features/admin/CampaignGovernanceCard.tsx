@@ -39,8 +39,13 @@ function mbInputToBytes(value: string): number | null | typeof INVALID {
   const trimmed = value.trim();
   if (trimmed === '') return null;
   const n = Number(trimmed);
-  // Same collapse as above: a negative quota became "no default quota" rather than an error.
-  return Number.isFinite(n) && n >= 0 ? Math.round(n * BYTES_PER_MB) : INVALID;
+  // `0` is REFUSED, not accepted (review). Only `null` means unlimited to the server:
+  // AttachmentsService enforces any non-null quota, so a saved 0 is a real zero-byte
+  // allowance and every campaign created afterwards rejects every map, portrait and handout.
+  // The box is labelled "blank = unlimited", so an admin typing 0 to mean "no cap" would get
+  // the exact opposite. Same contract as the limit fields above: blank for unlimited,
+  // anything else must be a usable number.
+  return Number.isFinite(n) && n > 0 ? Math.round(n * BYTES_PER_MB) : INVALID;
 }
 
 export function CampaignGovernanceCard({ settings, onChange }: { settings: ServerSettings | null; onChange: () => void }) {
@@ -217,7 +222,7 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
           <input
             id="default-quota-mb"
             type="number"
-            min={0}
+            min={1}
             className="cf-input text-sm cf-density-compact"
             value={defaultQuotaMb}
             onChange={(e) => setDefaultQuotaMb(e.target.value)}

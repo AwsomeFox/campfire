@@ -224,6 +224,27 @@ export const IMPORT_DISK_RESERVE_BYTES = 512 * 1024 * 1024;
  * ahead of any staging/DB write). Exported with an overridable `capBytes` so a test
  * can pin an exact boundary without allocating a real multi-hundred-MB buffer.
  */
+/**
+ * The uncompressed length a ZIP entry DECLARES in its own header, or null when the archive
+ * does not carry one (issue #851 review).
+ *
+ * Checking this before calling `.async('nodebuffer')` is what makes the cap a real zip-bomb
+ * defence rather than an accounting exercise. Accumulating only after decompression bounds
+ * the SUM across entries but not the PEAK of any single one, and the compressed upload cap is
+ * 128 MiB while one deflate entry can expand by orders of magnitude — so a small crafted
+ * archive could force a multi-gigabyte allocation (RangeError, or the process OOM) before the
+ * running total ever crossed its ceiling.
+ *
+ * A declared size is attacker-supplied and may understate the truth, which is exactly why the
+ * post-decompression accumulate stays: this rejects the cheap, honest-header bomb before the
+ * allocation, and the existing check still catches a lying header afterwards.
+ */
+function declaredUncompressedBytes(entry: unknown): number | null {
+  const data = (entry as { _data?: { uncompressedSize?: unknown } })?._data;
+  const size = data?.uncompressedSize;
+  return typeof size === 'number' && Number.isFinite(size) && size >= 0 ? size : null;
+}
+
 export function accumulateImportUncompressedBytes(
   runningTotal: number,
   addedBytes: number,
@@ -3583,10 +3604,16 @@ export class CampaignsService {
         attachmentsSkipped += 1; // present=false / dangling — no bytes were shipped
         continue;
       }
+      // Check the DECLARED size before expanding anything (review) — see
+      // `declaredUncompressedBytes`. This runs the same accumulator, so a header that would
+      // blow the cap rejects the archive without the allocation ever happening.
+      const declared = declaredUncompressedBytes(entry);
+      if (declared !== null) accumulateImportUncompressedBytes(unpackedBytes, declared);
       const bytes = await entry.async('nodebuffer');
       // Issue #851: preflight the running uncompressed total BEFORE this entry's bytes
       // are staged/persisted anywhere — reject the whole archive once expansion crosses
-      // the cap, rather than silently truncating what gets imported.
+      // the cap, rather than silently truncating what gets imported. Still required after
+      // the declared-size check above, which trusts a number the archive author chose.
       unpackedBytes = accumulateImportUncompressedBytes(unpackedBytes, bytes.length);
       if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
         attachmentsSkipped += 1;

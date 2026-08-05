@@ -291,19 +291,32 @@ export class CampaignGovernanceService {
     if (!Number.isInteger(userId)) {
       throw new BadRequestException('A synthetic/dev principal cannot file a campaign-creation request');
     }
-    const existing = await this.db
-      .select({ id: campaignCreationRequests.id })
-      .from(campaignCreationRequests)
-      .where(and(eq(campaignCreationRequests.userId, userId), eq(campaignCreationRequests.status, 'pending')))
-      .limit(1);
-    if (existing.length > 0) {
-      throw new ConflictException('You already have a pending campaign-creation request');
-    }
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(campaignCreationRequests)
-      .values({ userId, status: 'pending', note: note ?? '', requestedAt: ts })
-      .returning();
+    // One transaction, like decide() (review). The check and the insert were two awaited
+    // statements with an event-loop yield between them, so two requests filed at once both
+    // passed the check and both landed — and approving one leaves its twins pending forever,
+    // because decide() only touches the id it is given.
+    //
+    // A partial unique index on (user_id) WHERE status='pending' would be a second backstop,
+    // but this server is one process against one SQLite file, where a synchronous transaction
+    // already serializes the pair; it is not worth a third migration on a PR that already
+    // carries two.
+    const row = this.db.transaction((tx) => {
+      const existing = tx
+        .select({ id: campaignCreationRequests.id })
+        .from(campaignCreationRequests)
+        .where(and(eq(campaignCreationRequests.userId, userId), eq(campaignCreationRequests.status, 'pending')))
+        .limit(1)
+        .get();
+      if (existing) {
+        throw new ConflictException('You already have a pending campaign-creation request');
+      }
+      return tx
+        .insert(campaignCreationRequests)
+        .values({ userId, status: 'pending', note: note ?? '', requestedAt: ts })
+        .returning()
+        .get();
+    });
     const [who] = await this.db
       .select({ username: users.username, displayName: users.displayName })
       .from(users)
@@ -311,7 +324,11 @@ export class CampaignGovernanceService {
       .limit(1);
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      // The requester's REAL role (review). A creation request is filed precisely by someone
+      // with no dm authority — often a user the policy has restricted — so recording every one
+      // as 'dm' misattributes exactly the distinction this field exists to preserve. decide()
+      // in this same service already uses the helper.
+      actorRole: auditActorRole(user),
       action: 'campaign_creation_request.create',
       entityType: 'campaign_creation_request',
       entityId: row.id,

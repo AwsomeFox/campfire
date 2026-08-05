@@ -65,3 +65,22 @@ describe('campaign import preflight (issue #851)', () => {
     });
   });
 });
+
+describe('#851 review — the cap must fire BEFORE the allocation', () => {
+  it('rejects an entry whose DECLARED uncompressed size already blows the cap', () => {
+    // Accumulating only after `.async('nodebuffer')` bounds the SUM across entries but not the
+    // PEAK of any single one. The compressed upload cap is 128 MiB and one deflate entry can
+    // expand by orders of magnitude, so a small crafted archive could force a multi-gigabyte
+    // allocation before the running total ever crossed its ceiling — the classic zip bomb this
+    // preflight exists to close.
+    expect(() => accumulateImportUncompressedBytes(0, 4_000, 1_000)).toThrow(/uncompressed size/i);
+  });
+
+  it('still catches a header that UNDERSTATES the truth, which is why both checks stay', () => {
+    // A declared size is attacker-supplied. The pre-check is the cheap rejection; the
+    // post-decompression accumulate is what a lying header runs into.
+    const afterHonestDeclaration = accumulateImportUncompressedBytes(0, 10, 1_000);
+    expect(afterHonestDeclaration).toBe(10);
+    expect(() => accumulateImportUncompressedBytes(afterHonestDeclaration, 4_000, 1_000)).toThrow(/uncompressed size/i);
+  });
+});
