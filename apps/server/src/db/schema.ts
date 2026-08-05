@@ -1012,6 +1012,8 @@ export const users = sqliteTable('users', {
   timeFormat: text('time_format').notNull().default('system'),
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
+  // Whether to play spectator tumble/crit animations for other players' rolls (issue #1899).
+  animateOthersRolls: integer('animate_others_rolls', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

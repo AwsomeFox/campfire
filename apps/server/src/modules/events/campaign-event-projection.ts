@@ -32,6 +32,7 @@ export const CAMPAIGN_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, stri
   'check.resolved': 'Thin signal indicating a check request was resolved.',
   'campaign.trashed': 'Filtered server-side, never sent as data.',
   'safety.hold': 'Active state only, contains no actor or user identity.',
+  'dice.rolled': 'Thin id-only signal, refetches feed.',
 
   // AI-DM stream types
   'turn.start': 'Carries only the campaign id and a timestamp; the table needs to know a turn began.',

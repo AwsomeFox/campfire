@@ -918,6 +918,7 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
+  animate_others_rolls INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

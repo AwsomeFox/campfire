@@ -66,6 +66,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     textSize: row.textSize as User['textSize'],
     diceTheme: (row.diceTheme ?? 'nocturne') as User['diceTheme'],
     timeFormat: (row.timeFormat ?? 'system') as User['timeFormat'],
+    animateOthersRolls: row.animateOthersRolls ?? true,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -442,6 +443,7 @@ export class UsersService {
       if (input.textSize !== undefined) update.textSize = input.textSize;
       if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
       if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
+      if (input.animateOthersRolls !== undefined) update.animateOthersRolls = input.animateOthersRolls;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
       if (input.displayName !== undefined && input.displayName !== existing.displayName) {
