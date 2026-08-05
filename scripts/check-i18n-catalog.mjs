@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * CI guard for issue #629 — translation catalog completeness and i18n surface checks.
+ * CI guard for issue #629 and #1940 — translation catalog completeness, i18n surface checks, and JSX text ratchet.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
+ * 3. Encounters surface (issue #1940) ratchets against hardcoded plain JSX text nodes using scripts/i18n-jsx-baseline.json.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -108,7 +109,7 @@ const HARDCODED_PATTERNS = [
   { name: 'ErrorNote message=', re: /ErrorNote\s+message="[^"]+"/ },
   { name: 'EmptyState title=', re: /EmptyState[^>]*title="[^"]+"/ },
   { name: 'EmptyState hint=', re: /EmptyState[^>]*hint="[^"]+"/ },
-  { name: "Couldn't …", re: /"Couldn't [^"]+"/ },
+  { name: 'Couldn\'t …', re: /"Couldn't [^"]+"/ },
   { name: 'No campaign selected', re: /"No campaign selected\."/ },
   { name: 'setError err.message fallback', re: /err instanceof ApiError\s*\?\s*err\.message\s*:/ },
 ];
@@ -133,9 +134,59 @@ function checkHardcodedSurfaces() {
   return errors;
 }
 
+/**
+ * Scans JSX source code for hardcoded user-facing plain text strings in text nodes (issue #1940).
+ * Excludes attributes (data-testid, className, aria-*), numbers, dice notation (1d8+4, d20), punctuation, and t() calls.
+ * @param {string} src
+ * @returns {string[]} List of matched hardcoded text strings
+ */
+export function extractJsxTextNodes(src) {
+  const matches = [];
+  const textNodeRegex = />([^<>{}\r\n]+)</g;
+  let match;
+  while ((match = textNodeRegex.exec(src)) !== null) {
+    const raw = match[1];
+    const text = raw.trim();
+    if (!text) continue;
+    if (/^[\d\s\-_.,/\\()!?:;+|#%&*=<>'"✓✗ℹ️—–…]+$/.test(text)) continue;
+    if (/^\d*d\d+([+-]\d+)?$/i.test(text)) continue;
+    if (!/[a-zA-Z]{2,}/.test(text)) continue;
+    matches.push(text);
+  }
+  return matches;
+}
+
+function checkJsxTextRatchet() {
+  const errors = [];
+  const baselinePath = join(root, 'scripts/i18n-jsx-baseline.json');
+  let baseline = {};
+  try {
+    baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  } catch (err) {
+    errors.push(`missing or invalid scripts/i18n-jsx-baseline.json: ${err.message}`);
+    return errors;
+  }
+
+  const encDir = join(root, 'apps/web/src/features/encounters');
+  for (const file of walkSourceFiles(encDir)) {
+    const rel = file.slice(root.length + 1);
+    const src = readFileSync(file, 'utf8');
+    const nodes = extractJsxTextNodes(src);
+    const allowedCount = baseline[rel] ?? 0;
+    if (nodes.length > allowedCount) {
+      errors.push(
+        `${rel}: has ${nodes.length} hardcoded JSX text node(s), exceeding baseline limit of ${allowedCount}. ` +
+          `New hardcoded strings (e.g. "${nodes[0]}") must be translated with t() / useTranslation.`,
+      );
+    }
+  }
+  return errors;
+}
+
 const parityErrors = checkKeyParity();
 const surfaceErrors = checkHardcodedSurfaces();
-const errors = [...parityErrors, ...surfaceErrors];
+const ratchetErrors = checkJsxTextRatchet();
+const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors];
 
 if (errors.length > 0) {
   console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));
