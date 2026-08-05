@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   session_count INTEGER NOT NULL DEFAULT 0,
   latest_session_number INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
+  -- Issue #1502: per-campaign homebrew mechanics profile (JSON), or NULL when unset.
+  custom_mechanics_profile TEXT,
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   ics_token_expires_at TEXT,

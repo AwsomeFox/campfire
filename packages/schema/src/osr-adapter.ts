@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 import { initModDescThenSortOrderAsc, sortOrderAscTiebreak } from './initiative-tiebreak';
 import type { AttackRollInput, AttackRollResult } from './action-resolver';
@@ -54,6 +55,15 @@ export interface OsrMechanicsProfile {
   /** Whether individual initiative adds the DEX modifier to the d6 roll. */
   readonly initiativeUsesDexMod: boolean;
   readonly tiebreak: 'dex-then-order' | 'order-only';
+  /**
+   * OPTIONAL — this variant's own condition vocabulary (issue #1502). Every one of the six
+   * built-in OSR profiles omits this and keeps sharing {@link OSR_CONDITIONS} (their existing,
+   * unchanged behavior). A homebrew profile that doesn't play like a D&D retroclone — no
+   * Blinded/Paralyzed/etc. — declares its own closed list here instead of inheriting a
+   * vocabulary that isn't its own, the same "don't assume another system's terms" principle
+   * {@link NEUTRAL_STATBLOCK_PRESENTATION} already applies to labels (issue #763).
+   */
+  readonly conditions?: readonly string[];
 }
 
 // ---------- Ability modifier tables ----------
@@ -311,10 +321,13 @@ export interface OsrMigrationPreview {
   changes: string[];
 }
 
-/** Preview how combat math would change when migrating a campaign between OSR variants. */
-export function previewOsrMigration(fromSlug: string, toSlug: string): OsrMigrationPreview {
-  const from = osrMechanicsProfile(fromSlug);
-  const to = osrMechanicsProfile(toSlug);
+/**
+ * The change-detection at the heart of a migration preview, factored out (issue #1502) so it
+ * runs over any two profile OBJECTS — not just two registry slugs — which is what a homebrew
+ * campaign editing its own stored profile in place needs (there is no second slug to look up;
+ * the "from" and "to" are the same slug's profile before/after the edit).
+ */
+function diffMechanicsProfiles(from: OsrMechanicsProfile, to: OsrMechanicsProfile): string[] {
   const changes: string[] = [];
   if (from.abilityTable !== to.abilityTable) {
     changes.push(`Ability modifiers: ${from.abilityTable} (±${from.abilityCap}) → ${to.abilityTable} (±${to.abilityCap})`);
@@ -333,8 +346,32 @@ export function previewOsrMigration(fromSlug: string, toSlug: string): OsrMigrat
   if (from.tiebreak !== to.tiebreak) {
     changes.push(`Initiative ties: ${from.tiebreak === 'dex-then-order' ? 'higher DEX first' : 'insertion order'} → ${to.tiebreak === 'dex-then-order' ? 'higher DEX first' : 'insertion order'}`);
   }
+  const fromConditions = from.conditions ?? OSR_CONDITIONS;
+  const toConditions = to.conditions ?? OSR_CONDITIONS;
+  if (fromConditions.join() !== toConditions.join()) {
+    changes.push(`Conditions: ${fromConditions.length} (${fromConditions.join(', ')}) → ${toConditions.length} (${toConditions.join(', ')})`);
+  }
   if (changes.length === 0) changes.push('No mechanics changes — profiles are identical.');
-  return { fromSlug: from.slug, toSlug: to.slug, from, to, changes };
+  return changes;
+}
+
+/** Preview how combat math would change when migrating a campaign between OSR variants. */
+export function previewOsrMigration(fromSlug: string, toSlug: string): OsrMigrationPreview {
+  const from = osrMechanicsProfile(fromSlug);
+  const to = osrMechanicsProfile(toSlug);
+  return { fromSlug: from.slug, toSlug: to.slug, from, to, changes: diffMechanicsProfiles(from, to) };
+}
+
+/**
+ * Same diff, over two arbitrary mechanics profile OBJECTS rather than two registry slugs
+ * (issue #1502) — the seam a homebrew campaign's "you edited your rules, here's what shifts"
+ * preview needs when comparing its OWN stored profile before/after an in-place edit, which
+ * {@link previewOsrMigration}'s slug-keyed lookup cannot express (both sides would resolve to
+ * the same registered slug). Reuses the exact same change-detection {@link previewOsrMigration}
+ * uses, so the two never drift.
+ */
+export function previewMechanicsProfileMigration(from: OsrMechanicsProfile, to: OsrMechanicsProfile): OsrMigrationPreview {
+  return { fromSlug: from.slug, toSlug: to.slug, from, to, changes: diffMechanicsProfiles(from, to) };
 }
 
 // ---------- Adapter factory ----------
@@ -411,7 +448,9 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
       return representation === 'score' ? abilityFn(dex) : Math.trunc(dex);
     },
     initiativeTiebreak: tiebreak,
-    conditions: OSR_CONDITIONS,
+    // A homebrew profile's OWN vocabulary (issue #1502) when it declares one; every built-in
+    // OSR profile omits `conditions` and keeps the shared OSR_CONDITIONS list unchanged.
+    conditions: profile.conditions ?? OSR_CONDITIONS,
     /**
      * This variant's OWN attack roll (issue #1598), via {@link osrAttackHits} — the function
      * this file already provided but nothing called. `osrAttackHits` reads the ATTACKER'S
@@ -465,6 +504,50 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
       return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
     },
   };
+}
+
+// ---------- Homebrew mechanics profile (issue #1502) ----------
+// `createOsrVariantAdapter` above already manufactures a complete RuleSystemAdapter from 13
+// pure-data fields — no functions — selecting behavior from closed enums rather than executing
+// arbitrary code. The six built-in OSR variants (and the OSR_CONDITIONS default) prove the shape
+// works; the only thing making it a fixed list rather than a homebrew system builder is that
+// nothing validates and accepts an ARBITRARY caller-supplied profile. `HomebrewMechanicsProfile`
+// is that runtime-validated boundary — every field is the exact same closed-enum/data shape as
+// `OsrMechanicsProfile`, so a persisted or uploaded profile can never smuggle in unvetted code,
+// only a selection among already-audited strategies (ability table, save list, AC convention,
+// initiative model, tiebreak, optional condition vocabulary).
+
+/** Runtime-validated general mechanics profile a homebrew rule system persists (issue #1502). */
+export const HomebrewMechanicsProfile = z
+  .object({
+    slug: z.string().min(1).max(80),
+    label: z.string().min(1).max(120),
+    mechanicsSummary: z.string().max(500).default(''),
+    abilityTable: z.enum(['bx-banded', 'sw-banded', 'adnd-linear']),
+    abilityCap: z.number().int().min(1).max(10),
+    saves: z.array(z.string().min(1).max(80)).min(1).max(12),
+    acMode: z.enum(['descending', 'ascending']),
+    acAnchor: z.number().int().min(0).max(30),
+    initiativeMode: z.enum(['individual', 'group']),
+    initiativeDie: z.number().int().min(2).max(100),
+    initiativeUsesDexMod: z.boolean(),
+    tiebreak: z.enum(['dex-then-order', 'order-only']),
+    // Optional own condition vocabulary (see OsrMechanicsProfile.conditions above). Omit to
+    // keep the shared OSR_CONDITIONS list.
+    conditions: z.array(z.string().min(1).max(60)).min(1).max(40).optional(),
+  })
+  .strict();
+export type HomebrewMechanicsProfile = z.infer<typeof HomebrewMechanicsProfile>;
+
+/**
+ * Validate an arbitrary (persisted, uploaded, or hand-authored) profile and build its
+ * RuleSystemAdapter (issue #1502) — the widened, runtime-checked entry point onto the exact
+ * same factory the six built-in OSR variants already use. Throws a ZodError (out-of-enum
+ * strategy value, missing field, wrong type) rather than silently accepting malformed input.
+ */
+export function createHomebrewRuleSystemAdapter(rawProfile: unknown): RuleSystemAdapter {
+  const profile = HomebrewMechanicsProfile.parse(rawProfile);
+  return createOsrVariantAdapter(profile);
 }
 
 // ---------- Per-variant adapter exports ----------

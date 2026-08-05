@@ -21,8 +21,10 @@ import {
   CompendiumSnapshot,
   normalizeOffsetIsoDateTime,
   CharacterAction,
+  isRegisteredRuleSystemSlug,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium, HomebrewMechanicsProfile } from '@campfire/schema';
+import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -338,6 +340,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
+    customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
     deletedAt: row.deletedAt ?? null,
@@ -524,12 +527,49 @@ export class CampaignsService {
    * downstream (Compendium lookups scoped by pack slug) that assumes it resolves.
    * Empty string ('' — "no rule system picked") is always allowed, both on create and
    * when clearing it back via PATCH.
+   *
+   * Issue #1502: a homebrew campaign that carries its OWN validated customMechanicsProfile
+   * (checked separately by validateCustomMechanicsProfile, always in the same write) is the
+   * one exception — its slug need not match an installed rule pack, since the profile IS
+   * the rule system rather than imported content.
    */
-  private async validateRuleSystem(ruleSystem: string | undefined): Promise<void> {
+  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
+    if (hasCustomMechanicsProfile) return;
     const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
     if (!pack) {
-      throw new BadRequestException(`ruleSystem "${ruleSystem}" does not match any installed rule pack`);
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
+      );
+    }
+  }
+
+  /**
+   * Validate a homebrew mechanics profile against the ruleSystem slug it is being stored
+   * against (issue #1502). `HomebrewMechanicsProfile` itself already rejects out-of-enum
+   * strategy values at the zod boundary (CampaignCreate/CampaignUpdate parsing, both REST
+   * and MCP); this covers the cross-field business rules zod alone can't express:
+   *  - a profile requires a non-empty ruleSystem slug to attach to;
+   *  - that slug must NOT be a built-in registered adapter (5e/PF2e/OSR/…) — a homebrew
+   *    profile can never override a known system's mechanics through this side door;
+   *  - profile.slug must equal ruleSystem, so `ruleSystemAdapter(ruleSystem, profile)` can
+   *    trust the pairing without a second lookup at every resolve call site.
+   */
+  private validateCustomMechanicsProfile(
+    ruleSystem: string | null | undefined,
+    profile: HomebrewMechanicsProfile | null | undefined,
+  ): void {
+    if (profile == null) return;
+    if (!ruleSystem) {
+      throw new BadRequestException('customMechanicsProfile requires a non-empty ruleSystem slug');
+    }
+    if (isRegisteredRuleSystemSlug(ruleSystem)) {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is a built-in rule system and cannot carry a customMechanicsProfile`,
+      );
+    }
+    if (profile.slug !== ruleSystem) {
+      throw new BadRequestException(`customMechanicsProfile.slug ("${profile.slug}") must match ruleSystem ("${ruleSystem}")`);
     }
   }
 
@@ -570,7 +610,8 @@ export class CampaignsService {
 
   /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
-    await this.validateRuleSystem(input.ruleSystem);
+    this.validateCustomMechanicsProfile(input.ruleSystem ?? '', input.customMechanicsProfile ?? null);
+    await this.validateRuleSystem(input.ruleSystem, input.customMechanicsProfile != null);
     // A brand-new campaign has no locations/attachments of its own yet, so any
     // non-null currentLocationId/mapAttachmentId on create can never be valid.
     if (input.currentLocationId != null) {
@@ -600,6 +641,7 @@ export class CampaignsService {
         sessionCount: 0,
         latestSessionNumber: 0,
         ruleSystem: input.ruleSystem ?? '',
+        customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
         mapAttachmentId: input.mapAttachmentId ?? null,
         createdAt: ts,
         updatedAt: ts,
@@ -632,7 +674,10 @@ export class CampaignsService {
   ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
     // mapAlignment is a request-time directive (issue #870), not a stored column.
-    const { mapAlignment, ...campaignInput } = input;
+    // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
+    // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
+    // which is spread directly into `.set()` below.
+    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, ...campaignInput } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
@@ -646,7 +691,27 @@ export class CampaignsService {
         );
       }
     }
-    await this.validateRuleSystem(input.ruleSystem);
+    await this.validateRuleSystem(input.ruleSystem, customMechanicsProfileInput != null);
+    // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
+    // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
+    // customMechanicsProfile write is validated against the slug it will actually pair with.
+    const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    let nextCustomMechanicsProfile: string | null | undefined;
+    if (customMechanicsProfileInput !== undefined) {
+      // Explicitly set (or cleared with null) in this request.
+      this.validateCustomMechanicsProfile(effectiveRuleSystem, customMechanicsProfileInput);
+      nextCustomMechanicsProfile = customMechanicsProfileInput ? JSON.stringify(customMechanicsProfileInput) : null;
+    } else if (existing.customMechanicsProfile && existing.customMechanicsProfile.slug !== effectiveRuleSystem) {
+      // ruleSystem changed away from the slug the stored profile belongs to, in this SAME
+      // request, without this request also touching customMechanicsProfile. The stale profile
+      // can never resolve again (ruleSystemAdapter only honors an exact slug match against the
+      // CURRENT ruleSystem), so clear it rather than leave silently-orphaned data behind.
+      nextCustomMechanicsProfile = null;
+    } else {
+      nextCustomMechanicsProfile = undefined; // leave the column untouched
+    }
+    const customMechanicsProfilePatch =
+      nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -697,7 +762,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -782,7 +847,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -823,7 +888,7 @@ export class CampaignsService {
 
       [updatedRow] = await this.db
         .update(campaigns)
-        .set({ ...campaignInput, updatedAt: ts })
+        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
         .where(eq(campaigns.id, id))
         .returning();
     }
