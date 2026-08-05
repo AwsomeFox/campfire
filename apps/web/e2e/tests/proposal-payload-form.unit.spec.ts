@@ -407,3 +407,37 @@ test.describe('proposalPayloadForm: server-contract alignment (issue #769 review
     expect(data.hidden).toBe(false);
   });
 });
+
+test.describe('proposalPayloadForm: advanced-mode guardrails (issue #769 review)', () => {
+  test('an empty payload is not silently "no changes" under update semantics', () => {
+    // The editor refuses an emptied raw box outright, but this pins WHY it has to: `{}`
+    // validates cleanly against every *Update schema (every field optional), and the omission
+    // rule then reports nothing changed — for a payload that dropped every field. The two
+    // behaviours have to be read together, so the diff's half is asserted here.
+    expect(validateProposalPayload(QuestUpdate, {}).ok).toBe(true);
+    expect(diffProposalChangedKeys({ title: 'Q', reward: 'Gold' }, {}, 'update')).toEqual([]);
+    // On a create the same payload is loudly different, which is the point of the split.
+    expect(diffProposalChangedKeys({ title: 'Q', reward: 'Gold' }, {}, 'create').sort()).toEqual(['reward', 'title']);
+  });
+
+  test('an unparseable per-field JSON box leaves the original value in the best-effort draft', () => {
+    // This is what makes serializing that draft into raw mode lossy: the field error is
+    // recorded, but `data[key]` still holds the value seeded from the working payload, so the
+    // reviewer's half-typed text is nowhere in it. The editor refuses the switch for exactly
+    // this reason; this pins the underlying shape the refusal is protecting against.
+    const fields = describeProposalFields(QuestUpdate);
+    const jsonKeys = jsonFieldKeys(QuestUpdate);
+    const original = { title: 'Q', linkedEncounters: [1, 2] };
+    const text = initProposalFieldText(fields, jsonKeys, original);
+    const bool = initProposalFieldBool(fields, original);
+    const built = buildProposalDraftPayload(
+      fields,
+      jsonKeys,
+      { ...text, linkedEncounters: '[1, 2' },
+      bool,
+      original,
+    );
+    expect(built.fieldErrors.linkedEncounters).toBeTruthy();
+    expect(built.data.linkedEncounters).toEqual([1, 2]);
+  });
+});

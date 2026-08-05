@@ -22,6 +22,7 @@ import { TextArea, TextInput } from '../../components/ui';
 import {
   computeGuidedProposalPreview,
   computeProposalPreviewFromData,
+  humanizeFieldKey,
   describeProposalFields,
   initProposalFieldBool,
   initProposalFieldText,
@@ -63,9 +64,16 @@ function rawJsonId(prefix: string): string {
 }
 
 function parseJsonObject(raw: string): { ok: true; data: Record<string, unknown> } | { ok: false; message: string } {
+  // An emptied box is an ERROR, not `{}` (review). The editor this replaces called
+  // `JSON.parse(draft)` directly, so a wiped textarea threw and surfaced "Invalid JSON",
+  // blocking the approve. Mapping '' to `{}` removed that guardrail: `{}` validates cleanly
+  // against every `*Update` schema (all fields optional), and under update omission semantics
+  // the preview then reports "no changes from the current proposal" — for a payload that
+  // dropped every field. A DM who cleared the box by accident got no warning at all.
+  if (raw.trim() === '') return { ok: false, message: 'The payload must be a JSON object.' };
   let parsed: unknown;
   try {
-    parsed = raw.trim() === '' ? {} : JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch (err) {
     return { ok: false, message: err instanceof Error ? `Invalid JSON: ${err.message}` : 'Invalid JSON.' };
   }
@@ -118,6 +126,19 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     const preview = mode === 'guided' ? guidedPreview : advancedPreview;
 
     function switchToAdvanced() {
+      // Refuse the switch while a per-field JSON box is unparseable — the mirror of what
+      // `switchToGuided` already does (review). `buildProposalDraftPayload` records the field
+      // error but leaves `data[key]` at the value seeded from the working payload, so
+      // serializing that best-effort draft would replace the reviewer's half-typed `stats` /
+      // `skills` / `linkedEncounters` text with the ORIGINAL value — and switching back
+      // re-seeds guided state from the raw text, so the typed text would be gone from both
+      // modes with nothing said. Only the JSON boxes block: a scalar field error is
+      // recoverable in raw mode, which is often exactly why someone switches.
+      const badJsonKey = jsonKeys.find((key) => guidedPreview.fieldErrors[key]);
+      if (badJsonKey) {
+        setModeSwitchError(`Fix ${humanizeFieldKey(badJsonKey)} before switching to raw JSON.`);
+        return;
+      }
       setRawText(JSON.stringify(guidedPreview.draft, null, 2));
       setModeSwitchError(null);
       setMode('advanced');
