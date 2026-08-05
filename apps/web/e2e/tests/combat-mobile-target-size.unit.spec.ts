@@ -12,6 +12,8 @@ const ROOT = resolve(__dirname, '../..');
 const INDEX_CSS = resolve(ROOT, 'src/index.css');
 const RUN_SESSION = resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx');
 const BATTLE_MAP = resolve(ROOT, 'src/features/encounters/map/BattleMap.tsx');
+const COMBATANT_ROW = resolve(ROOT, 'src/features/encounters/combat/CombatantRow.tsx');
+const DEATH_SAVES = resolve(ROOT, 'src/features/encounters/combat/DeathSaves.tsx');
 const STAT_CARD = resolve(ROOT, 'src/components/CharacterStatCard.tsx');
 const ROLL_TOAST = resolve(ROOT, 'src/components/RollResultToast.tsx');
 
@@ -30,7 +32,7 @@ test.describe('combat mobile target-size source contracts (issue #428)', () => {
   });
 
   test('death-save pips, map tools, and apply-bar dismiss use the helpers', () => {
-    const source = [readFileSync(RUN_SESSION, 'utf8'), readFileSync(BATTLE_MAP, 'utf8')].join('\n');
+    const source = [readFileSync(RUN_SESSION, 'utf8'), readFileSync(BATTLE_MAP, 'utf8'), readFileSync(COMBATANT_ROW, 'utf8'), readFileSync(DEATH_SAVES, 'utf8')].join('\n');
     expect(source).toMatch(/className="cf-death-save-pip"/);
     expect(source).not.toMatch(/width:\s*13,\s*\n\s*height:\s*13/);
     expect(source).toMatch(/className="cf-map-tool"/);
