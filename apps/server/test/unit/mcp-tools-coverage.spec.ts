@@ -158,4 +158,32 @@ describe('McpToolsService coverage unit tests', () => {
     // ...and the flag must never be described as meaning the numbers ARE 5e-shaped.
     expect(description).not.toMatch(/only flags that the numbers are 5e-shaped/);
   });
+
+  /**
+   * Issue #1928 review (Codex, fourth round). The mirror-image error on the generator side:
+   * `difficultySupport: 'heuristic'` does NOT mean the reported difficulty is a 5e-shaped
+   * RATING — for a registered non-5e system the reported difficulty is `unsupported` with a
+   * null band, i.e. the absence of a rating. Only the roster-SIZING pass is 5e-shaped. A
+   * description that attaches "5e-shaped" to the reported difficulty invites an AI caller to
+   * report a band the payload does not contain. `generate_encounter` already got this right;
+   * `preview_encounter` did not, so both are pinned here rather than only the one that broke.
+   */
+  it.each(['generate_encounter', 'preview_encounter'])(
+    '%s does not describe the reported difficulty itself as 5e-shaped',
+    (toolName) => {
+      const service = createMcpToolsService();
+      const toolset = service.buildToolset(user);
+      const tool = toolset.tools.find((t) => t.name === toolName);
+      expect(tool).toBeDefined();
+      const description = tool!.description ?? '';
+
+      // "5e-shaped" is legal, but only ever attached to the sizing/heuristic pass.
+      for (const match of description.match(/[^.;]*5e-shaped[^.;]*/g) ?? []) {
+        expect(match).toMatch(/siz(e|ed|ing)|heuristic/i);
+      }
+      // ...and the unsupported difficulty must be described as absent, not as a 5e rating.
+      expect(description).toMatch(/unsupported/);
+      expect(description).not.toMatch(/reported difficulty is 5e-shaped/);
+    },
+  );
 });

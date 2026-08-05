@@ -1669,9 +1669,11 @@ export class McpToolsService {
       'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
         'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
         'just a band), a `difficultySupport` flag (\'supported\' for 5e/homebrew, \'heuristic\' for a registered ' +
-        'non-5e system whose reported difficulty is 5e-shaped rather than that system\'s own math — issue #1928; ' +
-        '`matchedBand` refers to the 5e-shaped roster-SIZING pass and can be `true` beside an `unsupported` ' +
-        'difficulty, so never report it as an achieved difficulty when `difficultySupport` is \'heuristic\'), ' +
+        'non-5e system, where the roster was SIZED by the 5e-shaped heuristic but the reported `difficulty` is ' +
+        '`status:\'unsupported\'` with a null band — it is NOT a 5e-shaped difficulty rating, it is the absence of ' +
+        'one, so do not report a band for it — issue #1928; `matchedBand` refers to that 5e-shaped roster-SIZING ' +
+        'pass and can be `true` beside an `unsupported` difficulty, so never report it as an achieved difficulty ' +
+        'when `difficultySupport` is \'heuristic\'), ' +
         'actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
         'unsupported-system math, swinginess), and actionable fallbacks when the compendium is empty or the system ' +
         'lacks budget math. First call with just `difficulty` (+ optional party/filters/shape/count/seed) to generate; ' +
