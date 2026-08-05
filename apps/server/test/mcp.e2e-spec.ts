@@ -6,6 +6,7 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
 import { MCP_CATALOG_COUNTS, MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
+import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, campaigns } from '../src/db/schema';
@@ -154,6 +155,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const updateRule = rules.find((rule) => rule.if?.properties?.operation?.const === 'update');
     expect(createRule?.then?.required).toEqual(expect.arrayContaining(['shape', 'x', 'y', 'sizeFt']));
     expect(updateRule?.then?.anyOf).toEqual(expect.arrayContaining([{ required: ['x'] }]));
+    const driverSchema = ctx.app
+      .get(McpToolsService)
+      .buildToolset({ id: 'mcp-aoe-schema', name: 'MCP AoE schema', devRole: 'dm', serverRole: 'admin', tokenContext: undefined })
+      .get('declare_aoe_template')?.inputSchema;
+    expect(driverSchema).toEqual(declareAoe?.inputSchema);
   });
 
   it('runs the campaign-library taxonomy, search, bulk, undo, and template flow through MCP', async () => {

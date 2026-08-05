@@ -788,10 +788,9 @@ export class McpToolsService {
         // zod type to avoid TS2589 (the deep conditional generics zodToJsonSchema infers).
         // #371: flatten nullable numeric FK unions to a top-level numeric type so the
         // provider tool registry advertises the same concrete types as tools/list.
-        inputSchema: flattenNullableNumericFks(zodToJsonSchema(strictShape, { $refStrategy: 'none' })) as Record<
-          string,
-          unknown
-        >,
+        inputSchema: (name === 'declare_aoe_template'
+          ? flattenNullableNumericFks(AoeTemplateMcpListingSchema)
+          : flattenNullableNumericFks(zodToJsonSchema(strictShape, { $refStrategy: 'none' }))) as Record<string, unknown>,
         proposalCapable: Object.prototype.hasOwnProperty.call(shape, 'propose'),
         mutating,
         invoke: async (args) => {
