@@ -308,7 +308,7 @@ export function CombatantRow({
       }}
       onClick={(event) => {
         if (!targeting?.legal || targeting.declared) return;
-        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"]');
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock]');
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
       }}
@@ -1142,7 +1142,7 @@ export function CombatantRow({
             surface the linked entry's AC / attacks / ability scores inline so the DM can
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
-        {statblock}
+        {statblock && <div data-combatant-statblock>{statblock}</div>}
         {onUseMonsterAction && (
           <CombatantActionsList
             encounterId={encounterId}

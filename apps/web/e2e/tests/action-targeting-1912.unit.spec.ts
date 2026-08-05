@@ -33,7 +33,15 @@ test('movable target touch jitter stays a target tap inside the shared CSS-pixel
 
 test('target row convenience ignores label and summary interactions', async () => {
   const rosterSource = await readFile(resolve(process.cwd(), 'src/features/encounters/combat/CombatantRow.tsx'), 'utf8');
-  expect(rosterSource).toContain('button, input, select, textarea, a, label, summary, [role="button"]');
+  expect(rosterSource).toContain('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock]');
+  expect(rosterSource).toContain('{statblock && <div data-combatant-statblock>{statblock}</div>}');
+});
+
+test('action impact flash replaces its previous expiry and cleans up on unmount', async () => {
+  const sessionSource = await readFile(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+  expect(sessionSource).toContain('const actionImpactTimerRef = useRef<number | null>(null);');
+  expect(sessionSource).toContain('if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);');
+  expect(sessionSource).toContain('actionImpactTimerRef.current = window.setTimeout(() => {');
 });
 
 test('legal target affordances support repeated pointer and keyboard selection', async () => {

@@ -664,6 +664,7 @@ export default function RunSessionPage() {
   const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
   const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
   const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
+  const actionImpactTimerRef = useRef<number | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -685,6 +686,9 @@ export default function RunSessionPage() {
   }, [announce]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
+  }, []);
+  useEffect(() => () => {
+    if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
@@ -3833,8 +3837,12 @@ export default function RunSessionPage() {
             pendingActionUseIdRef.current = null;
             setPendingActionUse(null);
             if (!prefersReducedMotion()) {
+              if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
               setActionImpactTargetIds(actionTargetIds);
-              window.setTimeout(() => setActionImpactTargetIds([]), 250);
+              actionImpactTimerRef.current = window.setTimeout(() => {
+                setActionImpactTargetIds([]);
+                actionImpactTimerRef.current = null;
+              }, 250);
             }
             setActionTargetIds([]);
             setActionTargetsDeclared(false);
