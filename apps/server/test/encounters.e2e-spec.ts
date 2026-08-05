@@ -3474,6 +3474,47 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(hiddenQuickRoll.body.roll).toMatchObject({ label: expect.stringContaining(UNKNOWN_COMBATANT_LABEL) });
     const hiddenQuickRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
     expect(JSON.stringify(hiddenQuickRolls.body)).not.toMatch(/Traitor/);
+    expect(hiddenQuickRolls.body).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: `${UNKNOWN_COMBATANT_LABEL} · Hidden strike (to-hit)` })]),
+    );
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
+    const exportedEncounter = exported.body.encounters.find((e: { combatants: Array<{ id: number }> }) => e.combatants.some((c) => c.id === duplicateId));
+    expect(exportedEncounter.combatants.find((c: { id: number }) => c.id === duplicateId)).toMatchObject({ npcIdentitySourceId: npcId });
+    const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
+    expect(imported.status).toBe(201);
+    const importedEncounter = (await request(server).get(`/api/v1/campaigns/${imported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const importedDetail = await request(server).get(`/api/v1/encounters/${importedEncounter.id}`).set(dm);
+    const importedDuplicate = importedDetail.body.combatants.find((c: { name: string }) => c.name === 'The Traitor 2');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const importedDuplicateRow = await db.select().from(combatantsTable).where(eq(combatantsTable.id, importedDuplicate.id)).get();
+    expect(importedDuplicateRow?.npcIdentitySourceId).not.toBeNull();
+    expect(JSON.stringify(importedDetail.body.combatants)).not.toMatch(/npcIdentitySourceId/);
+    const playerImportedDetail = await request(server).get(`/api/v1/encounters/${importedEncounter.id}`).set(player);
+    expect(playerImportedDetail.body.combatants.find((c: { id: number }) => c.id === importedDuplicate.id)).toMatchObject({
+      npcId: null,
+      name: UNKNOWN_COMBATANT_LABEL,
+    });
+    const archive = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`)
+      .set(dm)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    const archiveImported = await request(server)
+      .post('/api/v1/campaigns/import/archive')
+      .set(dm)
+      .attach('file', archive.body as Buffer, { filename: 'hidden-duplicate.mdzip', contentType: 'application/zip' });
+    expect(archiveImported.status).toBe(201);
+    const archiveEncounter = (await request(server).get(`/api/v1/campaigns/${archiveImported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const archivePlayerDetail = await request(server).get(`/api/v1/encounters/${archiveEncounter.id}`).set(player);
+    expect(archivePlayerDetail.body.combatants.find((c: { name: string }) => c.name === UNKNOWN_COMBATANT_LABEL)).toBeDefined();
     const mixedIdentity = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)

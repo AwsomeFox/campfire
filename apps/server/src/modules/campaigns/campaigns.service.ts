@@ -2729,7 +2729,9 @@ export class CampaignsService {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
           const npcSrc = intOrNull(c.npcId);
+          const npcIdentitySourceSrc = intOrNull(c.npcIdentitySourceId);
           const mappedNpcId = npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null;
+          const mappedNpcIdentitySourceId = npcIdentitySourceSrc != null ? (npcMap.get(npcIdentitySourceSrc) ?? null) : null;
           const compendiumResolved = resolveImportedCombatantRuleEntryId(c, compendiumResolution);
           if (compendiumResolved.detached) compendiumDetachedCount += 1;
           const [cRow] = tx
@@ -2739,11 +2741,15 @@ export class CampaignsService {
               kind: str(c.kind, 'monster'),
               characterId: charSrc != null ? (charMap.get(charSrc) ?? null) : null,
               npcId: mappedNpcId,
+              npcIdentitySourceId: mappedNpcIdentitySourceId,
               // A fresh encounter cannot retain allegiance for an NPC that import
               // could not restore: preparation ignores that snapshot, and /start
               // cannot refresh an unlinked combatant.
               npcDispositionSnapshot:
-                encounterStatus === 'preparing' && npcSrc != null && mappedNpcId === null
+                encounterStatus === 'preparing' &&
+                (npcSrc != null || npcIdentitySourceSrc != null) &&
+                mappedNpcId === null &&
+                mappedNpcIdentitySourceId === null
                   ? null
                   : typeof c.npcDispositionSnapshot === 'string'
                     ? c.npcDispositionSnapshot

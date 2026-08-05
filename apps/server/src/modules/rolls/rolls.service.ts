@@ -279,12 +279,8 @@ export class RollsService implements OnApplicationBootstrap {
    * redaction, only for the row-dropping encounter check (pushed into SQL instead, see
    * `listForCampaign`).
    *
-   * The reconstructed label assumes the exact "<name> · Initiative" suffix every current
-   * npcId-tagged producer writes (encounters.service.ts's bulk and per-combatant initiative
-   * rolls — the only callers that set npcId today), and matches the SAME string those write
-   * paths already use for an NPC hidden AT roll time, so a masked entry looks identical
-   * regardless of when the hide happened. Revisit this if a future roll type starts tagging
-   * npcId for a different action label.
+   * Preserve the portion after the first display-name separator rather than reconstructing
+   * an Initiative suffix: NPC-tagged quick rolls carry action-specific labels too.
    */
   private async maskHiddenNpcLabels(rolls: DiceRoll[]): Promise<DiceRoll[]> {
     const npcIds = [...new Set(rolls.map((r) => r.npcId).filter((id): id is number => id !== undefined))];
@@ -305,7 +301,10 @@ export class RollsService implements OnApplicationBootstrap {
       // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
       // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
       const { npcId: _npcId, ...withoutNpcId } = r;
-      return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` };
+      const originalLabel = r.label ?? '';
+      const separator = originalLabel.indexOf(' · ');
+      const suffix = separator >= 0 ? originalLabel.slice(separator + 3) : originalLabel;
+      return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · ${suffix}` };
     });
   }
 
