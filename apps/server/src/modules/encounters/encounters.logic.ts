@@ -81,6 +81,8 @@ export type EncounterEventRedactionCombatant = {
   id: number;
   name: string;
   npcId: number | null;
+  /** Internal source link retained by unlinked duplicate combatants. */
+  npcIdentitySourceId?: number | null;
 };
 
 /**
@@ -105,7 +107,7 @@ export function redactEncounterEventsForViewer(
   const hiddenCombatantIds = new Set<number>();
   const hiddenNames = new Set<string>();
   for (const c of combatants) {
-    if (c.npcId !== null && hiddenNpcIds.has(c.npcId)) {
+    if ([c.npcId, c.npcIdentitySourceId].some((id) => id != null && hiddenNpcIds.has(id))) {
       hiddenCombatantIds.add(c.id);
       if (c.name) hiddenNames.add(c.name);
     }

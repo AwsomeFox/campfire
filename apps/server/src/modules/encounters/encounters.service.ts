@@ -1355,7 +1355,7 @@ export class EncountersService {
     }
 
     const combatantRows = await this.listCombatantRows(encounterId);
-    const linkedNpcIds = combatantRows.map((c) => c.npcId).filter((n): n is number => n !== null);
+    const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
     const hiddenNpcIds = new Set<number>();
     if (linkedNpcIds.length > 0) {
       const hiddenRows = await this.db
@@ -1366,7 +1366,7 @@ export class EncountersService {
     }
     return redactEncounterEventsForViewer(
       events,
-      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId })),
+      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId, npcIdentitySourceId: c.npcIdentitySourceId })),
       hiddenNpcIds,
     );
   }
@@ -1693,7 +1693,7 @@ export class EncountersService {
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
       // here we sever the identity link (null npcId) and mask the name — the token still shows
       // in initiative (its position matters to play) but not who it is.
-      const linkedNpcIds = combatantRows.map((c) => c.npcIdentitySourceId ?? c.npcId).filter((n): n is number => n !== null);
+      const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
       if (linkedNpcIds.length > 0) {
         const hiddenRows = await this.db
           .select({ id: npcs.id })
@@ -1703,7 +1703,7 @@ export class EncountersService {
         if (hiddenIds.size > 0) {
           list = list.map((c) => {
             const source = combatantRows.find((row) => row.id === c.id);
-            return source && hiddenIds.has(source.npcIdentitySourceId ?? source.npcId ?? -1)
+            return source && [source.npcId, source.npcIdentitySourceId].some((id) => id !== null && hiddenIds.has(id))
               ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL }
               : c;
           });
@@ -2358,8 +2358,8 @@ export class EncountersService {
     // Enemy CRs: monsters plus NPCs whose captured/current campaign disposition is
     // hostile. A non-DM must not learn a hidden NPC's allegiance or statblock through
     // this aggregate, so hidden (and unlinked) NPC combatants fail closed for that view.
-    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
-    const npcIds = npcCombatants.map((c) => c.npcId as number);
+    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && (c.npcId !== null || c.npcIdentitySourceId !== null));
+    const npcIds = [...new Set(npcCombatants.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((id): id is number => id !== null)))];
     const hostileNpcIds = new Set<number>();
     const hiddenNpcIds = new Set<number>();
     if (npcIds.length > 0) {
@@ -2375,12 +2375,14 @@ export class EncountersService {
     const dmView = viewerRole === undefined || viewerRole === 'dm';
     const enemyCombatants = combatantRows.filter((c) => {
       if (c.kind === 'monster') return true;
-      if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
+      const npcIdentityId = c.npcIdentitySourceId ?? c.npcId;
+      const hasHiddenNpcIdentity = [c.npcId, c.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id));
+      if (c.kind !== 'npc' || (!dmView && (npcIdentityId === null || hasHiddenNpcIdentity))) return false;
       // Preparation is still authored world state: show the NPC's live
       // disposition until start() captures historical allegiance for play.
       const disposition = encounterRow.status === 'preparing'
-        ? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '')
-        : c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+        ? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '')
+        : c.npcDispositionSnapshot ?? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '');
       return disposition.trim().toLowerCase() === 'hostile';
     });
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
@@ -3659,7 +3661,14 @@ export class EncountersService {
       if (!source || (source.kind !== 'monster' && source.kind !== 'npc')) {
         throw new BadRequestException('Duplicate source must be a monster or NPC in this encounter');
       }
+      if (input.kind !== source.kind) {
+        throw new BadRequestException('Duplicate kind must match its source combatant');
+      }
+      if (input.npcId !== undefined || input.characterId !== undefined) {
+        throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
+      }
       npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
+      npcDispositionSnapshot = source.npcDispositionSnapshot;
     }
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
@@ -5667,14 +5676,14 @@ export class EncountersService {
       // below borrow the combatant's raw name, so a hidden NPC's identity must be
       // masked before it reaches that label — same rule the quick-roll dice log
       // already applies (issue #1850).
-      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
       const hiddenNpcIds = new Set<number>();
       if (npcIdsInRoll.length > 0) {
         const hiddenRows = tx.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIdsInRoll), eq(npcs.hidden, true))).all();
         for (const r of hiddenRows) hiddenNpcIds.add(r.id);
       }
-      const diceLogName = (row: { kind: string; npcId: number | null; name: string }): string =>
-        row.kind === 'npc' && row.npcId !== null && hiddenNpcIds.has(row.npcId) ? UNKNOWN_COMBATANT_LABEL : row.name;
+      const diceLogName = (row: { kind: string; npcId: number | null; npcIdentitySourceId: number | null; name: string }): string =>
+        row.kind === 'npc' && [row.npcId, row.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id)) ? UNKNOWN_COMBATANT_LABEL : row.name;
 
       // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
       // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
@@ -5722,6 +5731,7 @@ export class EncountersService {
         rolled = unrolled.map((row) => {
           const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
           const natural = initiative - row.initMod;
+          const diceLogNpcId = row.npcIdentitySourceId ?? row.npcId;
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
           // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever
           // the stored breakdown's terms summed to when it was last written — a DM's PATCH
@@ -5742,7 +5752,7 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
-            ...(row.kind === 'npc' && row.npcId !== null ? { npcId: row.npcId } : {}),
+            ...(row.kind === 'npc' && diceLogNpcId !== null ? { npcId: diceLogNpcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
@@ -6054,8 +6064,9 @@ export class EncountersService {
         // to a hide that happens after the roll was already recorded.
         if (!fresh.hidden) {
           let hiddenNpcName = false;
-          if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
-            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, freshCombatant.npcId)).limit(1).all();
+          const npcIdentityId = freshCombatant.npcIdentitySourceId ?? freshCombatant.npcId;
+          if (freshCombatant.kind === 'npc' && npcIdentityId !== null) {
+            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, npcIdentityId)).limit(1).all();
             hiddenNpcName = npc?.hidden === true;
           }
           const label = `${hiddenNpcName ? UNKNOWN_COMBATANT_LABEL : freshCombatant.name} · Initiative`;
@@ -6070,7 +6081,7 @@ export class EncountersService {
               label,
               source: 'rolled',
               encounterId,
-              ...(freshCombatant.kind === 'npc' && freshCombatant.npcId !== null ? { npcId: freshCombatant.npcId } : {}),
+              ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
             },
             user,
           );

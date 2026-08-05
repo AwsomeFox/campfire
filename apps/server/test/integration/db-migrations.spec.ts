@@ -2419,6 +2419,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     try {
       legacy.exec('ALTER TABLE combatants DROP COLUMN npc_identity_source_id');
       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145b_combatants_npc_identity_source_1924');
+      const now = '2026-08-05T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy identity source campaign', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Legacy identity source encounter', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO npcs (id, campaign_id, name, created_at, updated_at) VALUES (42, 1, 'Legacy NPC identity', ?, ?)").run(now, now);
       legacy.prepare("INSERT INTO combatants (encounter_id, kind, npc_id, name, hp_current, hp_max) VALUES (1, 'npc', 42, 'Legacy NPC', 1, 1)").run();
     } finally { legacy.close(); }
     const upgraded = openDatabase(dataDir);

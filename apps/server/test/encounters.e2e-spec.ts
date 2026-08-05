@@ -3445,7 +3445,8 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(dmC.npcId).toBe(npcId);
     expect(dmC.name).toBe('The Traitor');
     expect(dmC.npcDispositionSnapshot).toBe('hostile');
-    expect((dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((c) => c.id === duplicateId)).toMatchObject({ name: 'The Traitor 2', npcId: null });
+    expect(JSON.stringify(dmRes.body.combatants)).not.toMatch(/npcIdentitySourceId/);
+    expect((dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>).find((c) => c.id === duplicateId)).toMatchObject({ name: 'The Traitor 2', npcId: null, npcDispositionSnapshot: 'hostile' });
     // A non-DM sees the token in initiative but NOT who it is: identity link severed, name masked.
     for (const headers of [player, viewer]) {
       const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
@@ -3459,11 +3460,28 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       expect(JSON.stringify(c)).not.toMatch(/Traitor/);
       expect((res.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((x) => x.id === duplicateId)).toMatchObject({ npcId: null, name: UNKNOWN_COMBATANT_LABEL });
     }
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${duplicateId}`).set(dm).send({ hpDelta: -1 })).status).toBe(200);
+    const hiddenEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(player);
+    expect(JSON.stringify(hiddenEvents.body)).not.toMatch(/Traitor/);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    const hiddenRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenRolls.body)).not.toMatch(/Traitor/);
+    const mixedIdentity = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', name: 'Bad identity duplicate', npcId, duplicateOfCombatantId: combatantId });
+    expect(mixedIdentity.status).toBe(400);
     await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: false });
     const revealed = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
     expect((revealed.body.combatants as Array<{ id: number; name: string }>).find((x) => x.id === duplicateId)?.name).toBe('The Traitor 2');
     const invalid = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', name: 'Bad', duplicateOfCombatantId: 999999 });
     expect(invalid.status).toBe(400);
+    const otherEncounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Other fight' })).body.id;
+    const crossEncounter = await request(server)
+      .post(`/api/v1/encounters/${otherEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', name: 'Bad cross-encounter duplicate', duplicateOfCombatantId: combatantId });
+    expect(crossEncounter.status).toBe(400);
   });
 
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {

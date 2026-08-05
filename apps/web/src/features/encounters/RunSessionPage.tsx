@@ -3766,6 +3766,7 @@ export default function RunSessionPage() {
                     ? () => {
                         void api.post(`${API}/encounters/${eid}/combatants`, {
                           kind: c.kind,
+                          duplicateOfCombatantId: c.id,
                           name: duplicateCombatantName(c.name, encounter.combatants.map((combatant) => combatant.name)),
                           ruleEntryId: c.ruleEntryId ?? undefined,
                           statblock: c.statblock ?? undefined,
