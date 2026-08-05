@@ -1157,7 +1157,7 @@ export function CombatantRow({
           </div>
         )}
         {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
-          <details className="mt-2">
+          <details className="mt-2" data-combatant-detail>
             <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
             <CombatantStatblockEditor
               value={combatant.statblock}
