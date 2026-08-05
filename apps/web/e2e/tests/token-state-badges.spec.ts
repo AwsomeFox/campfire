@@ -49,7 +49,7 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerArc).toHaveAttribute('aria-label', 'Health: healthy');
     await expect(playerBoss).not.toContainText('30');
     await expect(playerBoss).not.toContainText('12');
-    await expect(playerPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveText('+1');
+    await expect(playerPage.getByTestId(`map-token-condition-overflow-${bossId}`)).toHaveText('+2');
     await expect(playerPage.getByTestId(`map-token-concentration-${bossId}`)).toBeVisible();
     const firstCondition = playerPage.getByTestId(`map-token-condition-${bossId}-0`);
     const conditionBox = await firstCondition.boundingBox();

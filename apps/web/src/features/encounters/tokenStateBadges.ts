@@ -84,15 +84,26 @@ export type TokenConditionBadge = {
   fallback: string;
 };
 
-export function tokenConditionBadges(conditions: readonly string[]): { visible: TokenConditionBadge[]; overflow: number } {
+/**
+ * `maxControls` includes the overflow control when one is needed. This keeps
+ * compact token footprints from overlapping condition controls or a neighbor.
+ */
+export function tokenConditionBadges(
+  conditions: readonly string[],
+  maxControls = 4,
+): { visible: TokenConditionBadge[]; overflow: number } {
   const normalized = conditions.filter((condition) => condition.trim().length > 0);
+  const capacity = Math.max(1, Math.min(4, Math.floor(maxControls)));
+  const needsOverflow = normalized.length > Math.min(3, capacity);
+  const visibleCapacity = needsOverflow ? capacity - 1 : capacity;
+  const visibleCount = Math.min(3, normalized.length, visibleCapacity);
   return {
-    visible: normalized.slice(0, 3).map((condition) => ({
+    visible: normalized.slice(0, visibleCount).map((condition) => ({
       condition,
       glyph: tokenConditionGlyph(condition),
       fallback: tokenConditionFallback(condition),
     })),
-    overflow: Math.max(0, normalized.length - 3),
+    overflow: Math.max(0, normalized.length - visibleCount),
   };
 }
 
@@ -111,32 +122,16 @@ export type TokenBadgePlacement = {
 export function tokenBadgePlacements(sizePx: number, count: number): TokenBadgePlacement[] {
   const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
   const targetSize = Math.max(18, visualSize);
-  const anchors = count <= 1 ? [50] : count === 2 ? [30, 70] : [18, 50, 82];
+  const inset = Math.min(50, (targetSize / sizePx) * 50);
+  const anchors = count <= 1 ? [50] : count === 2 ? [inset, 100 - inset] : [inset, 50, 100 - inset];
   return anchors.slice(0, Math.min(3, count)).map((left) => ({
     left,
-    // Keeping targets just below the disc avoids the top-right unplace corner
-    // even at the 18px minimum token diameter.
-    top: 116,
+    // Controls remain inside the lower part of the token, never over a token
+    // in the neighboring map cell.
+    top: 100 - inset,
     visualSize,
     targetSize,
   }));
-}
-
-/**
- * Overflow occupies its own second row so it never obscures a visible condition
- * target in the first row, including on an 18px token.
- */
-export function tokenOverflowPlacement(sizePx: number): TokenBadgePlacement {
-  const visualSize = Math.max(12, Math.min(18, Math.round(sizePx * 0.38)));
-  const targetSize = Math.max(18, visualSize);
-  return {
-    left: 50,
-    // Keep this just one target-height below the badge row rather than a
-    // fixed percentage, so it remains close to large tokens too.
-    top: 116 + (targetSize / sizePx) * 100 + 6,
-    visualSize,
-    targetSize,
-  };
 }
 
 export function tokenDeathMarker(combatant: Pick<Combatant, 'kind' | 'hpCurrent' | 'hpBand' | 'deathState'>): 'dying' | 'dead' | null {

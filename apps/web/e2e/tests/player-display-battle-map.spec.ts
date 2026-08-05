@@ -84,6 +84,7 @@ test.describe('Player Display battle map (issue #484)', () => {
     await expect(page.getByTestId('battle-map-surface')).toBeVisible();
     await expect(page.getByTestId(`map-token-${bossId}`)).toBeVisible();
     await expect(page.getByTestId(`map-token-${skirmisherId}`)).toHaveCount(0);
+    await expect(page.getByTestId(`map-aoe-shape-${AOE_ID}`)).toBeVisible();
     await expect(page.getByTestId(`map-aoe-${AOE_ID}`)).toHaveCount(0);
   });
 
@@ -98,6 +99,7 @@ test.describe('Player Display battle map (issue #484)', () => {
 
     await expect(page.getByTestId(`map-token-${bossId}`)).toBeVisible();
     await expect(page.getByTestId(`map-token-${skirmisherId}`)).toHaveCount(0);
+    await expect(page.getByTestId(`map-aoe-shape-${AOE_DARK_ID}`)).toHaveCount(0);
     await expect(page.getByTestId(`map-aoe-${AOE_DARK_ID}`)).toHaveCount(0);
   });
 });

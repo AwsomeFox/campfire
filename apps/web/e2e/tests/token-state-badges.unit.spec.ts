@@ -13,7 +13,6 @@ import {
   tokenDeathMarker,
   tokenHpFraction,
   tokenHpTone,
-  tokenOverflowPlacement,
   writeTokenDetailMode,
 } from '../../src/features/encounters/tokenStateBadges';
 import { hpBandFor } from '../../src/features/screen/playerSafe';
@@ -76,12 +75,15 @@ test.describe('token condition badges (issue #1905)', () => {
     expect(tokenConditionBadges(['a', 'b', 'c'])).toMatchObject({ overflow: 0 });
     expect(tokenConditionBadges(['a', 'b', 'c', 'd'])).toMatchObject({ overflow: 1 });
     expect(tokenConditionBadges(Array.from({ length: 10 }, (_, i) => `condition ${i}`))).toMatchObject({ overflow: 7 });
+    expect(tokenConditionBadges(['a', 'b'], 1)).toMatchObject({ visible: [], overflow: 2 });
+    expect(tokenConditionBadges(['a', 'b', 'c', 'd'], 3)).toMatchObject({ visible: [{ condition: 'a' }, { condition: 'b' }], overflow: 2 });
   });
 
-  test('keeps 18px condition hit targets clear of the unplace corner', () => {
+  test('keeps condition hit targets inside their token and clear of one another', () => {
     for (const size of [18, 24, 32, 64, 128]) {
-      const unplace = { left: size - 10, top: -6, right: size + 6, bottom: 10 };
-      for (const badge of tokenBadgePlacements(size, 3)) {
+      const capacity = Math.max(1, Math.min(3, Math.floor(size / 18)));
+      const placements = tokenBadgePlacements(size, capacity);
+      for (const badge of placements) {
         expect(badge.targetSize).toBeGreaterThanOrEqual(18);
         const x = (badge.left / 100) * size;
         const y = (badge.top / 100) * size;
@@ -91,30 +93,18 @@ test.describe('token condition badges (issue #1905)', () => {
           right: x + badge.targetSize / 2,
           bottom: y + badge.targetSize / 2,
         };
-        const intersects = rect.left < unplace.right && rect.right > unplace.left && rect.top < unplace.bottom && rect.bottom > unplace.top;
-        expect(intersects).toBe(false);
+        expect(rect.left).toBeGreaterThanOrEqual(0);
+        expect(rect.top).toBeGreaterThanOrEqual(0);
+        expect(rect.right).toBeLessThanOrEqual(size);
+        expect(rect.bottom).toBeLessThanOrEqual(size);
       }
-    }
-  });
-
-  test('puts overflow on a separate non-overlapping row', () => {
-    for (const size of [18, 24, 32, 64, 128]) {
-      const overflow = tokenOverflowPlacement(size);
-      const overflowRect = {
-        left: (overflow.left / 100) * size - overflow.targetSize / 2,
-        top: (overflow.top / 100) * size - overflow.targetSize / 2,
-        right: (overflow.left / 100) * size + overflow.targetSize / 2,
-        bottom: (overflow.top / 100) * size + overflow.targetSize / 2,
-      };
-      for (const badge of tokenBadgePlacements(size, 3)) {
-        const badgeRect = {
-          left: (badge.left / 100) * size - badge.targetSize / 2,
-          top: (badge.top / 100) * size - badge.targetSize / 2,
-          right: (badge.left / 100) * size + badge.targetSize / 2,
-          bottom: (badge.top / 100) * size + badge.targetSize / 2,
-        };
-        const intersects = badgeRect.left < overflowRect.right && badgeRect.right > overflowRect.left && badgeRect.top < overflowRect.bottom && badgeRect.bottom > overflowRect.top;
-        expect(intersects).toBe(false);
+      for (let index = 0; index < placements.length; index += 1) {
+        for (let other = index + 1; other < placements.length; other += 1) {
+          const first = placements[index]!;
+          const second = placements[other]!;
+          const horizontal = Math.abs(first.left - second.left) * size / 100;
+          expect(horizontal).toBeGreaterThanOrEqual((first.targetSize + second.targetSize) / 2);
+        }
       }
     }
   });
