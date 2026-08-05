@@ -23,8 +23,21 @@ test.describe('ActionUseFlow double-submit guard & error handling (issue #1474)'
     expect(code).toMatch(/setIsUnconfirmed\(true\);/);
     expect(code).toMatch(/void invalidateEncounter\(queryClient, encounterId\);/);
 
-    // 5. Apply button is disabled when commitSubmitted is true or isPending
-    expect(code).toMatch(/disabled=\{applyDisabled \|\| commit\.isPending \|\| commitSubmitted \|\| preview\.applied\}/);
+    // 5. Apply button is disabled when commitSubmitted is true or isPending.
+    //    Asserted term-by-term rather than as one literal expression: issue #1933 added
+    //    `applyGateReason` (the Apply-only safety-hold blocker) to this guard and reflowed
+    //    it across lines, which broke a whole-expression regex that was really pinning
+    //    formatting. What this test owns is that the double-submit terms are present, not
+    //    the order or line breaks of the disjunction.
+    //    Scoped to the Apply button's own guard by anchoring on its testid — a bare
+    //    `disabled={...term...}` search would match any other control's guard in the file
+    //    and could not fail.
+    const applyAnchor = code.indexOf('data-testid="action-use-apply"');
+    expect(applyAnchor).toBeGreaterThan(-1);
+    const applyGuard = code.slice(applyAnchor, code.indexOf('}', code.indexOf('disabled={', applyAnchor) + 10) + 1);
+    for (const term of ['applyDisabled', 'commit.isPending', 'commitSubmitted', 'preview.applied']) {
+      expect(applyGuard).toContain(term);
+    }
 
     // 6. onClick guards against double dispatch
     expect(code).toMatch(/if \(commitSubmitted \|\| commit\.isPending\) return;/);
