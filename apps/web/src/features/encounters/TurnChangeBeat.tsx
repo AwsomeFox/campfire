@@ -53,7 +53,7 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
       beat.tickerKind === 'round-wrap' ? 2_200 : 1_600,
     );
 
-    if (beat.kind !== 'your-turn') {
+    if (beat.kind !== 'your-turn' || !isYourTurn) {
       setShowTakeover(false);
       return () => window.clearTimeout(tickerTimer);
     }
@@ -71,7 +71,7 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
       window.removeEventListener('pointerdown', dismiss);
       window.removeEventListener('keydown', dismiss);
     };
-  }, [beat]);
+  }, [beat, isYourTurn]);
 
   // RouteChangeFocus rebuilds titles after navigation. Its formatter observes
   // this shared prefix, while this hook owns the visibility lifecycle.

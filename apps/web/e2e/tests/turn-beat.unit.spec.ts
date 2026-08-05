@@ -112,7 +112,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('clears a takeover when the following beat is not owned', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
     expect(source).toMatch(/if \(!beat\) \{\s*setShowTakeover\(false\);\s*setShowTicker\(false\);/);
-    expect(source).toMatch(/if \(beat\.kind !== 'your-turn'\) \{\s*setShowTakeover\(false\);/);
+    expect(source).toMatch(/if \(beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
   });
 
   test('skips owned-turn vibration when reduced motion is preferred', () => {
@@ -145,7 +145,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('does not promote a turn from character ownership data pending refresh', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const characterOwnershipPendingDataUpdatedAtRef = useRef<number \| null>\(null\);/);
-    expect(source).toMatch(/const invalidateCampaignCharactersForOwnership = useCallback\(\(\) => \{\s*characterOwnershipPendingDataUpdatedAtRef\.current = charactersQuery\.dataUpdatedAt;\s*invalidateCampaignCharacters\(queryClient, cid\);/);
+    expect(source).toMatch(/const invalidateCampaignCharactersForOwnership = useCallback\(\(\) => \{\s*characterOwnershipPendingDataUpdatedAtRef\.current = charactersQuery\.dataUpdatedAt;[\s\S]*?invalidateCampaignCharacters\(queryClient, cid\);/);
     expect(source).toMatch(/charactersQuery\.dataUpdatedAt <= pendingDataUpdatedAt/);
     expect(source).toMatch(/!charactersQuery\.isFetching\s*&&\s*characterOwnershipPendingDataUpdatedAtRef\.current == null/);
     expect(source).toMatch(/if \(characterOwnershipPendingDataUpdatedAtRef\.current != null\) return;/);
@@ -163,6 +163,16 @@ test.describe('turn-change beat (issue #1906)', () => {
 
     const recoveryBranch = source.slice(source.indexOf('onStreamRecovery: useCallback'), source.indexOf('onStreamRecovery: useCallback') + 500);
     expect(recoveryBranch).toContain('invalidateCampaignCharactersForOwnership();');
+  });
+
+  test('immediately gates existing ownership cues while the roster refreshes', () => {
+    const page = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const beat = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
+    expect(page).toMatch(/const \[characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending\] = useState\(false\);/);
+    expect(page).toMatch(/setCharacterOwnershipRefreshPending\(true\);\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnPulse\(false\);/);
+    expect(page).toMatch(/isYourTurn=\{encounter\?\.status === 'running'\s*&&\s*!characterOwnershipRefreshPending/);
+    expect(page).toMatch(/!turnBeat\s*\|\| characterOwnershipPendingDataUpdatedAtRef\.current != null\s*\|\| turnWorkspace\.isYourTurn !== true/);
+    expect(beat).toMatch(/if \(beat\.kind !== 'your-turn' \|\| !isYourTurn\) \{\s*setShowTakeover\(false\);/);
   });
 
   test('keeps Player Display to the paired encounter update load', () => {

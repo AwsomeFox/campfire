@@ -957,6 +957,7 @@ export default function RunSessionPage() {
     isYourTurn: boolean;
   } | null>(null);
   const [turnOwnerPendingCombatantId, setTurnOwnerPendingCombatantId] = useState<number | null>(null);
+  const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
   const turnPulseTimerRef = useRef<number | null>(null);
@@ -975,6 +976,7 @@ export default function RunSessionPage() {
       || charactersQuery.dataUpdatedAt <= pendingDataUpdatedAt
     ) return;
     characterOwnershipPendingDataUpdatedAtRef.current = null;
+    setCharacterOwnershipRefreshPending(false);
   }, [charactersQuery.dataUpdatedAt, charactersQuery.isFetching]);
 
   // Every campaign-character invalidation retains the previous successful
@@ -982,6 +984,14 @@ export default function RunSessionPage() {
   // turn frame arriving in the gap cannot use a former owner's identity.
   const invalidateCampaignCharactersForOwnership = useCallback(() => {
     characterOwnershipPendingDataUpdatedAtRef.current = charactersQuery.dataUpdatedAt;
+    // Neither the event-derived owner nor the retained /turn response is
+    // authoritative while the roster that grants ownership is being replaced.
+    // Gate their cues immediately; the completed roster read reauthorizes them.
+    setCharacterOwnershipRefreshPending(true);
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+    setTurnPulse(false);
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
     invalidateCampaignCharacters(queryClient, cid);
   }, [charactersQuery.dataUpdatedAt, cid, queryClient]);
 
@@ -2529,6 +2539,7 @@ export default function RunSessionPage() {
     if (
       !turnWorkspace
       || !turnBeat
+      || characterOwnershipPendingDataUpdatedAtRef.current != null
       || turnWorkspace.isYourTurn !== true
       || turnWorkspace.current?.combatantId !== currentCombatantId
       || turnBeat.combatantId !== currentCombatantId
@@ -2546,7 +2557,7 @@ export default function RunSessionPage() {
           identityBackground: currentCombatant ? tokenIdentityBackground(currentCombatant) : previous.identityBackground,
         }
       : previous);
-  }, [currentCombatant, currentCombatantId, triggerOwnedTurnFeedback, turnBeat?.combatantId, turnBeat?.key, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+  }, [charactersQuery.dataUpdatedAt, currentCombatant, currentCombatantId, triggerOwnedTurnFeedback, turnBeat?.combatantId, turnBeat?.key, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
@@ -3313,6 +3324,7 @@ export default function RunSessionPage() {
       <TurnChangeBeat
         beat={turnBeat}
         isYourTurn={encounter?.status === 'running'
+          && !characterOwnershipRefreshPending
           && turnOwnerPendingCombatantId == null
           && (turnOwnerFromEvent != null && turnOwnerFromEvent.combatantId === currentCombatantId
             ? turnOwnerFromEvent.isYourTurn
