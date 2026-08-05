@@ -39,10 +39,24 @@ test.describe('13th Age ruleset encounter panel (#1465)', () => {
       await expect(panel).toContainText('+4');
     } finally {
       // Clear the override so a CI retry or a later run of this spec starts from the
-      // un-overridden state instead of inheriting +4.
+      // un-overridden state instead of inheriting +4. `click()` alone only dispatches
+      // the mutation (escalationControl.mutate({ override: null }) -> POST .../escalation
+      // in RunSessionPage.tsx) — it does not wait for the request or the refetch that
+      // updates the panel's text. If the test ends (and the page/context tears down)
+      // before that round-trip finishes, a slow or cancelled cleanup could leave the
+      // shared Archmage fixture at +4 for the next run, which never touches
+      // restoreSeedEncounter(). Wait for the actual response and assert the panel
+      // reflects the clear before letting the test finish.
       const clearBtn = panel.getByRole('button', { name: 'Clear' });
       if (await clearBtn.isVisible().catch(() => false)) {
-        await clearBtn.click();
+        const [clearResponse] = await Promise.all([
+          page.waitForResponse(
+            (res) => res.url().includes('/escalation') && res.request().method() === 'POST',
+          ),
+          clearBtn.click(),
+        ]);
+        expect(clearResponse.ok(), 'clearing the escalation override must succeed').toBe(true);
+        await expect(panel).not.toContainText('+4');
       }
     }
   });
