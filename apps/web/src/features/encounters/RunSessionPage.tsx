@@ -27,6 +27,8 @@ import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
+import { FloatingNumbers } from './FloatingNumbers';
+import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
 import { hasRestoredTrashedEncounter, isCurrentCombatantUndoEncounter, REMOVE_COMBATANT_CONFIRM_BODY } from './combatantLifecycle';
 import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
 import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
@@ -40,6 +42,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
@@ -422,11 +425,13 @@ function InitiativeStrip({
   currentCombatantId,
   charactersById,
   turnPulse = false,
+  hpFeedbackByCombatant,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
+  hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
 }) {
   return (
     <div
@@ -441,11 +446,19 @@ function InitiativeStrip({
         const isCurrent = c.id === currentCombatantId;
         const character = c.characterId ? charactersById.get(c.characterId) : null;
         const isSilhouette = c.kind === 'npc' && c.npcId == null;
+        const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
+        const feedbackClass = feedback.some((event) => event.kind === 'down')
+          ? ' cf-hp-feedback-anchor--down'
+          : feedback.some((event) => event.kind === 'revive')
+            ? ' cf-hp-feedback-anchor--revive'
+            : feedback.some((event) => event.crit)
+              ? ' cf-hp-feedback-anchor--crit'
+              : '';
 
         return (
           <div
             key={c.id}
-            className="flex flex-col items-center gap-1 flex-none"
+            className={`cf-hp-feedback-anchor flex flex-col items-center gap-1 flex-none${feedbackClass}`}
             style={{ scrollSnapAlign: 'center' }}
             ref={(el) => {
               if (isCurrent && el) {
@@ -476,6 +489,7 @@ function InitiativeStrip({
                 </span>
               )}
             </div>
+            <FloatingNumbers events={feedback} />
             <span className="text-muted" style={{ fontSize: 10, lineHeight: 1 }}>
               {hpDisplay(c)}
             </span>
@@ -870,6 +884,115 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+  const hpFeedbackSnapshotRef = useRef<{ encounterId: number; combatants: Map<number, HpFeedbackSnapshot> } | null>(null);
+  const bulkHpFeedbackOperationsRef = useRef(new Map<string, { targets: Set<number>; stale: Map<number, HpFeedbackSnapshot>; emitted: Set<number> }>());
+  const nextHpFeedbackIdRef = useRef(0);
+  const [hpFeedbackEvents, setHpFeedbackEvents] = useState<Array<HpFeedbackEvent & { id: number }>>([]);
+  const appendHpFeedbackEvents = useCallback((events: readonly HpFeedbackEvent[]) => {
+    if (events.length === 0) return;
+    setHpFeedbackEvents((current) => [...current, ...events.map((event) => ({ ...event, id: nextHpFeedbackIdRef.current++ }))]);
+  }, []);
+  const appendOrUpgradeHpFeedbackCrit = useCallback((events: readonly HpFeedbackEvent[]) => {
+    const criticalDamage = events.find((event) => event.kind === 'damage' && event.crit);
+    if (!criticalDamage) {
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    setHpFeedbackEvents((current) => {
+      let index = -1;
+      for (let candidate = current.length - 1; candidate >= 0; candidate -= 1) {
+        const event = current[candidate];
+        if (
+          event.combatantId === criticalDamage.combatantId
+          && event.kind === 'damage'
+          && event.amount === criticalDamage.amount
+        ) {
+          index = candidate;
+          break;
+        }
+      }
+      if (index < 0) {
+        return [...current, ...events.map((event) => ({ ...event, id: nextHpFeedbackIdRef.current++ }))];
+      }
+      return current.map((event, eventIndex) => eventIndex === index ? { ...event, crit: true } : event);
+    });
+  }, [appendHpFeedbackEvents]);
+  useEffect(() => { setHpFeedbackEvents([]); hpFeedbackSnapshotRef.current = null; }, [eid]);
+  useEffect(() => {
+    if (!encounter) return;
+    const previous = hpFeedbackSnapshotRef.current;
+    if (previous?.encounterId !== encounter.id) {
+      hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: hpFeedbackSnapshot(encounter.combatants) };
+      return;
+    }
+    // A refetch can observe a committed earlier click while later plain-stepper clicks
+    // remain in the optimistic ledger. The click emits its feedback at mutation time;
+    // retain that predicted baseline for its targets so a 30 → 20 prediction followed
+    // by a 25 server refetch does not look like +5 heal. Still diff non-targets so a
+    // concurrent remote change remains visible while the local write is pending.
+    const optimisticQueue = optimisticHpQueueRef.current;
+    if (optimisticQueue.encounterId === eid && optimisticQueue.base && optimisticQueue.operations.size > 0) {
+      const optimisticCombatants = replayOptimisticHpDeltas(
+        optimisticQueue.base.combatants,
+        [...optimisticQueue.operations.values()]
+          .sort((a, b) => a.sequence - b.sequence)
+          .map(({ combatantId, delta }) => ({ combatantId, delta })),
+        ruleSystem,
+      );
+      const pendingTargetIds = new Set([...optimisticQueue.operations.values()].map(({ combatantId }) => combatantId));
+      const suppressedTargetIds = new Set([
+        ...pendingTargetIds,
+        ...[...bulkHpFeedbackOperationsRef.current.values()].flatMap((operation) => [...operation.targets]),
+      ]);
+      const events = diffHpFeedback(previous.combatants, encounter.combatants)
+        .filter((event) => !suppressedTargetIds.has(event.combatantId));
+      const nextSnapshot = withOptimisticHpFeedbackTargets(encounter.combatants, optimisticCombatants, pendingTargetIds);
+      hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: nextSnapshot };
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    if (bulkHpFeedbackOperationsRef.current.size > 0) {
+      const pendingTargets = new Set([...bulkHpFeedbackOperationsRef.current.values()].flatMap((operation) => [...operation.targets]));
+      for (const combatant of encounter.combatants) {
+        const before = previous.combatants.get(combatant.id);
+        if (pendingTargets.has(combatant.id) && before && !sameHpFeedbackSnapshot(before, combatant)) {
+          for (const operation of bulkHpFeedbackOperationsRef.current.values()) if (operation.targets.has(combatant.id)) operation.stale.set(combatant.id, combatant);
+        }
+      }
+      const events = diffHpFeedback(previous.combatants, encounter.combatants)
+        .filter((event) => !pendingTargets.has(event.combatantId));
+      const optimisticTargets = [...pendingTargets]
+        .map((combatantId) => previous.combatants.get(combatantId))
+        .filter((combatant): combatant is HpFeedbackSnapshot => combatant != null);
+      hpFeedbackSnapshotRef.current = {
+        encounterId: encounter.id,
+        combatants: withOptimisticHpFeedbackTargets(encounter.combatants, optimisticTargets, pendingTargets),
+      };
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    const events = diffHpFeedback(previous.combatants, encounter.combatants);
+    hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: hpFeedbackSnapshot(encounter.combatants) };
+    appendHpFeedbackEvents(events);
+  }, [appendHpFeedbackEvents, eid, encounter, ruleSystem]);
+  useEffect(() => {
+    if (hpFeedbackEvents.length === 0) return;
+    const timeout = window.setTimeout(() => setHpFeedbackEvents([]), 1_080 + (hpFeedbackEvents.length - 1) * 120);
+    return () => window.clearTimeout(timeout);
+  }, [hpFeedbackEvents]);
+  const hpFeedbackByCombatant = useMemo(() => {
+    const byCombatant = new Map<number, Array<HpFeedbackEvent & { id: number }>>();
+    for (const event of hpFeedbackEvents) {
+      const events = byCombatant.get(event.combatantId) ?? [];
+      events.push(event);
+      byCombatant.set(event.combatantId, events);
+    }
+    return byCombatant;
+  }, [hpFeedbackEvents]);
+  const seedHpFeedbackSnapshot = useCallback((source: EncounterWithCombatants | undefined) => {
+    if (source?.id !== eid) return;
+    hpFeedbackSnapshotRef.current = { encounterId: eid, combatants: hpFeedbackSnapshot(source.combatants) };
+  }, [eid]);
   useWakeLock(encounter?.status === 'running');
 
   // An encounter can be restored by another client or API caller. A newer authoritative
@@ -1781,6 +1904,10 @@ export default function RunSessionPage() {
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      const queuedBase = optimisticHpQueueRef.current;
+      const previousCombatant = queuedBase.encounterId === eid && queuedBase.base
+        ? queuedBase.base.combatants.find((combatant) => combatant.id === combatantId)
+        : previous?.combatants.find((combatant) => combatant.id === combatantId);
       // Defence data lives in the server's authoritative statblock.  Do not briefly
       // show an incorrect local HP total when damage rules are active; refetch settles it.
       if (
@@ -1790,10 +1917,45 @@ export default function RunSessionPage() {
         if (queue.encounterId !== eid) return {};
         if (!queue.base) queue.base = previous;
         queue.operations.set(idempotencyKey, optimisticOperation);
+        const optimisticCombatants = replayOptimisticHpDeltas(
+          queue.base.combatants,
+          [...queue.operations.values()]
+            .sort((a, b) => a.sequence - b.sequence)
+            .map(({ combatantId: pendingCombatantId, delta: pendingDelta }) => ({ combatantId: pendingCombatantId, delta: pendingDelta })),
+          ruleSystem,
+        );
+        const optimisticCombatant = optimisticCombatants.find((combatant) => combatant.id === combatantId);
+        const feedbackBefore = hpFeedbackSnapshotRef.current?.encounterId === eid
+          ? hpFeedbackSnapshotRef.current.combatants.get(combatantId)
+          : previousCombatant;
+        if (feedbackBefore && optimisticCombatant) {
+          appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot([feedbackBefore]), [optimisticCombatant]));
+          const snapshot = hpFeedbackSnapshotRef.current;
+          if (snapshot?.encounterId === eid) snapshot.combatants.set(combatantId, optimisticCombatant);
+        }
         replayPendingOptimisticHpDeltas();
-        return { encounterId: eid, optimisticOperationId: idempotencyKey };
+        return { encounterId: eid, optimisticOperationId: idempotencyKey, previousCombatant };
       }
-      return {};
+      return { previousCombatant };
+    },
+    onSuccess: (combatant, vars, ctx) => {
+      if (!vars.isCrit) return;
+      if (!ctx?.previousCombatant) return;
+      const before = ctx.previousCombatant;
+      const observed = hpFeedbackSnapshotRef.current?.encounterId === eid
+        ? hpFeedbackSnapshotRef.current.combatants.get(combatant.id)
+        : undefined;
+      const events = diffHpFeedback(hpFeedbackSnapshot([before]), [combatant], new Set([vars.combatantId]));
+      // An own SSE/poll update can arrive before this mutation callback. In that case
+      // normal feedback already rendered from the canonical diff; upgrade that exact
+      // event instead of leaking a combatant-wide crit marker to another writer.
+      if (observed && sameHpFeedbackSnapshot(observed, combatant)) {
+        appendOrUpgradeHpFeedbackCrit(events);
+        return;
+      }
+      if (observed && !sameHpFeedbackSnapshot(observed, before)) return;
+      appendHpFeedbackEvents(events);
+      if (observed) hpFeedbackSnapshotRef.current?.combatants.set(combatant.id, combatant);
     },
     onError: (err, _vars, ctx) => {
       const queue = optimisticHpQueueRef.current;
@@ -1804,6 +1966,7 @@ export default function RunSessionPage() {
         queue.operations.delete(ctx.optimisticOperationId)
       ) {
         replayPendingOptimisticHpDeltas();
+        seedHpFeedbackSnapshot(queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)));
       }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
       // just rolled back, but the server may in fact have applied it. Telling the DM "that
@@ -1849,13 +2012,41 @@ export default function RunSessionPage() {
         previous &&
         !hasDamageMetadata
       ) {
+        const queue = optimisticHpQueueRef.current;
+        const queuedCombatants = queue.encounterId === eid && queue.base && queue.operations.size > 0
+          ? replayOptimisticHpDeltas(
+              queue.base.combatants,
+              [...queue.operations.values()].sort((a, b) => a.sequence - b.sequence).map(({ combatantId, delta: pendingDelta }) => ({ combatantId, delta: pendingDelta })),
+              ruleSystem,
+            )
+          : null;
+        const queuedTargetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
+        const pendingBaseline = queuedCombatants
+          ? previous.combatants.map((combatant) => queuedTargetIds.has(combatant.id)
+              ? queuedCombatants.find((queued) => queued.id === combatant.id) ?? combatant
+              : combatant)
+          : previous.combatants;
+        const feedbackBaseline = hpFeedbackSnapshotRef.current?.encounterId === eid
+          ? [...hpFeedbackSnapshotRef.current.combatants.values()]
+          : pendingBaseline;
+        const optimisticCombatants = pendingBaseline.map((c) =>
+          targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem) : c,
+        );
+        appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot(feedbackBaseline), optimisticCombatants));
+        const snapshot = hpFeedbackSnapshotRef.current;
+        if (snapshot?.encounterId === eid) {
+          for (const combatant of optimisticCombatants) {
+            if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
+          }
+        }
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
-          combatants: previous.combatants.map((c) =>
-            targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem) : c,
-          ),
+          combatants: optimisticCombatants,
         });
       }
+      const bulkOperationId = newOperationId();
+      const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
+      bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);
       // Issue #580: one id for this apply-to-all, extended per target so each PATCH gets a
       // distinct key (the server fingerprints the payload, so one key cannot cover two
       // different combatants). This loop is a plain async function, not a TanStack
@@ -1865,10 +2056,9 @@ export default function RunSessionPage() {
       // A DM manually re-running a half-failed apply-to-all still double-applies to the
       // targets that succeeded; making that safe needs a stable id on the pending-apply
       // itself and is deliberately left out of this change.
-      const bulkOperationId = newOperationId();
       try {
-        for (const { combatantId, damage } of applications) {
-          await api.patch<Combatant>(
+        const results = await Promise.all(applications.map(async ({ combatantId, damage }) => {
+          const combatant = await api.patch<Combatant>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
               { hpDelta: delta, ...damage, idempotencyKey: `${bulkOperationId}:${combatantId}` },
@@ -1877,17 +2067,49 @@ export default function RunSessionPage() {
               isDm,
             ),
           );
+          return { combatantId, damage, combatant };
+        }));
+        if (previous && hasDamageMetadata) {
+          const snapshot = hpFeedbackSnapshotRef.current;
+          if (snapshot?.encounterId === eid) {
+            for (const { combatant, combatantId, damage } of results) {
+              const before = previous.combatants.find((candidate) => candidate.id === combatant.id);
+              const observed = snapshot.combatants.get(combatant.id);
+              const staleObserved = feedbackOperation.stale.get(combatant.id);
+              if (feedbackOperation.emitted.has(combatant.id)) continue;
+              if (staleObserved && !sameHpFeedbackSnapshot(staleObserved, combatant)) continue;
+              // A refetch may have already observed a different change to this target.
+              // Do not fold that remote update into this local result (or label it crit).
+              if (
+                !before
+                || !observed
+                || (!sameHpFeedbackSnapshot(observed, before) && !sameHpFeedbackSnapshot(observed, combatant))
+              ) continue;
+              appendHpFeedbackEvents(diffHpFeedback(
+                hpFeedbackSnapshot([before]),
+                [combatant],
+                damage.isCrit ? new Set([combatantId]) : new Set(),
+              ));
+              snapshot.combatants.set(combatant.id, combatant);
+              feedbackOperation.emitted.add(combatant.id);
+            }
+          }
         }
+        bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
-        if (previous) queryClient.setQueryData(queryKeys.encounter(eid), previous);
+        bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
+        if (previous) {
+          queryClient.setQueryData(queryKeys.encounter(eid), previous);
+          seedHpFeedbackSnapshot(previous);
+        }
         // Same rule as the single-target stepper: an unknown outcome is not a failure.
         if (isAmbiguousOutcome(err)) enterReconciling();
         else reportError(err);
         throw err;
       }
     },
-    [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm],
+    [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
   const patchCombatant = useCallback(
@@ -3180,6 +3402,7 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
+          hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
             canEditEncounter
@@ -3487,6 +3710,7 @@ export default function RunSessionPage() {
               currentCombatantId={encounter.currentCombatantId}
               charactersById={charactersById}
               turnPulse={turnPulse}
+              hpFeedbackByCombatant={hpFeedbackByCombatant}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -3522,6 +3746,7 @@ export default function RunSessionPage() {
                   rowRef={(el) => setCombatantRowRef(c.id, el)}
                   encounterId={eid}
                   combatant={c}
+                  hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
@@ -3653,6 +3878,8 @@ export default function RunSessionPage() {
           <CombatLog events={events} />
 
           <SharedDiceLog campaignId={cid} />
+
+          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} />
         </aside>
       </div>
 

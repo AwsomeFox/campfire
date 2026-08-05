@@ -2,6 +2,8 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { UIIcon } from '../../../components/UIIcon';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
+import type { HpFeedbackEvent } from '../hpFeedback';
+import { FloatingNumbers } from '../FloatingNumbers';
 import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter } from '@campfire/schema';
 import { useQuery } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../../lib/api';
@@ -190,6 +192,7 @@ export type BattleMapProps = {
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
   projection?: 'session' | 'cast';
   castToken?: string | null;
+  hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
 };
 
@@ -224,6 +227,7 @@ export function BattleMap({
   onAoeHitLayoutChange,
   projection = 'session',
   castToken = null,
+  hpFeedbackByCombatant = new Map(),
   ruleSystem,
 }: BattleMapProps) {
   const isCast = projection === 'cast';
@@ -2302,6 +2306,14 @@ export function BattleMap({
                 })()}
 
                 {placed.map((c) => {
+                  const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
+                  const feedbackClass = feedback.some((event) => event.kind === 'down')
+                    ? ' cf-hp-feedback-anchor--down'
+                    : feedback.some((event) => event.kind === 'revive')
+                      ? ' cf-hp-feedback-anchor--revive'
+                      : feedback.some((event) => event.crit)
+                        ? ' cf-hp-feedback-anchor--crit'
+                        : '';
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
@@ -2364,7 +2376,11 @@ export function BattleMap({
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                       }}
                     >
-                      <div style={{ position: 'relative', width: sizePx, height: sizePx }}>
+                      <div
+                        className={`cf-hp-feedback-anchor${feedbackClass}`}
+                        style={{ position: 'relative', width: sizePx, height: sizePx }}
+                      >
+                        <FloatingNumbers events={feedback} />
                         <span
                           style={{
                             display: 'grid', placeItems: 'center', width: sizePx, height: sizePx, borderRadius: '50%',

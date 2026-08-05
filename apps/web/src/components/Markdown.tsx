@@ -42,7 +42,7 @@ function useTypedMentionLinks(
     const byKey = new Map<string, MentionTarget>();
     for (const t of targets) byKey.set(`${t.type}:${t.id}`, t);
 
-    const anchors = root.querySelectorAll<HTMLAnchorElement>('a[href^="/.cf/"]');
+    const anchors = Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href^="/.cf/"]'));
     for (const a of anchors) {
       const link = parseCfLink(a.getAttribute('href'));
       if (!link) continue;
