@@ -253,8 +253,47 @@ test.describe('CastSafetyPoller + runCastSafetyPoll (#1908 rework — single-wri
     expect(CAST_SAFETY_POLL_TIMEOUT_MS).toBeGreaterThan(POLL_INTERVAL_MS);
     // The freshness window must itself stay below the hygiene timeout, or
     // nothing could ever be "too old" before the hygiene abort forces a
-    // conclusion anyway, and round 11a's check would never fire.
+    // conclusion anyway, and round 11a's/11c's checks would never fire.
     expect(CAST_SAFETY_OBSERVATION_FRESHNESS_MS).toBeLessThan(CAST_SAFETY_POLL_TIMEOUT_MS);
+  });
+
+  test('regression (round 12, Devin): the freshness window has real headroom over the poll interval, not just "greater than"', () => {
+    // Both round 11a's and round 11c's checks anchor to a timestamp set at
+    // the END of the PREVIOUS poll cycle (this request's own `issuedAt`, or
+    // the poller's `lastConfirmedAt`) — so even an instantly-concluding
+    // NEXT request is already, at minimum, one full poll interval old by
+    // the time it lands. A window merely greater than the interval by a
+    // sliver would still let one ordinary miss (not a genuine outage) trip
+    // it in practice; this asserts MEANINGFUL headroom, not just the bare
+    // inequality.
+    const POLL_INTERVAL_MS = 5_000;
+    const MIN_HEADROOM_MS = 2_000;
+    expect(CAST_SAFETY_OBSERVATION_FRESHNESS_MS).toBeGreaterThanOrEqual(POLL_INTERVAL_MS + MIN_HEADROOM_MS);
+  });
+
+  test('regression (round 12, the reviewer-supplied scenario): a single failure landing one poll interval after a confirmation stays a fail-safe no-op', async () => {
+    // The exact scenario from the finding: `lastConfirmedAt` is stamped at
+    // the PREVIOUS poll's conclusion, and the next tick fires POLL_MS
+    // later — so a failure concluding at (roughly) POLL_MS after the
+    // confirmation must NOT be treated as "too old", or a single dropped
+    // check would blank a shared TV mid-game for no real hold.
+    const poller = new CastSafetyPoller();
+    const POLL_INTERVAL_MS = 5_000;
+    const confirmed = await runCastSafetyPoll(poller, async () => ({ active: false }));
+    expect(confirmed).toMatchObject({ kind: 'ok', active: false });
+
+    // Simulate the next scheduled tick, one poll interval later, failing —
+    // using the poller's real Date.now()-based clock, scaled down via a
+    // small freshnessMs so the test stays fast while preserving the SAME
+    // ratio (interval : freshness) the production constants have.
+    const scaledInterval = 20;
+    const scaledFreshness = Math.round((CAST_SAFETY_OBSERVATION_FRESHNESS_MS / POLL_INTERVAL_MS) * scaledInterval);
+    await new Promise((resolve) => setTimeout(resolve, scaledInterval));
+    const failing: CastSafetyFetcher = async () => {
+      throw new TypeError('network blip');
+    };
+    const result = await runCastSafetyPoll(poller, failing, { freshnessMs: scaledFreshness });
+    expect(result.kind).toBe('failed');
   });
 
   test('a slow-but-healthy response still lands: no deadline is tight enough to reject it', async () => {

@@ -343,6 +343,18 @@ export class PlayerDisplayLoadSequencer {
  *      value response's OWN round-trip freshness check is unaffected and
  *      still needed — see the note on that branch in `poll()` for why it
  *      is not simply replaced by the same `lastConfirmedAt` comparison.)
+ * 12.  `CAST_SAFETY_OBSERVATION_FRESHNESS_MS` (5s) was exactly equal to the
+ *      page's poll interval — both round 11a's and round 11c's checks
+ *      anchor to a timestamp set at the END of the PREVIOUS poll cycle, so
+ *      even an instantly-concluding next request is already, at minimum,
+ *      one full interval old by the time it lands. A window equal to (not
+ *      meaningfully larger than) that interval meant one ordinary
+ *      slow/failed response — not a genuine multi-tick outage — routinely
+ *      crossed it, flashing the curtain over a live shared TV for no real
+ *      reason. Fix: widen to 8s, giving real headroom above the 5s
+ *      interval while staying comfortably below `CAST_SAFETY_POLL_TIMEOUT_MS`
+ *      (10s) — see that constant's own doc for the exact derivation and
+ *      the worst-case bound this still satisfies.
  *
  * The trade round 11a accepts, explicitly: a hung request now DOES delay
  * the next observation (rounds 1-3's exact tension), bounded by
@@ -351,10 +363,11 @@ export class PlayerDisplayLoadSequencer {
  * unlike the generation scheme's version, which (rounds 4-9) explicitly
  * carried none. Combined with round 11a's freshness check (and round 11c's
  * extension of it to failures), the worst-case exposure from hold-raised
- * to curtain-shown is bounded by `CAST_SAFETY_POLL_TIMEOUT_MS` alone (not
- * that value plus another poll interval, not two of them back to back, and
- * not stretched arbitrarily far by a run of fast failures) — see that
- * constant's own doc for the exact reasoning.
+ * to curtain-shown stays within the feature's 15s acceptance bound even
+ * with round 12's widened window (10s either way: `CAST_SAFETY_POLL_TIMEOUT_MS`
+ * for a single slow response, or roughly two poll intervals — the same
+ * 10s, given the current tuning — for a fast-failure burst to cross the
+ * freshness window) — see that constant's own doc for the exact reasoning.
  *
  * Cancellation on an identity change (unmount / cast-token change) is just
  * "abort the one possible in-flight request and free the poller"
@@ -387,17 +400,32 @@ export type CastSafetyFetcher = (signal: AbortSignal) => Promise<CastSafetyState
 export const CAST_SAFETY_POLL_TIMEOUT_MS = 10_000;
 
 /**
- * How old (issue-to-conclusion) an `active: false` observation — or a
- * failure/hygiene-abort — may be and still be trusted as describing the
- * CURRENT state (round 11a). Chosen to match roughly one poll interval
- * (5s): a healthy request against this trivial boolean-returning endpoint
- * concludes in well under a second, so only a genuinely slow/degraded
- * request ever crosses this threshold, and MUST stay comfortably below
- * `CAST_SAFETY_POLL_TIMEOUT_MS` — otherwise nothing could ever be "too old"
- * before the hygiene abort forces a conclusion anyway, and the freshness
- * check would never fire.
+ * How old (issue-to-conclusion) an `active: false` observation may be and
+ * still be trusted as describing the CURRENT state (round 11a); and,
+ * separately, how long since the last successful confirmation of ANY value
+ * a failure/hygiene-abort may be before it also stops being trusted as a
+ * benign no-op (round 11c).
+ *
+ * Round 12 (Devin): this must have REAL headroom over the page's poll
+ * interval (`POLL_MS`, 5s — see `PlayerDisplayPage.tsx`), not merely be
+ * larger than a single request's own near-instant round trip. Both
+ * mechanisms above are anchored to a PRIOR timestamp (this request's own
+ * `issuedAt`, or the poller's `lastConfirmedAt`) that was itself set at the
+ * END of the previous poll cycle — so even an infinitely-fast NEXT
+ * conclusion is already, at minimum, one full poll interval old the moment
+ * it lands. A value equal to (or barely above) that interval means a
+ * single ordinary missed/slow response — not a genuine multi-tick outage —
+ * routinely crosses the threshold and flips a live shared TV to the
+ * curtain for no real reason. 8s gives a full 3s of headroom above the 5s
+ * interval (enough to absorb one poll's own ordinary latency without
+ * tripping on a single miss), while staying comfortably below
+ * `CAST_SAFETY_POLL_TIMEOUT_MS` (10s) — otherwise nothing could ever be
+ * "too old" before the hygiene abort forces a conclusion anyway, and this
+ * check would never fire at all. See the unit suite's guard test for the
+ * exact `POLL_INTERVAL_MS < freshnessMs < CAST_SAFETY_POLL_TIMEOUT_MS`
+ * relationship this is required to satisfy.
  */
-export const CAST_SAFETY_OBSERVATION_FRESHNESS_MS = 5_000;
+export const CAST_SAFETY_OBSERVATION_FRESHNESS_MS = 8_000;
 
 export type CastSafetyPollResult =
   | { kind: 'ok'; active: boolean }

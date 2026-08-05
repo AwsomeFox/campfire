@@ -1005,6 +1005,11 @@ export default function PlayerDisplayPage() {
       ref={controlsRef}
       className="cf-screen-control-stack"
       data-visible={keepControlsVisible ? 'true' : 'false'}
+      // Only the cast/kiosk route's stack needs to sit above the safety
+      // curtain (see SCREEN_CSS below) — the authenticated route's stack,
+      // including the DM cockpit, must stay under it like every other
+      // authenticated control.
+      data-cast-mode={isCastMode ? 'true' : 'false'}
     >
       <div className="cf-screen-controls">
         <button
@@ -1853,24 +1858,38 @@ const SCREEN_CSS = `
 }
 .cf-screen.centered { display: flex; align-items: center; justify-content: center; }
 
-/* Operator control stack (issue #595 wiring preserved verbatim). z-index sits
-   ABOVE --cf-layer-dialog (issue #1908): the safety curtain (.cf-safety-display,
-   same tier as every other dialog) is now also this page's fail-safe DEFAULT before
-   the first /safety poll succeeds, and can persist indefinitely if that poll keeps
-   failing. On the cast/kiosk route the "Exit kiosk" button here is the ONLY affordance
-   a touch-only shared TV has -- a curtain that outranks it would strand the device with
-   no way to leave kiosk mode without a second device. .cf-exit-pin (the PIN dialog
-   this stack opens) sits one tier higher still, so it in turn is never trapped under
-   this stack once open. */
+/* Operator control stack (issue #595 wiring preserved verbatim). */
 .cf-screen .cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
   width: min(460px, calc(100vw - 28px));
-  z-index: calc(var(--cf-layer-dialog, 50) + 1);
   opacity: 1;
   pointer-events: auto;
   transition: opacity 0.4s ease;
+}
+/* z-index sits ABOVE --cf-layer-dialog (issue #1908) -- but ONLY on the
+   cast/kiosk route (data-cast-mode="true"), and only for what actually
+   renders there: the Exit-kiosk button and the fullscreen/wake-lock
+   notices. role !== 'dm' in cast mode, so the DM cockpit block below never
+   renders here regardless. The safety curtain (.cf-safety-display, same
+   tier as every other dialog) is also this page's fail-safe DEFAULT before
+   the first /safety poll succeeds, and can persist indefinitely if that
+   poll keeps failing. On the cast/kiosk route "Exit kiosk" is the ONLY
+   affordance a touch-only shared TV has -- a curtain that outranks it
+   would strand the device with no way to leave kiosk mode without a
+   second device. .cf-exit-pin (the PIN dialog this stack opens) sits one
+   tier higher still, so it in turn is never trapped under this stack once
+   open.
+   On the AUTHENTICATED route, this same div also carries the DM cockpit
+   (scene picker, paging, aspect toggle) -- that must stay under the
+   curtain like every other authenticated control, so an active X-Card
+   still blanks the whole operator surface it is meant to cover, matching
+   the pre-#1908 authed overlay behavior exactly. Leaving this rule
+   unconditional here regressed that (round 12 finding): scope it to
+   cast mode only. */
+.cf-screen .cf-screen-control-stack[data-cast-mode="true"] {
+  z-index: calc(var(--cf-layer-dialog, 50) + 1);
 }
 /* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
    reveal painted even before React flips data-visible (issue #595). */

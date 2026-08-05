@@ -233,3 +233,32 @@ test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
     expect(screenCss).not.toMatch(/var\(--color-danger\s*,/);
   });
 });
+
+test.describe('safety curtain z-index scoping (issue #1908, round 12)', () => {
+  // `.cf-screen-control-stack` renders BOTH the cast/kiosk route's Exit
+  // button (which must stay above the safety curtain — issue #1908 round
+  // 7) AND, on the authenticated route, the DM cockpit (scene picker,
+  // paging, aspect toggle — issue #823). Elevating the whole stack's
+  // z-index unconditionally lifted the authenticated cockpit above the
+  // curtain too, which regressed the authed overlay's original
+  // full-viewport-blocking behavior (round 12 finding). The elevation must
+  // be scoped to the cast-mode-only `[data-cast-mode="true"]` variant, not
+  // the bare `.cf-screen-control-stack` rule.
+  test('the elevated z-index only applies to the cast-mode control stack, not the bare (authenticated) one', () => {
+    const screenCss = extractScreenCss(READ(PAGE_PATH));
+    const bareRuleMatch = screenCss.match(/\.cf-screen\s+\.cf-screen-control-stack\s*\{([^}]*)\}/);
+    expect(bareRuleMatch, 'base .cf-screen-control-stack rule not found').not.toBeNull();
+    expect(bareRuleMatch?.[1]).not.toMatch(/z-index/);
+
+    const castModeRuleMatch = screenCss.match(
+      /\.cf-screen\s+\.cf-screen-control-stack\[data-cast-mode="true"\]\s*\{([^}]*)\}/,
+    );
+    expect(castModeRuleMatch, 'cast-mode-scoped .cf-screen-control-stack rule not found').not.toBeNull();
+    expect(castModeRuleMatch?.[1]).toMatch(/z-index:\s*calc\(var\(--cf-layer-dialog/);
+  });
+
+  test('the control stack carries a data-cast-mode attribute reflecting isCastMode', () => {
+    const pageSource = READ(PAGE_PATH);
+    expect(pageSource).toMatch(/data-cast-mode=\{isCastMode \? 'true' : 'false'\}/);
+  });
+});
