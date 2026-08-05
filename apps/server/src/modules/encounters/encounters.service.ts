@@ -2034,9 +2034,20 @@ export class EncountersService {
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
     if (input.aoe !== undefined) {
-      // This legacy DM whole-list route cannot mint or transfer player attribution:
-      // keep an existing template's declarer by id and stamp new DM templates null.
-      const previousById = new Map(aoeBaseline.map((template) => [template.id, template]));
+      let aoeBaselineForAttribution = aoeBaseline;
+      if (encounterRow.aoe && aoeBaseline.length === 0 && !resetApplied) {
+        try {
+          const raw = JSON.parse(encounterRow.aoe);
+          if (Array.isArray(raw)) {
+            aoeBaselineForAttribution = raw.filter(
+              (item): item is AoeTemplate => item != null && typeof item === 'object' && typeof item.id === 'string',
+            );
+          }
+        } catch {
+          // ignore parsing error fallback
+        }
+      }
+      const previousById = new Map(aoeBaselineForAttribution.map((template) => [template.id, template]));
       const aoeInput = input.aoe.map((template) => ({
         ...template,
         declaredByUserId: previousById.get(template.id)?.declaredByUserId ?? null,
