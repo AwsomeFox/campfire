@@ -224,6 +224,20 @@
       "updateSlotError": "Couldn't update the spell slot.",
       "ambiguousResolved": "We couldn't confirm that action completed at the time, but the values shown are now up to date — check them before retrying.",
       "setUsedTitle": "Set used to {{val}}"
+    },
+    "rulesLookup": {
+      "heading": "Rules quick lookup",
+      "placeholder": "Search rules & homebrew…",
+      "searchLabel": "Search rules and homebrew",
+      "noResults": "No matching rules found.",
+      "noDetails": "No details available for this entry.",
+      "recentLookups": "Recent lookups",
+      "homebrewBadge": "Homebrew",
+      "toggleExpand": "Expand rules quick lookup",
+      "toggleCollapse": "Collapse rules quick lookup",
+      "show": "Show",
+      "hide": "Hide",
+      "loading": "Searching…"
     }
   }
 }
