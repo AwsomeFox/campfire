@@ -193,8 +193,16 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
           `patch seed combatant ${c.id} -> ${patchRes.status()}: ${await readError(patchRes)}`,
         );
       }
+      // `resetTurn` only clears the per-turn slice (`used` + `movementUsedFt` —
+      // encounters.service.ts:7474-7477, matching the schema comment at
+      // index.ts:10791). `delaying`/`readied` are a separate pair of turn-order flags on
+      // the same endpoint (index.ts:10809-10810) and are NOT touched by `resetTurn`, so a
+      // spec that leaves a seed combatant delaying or with a readied action would
+      // otherwise leak that into the next test. Clear them explicitly in the same request.
+      // Concentration is intentionally left alone — resetTurn's own doc comment says it's
+      // kept, and no spec against this shared fixture sets it today.
       const turnRes = await dm.post(`/api/v1/encounters/${encounterId}/combatants/${c.id}/turn-state`, {
-        data: { resetTurn: true },
+        data: { resetTurn: true, delaying: false, readied: null },
       });
       if (!turnRes.ok()) {
         throw new Error(
