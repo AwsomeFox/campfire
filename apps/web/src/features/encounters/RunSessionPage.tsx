@@ -977,6 +977,15 @@ export default function RunSessionPage() {
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
   }, []);
   useEffect(() => setTurnOwnerFromEvent(null), [eid]);
+  // Ending an encounter emits an encounter.updated frame rather than a turn edge.
+  // Clear every transient turn signal here so a disabled /turn query cannot keep
+  // a prior owned turn (including the hidden-tab title) alive after combat stops.
+  useEffect(() => {
+    if (encounter?.status === 'running') return;
+    setTurnOwnerFromEvent(null);
+    setTurnBeat(null);
+    setTurnPulse(false);
+  }, [encounter?.status]);
   const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
   const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
     eventStatus,
@@ -3188,7 +3197,7 @@ export default function RunSessionPage() {
       )}
       <TurnChangeBeat
         beat={turnBeat}
-        isYourTurn={turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true)}
+        isYourTurn={encounter?.status === 'running' && (turnOwnerFromEvent ?? (turnWorkspace?.isYourTurn === true))}
       />
 
       {pendingApply && (

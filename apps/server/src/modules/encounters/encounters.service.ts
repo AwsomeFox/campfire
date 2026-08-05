@@ -6776,6 +6776,7 @@ export class EncountersService {
     let newRound = encounterRow.round;
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
+    let newCurrentKind: 'character' | 'monster' | 'npc' | null = null;
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
     let restoredLogEntries: Array<{
@@ -6969,6 +6970,7 @@ export class EncountersService {
           ? sorted.find((c) => c.id === currentCombatantId)
           : undefined;
       newCurrentName = phase === 'lair' ? 'Lair' : restored?.name ?? null;
+      newCurrentKind = restored?.kind ?? null;
       if (restored) {
         const reset = resetTurnStateForStart(restored.turnState);
         tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
@@ -7032,6 +7034,11 @@ export class EncountersService {
       detail: `round ${newRound}`,
     });
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    this.emitEncounterEvent('encounter.turn_changed', encounterRow.campaignId, encounterId, encounterRow.hidden, {
+      round: newRound,
+      currentCombatantId: newCurrentId,
+      combatantKind: newCurrentKind,
+    });
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
 

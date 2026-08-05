@@ -66,7 +66,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       undefined, // campaignsService
       actions,
     );
-    return { orm, service, actions };
+    return { orm, service, actions, events };
   }
 
   const dmUser: RequestUser = { id: 'dev:dm', name: 'DM', serverRole: 'admin', devRole: 'dm' };
@@ -206,6 +206,31 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const undone = await service.undoTurn(encounterId, dmUser, 'dm');
     expect(undone.currentCombatantId).toBe(c1);
     expect(currentId(orm, encounterId)).toBe(c1);
+  });
+
+  it('emits a turn edge for the restored combatant', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, events } = build();
+    const { campaignId, encounterId, c1, c2 } = seed(orm);
+    const frames: Array<{ type: string; currentCombatantId?: number | null; round?: number; combatantKind?: string | null }> = [];
+    const subscription = events.streamFor(campaignId).subscribe((event) => frames.push(event));
+
+    await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
+    frames.length = 0;
+    await service.undoTurn(encounterId, dmUser, 'dm');
+    subscription.unsubscribe();
+
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'encounter.updated', encounterId }),
+      expect.objectContaining({
+        type: 'encounter.turn_changed',
+        encounterId,
+        currentCombatantId: c1,
+        round: 1,
+        combatantKind: 'character',
+      }),
+    ]);
+    expect(c2).not.toBe(c1);
   });
 
   it('undo resets the restored combatant’s per-turn action economy', async () => {

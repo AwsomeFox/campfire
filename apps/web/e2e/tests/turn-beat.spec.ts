@@ -83,6 +83,18 @@ test.describe('turn-change beat (issue #1906)', () => {
       await expect(playerPage.getByTestId('turn-ticker')).toContainText('Round 2');
       await expect(playerPage.getByTestId('turn-takeover')).toHaveCount(0);
       await expect(playerPage.getByTestId('turn-takeover')).toHaveCount(0, { timeout: 4_000 });
+
+      // Re-enter an owned turn, then end the fight over SSE. An ended encounter
+      // must clear the hidden-tab ownership state even though it has no turn edge.
+      await dmPage.getByTestId('encounter-header-next-turn').click();
+      await expect(playerPage.getByTestId('turn-takeover')).toContainText("YOU'RE UP — Turn Beat Hero");
+      await playerPage.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await expect(playerPage).toHaveTitle(/^● Your turn — /);
+      await dmApi.post(`/api/v1/encounters/${encounterId}/end`);
+      await expect(playerPage).not.toHaveTitle(/^● Your turn — /);
     } finally {
       if (encounterId != null) {
         await dmApi.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);

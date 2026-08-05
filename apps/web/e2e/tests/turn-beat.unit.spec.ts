@@ -61,4 +61,15 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(!beat\) \{\s*setShowTakeover\(false\);\s*setShowTicker\(false\);/);
     expect(source).toMatch(/if \(beat\.kind !== 'your-turn'\) \{\s*setShowTakeover\(false\);/);
   });
+
+  test('clears turn ownership and transient cues when combat stops', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/if \(encounter\?\.status === 'running'\) return;\s*setTurnOwnerFromEvent\(null\);\s*setTurnBeat\(null\);/);
+    expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running' &&/);
+  });
+
+  test('keeps Player Display to the paired encounter update load', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/screen/PlayerDisplayPage.tsx'), 'utf8');
+    expect(source).toMatch(/if \(event\.type === 'encounter\.turn_changed'\) return;/);
+  });
 });
