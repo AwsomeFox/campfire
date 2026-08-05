@@ -66,7 +66,7 @@ import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { type AoeHitLayout } from './aoeHitTest';
 import { type TargetDamageApplication } from './directDamage';
 import { resolveGridCalibration } from './mapRenderedBounds';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
