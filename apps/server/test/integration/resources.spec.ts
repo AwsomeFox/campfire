@@ -817,6 +817,61 @@ describe('inline spell slots & character resources (issue #422)', () => {
       expect(JSON.parse(row.statblockJson!).spellSlots['2'].used).toBeUndefined();
     });
 
+    // Issue #1909 review (Devin P2): a genuinely schema-invalid stored statblock (not just a
+    // malformed resource/spell-slot entry, which the tests above already cover) must 400,
+    // not throw a raw ZodError that escapes as an unhandled 500 — matching every READ path
+    // for this column (parseCombatantStatblock), which degrades the same shape to null
+    // rather than throwing.
+    it("a schema-invalid stored statblock 400s instead of throwing an unhandled 500 (Devin review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      // abilityScores must be a record of numbers; a string value makes the WHOLE object
+      // fail CombatantStatblock's schema, not just one resource entry.
+      db.update(combatants)
+        .set({
+          statblockJson: JSON.stringify({
+            abilityScores: { STR: 'not-a-number' },
+            resources: { kiPoints: { max: 3, used: 0 } },
+            spellSlots: {},
+          }),
+        })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    // Issue #1909 review (Devin P2): the fix must not "fix" the 500 by re-serializing the
+    // SCHEMA-DEFAULTED/stripped object back to storage — that would silently normalize every
+    // OTHER untouched part of the stored statblock (here: a legacy/unknown top-level field,
+    // and AC) on a single pip click. Only the touched resource/spell-slot entry may change.
+    it("adjusting one resource does not silently rewrite unrelated stored statblock fields (Devin review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+      db.update(combatants)
+        .set({
+          statblockJson: JSON.stringify({
+            ac: 17,
+            legacyUnknownField: 'preserve-me',
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          }),
+        })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm');
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      const stored = JSON.parse(row.statblockJson!);
+      expect(stored.resources.kiPoints.used).toBe(1);
+      // Untouched fields survive byte-for-byte, including one z.object()'s default
+      // strip-unknown-keys behavior would otherwise have dropped on a re-parse/reserialize.
+      expect(stored.ac).toBe(17);
+      expect(stored.legacyUnknownField).toBe('preserve-me');
+      expect(stored.spellSlots['2'].used).toBe(0);
+    });
+
     // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
     // deleted/ended status, not the CAMPAIGN's lifecycle. Every other encounter-write
     // transaction that re-reads a fresh encounter row pairs it with

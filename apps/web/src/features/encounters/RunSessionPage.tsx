@@ -12,7 +12,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, CombatantStatblock as CombatantStatblockValue, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
 import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -46,6 +46,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { withStatblockRevision } from './resourceTrackerLogic';
+import { createStatblockSaveQueue, type StatblockSaveQueue } from './statblockSaveQueue';
 import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -2113,19 +2114,54 @@ export default function RunSessionPage() {
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
+  // Issue #1909 review (Devin) — a regression the earlier `withStatblockRevision` fix
+  // introduced: `CombatantStatblockEditor` has no debounce of its own (every keystroke
+  // calls `onChange` synchronously), and EVERY combatant PATCH advances the encounter's
+  // CAS token server-side (`updateCombatant`'s unconditional `encounters.updatedAt` bump).
+  // Sending that token unconditionally on every keystroke meant the SECOND keystroke's
+  // PATCH would carry the token the FIRST keystroke's PATCH had already invalidated,
+  // 409ing at ordinary typing speed. `statblockSaveQueue` debounces keystrokes into one
+  // save per pause and serializes saves per combatant so each save's `save()` callback
+  // below always re-reads the CURRENT encounter revision immediately before constructing
+  // its request — never a snapshot a prior save (from this same client) has since moved.
+  // The `deps` ref sidesteps a stale-closure trap from creating this queue once (a lazy
+  // ref, so the debounce/serialization state survives across renders) while `eid`/
+  // `combatantPatch`/`reportError` still need their CURRENT values at save time.
+  const statblockSaveDepsRef = useRef({ eid, combatantPatch: undefined as unknown as typeof combatantPatch, reportError });
+  statblockSaveDepsRef.current.eid = eid;
+  statblockSaveDepsRef.current.combatantPatch = combatantPatch;
+  statblockSaveDepsRef.current.reportError = reportError;
+
+  const statblockSaveQueueRef = useRef<StatblockSaveQueue<CombatantStatblockValue> | null>(null);
+  if (!statblockSaveQueueRef.current) {
+    statblockSaveQueueRef.current = createStatblockSaveQueue<CombatantStatblockValue>({
+      debounceMs: 600,
+      save: async (combatantId, draft) => {
+        const deps = statblockSaveDepsRef.current;
+        // Refetch (not just an async invalidate) so this AWAITS the current server
+        // revision landing in the cache before constructing the CAS token below.
+        await queryClient.invalidateQueries({ queryKey: queryKeys.encounter(deps.eid) });
+        const fresh = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(deps.eid));
+        const withRevision = withStatblockRevision({ statblock: draft }, fresh?.updatedAt);
+        await deps.combatantPatch.mutateAsync({ combatantId, patch: withRevision });
+      },
+      onError: (_combatantId, err) => statblockSaveDepsRef.current.reportError(err),
+    });
+  }
+
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {
+      if ('statblock' in patch) {
+        statblockSaveQueueRef.current?.enqueue(combatantId, patch.statblock as CombatantStatblockValue);
+        return;
+      }
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
       const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId, isDm) : patch;
-      // Issue #1909 review (Codex): see withStatblockRevision's doc comment — a
-      // whole-statblock write from the in-app statblock editor used to carry no
-      // `expectedUpdatedAt`, so the server's CAS guard never actually fired for it.
-      const withRevision = withStatblockRevision(enriched, encounter?.updatedAt);
-      combatantPatch.mutate({ combatantId, patch: withRevision });
+      combatantPatch.mutate({ combatantId, patch: enriched });
     },
-    [combatantPatch, encounter?.status, encounter?.currentCombatantId, encounter?.updatedAt, isDm],
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
 
   const deathSaveRoll = useKeyedMutation({

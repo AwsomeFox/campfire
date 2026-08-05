@@ -8768,7 +8768,21 @@ export class EncountersService {
           if (!fresh || !fresh.statblockJson) {
             throw new BadRequestException('This combatant has no inline statblock resources');
           }
-          const statblock = CombatantStatblock.parse(fromJsonText<unknown>(fresh.statblockJson, {}));
+          // Issue #1909 review (Devin P2): every READ path for this column
+          // (`parseCombatantStatblock`, `:248-252`) uses `safeParse` and degrades a
+          // corrupt/legacy row to `null` rather than throwing — this write path used
+          // `.parse`, so a `ZodError` on a legacy/malformed stored statblock escaped as an
+          // unhandled 500, inconsistent with the typed 400s this same branch deliberately
+          // added for malformed `used`/`max` just below. `rawStatblock` is the ORIGINAL
+          // parsed JSON (untouched by Zod's defaults/strip-unknown-keys), kept alongside
+          // the validated `statblock` so the write below can merge only the ONE changed
+          // resource/spell-slot entry back into it — see the write below for why.
+          const rawStatblock = fromJsonText<Record<string, unknown>>(fresh.statblockJson, {});
+          const parsedStatblock = CombatantStatblock.safeParse(rawStatblock);
+          if (!parsedStatblock.success) {
+            throw new BadRequestException("This combatant's inline statblock is malformed and cannot be adjusted here — open it in the statblock editor to fix or replace it.");
+          }
+          const statblock = parsedStatblock.data;
 
           if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
             const levelKey = String(patch.spellLevel);
@@ -8817,6 +8831,14 @@ export class EncountersService {
               throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
             }
             statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
+            // Issue #1909 review (Devin P2): merge only the TOUCHED level back into the
+            // ORIGINAL raw `rawStatblock.spellSlots`, not the re-parsed `statblock` as a
+            // whole — `.safeParse` applies schema defaults and strips unknown keys, so
+            // writing the re-parsed object back would silently normalize every OTHER
+            // untouched part of the stored statblock (AC, actions, unrelated resources) on
+            // a single pip click. Every field this endpoint didn't touch survives exactly
+            // as stored.
+            rawStatblock.spellSlots = { ...(rawStatblock.spellSlots as Record<string, unknown> | undefined), [levelKey]: statblock.spellSlots[levelKey] };
             eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
           } else if (patch.key) {
             const res = (statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined) ?? {
@@ -8847,6 +8869,9 @@ export class EncountersService {
               throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
             }
             statblock.resources[patch.key] = { ...res, used: nextUsed };
+            // Issue #1909 review (Devin P2): same merge-only-the-touched-entry rationale as
+            // the spell-slot branch above.
+            rawStatblock.resources = { ...(rawStatblock.resources as Record<string, unknown> | undefined), [patch.key]: statblock.resources[patch.key] };
             eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
           } else {
             throw new BadRequestException('Must supply either spellLevel or key to adjust');
@@ -8854,7 +8879,7 @@ export class EncountersService {
 
           const [updated] = tx
             .update(combatants)
-            .set({ statblockJson: toJsonText(statblock) })
+            .set({ statblockJson: toJsonText(rawStatblock) })
             .where(eq(combatants.id, combatantId))
             .returning()
             .all();
