@@ -7427,9 +7427,51 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
     expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
     expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
     // A template hidden by fog cannot be distinguished from a missing id through
-    // either player mutation route.
+    // any player mutation route, including REST's create-only declaration path.
     expect((await request(server).patch(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status).toBe(404);
     expect((await request(server).delete(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(otherPlayer).send(declaration)).status).toBe(404);
+
+    const invalidFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Invalid fog AoE visibility', hidden: false })
+    ).body.id;
+    await db.update(encountersTable).set({
+      aoe: JSON.stringify([{ ...declaration, id: 'invalid-fog-other', declaredByUserId: 'dev:p-2' }]),
+      fog: '{malformed',
+    }).where(eq(encountersTable.id, invalidFogId));
+    expect((await request(server).get(`/api/v1/encounters/${invalidFogId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player)).status).toBe(404);
+
+    const siblingFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog source', hidden: false })
+    ).body.id;
+    const siblingTargetId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog AoE visibility', hidden: false })
+    ).body.id;
+    const sharedMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', MINIMAL_PNG_1X1, { filename: 'shared-fog-map.png', contentType: 'image/png' });
+    expect(sharedMap.status).toBe(201);
+    await db.update(encountersTable).set({ mapAttachmentId: sharedMap.body.id, fog: JSON.stringify({ enabled: true, revealed: [] }) }).where(eq(encountersTable.id, siblingFogId));
+    await db.update(encountersTable).set({
+      mapAttachmentId: sharedMap.body.id,
+      aoe: JSON.stringify([{ ...declaration, id: 'sibling-fog-other', declaredByUserId: 'dev:p-2' }]),
+    }).where(eq(encountersTable.id, siblingTargetId));
+    expect((await request(server).get(`/api/v1/encounters/${siblingTargetId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player)).status).toBe(404);
 
     await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);

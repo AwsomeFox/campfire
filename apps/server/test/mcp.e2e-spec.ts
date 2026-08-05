@@ -1251,6 +1251,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(restEncounter.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'fog-owner' })]));
   });
 
+  it('declare_aoe_template keeps a hidden existing DM template non-enumerating for a player', async () => {
+    const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-hidden-existing-aoe', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP hidden existing AoE', hidden: false } })) as { id: number };
+    expect((await dmClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'dm-hidden', shape: 'circle', x: 20, y: 20, sizeFt: 10 } })).isError).toBeFalsy();
+    expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
+
+    const upsert = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { encounterId: encounter.id, templateId: 'dm-hidden', x: 60 } });
+    expect(upsert.isError).toBe(true);
+    expect(parseResult(upsert)).toMatchObject({ error: { status: 404 } });
+  });
+
   it('keeps hidden archived encounters non-enumerating for AoE MCP writes', async () => {
     const archivedCampaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP hidden archived AoE' });
     expect(archivedCampaign.status).toBe(201);

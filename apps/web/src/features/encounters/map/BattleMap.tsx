@@ -1213,7 +1213,8 @@ export function BattleMap({
     }
     if (gesture.kind === 'aoe') {
       const point = finalPoint ?? gesture.point;
-      updateAoe(gesture.templateId, { x: point.x, y: point.y });
+      if (effectiveCanDmWrite) updateAoe(gesture.templateId, { x: point.x, y: point.y });
+      else updatePlayerAoeFromDraft(gesture.templateId, { x: point.x, y: point.y });
       return;
     }
     if (gesture.kind === 'calibrate') {
@@ -1357,7 +1358,8 @@ export function BattleMap({
       e.preventDefault();
       e.stopPropagation();
       const next = nudgeMapPoint({ x: t.x, y: t.y }, e);
-      updateAoe(t.id, { x: next.x, y: next.y });
+      if (effectiveCanDmWrite) updateAoe(t.id, { x: next.x, y: next.y });
+      else updatePlayerAoeFromDraft(t.id, { x: next.x, y: next.y });
       announce(`${t.shape} template moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
       return;
     }

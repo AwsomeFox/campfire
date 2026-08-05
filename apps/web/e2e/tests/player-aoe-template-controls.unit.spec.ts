@@ -44,6 +44,8 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(updateAoe).toContain('queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)');
     expect(updateAoe).toContain('current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template))');
     expect(updateAoe).toContain('invalidateEncounter(queryClient, eid);');
+    expect(BATTLE_MAP).toContain('else updatePlayerAoeFromDraft(gesture.templateId, { x: point.x, y: point.y });');
+    expect(BATTLE_MAP).toContain('else updatePlayerAoeFromDraft(t.id, { x: next.x, y: next.y });');
   });
 
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {

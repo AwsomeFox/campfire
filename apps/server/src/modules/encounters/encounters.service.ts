@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
@@ -20,7 +20,7 @@ import { StorylinesService } from '../storylines/storylines.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
-import { fogConcealsPixels, parseFogState } from '../../common/fog';
+import { fogConcealsPixels, parseFogState, persistedFogConcealsPixels } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes, matchesSearchQuery } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
@@ -1758,23 +1758,9 @@ export class EncountersService {
     // (and render above the fog overlay client-side). Filter server-side for non-DMs using
     // the same concealment rules as token redaction; player-declared templates stay visible
     // to their owner via declaredByUserId.
-    let aoe = withLinks.aoe ?? [];
-    if (viewerRole !== undefined && viewerRole !== 'dm') {
-      const fog = parseFog(row.fog);
-      const invalidFog = row.fog !== null && fog === null;
-      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
-      const siblingProtects =
-        !invalidFog &&
-        !ownFogConceals &&
-        row.mapAttachmentId != null &&
-        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
-      if (invalidFog || siblingProtects) {
-        const concealAll: FogState = { enabled: true, revealed: [] };
-        aoe = filterAoeTemplatesForViewer(aoe, concealAll, { viewerUserId });
-      } else if (fog?.enabled) {
-        aoe = filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
-      }
-    }
+    const aoe = viewerRole !== undefined && viewerRole !== 'dm'
+      ? this.filterAoeTemplatesForViewer(this.db, row, withLinks.aoe ?? [], viewerUserId)
+      : withLinks.aoe ?? [];
     return {
       ...withLinks,
       aoe,
@@ -2215,6 +2201,40 @@ export class EncountersService {
   }
 
   /**
+   * The server's one fail-closed AoE visibility computation. Reads and scoped
+   * writes must agree: invalid fog and a sibling encounter that still protects
+   * a reused map both conceal every non-owned template.
+   */
+  private filterAoeTemplatesForViewer(
+    db: SyncDb,
+    encounter: typeof encounters.$inferSelect,
+    aoe: readonly AoeTemplateType[],
+    viewerUserId: string | undefined,
+  ): AoeTemplateType[] {
+    const fog = parseFog(encounter.fog);
+    const invalidFog = encounter.fog !== null && fog === null;
+    const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+    const siblingProtects =
+      !invalidFog &&
+      !ownFogConceals &&
+      encounter.mapAttachmentId != null &&
+      db
+        .select({ fog: encounters.fog })
+        .from(encounters)
+        .where(and(
+          eq(encounters.mapAttachmentId, encounter.mapAttachmentId),
+          eq(encounters.campaignId, encounter.campaignId),
+          isNotNull(encounters.fog),
+        ))
+        .all()
+        .some((row) => persistedFogConcealsPixels(row.fog));
+    if (invalidFog || siblingProtects) {
+      return filterAoeTemplatesForViewer(aoe, { enabled: true, revealed: [] }, { viewerUserId });
+    }
+    return filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
+  }
+
+  /**
    * Create one player- or DM-declared AoE template (issue #1913). Attribution is
    * stamped from the authenticated caller rather than accepted from the request.
    */
@@ -2246,8 +2266,11 @@ export class EncountersService {
       const current = parseAoe(fresh.aoe);
       const existingIndex = current.findIndex((candidate) => candidate.id === templateId);
       if (existingIndex >= 0) {
-        if (!upsert) throw new ConflictException(`AoE template ${templateId} already exists`);
         const existing = current[existingIndex];
+        if (role !== 'dm' && !this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).some((candidate) => candidate.id === templateId)) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        if (!upsert) throw new ConflictException(`AoE template ${templateId} already exists`);
         if (role !== 'dm' && existing.declaredByUserId !== user.id) {
           throw new ForbiddenException('Players may modify only their own AoE templates.');
         }
@@ -2313,9 +2336,7 @@ export class EncountersService {
       if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
       const existing = current[index];
       if (role !== 'dm' && existing.declaredByUserId !== user.id) {
-        // A template outside revealed fog must remain indistinguishable from a
-        // missing id, including on player-addressable write routes.
-        if (filterAoeTemplatesForViewer([existing], parseFog(fresh.fog), { viewerUserId: user.id }).length === 0) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
           throw new NotFoundException(`AoE template ${templateId} not found`);
         }
         throw new ForbiddenException('Players may modify only their own AoE templates.');
@@ -2374,8 +2395,7 @@ export class EncountersService {
       const existing = current.find((candidate) => candidate.id === templateId);
       if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
       if (role !== 'dm' && existing.declaredByUserId !== user.id) {
-        // Match reads and updates: unrevealed templates are non-enumerating.
-        if (filterAoeTemplatesForViewer([existing], parseFog(fresh.fog), { viewerUserId: user.id }).length === 0) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
           throw new NotFoundException(`AoE template ${templateId} not found`);
         }
         throw new ForbiddenException('Players may remove only their own AoE templates.');
