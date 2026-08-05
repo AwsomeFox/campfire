@@ -2412,8 +2412,12 @@ export function BattleMap({
                         outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
-                      onPointerDown={(e) => onTokenPointerDown(e, c)}
+                      onPointerDown={(e) => {
+                        if (legalTarget) e.stopPropagation();
+                        onTokenPointerDown(e, c);
+                      }}
                       onClick={(event) => {
+                        if (legalTarget) event.stopPropagation();
                         // A drag ends with a click; only a stationary token tap may select.
                         if (legalTarget && !isDragging && event.detail === 1) targeting?.onToggle(c.id);
                       }}
