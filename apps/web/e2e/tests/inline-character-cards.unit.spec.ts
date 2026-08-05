@@ -93,6 +93,6 @@ test.describe('inline character cards refresh (issue #421)', () => {
     // ordinary roll/token-move too, most of which mirror no sheet at all — wasted work
     // during a busy fight. The server now tags exactly the frames that mirrored a sheet
     // with `sheetMirrored`, so the client only piggybacks the invalidation then.
-    expect(source).toMatch(/invalidateEncounter\(queryClient, eid\);\s*\n\s*\/\/ Issue #1902 rework \(round 12, devin; narrowed round 19, codex P2\)[\s\S]*?if \(event\.sheetMirrored\) invalidateCampaignCharacters\(queryClient, cid\);/);
+    expect(source).toMatch(/invalidateEncounter\(queryClient, eid\);\s*\n\s*\/\/ Issue #1902 rework \(round 12, devin; narrowed round 19, codex P2\)[\s\S]*?if \(event\.sheetMirrored\) invalidateCampaignCharactersForOwnership\(\);/);
   });
 });
