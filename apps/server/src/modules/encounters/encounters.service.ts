@@ -9101,8 +9101,22 @@ export class EncountersService {
           // above — `assertMutable` alone does not cover an archive/trash of the CAMPAIGN
           // landing in the window between the role gate and this transaction.
           this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+          // Issue #1909 review (Devin): this re-read must answer the SAME two questions the
+          // character branch answers at `:8946-8949`, and it was collapsing them into one.
+          // "Row is gone" and "row exists but carries no inline statblock" are different
+          // facts with different correct answers, and the missing-row case is the whole
+          // reason this re-read exists — reporting it as "has no inline statblock resources"
+          // tells a DM whose monster a co-DM deleted mid-click that their statblock is
+          // broken. The encounter-scoping half was simply absent: the stale outer row is
+          // exactly what cannot be trusted here, so a combatant that moved encounters inside
+          // this window would have been written through unscoped. Both branches were added
+          // in this PR for the identical TOCTOU concern; the asymmetry was an oversight, not
+          // a decision.
           const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-          if (!fresh || !fresh.statblockJson) {
+          if (!fresh || fresh.encounterId !== encounterId) {
+            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+          }
+          if (!fresh.statblockJson) {
             throw new BadRequestException('This combatant has no inline statblock resources');
           }
           // Issue #1909 review (Devin P2): every READ path for this column

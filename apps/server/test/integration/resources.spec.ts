@@ -1371,6 +1371,70 @@ describe('inline spell slots & character resources (issue #422)', () => {
       expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
     });
 
+    // Issue #1909 review (Devin, twelfth finding): the statblock branch's in-transaction
+    // re-read answered only ONE of the two questions the character branch answers at
+    // `encounters.service.ts:8946-8949`. These two tests are the statblock-branch
+    // counterparts to "a combatant removed between the outer read and the transaction…"
+    // above, which only ever covered the character branch — which is exactly why the
+    // divergence survived.
+    it('a statblock combatant removed between the outer read and the transaction 404s, rather than reporting a broken statblock (Devin review)', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+      const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+        const result = await original(...(args as [number, number]));
+        // Simulate a co-DM's `removeCombatant` landing in the window between this outer
+        // read and the transaction below.
+        db.delete(combatants).where(eq(combatants.id, comb.id)).run();
+        return result;
+      });
+
+      try {
+        // The distinction under test: NOT the BadRequestException("no inline statblock
+        // resources") this used to throw, which tells the DM their statblock is malformed
+        // when the real answer is that the monster is gone.
+        await expect(
+          encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+        ).rejects.toThrow(NotFoundException);
+
+        const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+        expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('a statblock combatant moved to another encounter mid-request 404s instead of being written unscoped (Devin review)', async () => {
+      const { user, enc, comb, camp } = await seedStatblockEncounter();
+      const ts = new Date().toISOString();
+      const [otherEnc] = db
+        .insert(encounters)
+        .values({ campaignId: camp.id, name: 'Other Fight', status: 'running', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+      const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+        const result = await original(...(args as [number, number]));
+        db.update(combatants).set({ encounterId: otherEnc.id }).where(eq(combatants.id, comb.id)).run();
+        return result;
+      });
+
+      try {
+        // The encounter-scoping half was absent entirely: the row still exists and still has
+        // a statblock, so every pre-fix guard passed and the write went through against an
+        // encounter the request was never scoped to.
+        await expect(
+          encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+        ).rejects.toThrow(NotFoundException);
+
+        const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("a spell-slot entry missing `used` 400s naming the level, instead of silently persisting used: NaN (Codex review)", async () => {
       const { user, enc, comb } = await seedStatblockEncounter();
       db.update(combatants)
