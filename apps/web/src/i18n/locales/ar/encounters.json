@@ -100,6 +100,12 @@
       "transcriptLabel": "Driver transcript",
       "openTable": "Open full table"
     },
+    "turnBeat": {
+      "takeover": "دورك الآن — {{name}}",
+      "ticker": "دور {{name}}",
+      "round": "الجولة {{round}}",
+      "titlePrefix": "● دورك الآن — "
+    },
     "map": {
       "tokenDetails": {
         "label": "تفاصيل الرمز",

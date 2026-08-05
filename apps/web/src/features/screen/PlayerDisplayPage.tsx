@@ -532,6 +532,10 @@ export default function PlayerDisplayPage() {
           addMapPing(event.ping);
           return;
         }
+        // A turn advance emits an encounter.updated frame immediately before
+        // this edge frame. The display projection only needs the former; do
+        // not start a second full-board load for the same change.
+        if (event.type === 'encounter.turn_changed') return;
         void load();
       },
       [load, addMapPing],

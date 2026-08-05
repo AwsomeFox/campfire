@@ -21,6 +21,26 @@ export const SKIP_TO_MAIN_ID = 'skip-to-main';
 
 export const APP_DOCUMENT_TITLE = 'Campfire';
 
+let documentTitlePrefix: string | null = null;
+
+function withoutDocumentTitlePrefix(title: string): string {
+  return documentTitlePrefix && title.startsWith(documentTitlePrefix)
+    ? title.slice(documentTitlePrefix.length)
+    : title;
+}
+
+/**
+ * Coordinates a transient document-title prefix with RouteChangeFocus. The
+ * formatter below reapplies it whenever a route writes a fresh base title.
+ */
+export function setDocumentTitlePrefix(prefix: string | null): void {
+  const current = typeof document === 'undefined' ? '' : withoutDocumentTitlePrefix(document.title);
+  documentTitlePrefix = prefix;
+  if (typeof document !== 'undefined') {
+    document.title = prefix ? `${prefix}${current}` : current;
+  }
+}
+
 /** Matches EntityDeepLinkFocus — deep-linked entity rows expose this hash. */
 export const ENTITY_DEEP_LINK_HASH = /^#entity-[a-z_-]+-\d+$/;
 
@@ -158,7 +178,8 @@ export function formatDocumentTitle(opts: { page: string; campaignName?: string 
   const campaignName = opts.campaignName ? normalizePageTitle(opts.campaignName) : null;
   if (campaignName && campaignName !== page) parts.push(campaignName);
   if (page !== APP_DOCUMENT_TITLE) parts.push(APP_DOCUMENT_TITLE);
-  return parts.join(' · ');
+  const title = parts.join(' · ');
+  return documentTitlePrefix ? `${documentTitlePrefix}${title}` : title;
 }
 
 export function focusProgrammatically(el: HTMLElement): void {

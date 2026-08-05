@@ -100,6 +100,12 @@
       "transcriptLabel": "Driver transcript",
       "openTable": "Open full table"
     },
+    "turnBeat": {
+      "takeover": "YOU'RE UP — {{name}}",
+      "ticker": "{{name}}'s turn",
+      "round": "Round {{round}}",
+      "titlePrefix": "● Your turn — "
+    },
     "map": {
       "tokenDetails": {
         "label": "Token detail",

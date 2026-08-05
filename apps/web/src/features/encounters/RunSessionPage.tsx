@@ -33,6 +33,8 @@ import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
+import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -64,7 +66,7 @@ import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { type AoeHitLayout } from './aoeHitTest';
 import { type TargetDamageApplication } from './directDamage';
 import { resolveGridCalibration } from './mapRenderedBounds';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
+import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
@@ -419,10 +421,12 @@ function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
+  turnPulse = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
+  turnPulse?: boolean;
 }) {
   return (
     <div
@@ -451,7 +455,7 @@ function InitiativeStrip({
           >
             <div
               aria-current={isCurrent ? 'true' : undefined}
-              className="flex items-center justify-center overflow-hidden bg-surface"
+              className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
@@ -946,6 +950,113 @@ export default function RunSessionPage() {
     refetchInterval: 10_000,
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
+  const [turnBeat, setTurnBeat] = useState<TurnChangeBeatEvent | null>(null);
+  const [turnPulse, setTurnPulse] = useState(false);
+  const [turnOwnerFromEvent, setTurnOwnerFromEvent] = useState<{
+    combatantId: number | null;
+    isYourTurn: boolean;
+  } | null>(null);
+  const [turnOwnerPendingCombatantId, setTurnOwnerPendingCombatantId] = useState<number | null>(null);
+  const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
+  const turnBeatSequence = useRef(0);
+  const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
+  const turnPulseTimerRef = useRef<number | null>(null);
+  const ownedTurnFeedbackRef = useRef<number | null>(null);
+  // A character.updated frame invalidates the ownership map, but React Query
+  // deliberately retains its last successful data during the background fetch.
+  // Keep a precise freshness watermark so an immediately following turn edge
+  // cannot promote the previous owner from that stale map.
+  const characterOwnershipPendingDataUpdatedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const pendingDataUpdatedAt = characterOwnershipPendingDataUpdatedAtRef.current;
+    if (
+      pendingDataUpdatedAt == null
+      || charactersQuery.isFetching
+      || charactersQuery.dataUpdatedAt <= pendingDataUpdatedAt
+    ) return;
+    characterOwnershipPendingDataUpdatedAtRef.current = null;
+    setCharacterOwnershipRefreshPending(false);
+  }, [charactersQuery.dataUpdatedAt, charactersQuery.isFetching]);
+
+  // Every campaign-character invalidation retains the previous successful
+  // roster while its replacement loads. Mark that roster stale first so any
+  // turn frame arriving in the gap cannot use a former owner's identity.
+  const invalidateCampaignCharactersForOwnership = useCallback(() => {
+    characterOwnershipPendingDataUpdatedAtRef.current = charactersQuery.dataUpdatedAt;
+    // Neither the event-derived owner nor the retained /turn response is
+    // authoritative while the roster that grants ownership is being replaced.
+    // Gate their cues immediately; the completed roster read reauthorizes them.
+    setCharacterOwnershipRefreshPending(true);
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+    setTurnPulse(false);
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+    invalidateCampaignCharacters(queryClient, cid);
+  }, [charactersQuery.dataUpdatedAt, cid, queryClient]);
+
+  // An owned turn can initially be a private pending beat, then promote once
+  // the authorized roster and /turn workspace arrive. Keep the visual cues
+  // tied to that one beat even if those reads cause several rerenders.
+  const triggerOwnedTurnFeedback = useCallback((beatKey: number) => {
+    if (ownedTurnFeedbackRef.current === beatKey) return;
+    ownedTurnFeedbackRef.current = beatKey;
+    if (!prefersReducedMotion()) {
+      setTurnPulse(true);
+      if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+      turnPulseTimerRef.current = window.setTimeout(() => setTurnPulse(false), 700);
+    }
+    // A turn change must not pull a player away from an active form or dialog.
+    const active = document.activeElement as HTMLElement | null;
+    if (!active?.closest('form, [role="dialog"], input, textarea, select')) {
+      document.querySelector<HTMLElement>('[data-testid="turn-workspace"]')?.scrollIntoView({
+        behavior: scrollBehavior(),
+        block: 'nearest',
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    previousTurnBeatRef.current = null;
+    ownedTurnFeedbackRef.current = null;
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+    setTurnBeat(null);
+    setTurnPulse(false);
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+  }, [eid]);
+
+  // A loaded encounter is a silent baseline. This prevents opening an already
+  // running encounter (or any ordinary refetch) from replaying a turn-start beat,
+  // while keeping the baseline current if the stream missed an intervening edge.
+  useEffect(() => {
+    if (!encounter || encounter.id !== eid) return;
+    const current = encounter.currentCombatantId == null
+      ? undefined
+      : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
+    const isYourTurn = current?.characterId != null
+      && characters.some((character) => character.id === current.characterId && character.ownerUserId === String(me?.user.id ?? ''));
+    previousTurnBeatRef.current = {
+      encounterId: eid,
+      combatantId: encounter.currentCombatantId,
+      round: encounter.status === 'running' ? encounter.round : null,
+      isYourTurn,
+    };
+  }, [eid, encounter, characters, me?.user.id]);
+  useEffect(() => () => {
+    if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
+  }, []);
+  // Ending an encounter emits an encounter.updated frame rather than a turn edge.
+  // Clear every transient turn signal here so a disabled /turn query cannot keep
+  // a prior owned turn (including the hidden-tab title) alive after combat stops.
+  useEffect(() => {
+    if (encounter?.status === 'running') return;
+    ownedTurnFeedbackRef.current = null;
+    setTurnOwnerFromEvent(null);
+    setTurnOwnerPendingCombatantId(null);
+    setTurnBeat(null);
+    setTurnPulse(false);
+  }, [encounter?.status]);
   const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
   const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
     eventStatus,
@@ -1127,13 +1238,13 @@ export default function RunSessionPage() {
         if (event.type === 'party.rest.updated') {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
-          invalidateCampaignCharacters(queryClient, cid);
+          invalidateCampaignCharactersForOwnership();
           return;
         }
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
-          invalidateCampaignCharacters(queryClient, cid);
+          invalidateCampaignCharactersForOwnership();
           // Issue #1901 & #1900 review: an inventory equip/unequip or slot/spell edit emits
           // character.updated — invalidate derived encounter actions AND the turn workspace query.
           invalidateEncounterActions(queryClient, eid);
@@ -1148,7 +1259,7 @@ export default function RunSessionPage() {
           invalidateCampaignCheckRequests(queryClient, cid);
           return;
         }
-        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
+        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping' && event.type !== 'encounter.turn_changed') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
           navigate(`/c/${cid}/encounters`);
@@ -1157,6 +1268,72 @@ export default function RunSessionPage() {
         // A ping is a one-shot transient marker — render it, don't refetch the encounter.
         if (event.type === 'encounter.ping') {
           if (event.ping) addPing(event.ping);
+          return;
+        }
+        if (event.type === 'encounter.turn_changed') {
+          // The SSE frame itself is the edge. It carries only viewer-safe ids;
+          // the displayed name and identity colour come from this viewer's
+          // already-authorized roster, never a new server payload.
+          const combatant = event.currentCombatantId == null
+            ? undefined
+            : encounter?.combatants.find((candidate) => candidate.id === event.currentCombatantId);
+          const ownerDataReady = charactersQuery.data !== undefined
+            && !charactersQuery.isFetching
+            && characterOwnershipPendingDataUpdatedAtRef.current == null;
+          const rosterCombatantKnown = event.currentCombatantId == null || combatant != null;
+          const isYourTurn = ownerDataReady && combatant?.characterId != null
+            && characters.some((character) => character.id === combatant.characterId && character.ownerUserId === String(me?.user.id ?? ''));
+          // Clear the hidden-tab prefix on the frame that ends an owned turn;
+          // do not wait for the follow-up /turn refetch to settle. A character
+          // frame received before its owner list or encounter roster is available
+          // stays unknown so it cannot pin an incorrect negative result for the
+          // rest of the turn.
+          const ownerKnown = rosterCombatantKnown && (ownerDataReady || combatant?.characterId == null);
+          setTurnOwnerFromEvent(ownerKnown ? {
+            combatantId: event.currentCombatantId ?? null,
+            isYourTurn,
+          } : null);
+          setTurnOwnerPendingCombatantId(ownerKnown ? null : event.currentCombatantId ?? null);
+          const next: TurnBeatSnapshot = {
+            encounterId: eid,
+            combatantId: event.currentCombatantId ?? null,
+            round: event.round ?? null,
+            isYourTurn,
+          };
+          const previous = previousTurnBeatRef.current?.encounterId === eid
+            ? previousTurnBeatRef.current
+            : null;
+          const kind = detectSseTurnBeat(previous, next);
+          previousTurnBeatRef.current = next;
+          const tickerKind = previous?.round != null && next.round != null && next.round > previous.round
+            ? 'round-wrap'
+            : 'turn';
+          // A lair action has no roster combatant, but a round-wrap still has
+          // useful, non-secret feedback for every viewer.
+          if (kind && (combatant || event.currentCombatantId != null || tickerKind === 'round-wrap')) {
+            const beatKey = ++turnBeatSequence.current;
+            setTurnBeat({
+              key: beatKey,
+              combatantId: event.currentCombatantId ?? null,
+              pending: combatant == null && event.currentCombatantId != null,
+              kind,
+              tickerKind,
+              name: combatant?.name ?? '',
+              round: next.round,
+              identityBackground: combatant ? tokenIdentityBackground(combatant) : 'var(--color-neutral-900)',
+            });
+            if (kind === 'your-turn' && combatant) {
+              triggerOwnedTurnFeedback(beatKey);
+            }
+          } else if (kind) {
+            // A same-round lair action has no viewer-safe name to announce.
+            // Still replace the previous beat so an owned takeover cannot
+            // outlive the turn that just ended.
+            setTurnBeat(null);
+          }
+          // The paired encounter.updated frame has already invalidated the
+          // encounter read; only the viewer-specific workspace needs refresh.
+          void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
           return;
         }
         invalidateEncounter(queryClient, eid);
@@ -1175,29 +1352,29 @@ export default function RunSessionPage() {
         // The server now tags exactly the frames that mirrored a sheet with
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
-        if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
+        if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
       },
-      [eid, cid, navigate, queryClient, addPing],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
       setResyncPending(true);
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       // Same staleness the character.updated SSE branch above fixes (issue #1900
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
-    }, [queryClient, eid, cid]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
-    }, [queryClient, eid, cid]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
@@ -1431,7 +1608,7 @@ export default function RunSessionPage() {
     },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
-      invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCharactersForOwnership();
     },
   });
 
@@ -2290,6 +2467,10 @@ export default function RunSessionPage() {
     () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
     [encounter],
   );
+  const currentCombatant = useMemo(
+    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
+    [encounter?.combatants, currentCombatantId],
+  );
 
   const { data: turnWorkspace } = useQuery({
     queryKey: queryKeys.encounterTurn(eid),
@@ -2298,10 +2479,91 @@ export default function RunSessionPage() {
     staleTime: 2_000,
   });
 
-  const currentCombatant = useMemo(
-    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
-    [encounter?.combatants, currentCombatantId],
-  );
+  // Refresh /turn when the encounter poll observes a change that an SSE frame
+  // might have missed. This supplies an authoritative owner result for the
+  // hidden-tab title after reconnects as well as ordinary stream delivery.
+  useEffect(() => {
+    if (currentCombatantId === undefined) {
+      // A missed SSE edge can leave a stale owned /turn result behind while a
+      // same-round lair action clears the current combatant in the poll.
+      // Clear the optimistic owner immediately, then refetch the workspace.
+      setTurnOwnerFromEvent(null);
+      setTurnOwnerPendingCombatantId(null);
+    }
+    void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+  }, [currentCombatantId, eid, queryClient]);
+
+  // The event path wins immediately (especially when it clears an owned
+  // hidden-tab title), while a matching, later authoritative /turn result
+  // repairs an optimistic positive after a missed SSE frame or reconnect.
+  useEffect(() => {
+    if (!turnWorkspace) return;
+    if (characterOwnershipPendingDataUpdatedAtRef.current != null) return;
+    if (turnOwnerPendingCombatantId != null) {
+      if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) {
+        if (turnWorkspace.current?.combatantId === currentCombatantId) {
+          setTurnOwnerPendingCombatantId(null);
+        }
+        return;
+      }
+      setTurnOwnerFromEvent({
+        combatantId: turnOwnerPendingCombatantId,
+        isYourTurn: turnWorkspace.isYourTurn,
+      });
+      setTurnOwnerPendingCombatantId(null);
+      return;
+    }
+    if (turnWorkspace.current?.combatantId !== currentCombatantId) return;
+    setTurnOwnerFromEvent({
+      combatantId: currentCombatantId ?? null,
+      isYourTurn: turnWorkspace.isYourTurn,
+    });
+  }, [charactersQuery.dataUpdatedAt, currentCombatantId, turnOwnerPendingCombatantId, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
+
+  // If the character list was still loading when an owned frame arrived, the
+  // authoritative workspace can safely promote its already-visible ticker to
+  // the one owned takeover once both reads identify the same combatant.
+  useEffect(() => {
+    if (
+      !turnBeat?.pending
+      || turnBeat.combatantId !== currentCombatantId
+      || !currentCombatant
+    ) return;
+    const nextBeatKey = ++turnBeatSequence.current;
+    setTurnBeat((previous) => previous?.pending && previous.combatantId === currentCombatant.id
+      ? {
+          ...previous,
+          key: nextBeatKey,
+          pending: false,
+          name: currentCombatant.name,
+          identityBackground: tokenIdentityBackground(currentCombatant),
+        }
+      : previous);
+  }, [currentCombatant, currentCombatantId, turnBeat?.combatantId, turnBeat?.pending]);
+
+  useEffect(() => {
+    if (
+      !turnWorkspace
+      || !turnBeat
+      || characterOwnershipPendingDataUpdatedAtRef.current != null
+      || turnWorkspace.isYourTurn !== true
+      || turnWorkspace.current?.combatantId !== currentCombatantId
+      || turnBeat.combatantId !== currentCombatantId
+      || turnBeat.kind === 'your-turn'
+    ) return;
+    const nextBeatKey = ++turnBeatSequence.current;
+    triggerOwnedTurnFeedback(nextBeatKey);
+    setTurnBeat((previous) => previous && previous.combatantId === currentCombatantId
+      ? {
+          ...previous,
+          key: nextBeatKey,
+          kind: 'your-turn',
+          pending: false,
+          name: currentCombatant?.name ?? previous.name,
+          identityBackground: currentCombatant ? tokenIdentityBackground(currentCombatant) : previous.identityBackground,
+        }
+      : previous);
+  }, [charactersQuery.dataUpdatedAt, currentCombatant, currentCombatantId, triggerOwnedTurnFeedback, turnBeat?.combatantId, turnBeat?.key, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
@@ -2944,6 +3206,8 @@ export default function RunSessionPage() {
         <PlayerVitalsHeader 
           combatants={myCombatants} 
           charactersById={charactersById}
+          turnPulse={turnPulse}
+          currentCombatantId={currentCombatantId}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3063,6 +3327,16 @@ export default function RunSessionPage() {
           endTurnBusy={endTurn.isPending}
         />
       )}
+      <TurnChangeBeat
+        beat={turnBeat}
+        isYourTurn={encounter?.status === 'running'
+          && !characterOwnershipRefreshPending
+          && turnOwnerPendingCombatantId == null
+          && (turnOwnerFromEvent != null && turnOwnerFromEvent.combatantId === turnBeat?.combatantId
+            ? turnOwnerFromEvent.isYourTurn
+            : turnWorkspace?.current?.combatantId === currentCombatantId
+              && turnWorkspace?.isYourTurn === true)}
+      />
 
       {pendingApply && (
         <ApplyDamageBar
@@ -3212,6 +3486,7 @@ export default function RunSessionPage() {
               combatants={orderedCombatants}
               currentCombatantId={encounter.currentCombatantId}
               charactersById={charactersById}
+              turnPulse={turnPulse}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
