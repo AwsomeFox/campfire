@@ -2435,7 +2435,7 @@ export function BattleMap({
                           targeting?.onToggle(c.id);
                           return;
                         }
-                        onTokenKeyDown(e, c);
+                        if (movable) onTokenKeyDown(e, c);
                       }}
                       onFocus={(e) => {
                         setSelectedTokenId(c.id);
