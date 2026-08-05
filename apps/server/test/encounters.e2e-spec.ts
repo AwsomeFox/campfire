@@ -6983,6 +6983,10 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
+      const { declaredByUserId: _serverOwnedDeclarer, ...playerDeclaration } = ownedAoe;
+      expect(
+        (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerDeclaration)).status,
+      ).toBe(201);
       await request(server)
         .patch(`/api/v1/encounters/${encounterId}`)
         .set(dm)
