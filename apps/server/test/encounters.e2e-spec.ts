@@ -7075,6 +7075,11 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       // Issue #1928: this campaign never set a ruleSystem — the same 5e fallback the combat
       // math already uses — so the REPORTED difficulty is the system's own audited math.
       expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp stays the real adjusted-XP total (byte-identical to
+      // pre-#1928 output) and agrees with the reported difficulty's own adjustedXp for a
+      // supported system — never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
       expect(res.body.combatants.length).toBeGreaterThan(0);
       // Every suggested line references a real compendium statblock and carries CR/XP.
       for (const c of res.body.combatants) {
@@ -7183,6 +7188,10 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.body.plan[0].slotId).toBe(slot.slotId);
       // Issue #1928: default (empty) ruleSystem falls back to 5e's own audited math.
       expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp agrees with the reported difficulty's own adjustedXp for
+      // a supported system, and is never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
     });
 
     it('tunes deterministically: reroll one slot is reproducible and pin survives reroll-all', async () => {
@@ -8100,13 +8109,21 @@ describe('encounters — issue #1928: generator/preview difficulty honesty for a
     // Label, don't block: the roster is still populated by the internal count/CR heuristic...
     expect(res.body.combatants.length).toBeGreaterThan(0);
     expect(res.body.combatants.every((c: { ruleEntryId: number }) => c.ruleEntryId === orcEntryId)).toBe(true);
+    expect(res.body.combatants.every((c: { xp: number }) => c.xp > 0)).toBe(true);
     // ...but the REPORTED difficulty is explicit and unsupported, not a confident 5e band.
     expect(res.body.difficulty.status).toBe('unsupported');
     expect(res.body.difficulty.band).toBeNull();
     expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): `totalXp` must NOT be zeroed alongside the honest 'unsupported'
+    // status — `unsupportedEncounterDifficulty` always reports `adjustedXp:0` internally, but
+    // presenting that as `totalXp` here would be a FALSE zero sitting next to the positive
+    // per-combatant `xp` values above, not an honest absence. `totalXp` stays the real
+    // (heuristic) total that actually sized this roster; `difficulty`/`difficultySupport`
+    // alone carry the "not this system's own math" signal.
+    expect(res.body.totalXp).toBeGreaterThan(0);
   });
 
-  it('preview reports the same unsupported band + difficultySupport for the identical roster', async () => {
+  it('preview reports the same unsupported band + difficultySupport for the identical roster, and a positive totalXp', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
@@ -8115,6 +8132,10 @@ describe('encounters — issue #1928: generator/preview difficulty honesty for a
     expect(res.status).toBe(200);
     expect(res.body.difficulty.status).toBe('unsupported');
     expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): same invariant as generate — this also corrects a PRE-EXISTING
+    // zeroing in previewEncounter (predates #1928; `reported.adjustedXp` was already used
+    // here), not just the copy #1928 introduced in generateEncounter.
+    expect(res.body.totalXp).toBeGreaterThan(0);
   });
 
   it('GET :id/difficulty on a committed PF2e encounter agrees with generate/preview (all three unsupported)', async () => {

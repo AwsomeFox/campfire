@@ -37,7 +37,6 @@ import {
   normalizeStats,
   pickOutcomeBranch,
   resolveAbilityModifier,
-  RESOLVER_MATH_D20_5E,
   resolverImplementsSystemMath,
   rollBranchDamage,
   ruleSystemAdapter,
@@ -720,8 +719,16 @@ export class ActionResolverService {
     // Issue #1928: label, don't block — signal whether the maths just run above (d20 vs AC,
     // 5e-shaped proficiency) is actually audited for this campaign's rule system, rather than
     // presenting it as universally correct. Never gates `commit`; see the field's doc comment.
+    //
+    // Review (Copilot #1981): read `adapter.resolverMath` directly rather than hardcoding
+    // RESOLVER_MATH_D20_5E, so the gate and the reported profile cannot drift apart if a
+    // second profile is ever declared. This is safe today AND self-consistent by construction:
+    // resolverImplementsSystemMath's only possible `true` branch is the strict equality
+    // `adapter.resolverMath === RESOLVER_MATH_D20_5E`, which itself requires `resolverMath` to
+    // be defined (and equal to that one value) — the ternary here is defensive, not load-
+    // bearing, since `ResolverMathProfile` has exactly one member today.
     const systemMathSupported = resolverImplementsSystemMath(adapter);
-    const mathProfile = systemMathSupported ? RESOLVER_MATH_D20_5E : null;
+    const mathProfile = systemMathSupported ? (adapter.resolverMath ?? null) : null;
     return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId, systemMathSupported, mathProfile });
   }
 

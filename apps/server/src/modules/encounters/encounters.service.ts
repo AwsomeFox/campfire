@@ -3001,8 +3001,12 @@ export class EncountersService {
    * (the encounter doesn't exist until commit).
    */
   async generateEncounter(campaignId: number, input: EncounterGenerateInput, _viewerRole?: Role): Promise<EncounterSuggestion> {
-    const adapter = await this.adapterForCampaign(campaignId);
+    // Issue #1928 review (Copilot #1981): fetch the campaign's ruleSystem slug ONCE and derive
+    // the adapter from it locally — `ruleSystemAdapter` is pure — rather than calling both
+    // `adapterForCampaign` (which re-reads `campaigns.ruleSystem` itself) and
+    // `ruleSystemForCampaign`, which would run the same SELECT twice on this hot path.
     const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const adapter = ruleSystemAdapter(ruleSystem);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
     const candidates = await this.loadMonsterCandidates(adapter, input.filters);
 
@@ -3035,7 +3039,16 @@ export class EncountersService {
       combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
       targetBand: input.difficulty,
       difficulty: reported,
-      totalXp: reported.adjustedXp,
+      // Codex review (#1981): `reported.adjustedXp` is 0 for an `unsupported` status
+      // (unsupportedEncounterDifficulty always zeroes it) — reporting that as `totalXp` would
+      // be a FALSE zero sitting next to positive per-combatant `xp` values in the same payload,
+      // not an honest absence. `result.difficulty` is the selection heuristic's OWN adjusted-XP
+      // total (real and positive for a non-empty roster on every system, since it is what
+      // actually sized this roster) — byte-identical to `reported.adjustedXp` for 5e/empty-slug
+      // (same formula, same inputs), and the pre-#1928 value for every system. `difficulty` /
+      // `difficultySupport` still honestly flag a non-5e total as heuristic; `totalXp` itself
+      // must never contradict the positive `combatants[].xp` beside it.
+      totalXp: result.difficulty.adjustedXp,
       shape: result.shape,
       seed: result.seed,
       matchedBand: result.matchedBand,
@@ -3280,7 +3293,15 @@ export class EncountersService {
       targetBand: input.difficulty,
       difficulty: reported,
       explanation,
-      totalXp: reported.adjustedXp,
+      // Codex review (#1981, generateEncounter): same fix applies here — `reported.adjustedXp`
+      // is always 0 when `status:'unsupported'`, which would contradict the positive
+      // per-slot `xp` values in `roster` for a non-5e system. `result.difficulty` is the
+      // roster-selection heuristic's own adjusted-XP total (byte-identical to
+      // `reported.adjustedXp` for 5e/empty-slug, real and positive for a non-empty roster on
+      // every system). This also corrects the SAME pre-existing zeroing in `previewEncounter`
+      // (predates #1928 — `reported.adjustedXp` was already used here), not just the copy
+      // #1928 introduced in `generateEncounter`.
+      totalXp: result.difficulty.adjustedXp,
       shape: result.shape,
       seed: result.seed,
       matchedBand: result.matchedBand,
