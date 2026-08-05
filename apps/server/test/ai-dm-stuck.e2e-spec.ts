@@ -383,6 +383,10 @@ describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
     expect(res.body.result).not.toContain('{');
     expect(res.body.result).toMatch(/no entry/i);
     expect(res.body.result).toMatch(/D&D Homebrew SRD/);
+    // Issue #1898 review: the search this responds to now also covers the campaign's
+    // own homebrew (rulesLookup always passes campaignId once pack resolves), so the
+    // wording must not claim the miss was limited to the installed pack.
+    expect(res.body.result).toMatch(/homebrew/i);
     expect(res.body.result).toMatch(/broader term|exact name|spelling/i);
 
     await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);

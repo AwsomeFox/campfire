@@ -8114,10 +8114,16 @@ function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], 
   return lines.join('\n');
 }
 
-/** No matches in the campaign's rule system — distinguish from failure and suggest refinements (#717). */
+/**
+ * No matches in the campaign's rule system — distinguish from failure and suggest
+ * refinements (#717). Issue #1898 review: the search this responds to now covers the
+ * campaign's own homebrew alongside `pack` (rulesLookup always passes `campaignId`
+ * whenever `pack` is resolved), so the miss was never limited to the installed pack —
+ * the wording must not claim it was.
+ */
 function renderNoMatch(query: string, pack: RulePack): string {
   return [
-    `No entry in **${pack.name}** matches “${query.trim()}”.`,
+    `No entry in **${pack.name}** or your campaign's homebrew matches “${query.trim()}”.`,
     '',
     'Try a broader term, the exact name (e.g. a spell or condition), or check the spelling.',
   ].join('\n');
