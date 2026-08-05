@@ -1600,6 +1600,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1971-player', password: 'player-password-1' });
     const token = await playerAgent.post('/api/v1/tokens').send({ name: 'mcp-1971-player', scope: 'player', writeScope: 'direct', campaignId });
     const playerClient = await mcpClient(token.body.token);
+    const dmClient = await mcpClient(dmToken);
     try {
       await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
       const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
