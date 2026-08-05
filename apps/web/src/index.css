@@ -2368,6 +2368,56 @@ a:hover .cf-name-reveal {
 }
 .cf-turn-beat-motion { animation: cf-turn-beat-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .cf-turn-beat-pulse { animation: cf-turn-beat-pulse 0.7s ease-out both; }
+/* Transient encounter HP feedback (issue #1907). Kept presentation-only: the
+   canonical combatant query remains the single source for its values. */
+.cf-hp-feedback-anchor { position: relative; }
+.cf-hp-feedback {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  overflow: visible;
+}
+.cf-hp-feedback__item {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
+  animation: cf-hp-feedback-rise .9s ease-out both;
+}
+.cf-hp-feedback__item--damage { color: #f87171; }
+.cf-hp-feedback__item--heal { color: #4ade80; }
+.cf-hp-feedback__item--tempHp { color: #38bdf8; }
+.cf-hp-feedback__item--down { color: #f8fafc; }
+.cf-hp-feedback__item--revive { color: #86efac; }
+.cf-hp-feedback__item--bandTick { color: #fbbf24; }
+.cf-hp-feedback__item--crit { font-size: 21px; color: #fff; text-shadow: 0 0 8px #fff, 0 1px 3px rgba(0, 0, 0, .9); }
+.cf-hp-feedback-anchor--down { animation: cf-hp-feedback-down .3s ease-out both; }
+.cf-hp-feedback-anchor--revive { animation: cf-hp-feedback-revive .3s ease-out both; }
+.cf-hp-feedback-anchor--crit { animation: cf-hp-feedback-crit .18s steps(1, end) both; }
+@keyframes cf-hp-feedback-rise {
+  0% { opacity: 0; transform: translate(-50%, -35%) scale(.8); }
+  18% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, calc(-50% - 24px)) scale(1); }
+}
+@keyframes cf-hp-feedback-down {
+  0% { filter: grayscale(0); transform: scale(1); }
+  100% { filter: grayscale(.75); transform: scale(.96); }
+}
+@keyframes cf-hp-feedback-revive {
+  0% { filter: grayscale(.75); transform: scale(.96); }
+  100% { filter: grayscale(0); transform: scale(1); }
+}
+@keyframes cf-hp-feedback-crit {
+  0%, 45% { filter: brightness(2.5); }
+  100% { filter: brightness(1); }
+} 
 
 /* Accessibility: honour a reduced-motion preference globally (issue #594).
    Named cf-anim-* classes are not enough — Tailwind animate-* utilities,
@@ -2409,8 +2459,18 @@ a:hover .cf-name-reveal {
   .cf-dice-roll-overlay__die--crit,
   .cf-dice-roll-overlay__die--fumble,
   .cf-dice-roll-overlay__crit-ring,
-  .cf-dice-roll-overlay__fumble-void {
+  .cf-dice-roll-overlay__fumble-void,
+  .cf-hp-feedback-anchor--down,
+  .cf-hp-feedback-anchor--revive,
+  .cf-hp-feedback-anchor--crit,
+  .cf-hp-feedback__item {
     animation: none !important;
+  }
+
+  .cf-hp-feedback__item {
+    opacity: 1;
+    top: calc(50% - var(--cf-hp-feedback-offset, 0px));
+    transform: translate(-50%, -50%);
   }
 }
 

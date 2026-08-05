@@ -13,6 +13,8 @@ import { CombatantStatblockEditor } from '../CombatantStatblockEditor';
 import { isDown } from '../encounterEndedSummary';
 import { canStabilizeCombatant } from '../combatantLifecycle';
 import { TOKEN_SIZE_OPTIONS } from '../map/BattleMap';
+import { FloatingNumbers } from '../FloatingNumbers';
+import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 
@@ -35,6 +37,7 @@ export type CombatantRowProps = {
   rowRef?: (el: HTMLDivElement | null) => void;
   encounterId: number;
   combatant: Combatant;
+  hpFeedbackEvents: readonly (HpFeedbackEvent & { id: number })[];
   isCurrentTurn: boolean;
   /**
    * Permission to edit this combatant right now — PERMISSION ONLY (issue #1746 —
@@ -123,6 +126,7 @@ export function CombatantRow({
   rowRef,
   encounterId,
   combatant,
+  hpFeedbackEvents,
   isCurrentTurn,
   canEditPermission,
   syncBlocked,
@@ -269,12 +273,20 @@ export function CombatantRow({
   // the whole row and skull/strike-through the name. `isDown` works off the HP band
   // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
   const down = isDown(combatant);
+  const feedbackClass = hpFeedbackEvents.some((event) => event.kind === 'down')
+    ? ' cf-hp-feedback-anchor--down'
+    : hpFeedbackEvents.some((event) => event.kind === 'revive')
+      ? ' cf-hp-feedback-anchor--revive'
+      : hpFeedbackEvents.some((event) => event.crit)
+        ? ' cf-hp-feedback-anchor--crit'
+        : '';
 
   return (
     <div
       ref={rowRef}
       data-testid={`combatant-row-${combatant.id}`}
       data-current-turn={isCurrentTurn ? 'true' : undefined}
+      className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
         flexWrap: 'wrap',
@@ -288,6 +300,7 @@ export function CombatantRow({
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
     >
+      <FloatingNumbers events={hpFeedbackEvents} />
       {/* Issue #1746: single accessible reason shared by every write control this row
           disables while the sync gate blocks, referenced via aria-describedby below. */}
       {syncBlocked && (
