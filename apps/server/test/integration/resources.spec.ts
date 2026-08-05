@@ -19,6 +19,7 @@ import { Dnd5eAdapter, Pf2eAdapter, resourceVocabularyForAdapter } from '@campfi
 import { makeTempDataDir } from './fixtures';
 import { eq } from 'drizzle-orm';
 import fs from 'node:fs';
+import * as encounterIdempotency from '../../src/modules/encounters/encounter-idempotency';
 
 describe('inline spell slots & character resources (issue #422)', () => {
   let dataDir: string;
@@ -609,6 +610,66 @@ describe('inline spell slots & character resources (issue #422)', () => {
       await expect(
         encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
       ).rejects.toThrow(ConflictException);
+    });
+
+    // Review finding (Devin + Copilot, same defect): the unit spec on the shared primitives
+    // (encounter-idempotency-race.spec.ts) proves `recordEncounterOp` throws
+    // `EncounterOpRaceMarker` on a colliding insert and that `readEncounterOpAfterRace`
+    // returns the winner's stored response — but a bare source-grep confirming the catch
+    // TEXT exists cannot distinguish a CORRECT catch from a broken one (`catch (err) {
+    // throw err }`, one that returns the loser's own result, or one missing the `opClaim &&`
+    // guard would all still match). This test instead drives `adjustCombatantResource`
+    // itself through the real race path: `recordEncounterOp` is stubbed to throw
+    // `EncounterOpRaceMarker` (standing in for a genuinely concurrent same-key insert that
+    // collided), and `readEncounterOpAfterRace` is stubbed to resolve with a DISTINCTIVE
+    // "winner" response the local write's own effect could never produce (`used: 999` on a
+    // max-3 pool it never touched). If the catch is wired correctly, `adjustCombatantResource`
+    // RESOLVES with that exact winner body; if the catch were a bare rethrow (or any other
+    // broken shape), the call would reject instead — a real, failable assertion on behavior,
+    // not on source text.
+    it('a race-marker thrown by recordEncounterOp makes adjustCombatantResource resolve with the WINNER\'s replayed response, not reject', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      const claim = {
+        actorId: String(user.id),
+        operation: 'combatant.resource_adjust' as const,
+        key: 'race-marker-wiring',
+        encounterId: enc.id,
+        campaignId: enc.campaignId,
+        fingerprint: 'irrelevant-for-this-stub',
+      };
+      const winnerResponse = { id: comb.id, statblock: { resources: { kiPoints: { max: 3, used: 999 } }, spellSlots: {} } };
+
+      const recordSpy = jest
+        .spyOn(encounterIdempotency, 'recordEncounterOp')
+        .mockImplementation(() => {
+          throw new encounterIdempotency.EncounterOpRaceMarker(claim);
+        });
+      const raceSpy = jest
+        .spyOn(encounterIdempotency, 'readEncounterOpAfterRace')
+        .mockResolvedValue({ response: winnerResponse, responseRole: 'dm' });
+
+      try {
+        const result = await encountersService.adjustCombatantResource(
+          enc.id,
+          comb.id,
+          { key: 'kiPoints', delta: 1, idempotencyKey: 'race-marker-wiring' },
+          user,
+          'dm',
+        );
+        // The WINNER's stubbed body, not the loser's own would-be effect (used: 1) and not
+        // a rejection.
+        expect(result).toEqual(winnerResponse);
+        expect(raceSpy).toHaveBeenCalledTimes(1);
+
+        // The loser's own write must have rolled back with the transaction — nothing was
+        // actually persisted from THIS call.
+        const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
+      } finally {
+        recordSpy.mockRestore();
+        raceSpy.mockRestore();
+      }
     });
   });
 });

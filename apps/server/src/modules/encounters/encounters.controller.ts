@@ -627,6 +627,16 @@ export class EncountersController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
+    // Issue #1909 review (Devin): `requireRole(..., 'player')` below throws 403 for a
+    // viewer BEFORE the service's own `isVisibleTo` gate is ever reached — a viewer hitting
+    // a HIDDEN encounter's real id would get 403, distinguishable from the 404 a nonexistent
+    // id gets (an enumeration oracle). Pre-check visibility at the VIEWER floor first, same
+    // as the sibling death-save/roll-initiative routes just below, so a hidden encounter is
+    // 404 for every non-DM regardless of whether they'd otherwise pass the player-role gate.
+    await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer'))) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.adjustCombatantResource(id, cid, body, user, role);
   }

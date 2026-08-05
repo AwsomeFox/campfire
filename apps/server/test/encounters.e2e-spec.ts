@@ -6209,6 +6209,48 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       expect(dmRes.status).toBe(201);
     });
 
+    // Review finding (Devin, catching that the player-only test above did not close the
+    // gap): `requireRole(..., 'player')` 403s a viewer BEFORE the service's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets, which is the
+    // enumeration oracle hidden-entity secrecy exists to close. The controller now
+    // pre-checks visibility at the viewer floor before ever reaching the player-role gate,
+    // mirroring POST .../death-save and POST .../roll-initiative.
+    it("a viewer gets 404 for a HIDDEN encounter's real combatant id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Viewer Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const viewerRealId = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerRealId.status).toBe(404);
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const viewerNonexistent = await request(server)
+        .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerNonexistent.status).toBe(404);
+
+      // Nothing written.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
     // Review finding (Devin + Copilot, same defect): there is no per-combatant revision
     // column — `PATCH /encounters/:id/combatants/:cid`'s `expectedUpdatedAt` validates
     // against the ENCOUNTER's own `updatedAt`. A whole-statblock PATCH (e.g. from

@@ -4073,7 +4073,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
 
     it('adjust_combatant_resource: a statblock combatant is dm-only — a viewer-scoped PAT is refused', async () => {
-      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Viewer Denied' });
+      // hidden: false — this test isolates the statblock DM-only rule, not hidden-encounter
+      // secrecy (a hidden encounter would 404 a viewer before ever reaching that rule; see
+      // the dedicated hidden-encounter viewer test below).
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Viewer Denied', hidden: false });
       const encounterId = encRes.body.id as number;
       const dmClient = await mcpClient(dmToken);
       const addResult = await dmClient.callTool({
@@ -4159,6 +4162,47 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
         arguments: { encounterId, combatantId, key: 'hiddenFightResource', delta: 1 },
       });
       expect(dmAdjust.isError).toBeFalsy();
+    });
+
+    // Review finding (Devin, catching that the owning-player test above did not close the
+    // gap): `requireRole(..., 'player')` throws 403 for a viewer BEFORE the tool's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets. The tool now
+    // pre-checks visibility at the viewer floor first, mirroring roll_combatant_initiative.
+    it("adjust_combatant_resource: a viewer gets 404 for a HIDDEN encounter's real id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Viewer Secrecy Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const viewerClient = await mcpClient(viewerToken);
+      const realId = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(realId.isError).toBe(true);
+      expect((realId.content as TextContent[])[0].text).toContain('404');
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const nonexistent = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId: 999999999, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(nonexistent.isError).toBe(true);
+      expect((nonexistent.content as TextContent[])[0].text).toContain('404');
     });
 
     // Issue #1643 — "verify what already works first": before this PR, exhaustion was

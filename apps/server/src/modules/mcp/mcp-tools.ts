@@ -4620,6 +4620,20 @@ export class McpToolsService {
       },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Issue #1909 review (Devin): mirror roll_combatant_initiative's own viewer-role
+        // visibility pre-check just below — `requireRole(..., 'player')` alone throws 403
+        // for a viewer BEFORE the service's own `isVisibleTo` gate is ever reached, so a
+        // viewer hitting a HIDDEN encounter's real id would get 403, distinguishable from
+        // the 404 a nonexistent id gets (an enumeration oracle). Pre-check at the VIEWER
+        // floor first so a hidden encounter is 404 for every non-DM.
+        if (
+          !isVisibleTo(
+            { hidden: row.hidden },
+            await this.access.requireRole(user, row.campaignId, 'viewer'),
+          )
+        ) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantResourceAdjust.parse(fields);
         return this.encounters.adjustCombatantResource(encounterId as number, combatantId as number, validated, user, role);
