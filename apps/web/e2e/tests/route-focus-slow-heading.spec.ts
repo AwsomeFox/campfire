@@ -191,6 +191,8 @@ test('a late heading does not claw focus away after a non-focus-moving key press
 });
 
 test('a late heading does not steal focus from an open dialog (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
   const { campaignId } = seed();
   await page.goto(`/c/${campaignId}`);
   await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
@@ -214,19 +216,28 @@ test('a late heading does not steal focus from an open dialog (#591)', async ({ 
   const main = page.locator(`#${MAIN_CONTENT_ID}`);
   await expect(main).toBeFocused();
 
-  // Open a real modal dialog (the shared notification panel) while the fallback is still
-  // untouched and the recovery window is open. A dialog opening is not a "user takeover"
-  // under `handleUserTookOver`'s predicate — it moves focus itself, the app didn't ask the
-  // user to do anything — so this exercises the separate modal guard in `upgradeFromFallback`
-  // rather than the focusin-based takeover tracking covered by the tests above.
-  const bell = page.getByRole('button', { name: 'Notifications', exact: true });
-  await bell.click();
-  const dialog = page.getByRole('dialog', { name: 'Notifications' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute('aria-modal', 'true');
-  await expect(dialog.locator(':focus')).toHaveCount(1);
+  // Make `isModalDialogOpen(document)` true without going through any real user gesture:
+  // clicking, tabbing to, or otherwise activating any real dialog (the notification panel
+  // included) fires a capturing pointerdown/focusin first, which `handleUserTookOver` already
+  // treats as the user taking over and tears the fallback watch down *before* the modal-guard
+  // code in `upgradeFromFallback` is ever reached — so a test that opens a dialog that way
+  // stays green even with both `isModalDialogOpen` checks deleted, and proves nothing about
+  // them (PR #1957 review, P2 codex finding). Injecting the dialog node directly — without
+  // moving focus or dispatching any pointer/key event — isolates the modal guard from the
+  // takeover tracking already covered by the tests above: `main` stays the active element,
+  // `settledOnMainFallback` stays true, and only `isModalDialogOpen(document)` changes.
+  await page.evaluate(() => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Injected test dialog');
+    document.body.appendChild(dialog);
+  });
+  await expect(main).toBeFocused();
 
-  // Now let the real heading arrive. It must not steal focus away from the open dialog.
+  // Now let the real heading arrive. Without the modal guard this would move focus to it
+  // (as the first test in this file demonstrates happens in the absence of a dialog); with
+  // it, `upgradeFromFallback` must see the injected dialog and refuse.
   releaseSummary();
   await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeVisible();
 
@@ -236,8 +247,60 @@ test('a late heading does not steal focus from an open dialog (#591)', async ({ 
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       }),
   );
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator(':focus')).toHaveCount(1);
+  await expect(main).toBeFocused();
+});
+
+test('a readiness-anchored extension still claims focus past the flat window (#591)', async ({ page }) => {
+  await installGraceMsOverride(page, TEST_GRACE_MS);
+
+  const { campaignId } = seed();
+  await page.goto(`/c/${campaignId}`);
+  await expect(page.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
+
+  await page.getByRole('link', { name: 'Party', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Party' })).toBeFocused();
+
+  let releaseSummary: () => void = () => {};
+  const summaryGate = new Promise<void>((resolve) => {
+    releaseSummary = resolve;
+  });
+  await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+    await summaryGate;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
+
+  const main = page.locator(`#${MAIN_CONTENT_ID}`);
+  await expect(main).toBeFocused();
+
+  // Simulate the route-level Suspense fallback (`SkeletonRoute`, data-testid="skeleton-route"
+  // — the signal `checkRouteReadiness` watches for) being present, then removed. An actual
+  // slow `lazy()` chunk load is impractical to reproduce deterministically in e2e, so this
+  // drives the same DOM signal directly. The removal re-anchors the recovery deadline to a
+  // fresh base grace period from that moment (PR #1957 review, P2 codex finding: a flat
+  // multiple of navigation time cannot account for an independently-timed chunk load ahead
+  // of the read — e.g. a 35s chunk load plus a 26s read outliving a flat 60s window).
+  await page.evaluate((mainId) => {
+    const skeleton = document.createElement('div');
+    skeleton.setAttribute('data-testid', 'skeleton-route');
+    document.getElementById(mainId)?.appendChild(skeleton);
+  }, MAIN_CONTENT_ID);
+
+  // Still comfortably inside the flat window (2x the override) when the skeleton is removed.
+  await page.waitForTimeout(TEST_GRACE_MS + 200);
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="skeleton-route"]')?.remove();
+  });
+
+  // This crosses the ORIGINAL flat ceiling (2x the override, from settle) — without the
+  // readiness-anchored extension the recovery window would already be closed by now, and the
+  // heading below would land on a torn-down `settledOnMainFallback`.
+  await page.waitForTimeout(150);
+  releaseSummary();
+
+  await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused();
 });
 
 test('a heading arriving after the recovery grace window does not claw focus away (#591)', async ({ page }) => {

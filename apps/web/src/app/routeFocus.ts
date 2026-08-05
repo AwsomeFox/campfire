@@ -6,6 +6,15 @@
  */
 
 import { API_READ_BUDGET } from '../lib/apiTimeouts';
+import { SKELETON_TEST_IDS } from '../components/loadingSkeletonState';
+
+/**
+ * Marks `router.tsx`'s `lazyPage()` Suspense fallback (`SkeletonRoute` in ui.tsx) — the
+ * one reliable, existing signal that a code-split route's own component has not yet
+ * mounted. Used to anchor the recovery window to actual route readiness rather than a
+ * flat multiple of navigation time (see `focusMainDestination`'s route-readiness check).
+ */
+const ROUTE_SKELETON_SELECTOR = `[data-testid="${SKELETON_TEST_IDS.route}"]`;
 
 export const MAIN_CONTENT_ID = 'main-content';
 export const SKIP_TO_MAIN_ID = 'skip-to-main';
@@ -250,6 +259,9 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   // Set between scheduling the deferred upgrade and that frame running, so a second
   // observer fire in the gap cannot queue a duplicate focus move.
   let upgradeScheduled = false;
+  // Whether `main` currently contains the route-level Suspense fallback — see
+  // `checkRouteReadiness`.
+  let routeSkeletonPresent = false;
 
   const cancelFrames = () => {
     for (const id of frames) window.cancelAnimationFrame(id);
@@ -336,6 +348,30 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     removeFallbackWatchListeners();
   };
 
+  // Anchors the recovery window to actual route readiness rather than a flat multiple of
+  // navigation time: `graceWindowMs` (double the read budget) covers the general case, but
+  // a code-split route's chunk load is independently timed (`lazyPage` in router.tsx) and
+  // not itself bounded by anything, so a slow-but-real chunk load ahead of the read can
+  // still compound past a fixed multiple (review finding: P2 codex — e.g. a 35s chunk load
+  // plus a 26s read outlives a flat 60s window). Rather than guessing a bigger fixed number,
+  // detect the one reliable existing signal that the component actually mounted: the
+  // route-level Suspense fallback (`SkeletonRoute`) leaving `<main>`. On that transition the
+  // window re-arms for a fresh `graceMs` — the read budget itself — from *now*, since that
+  // is genuinely when a request the component issues could have started. This can only
+  // extend recovery while the flat `graceWindowMs` ceiling has not already elapsed (the
+  // observer is disconnect-free but `settledOnMainFallback` already false stops any of this
+  // from mattering past that point), so a route that never uses `SkeletonRoute` — or whose
+  // chunk load itself somehow exceeds `graceWindowMs` — still falls back to the flat bound,
+  // and a genuinely headless route keeps its hard teardown either way.
+  const checkRouteReadiness = () => {
+    const skeletonNow = Boolean(main.querySelector(ROUTE_SKELETON_SELECTOR));
+    if (routeSkeletonPresent && !skeletonNow) {
+      if (fallbackGraceTimeout) window.clearTimeout(fallbackGraceTimeout);
+      fallbackGraceTimeout = window.setTimeout(teardownFallbackWatch, graceMs);
+    }
+    routeSkeletonPresent = skeletonNow;
+  };
+
   const scheduleFrame = (cb: () => void) => {
     const id = window.requestAnimationFrame(() => {
       frames.delete(id);
@@ -374,7 +410,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     }
     // A fallback settle keeps the observer alive so a real h1 that arrives shortly afterward
     // can still take over focus — but only until the user acts on the page themselves (see
-    // `handleUserTookOver`), or until `graceWindowMs` elapses, whichever happens first.
+    // `handleUserTookOver`), or until the window elapses, whichever happens first.
     //
     // Armed for double `graceMs` up front, not `graceMs` itself: a route's component can be
     // code-split (`lazyPage` in router.tsx), so on a cold navigation the chunk download has to
@@ -384,7 +420,10 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     // start covers a slow chunk load ahead of the read without needing to observe any activity
     // first (review finding: P2 codex — a flat window armed only for the base grace period
     // cannot help here, since resetting on continued activity never gets a chance to fire).
+    // `checkRouteReadiness` can extend this further, anchored to when the component actually
+    // mounts, for the case where even double the base budget is not enough.
     installFallbackWatchListeners();
+    routeSkeletonPresent = Boolean(main.querySelector(ROUTE_SKELETON_SELECTOR));
     fallbackGraceTimeout = window.setTimeout(teardownFallbackWatch, graceWindowMs);
   };
 
@@ -414,7 +453,10 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
       return true;
     }
     const h1 = main.querySelector('h1');
-    if (!(h1 instanceof HTMLElement)) return false;
+    if (!(h1 instanceof HTMLElement)) {
+      checkRouteReadiness();
+      return false;
+    }
     if (!moveFocus) {
       teardownFallbackWatch();
       return true;
@@ -430,6 +472,15 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     scheduleFrame(() => {
       upgradeScheduled = false;
       if (!settledOnMainFallback) return;
+      // Re-queried here rather than reusing the `h1` captured above: if the page swaps
+      // the heading out in the gap between that capture and this frame running (an
+      // unkeyed remount, a Suspense boundary resolving, a list re-render), the captured
+      // node is now detached and `.focus()` on it is a silent no-op — focus would stay on
+      // `main` with no further attempt ever made, since `teardownFallbackWatch()` below
+      // has already cleared `settledOnMainFallback` by the time the replacement heading's
+      // own mutation arrives (review finding: Devin).
+      const target = main.querySelector('h1');
+      if (!(target instanceof HTMLElement) || !target.isConnected) return;
       teardownFallbackWatch();
       if (document.activeElement !== main) return;
       if (shouldPreserveFocusInsideMain(main, document)) return;
@@ -437,7 +488,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
       // frame being scheduled and it actually running, and that must cancel the transfer
       // just as reliably as a dialog that was already open when the mutation fired.
       if (isModalDialogOpen(document)) return;
-      focusOwned(h1);
+      focusOwned(target);
     });
     return true;
   };
