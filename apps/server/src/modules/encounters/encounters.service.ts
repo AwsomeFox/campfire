@@ -3,9 +3,9 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -6725,6 +6725,8 @@ export class EncountersService {
       suggestedActions: [],
       startPrompts: [],
       endPrompts: [],
+      spellSlots: null,
+      spells: [],
     };
     if (status !== 'running') {
       return base;
@@ -6778,6 +6780,17 @@ export class EncountersService {
     const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
     const suggestedActions = await this.suggestedActionsForCombatant(current);
 
+    // Issue #1900: spellSlots/spells are the in-combat Spellbook's real data source, gated
+    // by the exact same canSeeDetail check as the rest of the detailed workspace above — a
+    // player never receives another PC's or a monster's spell data through this payload.
+    // Scoped to character actors only (a monster/NPC has no persisted spell-slot pool).
+    let spellSlots: Record<string, SpellSlotLevel> | null = null;
+    let spells: TurnSpellEntry[] = [];
+    if (current.kind === 'character' && current.characterId !== null) {
+      spellSlots = await this.spellSlotsForCharacter(current.characterId);
+      spells = deriveTurnSpells(suggestedActions);
+    }
+
     return {
       ...base,
       current: currentActor,
@@ -6792,7 +6805,15 @@ export class EncountersService {
       suggestedActions,
       startPrompts: deriveStartTurnPrompts(current),
       endPrompts: deriveEndTurnPrompts(current, model.slots),
+      spellSlots,
+      spells,
     };
+  }
+
+  /** The character's persisted per-level spell slot map (issue #1900), `{}` when it has none. */
+  private async spellSlotsForCharacter(characterId: number): Promise<Record<string, SpellSlotLevel>> {
+    const [character] = await this.db.select({ spellSlots: characters.spellSlots }).from(characters).where(eq(characters.id, characterId)).limit(1);
+    return fromJsonText<Record<string, SpellSlotLevel>>(character?.spellSlots ?? null, {});
   }
 
   /** Resolve a combatant into a TurnActor, looking up the linked character's owner (issue #413). */

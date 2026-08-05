@@ -19,13 +19,13 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useState } from 'react';
 import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
-import { SpellbookPanel, type SpellItem, type SpellSlotMap, type PactSlotPool, type SpellcastingStats } from './SpellbookPanel';
+import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap, type SpellCastContext } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
 
@@ -43,9 +43,10 @@ const STANDARD_ACTIONS = [
 
 interface TurnWorkspaceProps {
   encounterId: number;
-  /** Round + current-combatant id drive the query key so the workspace refetches on advance. */
-  round: number;
-  currentCombatantId: number | null;
+  /** Issue #1900: fetched ONCE by the parent (RunSessionPage) and passed down — the workspace
+   *  no longer runs its own duplicate `/turn` query. `undefined` while the parent's read is
+   *  still loading, which renders nothing (same as the old not-yet-fetched state). */
+  turn: TurnWorkspaceData | undefined;
   isDm: boolean;
   ruleSystem?: string | null;
   /** Current combatant turn state (delay / ready) from the encounter roster. */
@@ -66,12 +67,10 @@ interface TurnWorkspaceProps {
   endTurnBusy?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
-  /** Issue #1851: In-combat spellbook panel integration */
-  spells?: SpellItem[];
-  spellSlots?: SpellSlotMap;
-  pactSlots?: PactSlotPool | null;
-  spellStats?: SpellcastingStats;
-  onUpdateSpellSlot?: (level: number | 'pact', delta: number) => void;
+  /** Issue #1900: spend (+1) or restore (-1) one spell-slot level for the current combatant's
+   *  character, via the parent's POST :id/spell-slots mutation. Undefined when the viewer
+   *  isn't authorized to cast for this actor right now (mirrors onUseSuggestedAction's gate). */
+  onUpdateSpellSlot?: (level: number | undefined, delta: number, castContext?: SpellCastContext) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -121,8 +120,7 @@ function SlotChip({
 
 export function TurnWorkspace({
   encounterId,
-  round,
-  currentCombatantId,
+  turn,
   isDm,
   ruleSystem,
   currentTurnState,
@@ -135,10 +133,6 @@ export function TurnWorkspace({
   endTurnBusy = false,
   gridUnit,
   gridScale,
-  spells,
-  spellSlots,
-  pactSlots,
-  spellStats,
   onUpdateSpellSlot,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
@@ -152,14 +146,6 @@ export function TurnWorkspace({
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
-
-  const { data: turn } = useQuery({
-    // Keying on round + current combatant makes the workspace refetch the instant the turn
-    // advances (the parent's SSE/poll invalidation flips these), without its own poller.
-    queryKey: [...queryKeys.encounterTurn(encounterId), round, currentCombatantId ?? 0],
-    queryFn: () => api.get<TurnWorkspaceData>(`${API}/encounters/${encounterId}/turn`),
-    staleTime: 2_000,
-  });
 
   const settle = () => {
     invalidateEncounter(queryClient, encounterId);
@@ -245,22 +231,30 @@ export function TurnWorkspace({
     }
   }, [actionItems, activeTab]);
 
-  const effectiveSpells = useMemo<SpellItem[]>(() => {
-    if (spells && spells.length > 0) return spells;
-    if (!turn?.suggestedActions) return [];
-    return turn.suggestedActions
-      .filter((a) => a.source?.toLowerCase().includes('spell') || a.name.toLowerCase().includes('spell'))
-      .map((a, idx) => ({
-        id: `suggested-spell-${idx}`,
-        name: a.name,
-        level: 1,
-        castingTime: '1A',
-        range: '60 ft',
-        school: 'Evocation',
-        spec: a.spec,
-        actionIndex: a.actionIndex,
-      }));
-  }, [spells, turn?.suggestedActions]);
+  // Issue #1900: real data only — `turn.spells`/`turn.spellSlots` are server-derived from the
+  // character's actual actions/persisted slots (see `deriveTurnSpells` in @campfire/schema).
+  // No client-side invention of level/school/range/casting-time; a spell with no cost-slot
+  // data simply renders without a Time badge (SpellbookPanel), and an actor with neither
+  // spells nor slots gets no toggle at all (below) rather than an empty/fake panel.
+  const spellItems = useMemo<SpellItem[]>(
+    () =>
+      (turn?.spells ?? []).map((s, idx) => ({
+        id: `spell-${s.actionIndex ?? idx}-${s.name}`,
+        name: s.name,
+        level: s.level,
+        castingTime: s.castingSlot || undefined,
+        isConcentration: s.concentration,
+        spec: s.spec,
+        actionIndex: s.actionIndex,
+      })),
+    [turn?.spells],
+  );
+  const spellSlotsMap: SpellSlotMap | undefined = turn?.spellSlots ?? undefined;
+  // Review fix: a persisted slots map can legitimately contain a level entry with `max: 0`
+  // (e.g. a class that hasn't reached that slot tier yet) — that pool has nothing to spend,
+  // so it must not count as "has slots" for the toggle-visibility acceptance criterion
+  // (hidden when the actor has no spells and no *usable* slots). See `hasSpellbookContent`.
+  const hasSpellbookData = hasSpellbookContent(spellItems, spellSlotsMap);
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurnBusy || turnState.isPending;
@@ -281,25 +275,25 @@ export function TurnWorkspace({
           <span className="tag tag-neutral">now</span>
           {turn.next && <span className="text-sm text-muted">Next: {turn.next.name}</span>}
         </div>
-        <button
-          type="button"
-          className="btn btn-secondary text-xs cf-target-44 flex items-center gap-1.5 min-h-[44px]"
-          data-testid="toggle-spellbook-btn"
-          aria-expanded={showSpellbook}
-          aria-label="Toggle spellbook panel"
-          onClick={() => setShowSpellbook((prev) => !prev)}
-        >
-          <span>🔮 Spellbook</span>
-        </button>
+        {hasSpellbookData && (
+          <button
+            type="button"
+            className="btn btn-secondary text-xs cf-target-44 flex items-center gap-1.5 min-h-[44px]"
+            data-testid="toggle-spellbook-btn"
+            aria-expanded={showSpellbook}
+            aria-label="Toggle spellbook panel"
+            onClick={() => setShowSpellbook((prev) => !prev)}
+          >
+            <span>🔮 Spellbook</span>
+          </button>
+        )}
       </div>
 
-      {showSpellbook && (
+      {showSpellbook && hasSpellbookData && (
         <SpellbookPanel
           combatantName={turn.current.name}
-          stats={spellStats}
-          spells={effectiveSpells}
-          spellSlots={spellSlots}
-          pactSlots={pactSlots}
+          spells={spellItems}
+          spellSlots={spellSlotsMap}
           activeConcentration={turn.concentration}
           disabled={controlsDisabled}
           onUpdateSlot={onUpdateSpellSlot}

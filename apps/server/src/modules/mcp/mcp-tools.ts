@@ -1550,9 +1550,10 @@ export class McpToolsService {
       'Get the current-turn workspace (issue #413): the active combatant, round, next actor, and — for the DM or the ' +
         'current combatant\'s owner — the adapter-defined action-economy slots (with usage + plain-language help), ' +
         'movement / reaction / concentration / active effects, suggested actions from the sheet, EQUIPPED inventory ' +
-        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, and the ' +
-        'start/end-of-turn prompts to resolve before advancing. Read-only. The detailed workspace is withheld from ' +
-        'other viewers (a monster\'s abilities/effects never leak to players).',
+        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, the ' +
+        'start/end-of-turn prompts to resolve before advancing, and — for a character actor — its persisted spell ' +
+        'slots and derived castable spells (issue #1900). Read-only. The detailed workspace (including spells/slots) ' +
+        'is withheld from other viewers (a monster\'s abilities/effects never leak to players).',
       { encounterId: Id.describe('Encounter id — from list_encounters') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
