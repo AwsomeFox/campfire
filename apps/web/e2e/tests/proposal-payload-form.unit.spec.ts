@@ -141,29 +141,27 @@ test.describe('proposalPayloadForm: buildProposalDraftPayload', () => {
     expect('reward' in data).toBe(false);
   });
 
-  test('an omitted key IS reported as a change on a create, where nothing is left alone', () => {
-    // Round 3, second pass (review). The omission rule above is update semantics — `.set({
-    // ...input })` leaves an absent column as it was. A create has no row to leave alone: the
-    // key falls back to a schema/service default, so the created entity really does differ from
-    // what the proposal asked for. Reporting "no changes" there is the worse error, and its
-    // sharpest form is a secrecy one: dropping an explicit `hidden: false` from a create is the
-    // #754 flip to DM-only-by-default that this whole feature exists to make visible.
-    expect(diffProposalChangedKeys({ title: 'Q', status: 'active' }, { title: 'Q' }, 'create')).toEqual(['status']);
-    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' }, 'create')).toEqual(['hidden']);
-    // ...and unchanged for an update, which is the default when no action is given.
-    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' }, 'update')).toEqual([]);
-    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' })).toEqual([]);
+  test('a key the submitted payload DROPS is reported as a change', () => {
+    // The baseline this diff compares against is the PROPOSAL, not the stored row. So a key
+    // the reviewer clears — a select or number has no empty representation, so clearing can
+    // only omit it — means the change the proposer asked for will not be applied. That is a
+    // difference and the DM has to see it. Its sharpest form is a secrecy one: dropping an
+    // explicit `hidden: false` means the entity is no longer being made public.
+    //
+    // Round 3 suppressed this for updates, reasoning that `.set({ ...input })` leaves an
+    // omitted column alone. True of the row, irrelevant to the comparison — and the preview
+    // then said "no changes" for an edit that silently discarded the proposer's request.
+    // Whether the OUTCOME is "left alone" or "cleared" is a rendering question, answered in
+    // ProposalPreviewPanel by showing "not sent" rather than the `—` used for an explicit null.
+    expect(diffProposalChangedKeys({ title: 'Q', status: 'active' }, { title: 'Q' })).toEqual(['status']);
+    expect(diffProposalChangedKeys({ title: 'Q', hidden: false }, { title: 'Q' })).toEqual(['hidden']);
+    expect(diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' })).toEqual(['reward']);
   });
 
-  test('an omitted key is not reported as a changed field — omission changes nothing server-side', () => {
-    // The preview's half of the same defect. A number/select field has no empty
-    // representation, so clearing it can only omit the key; the diff used to report that as
-    // `→ —`, promising a clear the request cannot perform. An explicit `null`, which DOES
-    // clear the column, must still show — that distinction is the whole point of `sameJson`.
-    expect(diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' })).toEqual([]);
+  test('an explicit null is still distinct from an omission, in the diff and in the payload', () => {
+    // `sameJson` must keep these apart: an explicit `null` CLEARS the column, omission does
+    // not. Both are changes; they are different changes.
     expect(diffProposalChangedKeys({ giverNpcId: 7 }, { giverNpcId: null })).toEqual(['giverNpcId']);
-    // A key the payload ADDS is still a change; only the original-present/next-absent
-    // direction is silent.
     expect(diffProposalChangedKeys({ title: 'Quest' }, { title: 'Quest', reward: 'Gold' })).toEqual(['reward']);
   });
 
@@ -312,15 +310,13 @@ test.describe('proposalPayloadForm: diffProposalChangedKeys', () => {
     expect(changed).toEqual(['title']);
   });
 
-  test('reports an added key, and stays silent about a removed one', () => {
+  test('reports an added key AND a removed one', () => {
     const changed = diffProposalChangedKeys({ title: 'Quest' }, { title: 'Quest', status: 'available' }).sort();
     expect(changed).toEqual(['status']);
-    // A removed key was reported as changed until round 3 of the #769 review. It is not: an
-    // omitted key leaves the column untouched under `.set({ ...input })`, so calling it a
-    // change promised the DM a clear the request would never perform. The full reasoning and
-    // the explicit-null counterpart live in the omit-vs-clear test above.
+    // Round 3 suppressed the removal; round 5 established that was the wrong layer — see the
+    // dropped-key test above.
     const removed = diffProposalChangedKeys({ title: 'Quest', reward: 'Gold' }, { title: 'Quest' });
-    expect(removed).toEqual([]);
+    expect(removed).toEqual(['reward']);
   });
 });
 
@@ -415,9 +411,9 @@ test.describe('proposalPayloadForm: advanced-mode guardrails (issue #769 review)
     // rule then reports nothing changed — for a payload that dropped every field. The two
     // behaviours have to be read together, so the diff's half is asserted here.
     expect(validateProposalPayload(QuestUpdate, {}).ok).toBe(true);
-    expect(diffProposalChangedKeys({ title: 'Q', reward: 'Gold' }, {}, 'update')).toEqual([]);
-    // On a create the same payload is loudly different, which is the point of the split.
-    expect(diffProposalChangedKeys({ title: 'Q', reward: 'Gold' }, {}, 'create').sort()).toEqual(['reward', 'title']);
+    // ...and the diff now reports every dropped field rather than staying silent, so an
+    // emptied payload is loud in the preview as well as refused at the editor boundary.
+    expect(diffProposalChangedKeys({ title: 'Q', reward: 'Gold' }, {}).sort()).toEqual(['reward', 'title']);
   });
 
   test('an unparseable per-field JSON box leaves the original value in the best-effort draft', () => {
@@ -477,6 +473,6 @@ test.describe('proposalPayloadForm: optional booleans are tri-state (issue #769 
     // Ties this to the create-semantics diff: choosing "No" on a create proposal that omitted
     // the key is a real, visible difference — the entity goes from DM-only-by-default to
     // explicitly public.
-    expect(diffProposalChangedKeys({ title: 'Q' }, { title: 'Q', hidden: false }, 'create')).toEqual(['hidden']);
+    expect(diffProposalChangedKeys({ title: 'Q' }, { title: 'Q', hidden: false })).toEqual(['hidden']);
   });
 });
