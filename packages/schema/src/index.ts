@@ -9189,6 +9189,33 @@ export const AoeTemplate = z.object({
 export type AoeTemplate = z.infer<typeof AoeTemplate>;
 
 /**
+ * A caller-supplied template declaration (issue #1913). The server sets the
+ * declarer from the authenticated identity, so accepting `declaredByUserId`
+ * here would let a player impersonate another template owner. `.strict()` is
+ * therefore an authorization boundary, not merely DTO hygiene.
+ */
+export const AoeTemplateDeclare = AoeTemplate.omit({ declaredByUserId: true }).strict();
+export type AoeTemplateDeclare = z.infer<typeof AoeTemplateDeclare>;
+
+/**
+ * Fields a caller may change on an existing AoE template (issue #1913). Its
+ * route supplies the template id; ownership and declarer attribution always
+ * remain server-controlled.
+ */
+// This intentionally does not derive from `AoeTemplateDeclare.partial()`: Zod
+// defaults on the declaration schema would materialize omitted `angleDeg` and
+// `color` keys, turning a one-field PATCH into an accidental reset.
+export const AoeTemplateUpdate = z.object({
+  shape: AoeShape.optional(),
+  x: z.number().min(0).max(100).optional(),
+  y: z.number().min(0).max(100).optional(),
+  sizeFt: z.number().positive().max(1000).optional(),
+  angleDeg: z.number().min(-360).max(360).optional(),
+  color: z.string().max(24).nullable().optional(),
+}).strict();
+export type AoeTemplateUpdate = z.infer<typeof AoeTemplateUpdate>;
+
+/**
  * A transient "look here" ping broadcast over SSE (issue #238). Not persisted — it rides the
  * campaign event stream as a one-shot signal that every open client renders for a moment and
  * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
@@ -13029,4 +13056,3 @@ export type EncounterTemplateRosterEntry = z.infer<typeof EncounterTemplateRoste
 
 export const EncounterTemplateRoster = z.array(EncounterTemplateRosterEntry);
 export type EncounterTemplateRoster = z.infer<typeof EncounterTemplateRoster>;
-

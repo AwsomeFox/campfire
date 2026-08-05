@@ -1,9 +1,9 @@
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -20,7 +20,7 @@ import { StorylinesService } from '../storylines/storylines.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
-import { fogConcealsPixels, parseFogState } from '../../common/fog';
+import { fogConcealsPixels, parseFogState, persistedFogConcealsPixels } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes, matchesSearchQuery } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
@@ -87,6 +87,8 @@ type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
+type AoeTemplateUpdateInput = z.infer<typeof AoeTemplateUpdate>;
+const MAX_PLAYER_DECLARED_AOE_TEMPLATES = 10;
 type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -237,13 +239,26 @@ function parseFog(text: string | null): FogState | null {
 
 /**
  * Parse the stored AoE-templates JSON back into an AoeTemplate[] (issue #238). Same defensive
- * degrade-to-empty as parseFog: corrupt/legacy text or an entry that no longer validates is
- * dropped rather than failing the whole encounter read — templates are a display aid.
+ * degrade-to-empty as parseFog: corrupt/legacy text or any invalid entry makes the stored
+ * list unreadable rather than failing the whole encounter read — templates are a display aid.
  */
 function parseAoe(text: string | null): AoeTemplateType[] {
   if (text == null) return [];
   const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
   return parsed.success ? parsed.data : [];
+}
+
+/**
+ * Scoped AoE writes must never persist parseAoe's read-time degraded value: doing so
+ * could turn one malformed saved entry into a destructive rewrite of the whole list.
+ */
+function parseAoeForScopedWrite(text: string | null): AoeTemplateType[] {
+  if (text == null) return [];
+  const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
+  if (!parsed.success) {
+    throw new ConflictException('Encounter AoE templates contain invalid saved data and must be repaired before they can be changed');
+  }
+  return parsed.data;
 }
 
 function parseCombatantStatblock(text: string | null): CombatantStatblock | null {
@@ -1757,23 +1772,9 @@ export class EncountersService {
     // (and render above the fog overlay client-side). Filter server-side for non-DMs using
     // the same concealment rules as token redaction; player-declared templates stay visible
     // to their owner via declaredByUserId.
-    let aoe = withLinks.aoe ?? [];
-    if (viewerRole !== undefined && viewerRole !== 'dm') {
-      const fog = parseFog(row.fog);
-      const invalidFog = row.fog !== null && fog === null;
-      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
-      const siblingProtects =
-        !invalidFog &&
-        !ownFogConceals &&
-        row.mapAttachmentId != null &&
-        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
-      if (invalidFog || siblingProtects) {
-        const concealAll: FogState = { enabled: true, revealed: [] };
-        aoe = filterAoeTemplatesForViewer(aoe, concealAll, { viewerUserId });
-      } else if (fog?.enabled) {
-        aoe = filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
-      }
-    }
+    const aoe = viewerRole !== undefined && viewerRole !== 'dm'
+      ? this.filterAoeTemplatesForViewer(this.db, row, withLinks.aoe ?? [], viewerUserId)
+      : withLinks.aoe ?? [];
     return {
       ...withLinks,
       aoe,
@@ -2032,10 +2033,30 @@ export class EncountersService {
       changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, aoeBaseline)) {
-      const aoe = toJsonText(input.aoe);
-      set.aoe = aoe;
-      changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+    if (input.aoe !== undefined) {
+      let aoeBaselineForAttribution = aoeBaseline;
+      if (encounterRow.aoe && aoeBaseline.length === 0 && !resetApplied) {
+        try {
+          const raw = JSON.parse(encounterRow.aoe);
+          if (Array.isArray(raw)) {
+            aoeBaselineForAttribution = raw.filter(
+              (item): item is AoeTemplate => item != null && typeof item === 'object' && typeof item.id === 'string',
+            );
+          }
+        } catch {
+          // ignore parsing error fallback
+        }
+      }
+      const previousById = new Map(aoeBaselineForAttribution.map((template) => [template.id, template]));
+      const aoeInput = input.aoe.map((template) => ({
+        ...template,
+        declaredByUserId: previousById.get(template.id)?.declaredByUserId ?? null,
+      }));
+      if (!isDeepStrictEqual(aoeInput, aoeBaseline)) {
+        const aoe = toJsonText(aoeInput);
+        set.aoe = aoe;
+        changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+      }
     }
     // Entity-level secrecy (issue #262) — DM-only (this whole endpoint requires dm). true
     // hides the encounter's roster + difficulty from non-DM reads; the DM reveals by
@@ -2187,6 +2208,254 @@ export class EncountersService {
     // encounter is revealed the ping can be re-issued.
     if (hidden) return;
     this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
+  }
+
+  /**
+   * Enforce the role and secrecy rules shared by the player-addressable AoE write
+   * routes. This deliberately runs inside the transaction before the campaign
+   * lifecycle recheck, so a hidden encounter stays non-enumerating even after
+   * archive; the lifecycle check still runs transactionally before any write.
+   */
+  private assertAoeTemplateWriteAccess(encounter: typeof encounters.$inferSelect, role: Role): void {
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounter.id} not found`);
+    }
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not declare or modify AoE templates.');
+    }
+  }
+
+  /**
+   * The server's one fail-closed AoE visibility computation. Reads and scoped
+   * writes must agree: invalid fog and a sibling encounter that still protects
+   * a reused map both conceal every non-owned template.
+   */
+  private filterAoeTemplatesForViewer(
+    db: SyncDb,
+    encounter: typeof encounters.$inferSelect,
+    aoe: readonly AoeTemplateType[],
+    viewerUserId: string | undefined,
+  ): AoeTemplateType[] {
+    const fog = parseFog(encounter.fog);
+    const invalidFog = encounter.fog !== null && fog === null;
+    const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+    const siblingProtects =
+      !invalidFog &&
+      !ownFogConceals &&
+      encounter.mapAttachmentId != null &&
+      db
+        .select({ fog: encounters.fog })
+        .from(encounters)
+        .where(and(
+          eq(encounters.mapAttachmentId, encounter.mapAttachmentId),
+          eq(encounters.campaignId, encounter.campaignId),
+          isNotNull(encounters.fog),
+        ))
+        .all()
+        .some((row) => persistedFogConcealsPixels(row.fog));
+    if (invalidFog || siblingProtects) {
+      return filterAoeTemplatesForViewer(aoe, { enabled: true, revealed: [] }, { viewerUserId });
+    }
+    return filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
+  }
+
+  /**
+   * Create one player- or DM-declared AoE template (issue #1913). Attribution is
+   * stamped from the authenticated caller rather than accepted from the request.
+   */
+  async declareAoeTemplate(
+    encounterId: number,
+    input: unknown,
+    user: RequestUser,
+    role: Role,
+    /** REST stays create-only; MCP exposes explicit create/update operations. */
+    operation: 'create' | 'update' = 'create',
+  ): Promise<AoeTemplateType> {
+    // REST and MCP creations are complete; MCP updates deliberately permit a
+    // partial payload. Keep raw key presence so
+    // schema defaults cannot overwrite fields the caller did not intend to change.
+    const rawInput = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const createTemplate = operation === 'update' ? undefined : AoeTemplateDeclare.parse(input);
+    const templateId = createTemplate?.id ?? AoeTemplate.shape.id.parse(rawInput.id);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let declared: AoeTemplateType | undefined;
+    let action: 'encounter.aoe.declare' | 'encounter.aoe.update' = 'encounter.aoe.declare';
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const existingIndex = current.findIndex((candidate) => candidate.id === templateId);
+      if (existingIndex >= 0) {
+        const existing = current[existingIndex];
+        if (role !== 'dm' && !this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).some((candidate) => candidate.id === templateId)) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        if (operation === 'create') throw new ConflictException(`AoE template ${templateId} already exists`);
+        if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+          throw new ForbiddenException('Players may modify only their own AoE templates.');
+        }
+        // MCP upserts may omit defaulted fields such as angle/color; merge only raw
+        // caller-supplied keys so a move cannot reset the existing template's intent.
+        const supplied = Object.fromEntries(
+          Object.entries(rawInput).filter(([key, value]) => key !== 'id' && key !== 'declaredByUserId' && value !== undefined),
+        );
+        declared = AoeTemplate.parse({ ...existing, ...supplied, declaredByUserId: existing.declaredByUserId });
+        if (isDeepStrictEqual(declared, existing)) {
+          emittedEncounter = fresh;
+          return;
+        }
+        current[existingIndex] = declared;
+        action = 'encounter.aoe.update';
+      } else {
+        if (operation === 'update') throw new NotFoundException(`AoE template ${templateId} not found`);
+        if (current.length >= 50) {
+          throw new ConflictException('An encounter may have at most 50 AoE templates');
+        }
+        if (role !== 'dm' && current.filter((template) => template.declaredByUserId === user.id).length >= MAX_PLAYER_DECLARED_AOE_TEMPLATES) {
+          throw new ConflictException(`A player may declare at most ${MAX_PLAYER_DECLARED_AOE_TEMPLATES} AoE templates per encounter`);
+        }
+        declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: role === 'dm' ? null : user.id };
+        current.push(declared);
+      }
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action,
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: declared!.id,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return declared!;
+  }
+
+  /** Update an AoE template while preserving the server-owned declarer identity. */
+  async updateAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    input: AoeTemplateUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<AoeTemplateType> {
+    AoeTemplate.shape.id.parse(templateId);
+    const patch = AoeTemplateUpdate.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let updated: AoeTemplateType | undefined;
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const index = current.findIndex((candidate) => candidate.id === templateId);
+      if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
+      const existing = current[index];
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        throw new ForbiddenException('Players may modify only their own AoE templates.');
+      }
+
+      // `AoeTemplateUpdate` cannot include id or declarer. Re-parse the joined
+      // value so the persisted array always retains the full AoeTemplate invariant.
+      updated = AoeTemplate.parse({ ...existing, ...patch, declaredByUserId: existing.declaredByUserId });
+      if (isDeepStrictEqual(updated, existing)) {
+        emittedEncounter = fresh;
+        return;
+      }
+      current[index] = updated;
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.aoe.update',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: templateId,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return updated!;
+  }
+
+  /** Remove an AoE template under the same secrecy, lifecycle, and ownership gates. */
+  async removeAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ ok: true }> {
+    AoeTemplate.shape.id.parse(templateId);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const existing = current.find((candidate) => candidate.id === templateId);
+      if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        throw new ForbiddenException('Players may remove only their own AoE templates.');
+      }
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current.filter((candidate) => candidate.id !== templateId)), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aoe.remove',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: templateId,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return { ok: true };
   }
 
   /**
@@ -6608,7 +6877,9 @@ export class EncountersService {
         if (opClaim) {
           const prior = findPriorEncounterOp(tx, opClaim, Date.now());
           if (prior) {
-            if (prior.response && prior.responseRole === role) {
+            // Player projections include their own fog-concealed AoE templates, so a
+            // role-only cached response is safe only for the DM's shared projection.
+            if (role === 'dm' && prior.response && prior.responseRole === role) {
               replayedEncounter = prior.response as EncounterWithCombatants;
             } else {
               // Claim committed but its body was never backfilled (a crash in the moment
@@ -6836,8 +7107,8 @@ export class EncountersService {
       if (err instanceof EncounterOpRaceMarker) {
         // Same intent, two concurrent attempts: ours rolled back, theirs committed.
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
-        return this.getWithCombatantsOrThrow(encounterId, role);
+        if (role === 'dm' && prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, role, user.id);
       }
       throw err;
     }
@@ -6846,7 +7117,7 @@ export class EncountersService {
     // turn marker, re-auditing, or re-emitting would manufacture the very duplicate this
     // exists to prevent.
     if (replayedEncounter) return replayedEncounter;
-    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
+    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role, user.id);
 
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -6915,12 +7186,12 @@ export class EncountersService {
         .catch(() => {});
     }
 
-    const view = await this.getWithCombatantsOrThrow(encounterId, role);
+    const view = await this.getWithCombatantsOrThrow(encounterId, role, user.id);
     // Backfill the original response onto the already-committed claim (issue #580) so a
     // retry gets the turn pointer THIS call produced, not merely "some current state".
     // Best-effort by construction: the claim (the part that prevents a second advance) is
     // already durable, and a replay that finds no body falls back to fresh truth.
-    if (opClaim) await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
+    if (opClaim && role === 'dm') await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
     return view;
   }
 

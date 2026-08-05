@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
@@ -6983,6 +6983,10 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
+      const { declaredByUserId: _serverOwnedDeclarer, ...playerDeclaration } = ownedAoe;
+      expect(
+        (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerDeclaration)).status,
+      ).toBe(201);
       await request(server)
         .patch(`/api/v1/encounters/${encounterId}`)
         .set(dm)
@@ -7278,6 +7282,254 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     // role floor and not some unrelated breakage.
     const stillPlayer = await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 51, y: 51 });
     expect(stillPlayer.status).toBe(201);
+  });
+});
+
+describe('encounters — player-declared AoE templates (issue #1913)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Player AoE Campaign' })).body.id;
+    encounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Visible Player AoE', hidden: false })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('stamps the caller, rejects spoofing, enforces ownership, and audits/SSEs writes', async () => {
+    const server = ctx.app.getHttpServer();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const spoof = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ ...declaration, declaredByUserId: 'dev:p-2' });
+      expect(spoof.status).toBe(400);
+
+      const created = await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration);
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ ...declaration, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status,
+      ).toBe(403);
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player).send({ declaredByUserId: 'dev:p-2' })).status,
+      ).toBe(400);
+
+      const playerMoved = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(player)
+        .send({ x: 40 });
+      expect(playerMoved.status).toBe(200);
+      expect(playerMoved.body).toMatchObject({ x: 40, angleDeg: 45, color: '#663399' });
+
+      const dmUpdated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(dm)
+        .send({ x: 60, angleDeg: 90 });
+      expect(dmUpdated.status).toBe(200);
+      expect(dmUpdated.body).toMatchObject({ id: 'player-cone', x: 60, angleDeg: 90, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer)).status,
+      ).toBe(403);
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player)).status).toBe(200);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
+        .map((row) => row.action)
+        .filter((action) => action.startsWith('encounter.aoe.'));
+      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.update', 'encounter.aoe.remove']);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(4);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps player attribution immutable through the legacy DM whole-list AoE patch', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerTemplate = { ...declaration, id: 'legacy-player' };
+    expect(
+      (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerTemplate)).status,
+    ).toBe(201);
+
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({
+        aoe: [
+          { ...playerTemplate, declaredByUserId: 'dev:p-2' },
+          { ...declaration, id: 'legacy-dm', declaredByUserId: 'dev:p-2' },
+        ],
+      });
+
+    expect(patched.status).toBe(200);
+    expect(patched.body.aoe).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'legacy-player', declaredByUserId: 'dev:p-1' }),
+      expect.objectContaining({ id: 'legacy-dm', declaredByUserId: null }),
+    ]));
+  });
+
+  it('rejects scoped AoE writes without rewriting malformed saved templates or emitting side effects', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const protectedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Malformed saved AoE', hidden: false })
+    ).body.id;
+    const savedAoe = JSON.stringify([
+      { ...declaration, id: 'surviving-template', declaredByUserId: null },
+      { id: 'invalid-template', shape: 'not-a-shape' },
+    ]);
+    await db.update(encountersTable).set({ aoe: savedAoe }).where(eq(encountersTable.id, protectedId));
+    const before = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      expect((await request(server).post(`/api/v1/encounters/${protectedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+      const after = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+      expect(after?.aoe).toBe(savedAoe);
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+      expect(
+        (await db.select().from(auditLog).where(eq(auditLog.entityId, protectedId))).filter((row) => row.action.startsWith('encounter.aoe.')),
+      ).toEqual([]);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === protectedId)).toEqual([]);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Hidden Player AoE', hidden: true })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(viewer).send(declaration)).status).toBe(403);
+
+    const endedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Player AoE', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended', endedAt: new Date().toISOString() }).where(eq(encountersTable.id, endedId));
+    expect((await request(server).post(`/api/v1/encounters/${endedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const capId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'AoE cap', hidden: false })
+    ).body.id;
+    const fifty = Array.from({ length: 50 }, (_, index) => ({ ...declaration, id: `cap-${index}` }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(fifty) }).where(eq(encountersTable.id, capId));
+    expect((await request(server).post(`/api/v1/encounters/${capId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const playerCapId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Player AoE cap', hidden: false })
+    ).body.id;
+    const tenPlayerTemplates = Array.from({ length: 10 }, (_, index) => ({ ...declaration, id: `player-cap-${index}`, declaredByUserId: 'dev:p-1' }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(tenPlayerTemplates) }).where(eq(encountersTable.id, playerCapId));
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(dm).send({ ...declaration, id: 'dm-after-player-cap' })).status).toBe(201);
+
+    const fogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Fogged player AoE', hidden: false })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${fogId}`).set(dm).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(player).send(declaration)).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(dm)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
+    // A template hidden by fog cannot be distinguished from a missing id through
+    // any player mutation route, including REST's create-only declaration path.
+    expect((await request(server).patch(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(otherPlayer).send(declaration)).status).toBe(404);
+
+    const invalidFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Invalid fog AoE visibility', hidden: false })
+    ).body.id;
+    await db.update(encountersTable).set({
+      aoe: JSON.stringify([{ ...declaration, id: 'invalid-fog-other', declaredByUserId: 'dev:p-2' }]),
+      fog: '{malformed',
+    }).where(eq(encountersTable.id, invalidFogId));
+    expect((await request(server).get(`/api/v1/encounters/${invalidFogId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player)).status).toBe(404);
+
+    const siblingFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog source', hidden: false })
+    ).body.id;
+    const siblingTargetId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog AoE visibility', hidden: false })
+    ).body.id;
+    const sharedMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', MINIMAL_PNG_1X1, { filename: 'shared-fog-map.png', contentType: 'image/png' });
+    expect(sharedMap.status).toBe(201);
+    await db.update(encountersTable).set({ mapAttachmentId: sharedMap.body.id, fog: JSON.stringify({ enabled: true, revealed: [] }) }).where(eq(encountersTable.id, siblingFogId));
+    await db.update(encountersTable).set({
+      mapAttachmentId: sharedMap.body.id,
+      aoe: JSON.stringify([{ ...declaration, id: 'sibling-fog-other', declaredByUserId: 'dev:p-2' }]),
+    }).where(eq(encountersTable.id, siblingTargetId));
+    expect((await request(server).get(`/api/v1/encounters/${siblingTargetId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player)).status).toBe(404);
+
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);
+    // Archive enforcement must not run before hidden visibility: a player probing
+    // this still-hidden encounter receives the same 404 as for a missing id.
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).patch(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player)).status).toBe(404);
   });
 });
 
@@ -8983,6 +9235,17 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     const { encounterId, ariaId, monsterId } = await seedRunningFight();
     const server = ctx.app.getHttpServer();
 
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog: { enabled: true, revealed: [] } });
+    expect(
+      (await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ id: 'end-turn-owner-aoe', shape: 'circle', x: 20, y: 20, sizeFt: 10 })).status,
+    ).toBe(201);
+
     const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(before.body.currentCombatantId).toBe(ariaId);
 
@@ -8992,6 +9255,7 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .send({ expectedCurrentCombatantId: ariaId });
     expect(res.status).toBe(201);
     expect(res.body.currentCombatantId).toBe(monsterId);
+    expect(res.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'end-turn-owner-aoe', declaredByUserId: 'dev:p-1' })]));
   });
 
   it('player POST /end-turn is forbidden when it is not their turn', async () => {
