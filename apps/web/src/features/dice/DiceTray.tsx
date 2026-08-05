@@ -398,9 +398,12 @@ export function DiceTray({
       return;
     }
     let last: DiceRoll | null = null;
-    for (const expr of toSubmit) {
+    for (const [index, expr] of toSubmit.entries()) {
       // Sequential so multi-group rolls land in a stable order in the shared feed.
-      last = await onSubmitExpr(expr, pendingLabel ?? undefined);
+      // An oversized saved pool splits into several feed entries. Keep its label
+      // on the first entry only so the remainder are not misrepresented as
+      // repeated uses of the same preset.
+      last = await onSubmitExpr(expr, index === 0 ? (pendingLabel ?? undefined) : undefined);
     }
     if (last) setFeedback({ label: last.expr, total: last.total, rolls: last.rolls, kept: last.kept });
   }, [pool, modifier, advMode, onSubmitExpr, pendingLabel, t]);

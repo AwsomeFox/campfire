@@ -239,6 +239,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       await page.addInitScript((key) => {
         localStorage.setItem(key, JSON.stringify([
           { label: 'Sneak attack', pool: { 8: 1 }, modifier: 2, advMode: 'flat', persisted: true },
+          { label: 'Mega pool', pool: { 4: 20, 6: 20, 8: 20, 10: 20, 12: 20, 20: 20, 100: 20 }, modifier: 99, advMode: 'flat', persisted: true },
         ]));
       }, `campfire.dicePresets.${campaignId}`);
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
@@ -261,6 +262,26 @@ test.describe('encounter dice — apply rolled damage', () => {
       await rollButton('Roll 1d8 +2').click();
       await expect(savedResponse.then((response) => response.request().postDataJSON())).resolves.toEqual({ expr: '1d8+2', label: 'Sneak attack' });
       await expect(page.getByTestId('shared-dice-log').getByText('Sneak attack: 1d8+2', { exact: false })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Mega pool', exact: true }).click();
+      const fallbackPayloads: unknown[] = [];
+      const recordFallbackPayload = (request: Request) => {
+        if (request.method() === 'POST' && request.url().endsWith(`/campaigns/${campaignId}/roll`)) {
+          fallbackPayloads.push(request.postDataJSON());
+        }
+      };
+      page.on('request', recordFallbackPayload);
+      await rollButton('Roll 20d4 + 20d6 + 20d8 + 20d10 + 20d12 + 20d20 + 20d100 +99').click();
+      await expect.poll(() => fallbackPayloads).toEqual([
+        { expr: '20d4+99', label: 'Mega pool' },
+        { expr: '20d6' },
+        { expr: '20d8' },
+        { expr: '20d10' },
+        { expr: '20d12' },
+        { expr: '20d20' },
+        { expr: '20d100' },
+      ]);
+      page.off('request', recordFallbackPayload);
 
       await page.getByRole('button', { name: 'Clear', exact: true }).click();
       await page.getByRole('button', { name: 'Initiative', exact: true }).click();
