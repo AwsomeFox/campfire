@@ -9043,7 +9043,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       const res = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/encounters`)
         .set(dm)
-        .send({ name: 'Clear Initiative 3' });
+        .send({ name: 'Clear Initiative 3', hidden: false });
       const enc3 = res.body.id;
       const m = await request(server)
         .post(`/api/v1/encounters/${enc3}/combatants`)
