@@ -43,7 +43,7 @@ test('legal target affordances support repeated pointer and keyboard selection',
   expect(mapSource).toContain('if (movable) onTokenKeyDown(e, c);');
   expect(mapSource).toContain('if (movable) setSelectedTokenId(c.id);');
   expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
-  expect(mapSource).toContain('startClientX: e.clientX, startClientY: e.clientY');
+  expect(mapSource).toContain('clientX: e.clientX, clientY: e.clientY');
   expect(mapSource).toContain('strokeWidth={2}');
   expect(mapSource).not.toContain('event.detail === 1');
   expect(rosterSource).toContain('data-testid={`combatant-target-toggle-${combatant.id}`}');

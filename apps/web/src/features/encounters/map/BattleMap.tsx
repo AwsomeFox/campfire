@@ -252,7 +252,7 @@ export function BattleMap({
   };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
-    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; startClientX: number; startClientY: number; moved: boolean; targetable: boolean }
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; clientX: number; clientY: number; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
@@ -937,7 +937,7 @@ export function BattleMap({
     if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
-    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, startClientX: e.clientX, startClientY: e.clientY, moved: false, targetable };
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, clientX: e.clientX, clientY: e.clientY, moved: false, targetable };
     setDraggingId(c.id);
     setDragPos(point);
   }
