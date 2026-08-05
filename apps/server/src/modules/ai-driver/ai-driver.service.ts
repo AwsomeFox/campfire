@@ -7206,23 +7206,11 @@ export class AiDriverService {
       detail: auditDetail,
     });
 
-    // Homebrew / no rule system: say so plainly rather than searching every installed pack
-    // and answering from whichever happens to match first (#717).
-    if (!pack) {
-      return { query, result: renderNoRuleSystem(query) };
-    }
-
-    // Issue #1898 review: campaignId/user were already both in scope on this method's
-    // own signature — this is a fourth internal caller of the same read the issue's
-    // three other call sites (REST search, REST entry, MCP lookup_rule) now scope,
-    // not the MCP tokenContext case (which would have needed a novel ambient default).
-    // Without it, the AI-DM's rules lookup silently stayed pack-only and reported no
-    // match for a campaign's own homebrew rulings.
-    const page = await this.rules.search({ q: query, pack: pack.slug, campaignId }, 5, user);
+    const page = await this.rules.search({ q: query, pack: pack?.slug, campaignId }, 5, user);
     if (page.items.length === 0) {
-      return { query, result: renderNoMatch(query, pack) };
+      return { query, result: pack ? renderNoMatch(query, pack) : renderNoRuleSystem(query) };
     }
-    return { query, result: renderRulesAnswer(query, pack, page.items, campaignId) };
+    return { query, result: renderRulesAnswer(query, pack ?? null, page.items, campaignId) };
   }
 
   /**
@@ -8109,7 +8097,7 @@ function excerptRuleBody(body: string | undefined | null): string {
  * credits an entry under its OWN license/attribution, never blindly the pack's). Branch on
  * `top.campaignId != null` and use the entry's own rights fields instead.
  */
-function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], campaignId: number): string {
+function renderRulesAnswer(query: string, pack: RulePack | null, results: RuleEntry[], campaignId: number): string {
   const [top, ...rest] = results;
   const lines: string[] = [];
   lines.push(`**${top.name}**${top.type ? ` *(${top.type})*` : ''}`);
@@ -8119,7 +8107,7 @@ function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], 
     lines.push(body);
   }
   lines.push('');
-  if (top.campaignId != null) {
+  if (top.campaignId != null || !pack) {
     const credit = [top.author, top.attribution].filter((v) => v && v.trim()).join(' — ');
     // Only an explicitly open_licensed homebrew entry names a real license to credit;
     // private_original/permission_granted homebrew has none to show (and must never
