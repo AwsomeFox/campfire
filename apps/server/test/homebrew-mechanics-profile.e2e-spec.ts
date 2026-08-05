@@ -122,6 +122,22 @@ describe('campaign customMechanicsProfile (issue #1502, e2e)', () => {
     expect(patchRes.body.customMechanicsProfile).toBeNull();
   });
 
+  it('carries customMechanicsProfile over on campaign clone (otherwise a clone would silently fall back to 5e)', async () => {
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Clone Source Campaign', ruleSystem: 'e2e-clone-hack', customMechanicsProfile: { ...validProfile, slug: 'e2e-clone-hack' } });
+    expect(createRes.status).toBe(201);
+
+    const cloneRes = await request(server)
+      .post(`/api/v1/campaigns/${createRes.body.id}/clone`)
+      .set(dm)
+      .send({});
+    expect(cloneRes.status).toBe(201);
+    expect(cloneRes.body.ruleSystem).toBe('e2e-clone-hack');
+    expect(cloneRes.body.customMechanicsProfile).toMatchObject({ slug: 'e2e-clone-hack', abilityTable: 'sw-banded' });
+  });
+
   it('drives ability-modifier math on the real character-checks endpoint (proves resolution end-to-end, not just at the schema layer)', async () => {
     const campRes = await request(server)
       .post('/api/v1/campaigns')

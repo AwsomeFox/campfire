@@ -1340,6 +1340,10 @@ export class CampaignsService {
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
+          // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
+          // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
+          // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
+          customMechanicsProfile: source.customMechanicsProfile ? JSON.stringify(source.customMechanicsProfile) : null,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           createdAt: ts,
           updatedAt: ts,
