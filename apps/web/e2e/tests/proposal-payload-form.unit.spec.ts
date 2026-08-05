@@ -441,3 +441,42 @@ test.describe('proposalPayloadForm: advanced-mode guardrails (issue #769 review)
     expect(built.data.linkedEncounters).toEqual([1, 2]);
   });
 });
+
+test.describe('proposalPayloadForm: optional booleans are tri-state (issue #769 review)', () => {
+  const fields = describeProposalFields(QuestCreate);
+  const jsonKeys = jsonFieldKeys(QuestCreate);
+
+  test('a payload that omits `hidden` initialises to NOT SET, not to false', () => {
+    // The distinction the checkbox could not express. `resolveCreateHidden` (#754) reads an
+    // omitted `hidden` on a create as DM-only and an explicit `false` as public, so rendering
+    // "absent" as an unchecked box told the reviewer the opposite of what approving does.
+    const bool = initProposalFieldBool(fields, { title: 'Q' });
+    expect(bool.hidden).toBeUndefined();
+    // ...and a payload that HAS it keeps its value, in both directions.
+    expect(initProposalFieldBool(fields, { title: 'Q', hidden: false }).hidden).toBe(false);
+    expect(initProposalFieldBool(fields, { title: 'Q', hidden: true }).hidden).toBe(true);
+  });
+
+  test('an explicit `false` is now expressible, and is sent', () => {
+    // Previously unreachable in guided mode: unchecking an already-unchecked box still
+    // omitted, so "create this quest PUBLIC" could only be said in raw JSON.
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Q' });
+    const bool = initProposalFieldBool(fields, { title: 'Q' });
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, { ...bool, hidden: false }, { title: 'Q' });
+    expect(data.hidden).toBe(false);
+  });
+
+  test('NOT SET still omits the key, so the server default is untouched', () => {
+    const text = initProposalFieldText(fields, jsonKeys, { title: 'Q' });
+    const bool = initProposalFieldBool(fields, { title: 'Q' });
+    const { data } = buildProposalDraftPayload(fields, jsonKeys, text, { ...bool, hidden: undefined }, { title: 'Q' });
+    expect('hidden' in data).toBe(false);
+  });
+
+  test('and a create reports the explicit `false` as a change, so the preview cannot stay silent', () => {
+    // Ties this to the create-semantics diff: choosing "No" on a create proposal that omitted
+    // the key is a real, visible difference — the entity goes from DM-only-by-default to
+    // explicitly public.
+    expect(diffProposalChangedKeys({ title: 'Q' }, { title: 'Q', hidden: false }, 'create')).toEqual(['hidden']);
+  });
+});

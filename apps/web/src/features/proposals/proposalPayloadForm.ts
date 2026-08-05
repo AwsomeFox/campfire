@@ -229,7 +229,16 @@ export function jsonFieldMeta(key: string, schema: z.AnyZodObject): { label: str
 }
 
 export type ProposalFieldTextState = Record<string, string>;
-export type ProposalFieldBoolState = Record<string, boolean>;
+/**
+ * Tri-state, not boolean (issue #769 review, Devin). `undefined` means NOT SET — the key is
+ * absent from the payload — and that is a third, meaningful state, not a synonym for `false`.
+ *
+ * `resolveCreateHidden` (#754) reads an omitted `hidden` on a create as DM-only and an
+ * explicit `false` as public, so a plain checkbox both misreported the state (rendered
+ * unchecked, i.e. "public", for a payload that would create the entity DM-only) and made the
+ * explicit-`false` case unreachable: unchecking an already-unchecked box still omits.
+ */
+export type ProposalFieldBoolState = Record<string, boolean | undefined>;
 
 function fieldToText(value: unknown): string {
   if (value === undefined || value === null) return '';
@@ -260,7 +269,8 @@ export function initProposalFieldBool(
   const bool: ProposalFieldBoolState = {};
   for (const f of fields) {
     if (f.kind !== 'boolean') continue;
-    bool[f.key] = Boolean(payload[f.key]);
+    // Absent stays absent — see the tri-state note on ProposalFieldBoolState.
+    bool[f.key] = f.key in payload ? Boolean(payload[f.key]) : undefined;
   }
   return bool;
 }
@@ -345,7 +355,7 @@ export function buildProposalDraftPayload(
 
   for (const f of fields) {
     if (f.kind === 'boolean') {
-      const checked = bool[f.key] ?? false;
+      const checked = bool[f.key];
       // "Omit != false" is a real, documented server invariant for optional booleans
       // with no Zod default (e.g. `hidden` — issue #754's `resolveCreateHidden`: an
       // omitted `hidden` defaults to DM-only, while an explicit `false` makes a create
@@ -353,7 +363,12 @@ export function buildProposalDraftPayload(
       // therefore stay OMITTED, not be coerced to an explicit `false` just because a
       // checkbox always renders some boolean. Checking it True, or a key that was
       // already explicitly present (any value), is always sent explicitly.
-      if (!checked && f.optional && !(f.key in passthroughBase)) {
+      // Tri-state: "not set" omits the key in BOTH modes, and it means the right thing in
+      // each — on a create the server applies its own default (DM-only, for `hidden`), on an
+      // update `.set({ ...input })` leaves the column alone. `true`/`false` are both sent
+      // explicitly, which is what makes an intentionally-public create expressible here at
+      // all rather than only in raw JSON.
+      if (checked === undefined) {
         delete data[f.key];
       } else {
         data[f.key] = checked;

@@ -211,23 +211,35 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       const describedBy = [helpId, error ? errorId : null].filter(Boolean).join(' ');
 
       if (f.kind === 'boolean') {
+        // A three-option select, not a checkbox (issue #769 review, Devin). A checkbox has two
+        // states and this field has three: set true, set false, and NOT SET. They are not
+        // interchangeable — `resolveCreateHidden` (#754) reads an omitted `hidden` on a create
+        // as DM-only and an explicit `false` as public. Rendered as a checkbox, an omitted
+        // `hidden` drew UNCHECKED, telling the reviewer the entity would be visible to players
+        // when approving would create it DM-only, and there was no way to say "explicitly
+        // public" at all without dropping to raw JSON.
+        const current = bool[f.key];
+        const value = current === undefined ? '' : current ? 'true' : 'false';
         return (
           <div key={f.key} className="space-y-1">
-            <label htmlFor={id} className="text-[11px] font-semibold text-secondary inline-flex items-center gap-1.5 cursor-pointer">
-              <input
-                id={id}
-                type="checkbox"
-                checked={bool[f.key] ?? false}
-                // Matches every other control in this component (issue #769 review,
-                // Copilot): the checkbox associated its error via `aria-describedby` but
-                // never announced itself as invalid, so a screen-reader user heard the
-                // message without the state.
-                aria-invalid={error ? true : undefined}
-                aria-describedby={describedBy}
-                onChange={(e) => setBool((cur) => ({ ...cur, [f.key]: e.target.checked }))}
-              />
-              {f.label}
-            </label>
+            <label htmlFor={id} className="text-[11px] font-semibold text-secondary">{f.label}</label>
+            <select
+              id={id}
+              className="cf-select"
+              value={value}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={describedBy}
+              onChange={(e) =>
+                setBool((cur) => ({
+                  ...cur,
+                  [f.key]: e.target.value === '' ? undefined : e.target.value === 'true',
+                }))
+              }
+            >
+              <option value="">Not set — the server's default applies</option>
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
             <p id={helpId} className="text-[10px] text-secondary m-0">{f.help}</p>
             {error && (
               <p id={errorId} role="alert" className="text-[11px] text-rose-400 m-0">{error}</p>
