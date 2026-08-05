@@ -239,6 +239,21 @@ export class CastService {
   }
 
   /**
+   * Server-authorized projection used by the authenticated Player Display preview.
+   *
+   * The preview is opened from a DM session, but it is still a table-facing
+   * surface. Its payload must therefore have the same viewer authority as an
+   * anonymous cast capability before it crosses the API boundary.
+   */
+  async playerDisplaySummary(campaignId: number): Promise<CampaignSummary> {
+    return this.campaignsService.summary(campaignId, CAST_VIEWER_USER, CAST_VIEWER_ROLE);
+  }
+
+  async playerDisplayRunningEncounters(campaignId: number): Promise<Encounter[]> {
+    return this.encountersService.listForCampaign(campaignId, 'running', CAST_VIEWER_ROLE);
+  }
+
+  /**
    * Read-only X-Card state for the cast display (issue #1908).
    *
    * The shared TV has no member identity, so it cannot call the member-facing
@@ -286,7 +301,61 @@ export class CastService {
   async encounter(token: string, encounterId: number): Promise<EncounterWithCombatants> {
     const cast = this.resolveActive(token);
     await this.castEncounterRowOrThrow(cast, encounterId);
-    return this.encountersService.getWithCombatantsOrThrow(encounterId, CAST_VIEWER_ROLE);
+    return this.playerDisplayEncounterProjection(encounterId);
+  }
+
+  /**
+   * Authenticated previews deliberately share the cast endpoint's running-only
+   * scope. Callers must establish campaign membership before invoking this;
+   * this method owns the viewer-role projection itself.
+   */
+  async playerDisplayEncounter(campaignId: number, encounterId: number): Promise<EncounterWithCombatants> {
+    const row = await this.encountersService.getRowOrThrow(encounterId);
+    if (row.campaignId !== campaignId || row.status !== 'running') {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    return this.playerDisplayEncounterProjection(encounterId);
+  }
+
+  /** Viewer-safe map bytes for the authenticated Player Display preview. */
+  async playerDisplayEncounterMap(
+    campaignId: number,
+    encounterId: number,
+    variant: 'original' | 'thumb',
+  ): Promise<EncounterMapView> {
+    const row = await this.encountersService.getRowOrThrow(encounterId);
+    if (row.campaignId !== campaignId || row.status !== 'running') {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const encounter = this.encountersService.encounterForMapOrThrow(row, CAST_VIEWER_ROLE);
+    const persistedFogInvalid = row.fog !== null && parseFogState(row.fog) === null;
+    return this.encounterMaps.resolve(encounter, CAST_VIEWER_ROLE, variant, persistedFogInvalid);
+  }
+
+  /**
+   * `getWithCombatantsOrThrow(..., 'viewer')` owns HP, fog, hidden-entity, and
+   * AoE redaction. The Player Display also never needs a combat turn workspace
+   * or death-save counters, so replace those sensitive fields server-side before
+   * either authenticated or capability clients receive the encounter.
+   */
+  private async playerDisplayEncounterProjection(encounterId: number): Promise<EncounterWithCombatants> {
+    const encounter = await this.encountersService.getWithCombatantsOrThrow(encounterId, CAST_VIEWER_ROLE);
+    return {
+      ...encounter,
+      combatants: encounter.combatants.map((combatant) => ({
+        ...combatant,
+        deathSaveSuccesses: 0,
+        deathSaveFailures: 0,
+        turnState: {
+          used: {},
+          movementUsedFt: 0,
+          concentration: null,
+          pendingConcentrationChecks: [],
+          delaying: false,
+          readied: null,
+        },
+      })),
+    };
   }
 
   /**

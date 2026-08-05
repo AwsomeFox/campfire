@@ -59,6 +59,7 @@ const CLOSE_GLYPH_MIGRATED_SITES = [
   'features/characters/CharacterPage.tsx',
   'features/dice/DiceTray.tsx',
   'features/encounters/RunSessionPage.tsx',
+  'features/encounters/map/BattleMap.tsx',
   'features/inventory/inventoryShared.tsx',
   'features/notes/MyNotesPage.tsx',
   'features/notifications/NotificationsBell.tsx',

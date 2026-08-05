@@ -19,6 +19,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { useRollResultToast } from '../../components/RollResultToastContext';
 import { useCampaignAccessFor } from '../../app/CampaignAccessContext';
 import { DiceTray } from './DiceTray';
+import { openLegendActionRollAnimationExpr, openLegendActionRollAnimationSides } from './diceTrayExpressions';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
@@ -162,7 +163,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // can hook the same POST -> prepend -> announce flow. Returns the persisted roll so
   // the tray can surface a per-roll result (e.g. the kept die on an advantage roll).
   const submitExpr = useCallback(
-    async (raw: string): Promise<DiceRoll | null> => {
+    async (raw: string, label?: string): Promise<DiceRoll | null> => {
       // Issue #633: canonicalize the expression before submit so non-ASCII
       // decimal digits (Arabic-Indic ٠-٩, Persian ۰-۹, Devanagari ०-९) typed or
       // pasted by international rollers are normalized to ASCII and lowercase,
@@ -176,7 +177,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       setError(null);
       beginRollAnimation(cleaned);
       try {
-        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned, label });
         const batch = formatDiceRollAnnouncementBatch([result], t);
         if (batch) {
           rememberLocalDiceAnnouncement(campaignId, result.id);
@@ -214,7 +215,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     async (payload: ActionRollRequest): Promise<DiceRoll | null> => {
       setRolling(true);
       setError(null);
-      beginRollAnimation(t('dice.rollActionDice'));
+      beginRollAnimation(openLegendActionRollAnimationExpr(payload.score));
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll/action`, payload);
         const batch = formatDiceRollAnnouncementBatch([result], t);
@@ -234,7 +235,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
           return next;
         });
         setJustRolledId(result.id);
-        showRoll(result);
+        showRoll(result, { animationSides: openLegendActionRollAnimationSides(result.terms) });
         return result;
       } catch (err) {
         cancelRollAnimation();

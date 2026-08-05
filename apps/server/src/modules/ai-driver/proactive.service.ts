@@ -227,7 +227,8 @@ export class ProactiveService implements OnModuleDestroy {
       return 'objectiveCompleted';
     }
     if (event.type === 'encounter.turn_changed' && settings.triggers.npcTurn) {
-      const kind = (event as any).combatantKind;
+      if (event.turnReverted) return null;
+      const kind = event.combatantKind;
       if (kind && kind !== 'character') {
         return 'npcTurn';
       }

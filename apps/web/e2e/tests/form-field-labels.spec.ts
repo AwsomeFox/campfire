@@ -78,7 +78,9 @@ test.describe('shared Field labels on authoring surfaces (issue #886)', () => {
   test('encounter create associates name + link selects and is axe-clean', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/encounters`);
-    await page.getByRole('button', { name: '+ New encounter' }).click();
+    const newEncounterBtn = page.getByTestId('new-encounter-button');
+    await expect(newEncounterBtn).toBeVisible();
+    await newEncounterBtn.click();
     const form = page.getByTestId('encounter-create-form');
 
     const nameIds = fieldIds(ENCOUNTER_CREATE_PREFIX, ENCOUNTER_FIELD.name);

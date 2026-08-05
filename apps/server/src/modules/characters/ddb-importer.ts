@@ -1,7 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { z } from 'zod';
 import type { CharacterCreate, CharacterAction as CharacterActionType, DdbImportSummary } from '@campfire/schema';
-import { CharacterAction, expandRawStatblockAction, isResolvableSpec } from '@campfire/schema';
+import { CharacterAction, DND5E_DAMAGE_TYPES, expandRawStatblockAction, isResolvableSpec } from '@campfire/schema';
 import { parseDiceExpr } from '../../common/dice';
 
 /**
@@ -141,6 +141,76 @@ interface DdbActionEntry {
   // either (it would default to unlimited), which would let encounter resolution permit
   // uses the source feature doesn't actually have. See hasUnmappedLimitedUse below.
   limitedUse?: unknown;
+  // The feature's damage type, as a DDB damage-type ID rather than the display string an
+  // ITEM definition carries (`DdbInventoryItem.definition.damageType`, "Slashing"). Mapped
+  // through DDB_DAMAGE_TYPE_ID_TO_NAME below; see that constant for how the numbering was
+  // verified. `null` on every non-damaging feature (DDB always sends the key).
+  damageTypeId?: number | null;
+}
+
+/**
+ * DDB damage-type ID -> Campfire's canonical 5e damage-type name (issue #1958).
+ *
+ * `computeFeatureActions` used to hardcode every feature's `DamagePart.type` to `''`, and
+ * `applyDamageModifiers` (packages/schema/src/action-resolver.ts) skips resistance /
+ * immunity / vulnerability lookups entirely when `type` is `''` — so an imported breath
+ * weapon or smite dealt FULL damage to a creature that resists or is immune to it, silently
+ * producing wrong combat math with nothing in `summary.textOnly` to flag it.
+ *
+ * PR #1950's review concluded no damage-type field existed on a class/race/background/item/
+ * feat action entry. It does — DDB just spells it differently than it does for items. Verified
+ * three ways rather than assumed, because a WRONG type is worse than the untyped default it
+ * replaces (it would apply somebody's resistance, just not the right one):
+ *
+ *  1. Presence, against real public sheets: `damageTypeId` is sent on EVERY `actions.<section>[]`
+ *     entry, beside the `dice`/`value`/`attackTypeRange`/`fixedSaveDc`/`saveStatId`/
+ *     `abilityModifierStatId`/`activation`/`limitedUse` fields this importer already reads.
+ *  2. Shape, against an independent third-party JSON Schema of the character-service payload
+ *     (srsutherland/5ejson `schema/dndbeyond.schema`), which lists `damageTypeId` in the
+ *     REQUIRED set for `data.actions.race[]` items.
+ *  3. The numbering itself, pinned empirically against features whose damage type is fixed by
+ *     the core rules, read out of real public sheets:
+ *       - Monk "Unarmed Strike" / "Flurry of Blows" -> 1, and RAW those are bludgeoning;
+ *       - Dhampir "Fanged Bite"                     -> 2, RAW piercing;
+ *       - Way of Mercy Monk "Hand of Harm"          -> 4, RAW necrotic;
+ *       - Circle of Stars Druid "Starry Form: Archer" -> 12, RAW radiant.
+ *     Four non-adjacent IDs, all agreeing with the table below, which is itself the mapping
+ *     MrPrimate/ddb-importer (the long-running Foundry VTT DDB importer) has shipped as
+ *     `DICTIONARY.actions.damageType`.
+ *
+ * The values are members of `DND5E_DAMAGE_TYPES` (@campfire/schema) rather than free strings,
+ * so the compiler rejects a typo that would silently never match a target's resistance list,
+ * and every name is well inside `DamagePart.type`'s `z.string().max(24)` bound.
+ *
+ * An ID absent from this table (a homebrew or newly-introduced DDB type) is deliberately NOT
+ * bounced back to `''`: an unrecognized type is treated exactly like a weapon's missing
+ * `damageType`, forcing the whole entry text-only (see computeFeatureActions), because
+ * resolving untyped is the very bug this map exists to fix.
+ */
+const DDB_DAMAGE_TYPE_ID_TO_NAME: Readonly<Record<number, (typeof DND5E_DAMAGE_TYPES)[number]>> = Object.freeze({
+  1: 'bludgeoning',
+  2: 'piercing',
+  3: 'slashing',
+  4: 'necrotic',
+  5: 'acid',
+  6: 'cold',
+  7: 'fire',
+  8: 'lightning',
+  9: 'thunder',
+  10: 'poison',
+  11: 'psychic',
+  12: 'radiant',
+  13: 'force',
+});
+
+/**
+ * A feature entry's damage type, or `''` when the sheet carries no recognizable one — the
+ * caller treats `''` as "cannot resolve this entry", never as "untyped damage".
+ */
+function featureDamageTypeName(item: DdbActionEntry): string {
+  const id = item.damageTypeId;
+  if (typeof id !== 'number' || !Number.isInteger(id)) return '';
+  return DDB_DAMAGE_TYPE_ID_TO_NAME[id] ?? '';
 }
 
 /** True when a feature entry carries a per-rest/per-day limited-use pool this importer
@@ -893,10 +963,27 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // text-only instead. A save-shaped feature with the same gap is handled symmetrically
       // below (round 15 — see that comment for why "many conditions have no damage" isn't a
       // good enough reason to keep it resolvable).
-      if (attackBonus !== null && (!diceString || invalidFlat || flatOutOfRange)) {
+      //
+      // A missing/unrecognized damage type reaches this same branch (issue #1958): the damage
+      // part below used to be hardcoded to `type: ''`, and `applyDamageModifiers` skips target
+      // resistance/immunity/vulnerability entirely for an empty type, so the feature resolved
+      // at full damage against a creature that resists it and was never flagged in
+      // `summary.textOnly`. `computeWeaponActions` already refuses to resolve an untyped weapon
+      // for exactly this reason (round 16); features now match, sourcing the type from DDB's
+      // own `damageTypeId` (see DDB_DAMAGE_TYPE_ID_TO_NAME) instead of inventing one.
+      const damageType = featureDamageTypeName(item);
+      if (attackBonus !== null && (!diceString || invalidFlat || flatOutOfRange || !damageType)) {
         attackBonus = null;
       }
-      const damage = diceString && !invalidFlat && !flatOutOfRange ? [{ expression: `${diceString}${flatSuffix(flat)}`, type: '' }] : undefined;
+      const damage =
+        // `expandRawStatblockAction` also turns this list into the visible `CharacterAction.damage`
+        // string / roll chip. Keep a validated dice expression for a text-only healing or utility
+        // feature that has no `damageTypeId` (for example Second Wind); the missing-type gates
+        // above and below have already cleared `attackBonus` / `savingThrow`, so this empty type
+        // can never enter a resolvable spec or bypass damage modifiers.
+        diceString && !invalidFlat && !flatOutOfRange
+          ? [{ expression: `${diceString}${flatSuffix(flat)}`, type: damageType }]
+          : undefined;
       // Same principle for a save DC: a missing/unrecognized saveStatId must not default to
       // DEX — that's inventing which ability the target saves with, which resolution would
       // then roll against silently. No resolvable ability -> no savingThrow -> text-only.
@@ -951,7 +1038,11 @@ function computeFeatureActions(data: DdbCharacterData, stats: Record<string, num
       // attack case round 13 already forces text-only) must not resolve — a save spec with no
       // representable outcome, or one paired with a broken damage expression, would either
       // silently under-deliver or embed the same crash/broken-formula risk described above.
-      if (invalidFlat || flatOutOfRange || invalidDice || !diceString) {
+      // A missing/unrecognized `damageTypeId` (issue #1958) joins the same list: a save-for-half
+      // spec whose damage is untyped bypasses the target's resistance/immunity on both the
+      // failure and the halved-success branch, so it is no more trustworthy than one carrying a
+      // broken damage expression. Symmetric with the attack-shaped gate above.
+      if (invalidFlat || flatOutOfRange || invalidDice || !diceString || !damageType) {
         savingThrow = null;
       }
       // A feature that is BOTH attack-shaped (attackTypeRange resolved to a real

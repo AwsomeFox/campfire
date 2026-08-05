@@ -324,8 +324,8 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(regionMap).toMatch(/btn btn-ghost cf-density-xs/);
     expect(regionMap).not.toMatch(/style=\{\{[^}]*minHeight:\s*0/);
 
-    const runSession = READ(join(ROOT, 'features/encounters/RunSessionPage.tsx'));
-    expect(runSession).toMatch(/btn btn-ghost cf-density-xs/);
+    const battleMap = READ(join(ROOT, 'features/encounters/map/BattleMap.tsx'));
+    expect(battleMap).toMatch(/btn btn-ghost cf-density-xs/);
 
     const charPage = READ(join(ROOT, 'features/characters/CharacterPage.tsx'));
     expect(charPage).toMatch(/density="xs"/);

@@ -376,6 +376,11 @@ textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
 .tag-accent-2 { background: var(--color-accent-2-800); color: var(--color-accent-2-100); }
 .tag-neutral { background: var(--color-neutral-800); color: var(--color-neutral-100); }
 .tag-outline { border: 1px solid var(--color-accent); color: var(--color-accent); }
+/* Homebrew badge (issue #1898 review): a real modifier for the existing --color-amber
+   token, which no component had consumed before this. Same dark-bg/light-text shape as
+   tag-accent/tag-neutral above (a solid pill, so it reads regardless of what's behind
+   it) rather than a translucent tint over the parent. */
+.tag-amber { background: color-mix(in srgb, var(--color-amber) 32%, black); color: color-mix(in srgb, var(--color-amber) 55%, white); }
 
 /* — navigation — */
 .nav {

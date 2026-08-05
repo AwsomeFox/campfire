@@ -107,7 +107,7 @@ export function CheckRequestPanel({
 
   return (
     <Card className="space-y-2.5" data-testid="request-check-panel">
-      <span className="card-kicker">Request a check</span>
+      <span className="card-kicker">{t('encounters.checks.requestCheck')}</span>
       <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
         Ask a player to roll a check or save. They get an in-page prompt and roll once; the result
         lands in the shared dice log with your consequence text.
@@ -115,10 +115,9 @@ export function CheckRequestPanel({
       {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
-          <label htmlFor="check-request-character">Character</label>
+          <label htmlFor="check-request-character">{t('encounters.checks.character')}</label>
           <select
             id="check-request-character"
-            aria-label="Character"
             className="cf-select"
             value={characterId === '' ? '' : String(characterId)}
             onChange={(e) => {
@@ -126,7 +125,7 @@ export function CheckRequestPanel({
               setCheckId('');
             }}
           >
-            <option value="">Choose a character…</option>
+            <option value="">{t('encounters.checks.chooseCharacter')}</option>
             {availableCharacters.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
@@ -135,16 +134,17 @@ export function CheckRequestPanel({
           </select>
         </div>
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
-          <label htmlFor="check-request-check">Check</label>
+          <label htmlFor="check-request-check">{t('encounters.checks.check')}</label>
           <select
             id="check-request-check"
-            aria-label="Check"
             className="cf-select"
             value={checkId}
             disabled={typeof characterId !== 'number' || checksQuery.isLoading}
             onChange={(e) => setCheckId(e.target.value)}
           >
-            <option value="">{typeof characterId === 'number' ? 'Choose a check…' : 'Pick a character first'}</option>
+            <option value="">
+              {typeof characterId === 'number' ? t('encounters.checks.chooseCheck') : t('encounters.checks.pickCharacterFirst')}
+            </option>
             {checks.map((def) => (
               <option key={def.id} value={def.id}>
                 {def.label}
@@ -153,10 +153,9 @@ export function CheckRequestPanel({
           </select>
         </div>
         <div className="field" style={{ width: 80 }}>
-          <label htmlFor="check-request-dc">DC</label>
+          <label htmlFor="check-request-dc">{t('encounters.checks.dc')}</label>
           <TextInput
             id="check-request-dc"
-            aria-label="DC"
             type="number"
             min={1}
             max={99}
@@ -167,10 +166,9 @@ export function CheckRequestPanel({
         </div>
       </div>
       <div className="field">
-        <label htmlFor="check-request-consequence">Consequence (optional)</label>
+        <label htmlFor="check-request-consequence">{t('encounters.checks.consequenceOptional')}</label>
         <TextInput
           id="check-request-consequence"
-          aria-label="Consequence"
           placeholder="On a failure, the bridge gives way…"
           value={consequence}
           maxLength={500}
@@ -257,6 +255,7 @@ function PromptCard({
 
 /** The resolved result the player just rolled — total, pass/fail, and the DM's consequence text. */
 function ResultCard({ resolution }: { resolution: CheckRequestResolution }) {
+  const { t } = useTranslation();
   const { request, result } = resolution;
   return (
     <div
@@ -269,7 +268,7 @@ function ResultCard({ resolution }: { resolution: CheckRequestResolution }) {
         <span className="text-muted" style={{ fontSize: 12 }}>{result.check.label}</span>
       </div>
       <div style={{ fontSize: 13 }}>
-        <span>Rolled </span>
+        <span>{t('encounters.checks.rolled')}</span>
         <strong style={{ color: 'var(--color-accent)' }}>{result.roll.total}</strong>
         {result.roll.dc != null && (
           <span
@@ -283,7 +282,7 @@ function ResultCard({ resolution }: { resolution: CheckRequestResolution }) {
       <span className="text-muted" style={{ fontSize: 11.5 }}>{result.check.breakdownText}</span>
       {request.consequence && (
         <p style={{ fontSize: 12, margin: 0 }} data-testid={`check-request-result-consequence-${request.id}`}>
-          <span className="text-muted">Consequence: </span>
+          <span className="text-muted">{t('encounters.checks.consequence')}</span>
           {request.consequence}
         </p>
       )}

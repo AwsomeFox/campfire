@@ -23,6 +23,7 @@ import { resolve } from 'node:path';
 const characterStatCard = readFileSync(resolve(__dirname, '../../src/components/CharacterStatCard.tsx'), 'utf8');
 const inventoryShared = readFileSync(resolve(__dirname, '../../src/features/inventory/inventoryShared.tsx'), 'utf8');
 const runSessionPage = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
+const combatantRow = readFileSync(resolve(__dirname, '../../src/features/encounters/combat/CombatantRow.tsx'), 'utf8');
 const apiLib = readFileSync(resolve(__dirname, '../../src/lib/api.ts'), 'utf8');
 const actionUseFlow = readFileSync(resolve(__dirname, '../../src/features/encounters/ActionUseFlow.tsx'), 'utf8');
 
@@ -71,9 +72,9 @@ test.describe('equipped-item actions in the encounter card (#1901)', () => {
   });
 
   test('RunSessionPage wires encounterId/combatantId into the card and no longer re-derives the action from ch.actions[actionIndex]', () => {
-    expect(runSessionPage).toContain('encounterId={encounterId}');
-    expect(runSessionPage).toContain('combatantId={combatant.id}');
-    expect(runSessionPage).not.toContain('ch?.actions[actionIndex]');
+    expect(combatantRow).toContain('encounterId={encounterId}');
+    expect(combatantRow).toContain('combatantId={combatant.id}');
+    expect(combatantRow).not.toContain('ch?.actions[actionIndex]');
   });
 
   test('an inventory equip/unequip (character.updated) invalidates this encounter\'s cached action lists', () => {

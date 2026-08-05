@@ -95,9 +95,14 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
       const { release, started } = await holdRoute(page, `**/api/v1/encounters/${encounterId}/end`, 'POST');
 
       await page.goto(encounterUrl());
-      await page.getByRole('button', { name: 'End', exact: true }).click();
+      const endBtn = page.getByRole('button', { name: 'End', exact: true });
+      await expect(endBtn).toBeVisible();
+      await endBtn.click();
       const dialog = page.getByRole('dialog', { name: 'End this encounter?' });
-      await dialog.getByRole('button', { name: 'End encounter' }).click();
+      await expect(dialog).toBeVisible();
+      const confirmBtn = dialog.getByRole('button', { name: 'End encounter' });
+      await expect(confirmBtn).toBeVisible();
+      await confirmBtn.click();
       await started;
       await expectBusyConfirm(page, 'End this encounter?', 'Ending encounter…', 'End encounter', release, true);
     } finally {
@@ -115,9 +120,14 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     );
 
     await page.goto(endedEncounterUrl());
-    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    const deleteBtn = page.getByRole('button', { name: 'Delete', exact: true });
+    await expect(deleteBtn).toBeVisible();
+    await deleteBtn.click();
     const dialog = page.getByRole('dialog', { name: 'Delete this encounter?' });
-    await dialog.getByRole('button', { name: 'Delete encounter' }).click();
+    await expect(dialog).toBeVisible();
+    const confirmBtn = dialog.getByRole('button', { name: 'Delete encounter' });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
     await started;
     await expectBusyConfirm(
       page,
@@ -137,9 +147,14 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     );
 
     await page.goto(endedEncounterUrl());
-    await page.getByRole('button', { name: 'Reopen', exact: true }).click();
+    const reopenBtn = page.getByRole('button', { name: 'Reopen', exact: true });
+    await expect(reopenBtn).toBeVisible();
+    await reopenBtn.click();
     const dialog = page.getByRole('dialog', { name: 'Reopen this encounter?' });
-    await dialog.getByRole('button', { name: 'Reopen encounter' }).click();
+    await expect(dialog).toBeVisible();
+    const confirmBtn = dialog.getByRole('button', { name: 'Reopen encounter' });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
     await started;
     await expectBusyConfirm(
       page,

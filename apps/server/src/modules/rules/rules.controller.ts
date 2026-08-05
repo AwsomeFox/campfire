@@ -187,6 +187,7 @@ export class RulesController {
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
+  @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Campaign ID to include campaign homebrew for members.' })
   @ApiResponse({ status: 200, description: 'Paginated matching rule entries (`items`, `total`, `hasMore`, `nextCursor?`).' })
   search(
     @Query('q') q: string | undefined,
@@ -194,6 +195,8 @@ export class RulesController {
     @Query('pack') pack: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('cursor') cursor: string | undefined,
+    @Query('campaignId') campaignIdStr: string | undefined,
+    @CurrentUser() user: RequestUser,
   ) {
     let parsedLimit: number | undefined;
     if (limit !== undefined && limit !== '') {
@@ -203,20 +206,42 @@ export class RulesController {
       }
       parsedLimit = n;
     }
+    let campaignId: number | undefined;
+    if (campaignIdStr !== undefined && campaignIdStr !== '') {
+      const n = Number(campaignIdStr);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new BadRequestException('`campaignId` must be a positive integer');
+      }
+      campaignId = n;
+    }
     return this.rules.search({
       q: q ?? '',
       type: type as RuleEntryType | undefined,
       pack,
       cursor,
       limit: parsedLimit,
-    });
+      campaignId,
+    }, undefined, user);
   }
 
   @Get('entries/:id')
-  @ApiOperation({ summary: 'Get a rule entry', description: 'Any authenticated user.' })
+  @ApiOperation({ summary: 'Get a rule entry', description: 'Any authenticated user. Pass optional campaignId for member homebrew resolution.' })
+  @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Campaign ID to resolve campaign homebrew for members.' })
   @ApiResponse({ status: 200, description: 'Rule entry.' })
-  getEntry(@Param('id', ParseIntPipe) id: number) {
-    return this.rules.getEntryOrThrow(id);
+  getEntry(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('campaignId') campaignIdStr: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    let campaignId: number | undefined;
+    if (campaignIdStr !== undefined && campaignIdStr !== '') {
+      const n = Number(campaignIdStr);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new BadRequestException('`campaignId` must be a positive integer');
+      }
+      campaignId = n;
+    }
+    return this.rules.getEntryOrThrow(id, campaignId, user);
   }
 
   /**

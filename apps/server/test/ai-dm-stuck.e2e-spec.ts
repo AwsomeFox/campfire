@@ -383,7 +383,88 @@ describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
     expect(res.body.result).not.toContain('{');
     expect(res.body.result).toMatch(/no entry/i);
     expect(res.body.result).toMatch(/D&D Homebrew SRD/);
+    // Issue #1898 review: the search this responds to now also covers the campaign's
+    // own homebrew (rulesLookup always passes campaignId once pack resolves), so the
+    // wording must not claim the miss was limited to the installed pack.
+    expect(res.body.result).toMatch(/homebrew/i);
     expect(res.body.result).toMatch(/broader term|exact name|spelling/i);
+
+    await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
+  });
+
+  // Issue #1898 review: rulesLookup() is a fourth internal caller of RulesService.search
+  // alongside REST /rules/search, REST /rules/entries/:id, and MCP lookup_rule — all three
+  // of which now scope to the campaign's homebrew. This call site had campaignId and user
+  // in scope on its own method signature already, so omitting them was the same defect,
+  // just not enumerated in the issue's list: a campaign's own homebrew ruling reported as
+  // "no entry" instead of being found.
+  it('finds a campaign homebrew entry the installed pack alone does not have (#1898)', async () => {
+    const dnd = await uploadPack(dndPack);
+    const campaignId = await h.createCampaign('Homebrew Rules Lookup');
+    await h.configureSeat(campaignId, seat);
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: dnd.slug });
+
+    const homebrew = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'shadow-grapple',
+        name: 'Shadow Grapple',
+        type: 'condition',
+        summary: '',
+        body: 'A shadow-bound creature cannot be moved by anything but its captor.',
+        rightsStatus: 'private_original',
+      });
+    expect(homebrew.status).toBe(201);
+
+    // Not in the installed D&D pack at all — before the fix this reported "no entry".
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'Shadow Grapple' }, player);
+    expect(res.status).toBe(201);
+    expect(res.body.result).not.toMatch(/no entry/i);
+    expect(res.body.result).toContain('Shadow Grapple');
+    expect(res.body.result).toContain('shadow-bound creature');
+    // Issue #1898 review: the homebrew source line must credit "Campaign homebrew", never
+    // the installed D&D pack (whose name/license this private house rule has nothing to
+    // do with) — an assertion on the body alone would not have caught the mis-attribution
+    // this fix corrects. private_original (no license set) shows no license fragment.
+    expect(res.body.result).toContain('*Source: Campaign homebrew*');
+    expect(res.body.result).not.toContain('D&D Homebrew SRD');
+    expect(res.body.result).not.toContain('OGL 1.0a');
+    // The compendium link must be campaign-scoped — the web router only registers
+    // /c/:campaignId/compendium/:entryId, never a bare /compendium/:id.
+    expect(res.body.result).toMatch(new RegExp(`\\]\\(/c/${campaignId}/compendium/\\d+\\)`));
+    expect(res.body.result).not.toMatch(/]\(\/compendium\//);
+
+    await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
+  });
+
+  it('credits an open-licensed homebrew entry under its OWN license and author, not the installed pack\'s (#1898)', async () => {
+    const dnd = await uploadPack(dndPack);
+    const campaignId = await h.createCampaign('Homebrew Attribution Lookup');
+    await h.configureSeat(campaignId, seat);
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: dnd.slug });
+
+    const homebrew = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'sunfire-brand',
+        name: 'Sunfire Brand',
+        type: 'item',
+        summary: '',
+        body: 'A blade that sheds daylight in a 20-foot radius.',
+        rightsStatus: 'open_licensed',
+        license: 'CC-BY-4.0',
+        author: 'Table 7',
+        sourceUrl: 'https://example.invalid/sunfire-brand',
+      });
+    expect(homebrew.status).toBe(201);
+
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'Sunfire Brand' }, player);
+    expect(res.status).toBe(201);
+    expect(res.body.result).toContain('*Source: Campaign homebrew · Table 7 · CC-BY-4.0*');
+    expect(res.body.result).not.toContain('D&D Homebrew SRD');
+    expect(res.body.result).not.toContain('OGL 1.0a');
 
     await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
   });

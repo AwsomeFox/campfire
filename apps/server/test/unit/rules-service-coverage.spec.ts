@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { NotFoundException } from '@nestjs/common';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { RulesService } from '../../src/modules/rules/rules.service';
@@ -182,5 +183,131 @@ describe('RulesService unit coverage tests', () => {
     });
     expect(searchResult.items.length).toBeGreaterThanOrEqual(1);
     expect(searchResult.items[0].name).toBe('Fireball Spell');
+  });
+
+  it('handles campaign-scoped getEntryOrThrow and search including homebrew and archived exclusion', async () => {
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'open5e-srd',
+        name: 'Open5e SRD',
+        version: '1.0.0',
+        license: 'OGL',
+        sourceUrl: 'https://example.com',
+        installedAt: nowIso(),
+        entryCount: 1,
+      })
+      .returning();
+
+    const [globalEntry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'goblin',
+        name: 'Goblin',
+        type: 'monster',
+        summary: 'Small humanoid monster.',
+        body: 'Nimble escape.',
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      })
+      .returning();
+
+    const homebrewEntry = await rulesService.createCampaignHomebrew(
+      campaignId,
+      {
+        slug: 'shadow-goblin',
+        name: 'Shadow Goblin',
+        type: 'monster',
+        summary: 'Homebrew shadow monster.',
+        body: 'Shadow step.',
+      },
+      adminActor,
+    );
+
+    // 1. Member can get global entry with campaignId
+    const resolvedGlobal = await rulesService.getEntryOrThrow(globalEntry.id, campaignId, adminActor);
+    expect(resolvedGlobal.id).toBe(globalEntry.id);
+
+    // 2. Member can get homebrew entry with campaignId
+    const resolvedHomebrew = await rulesService.getEntryOrThrow(homebrewEntry.id, campaignId, adminActor);
+    expect(resolvedHomebrew.id).toBe(homebrewEntry.id);
+
+    // 3. Getting homebrew without campaignId throws 404
+    await expect(rulesService.getEntryOrThrow(homebrewEntry.id)).rejects.toThrow('not found');
+
+    // 4. Getting homebrew scoped to a DIFFERENT campaignId (999, not the entry's real
+    // campaignId) throws NotFoundException specifically — the SQL scope excludes the row
+    // rather than falling through to some other error, so the id's existence never leaks
+    // outside its own campaign. `access` is mocked to always grant 'dm' above, so this
+    // isolates the scope condition itself; real non-member rejection (a genuine second
+    // campaign the caller isn't in) is covered by the e2e test in homebrew.e2e-spec.ts,
+    // which uses real per-campaign membership rather than this mock.
+    await expect(rulesService.getEntryOrThrow(homebrewEntry.id, 999, adminActor)).rejects.toThrow(NotFoundException);
+
+    // 5. Member search with campaignId returns both global and homebrew
+    const scopedSearch = await rulesService.search(
+      { q: 'Goblin', campaignId },
+      10,
+      adminActor,
+    );
+    const names = scopedSearch.items.map((i) => i.name);
+    expect(names).toContain('Goblin');
+    expect(names).toContain('Shadow Goblin');
+
+    // 6. Search without campaignId returns only global
+    const globalSearch = await rulesService.search({ q: 'Goblin' });
+    const globalNames = globalSearch.items.map((i) => i.name);
+    expect(globalNames).toContain('Goblin');
+    expect(globalNames).not.toContain('Shadow Goblin');
+
+    // 7. A `pack` filter alongside campaignId must not exclude homebrew: homebrew rows
+    // live under a separate internal pack (never the requested pack's id), and the web
+    // add-combatant picker always sends both once a campaign has a rule system configured
+    // (issue #1898 review) — the pack filter must narrow only the global half of the scope.
+    const packScopedSearch = await rulesService.search(
+      { q: 'Goblin', pack: pack.slug, campaignId },
+      10,
+      adminActor,
+    );
+    const packScopedNames = packScopedSearch.items.map((i) => i.name);
+    expect(packScopedNames).toContain('Goblin');
+    expect(packScopedNames).toContain('Shadow Goblin');
+
+    // 8. Archived homebrew is excluded from scoped search
+    await rulesService.archiveCampaignHomebrew(campaignId, homebrewEntry.id, adminActor);
+    const postArchiveSearch = await rulesService.search(
+      { q: 'Goblin', campaignId },
+      10,
+      adminActor,
+    );
+    const postArchiveNames = postArchiveSearch.items.map((i) => i.name);
+    expect(postArchiveNames).toContain('Goblin');
+    expect(postArchiveNames).not.toContain('Shadow Goblin');
+
+    // 9. A `pack` slug naming a rule system with no matching INSTALLED pack must not
+    // drop the campaign's own (still-live, not archived) homebrew too (issue #1898
+    // review): campaign.ruleSystem is free-text, never validated against installed
+    // packs, and the picker always forwards it. Re-create a live homebrew entry since
+    // step 8 archived the prior one.
+    await rulesService.createCampaignHomebrew(
+      campaignId,
+      { slug: 'still-live-goblin', name: 'Still Live Goblin', type: 'monster', summary: '', body: '' },
+      adminActor,
+    );
+    const missingPackSearch = await rulesService.search(
+      { q: 'Goblin', pack: 'no-such-installed-pack-slug', campaignId },
+      10,
+      adminActor,
+    );
+    const missingPackNames = missingPackSearch.items.map((i) => i.name);
+    expect(missingPackNames).toContain('Still Live Goblin');
+    expect(missingPackNames).not.toContain('Goblin'); // the global entry belongs to a REAL pack, not the missing one
+    expect(missingPackNames).not.toContain('Shadow Goblin'); // archived — stays excluded regardless
+
+    // Regression: without campaignId, a missing pack still short-circuits to fully empty
+    // (unchanged behavior for the plain global search).
+    const missingPackGlobalSearch = await rulesService.search({ q: 'Goblin', pack: 'no-such-installed-pack-slug' });
+    expect(missingPackGlobalSearch.items).toHaveLength(0);
   });
 });

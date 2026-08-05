@@ -125,6 +125,111 @@ export class CampaignCastSessionsController {
   }
 }
 
+/**
+ * Authenticated Player Display previews are table-facing even when a DM opens
+ * them. These endpoints authorize membership, then force the CastService's
+ * server-side viewer projection rather than returning the caller's DM-shaped
+ * campaign data for the browser to redact.
+ */
+@ApiTags('cast')
+@Controller('campaigns/:campaignId/player-display')
+export class CampaignPlayerDisplayController {
+  constructor(
+    private readonly cast: CastService,
+    private readonly access: CampaignAccessService,
+  ) {}
+
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  @Get('summary')
+  @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display summary', description: 'Requires campaign membership. The response is always projected as a viewer for the table-facing display.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe campaign summary.' })
+  async summary(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<CampaignSummary> {
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplaySummary(campaignId);
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  @Get('encounters')
+  @ApiOperation({ summary: 'List server-redacted running encounters for the authenticated Player Display preview', description: 'Requires campaign membership. Only running encounters are part of the table-facing display.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe running encounter list.' })
+  async encounters(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('status') status: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ): Promise<Encounter[]> {
+    if (status !== undefined && status !== 'running') {
+      throw new BadRequestException("status must be 'running' (or omitted)");
+    }
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplayRunningEncounters(campaignId);
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  @Get('encounters/:encounterId')
+  @ApiOperation({ summary: 'Read a server-redacted authenticated Player Display encounter', description: 'Requires campaign membership. Only running, viewer-safe encounters are returned.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe running encounter with combatants.' })
+  async encounter(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('encounterId', ParseIntPipe) encounterId: number,
+    @CurrentUser() user: RequestUser,
+  ): Promise<EncounterWithCombatants> {
+    await this.access.requireMember(user, campaignId);
+    return this.cast.playerDisplayEncounter(campaignId, encounterId);
+  }
+
+  @Get('encounters/:encounterId/map')
+  @CAST_MAP_THROTTLE
+  @ApiOperation({ summary: 'Get a viewer-safe map for the authenticated Player Display preview', description: 'Requires campaign membership. Map bytes are always rendered as viewer, even when the authenticated caller is a DM.' })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe battle-map bytes.' })
+  async map(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('encounterId', ParseIntPipe) encounterId: number,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('size') size: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ): Promise<void> {
+    if (size !== undefined && size !== 'thumb') {
+      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
+    await this.access.requireMember(user, campaignId);
+    if (req.headers.range !== undefined) {
+      res
+        .status(416)
+        .set({
+          'Accept-Ranges': 'none',
+          'Cache-Control': 'private, no-store',
+          'Referrer-Policy': 'no-referrer',
+          'Content-Range': 'bytes */0',
+          Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        })
+        .end();
+      return;
+    }
+    const view = await this.cast.playerDisplayEncounterMap(campaignId, encounterId, size === 'thumb' ? 'thumb' : 'original');
+    res
+      .status(200)
+      .set({
+        'Content-Type': view.mime,
+        'Content-Length': String(view.bytes.length),
+        'Content-Disposition': contentDispositionHeader(view.filename, 'inline'),
+        ETag: view.etag,
+        'Cache-Control': 'private, no-store, max-age=0',
+        'Referrer-Policy': 'no-referrer',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Accept-Ranges': 'none',
+        Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        'X-Campfire-Map-View': view.protected ? 'fog-protected' : 'fully-revealed',
+      })
+      .end(view.bytes);
+  }
+}
+
 @ApiTags('cast')
 @Controller('cast/:token')
 export class PublicCastController {

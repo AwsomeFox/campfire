@@ -1,6 +1,8 @@
 /**
  * Run-session encounter sync indicator + guarded actions (issue #471, extended by #1446).
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import {
   CONNECTING_GRACE_MS,
@@ -23,6 +25,9 @@ import {
   settleEncounterOverride,
   type EncounterOverrideAuthority,
 } from '../../src/features/encounters/encounterSyncState';
+
+const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const DM_LIFECYCLE_HEADER = resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx');
 
 test.describe('encounter sync state (issue #471)', () => {
   test('maps SSE + read freshness into live/connecting/reconnecting/offline/stale', () => {
@@ -92,9 +97,28 @@ test.describe('encounter sync state (issue #471)', () => {
     expect(encounterResyncAdvanced(first.syncRevision, '2026-07-25T12:00:05.000Z')).toBe(true);
   });
 
-  test('wires encounter sync state and guarded actions via exported pure helpers', () => {
+  test('RunSessionPage wires encounter sync state and guarded actions', () => {
+    const runSessionSource = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const lifecycleHeaderSource = readFileSync(DM_LIFECYCLE_HEADER, 'utf8');
+    expect(runSessionSource).toMatch(/deriveEncounterSyncState/);
+    expect(runSessionSource).toMatch(/encounterActionsBlocked/);
+    expect(runSessionSource).toMatch(/data-testid=\{ENCOUNTER_SYNC_CHIP_TESTID\}/);
+    expect(lifecycleHeaderSource).toMatch(/data-testid=\{ENCOUNTER_SYNC_BANNER_TESTID\}/);
     expect(ENCOUNTER_SYNC_CHIP_TESTID).toBe('encounter-sync-chip');
     expect(ENCOUNTER_SYNC_BANNER_TESTID).toBe('encounter-sync-banner');
+    expect(runSessionSource).toMatch(/setResyncPending\(true\)/);
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-prompt"/);
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-confirm"/);
+    expect(runSessionSource).toMatch(/confirmEncounterOverride/);
+    expect(runSessionSource).toMatch(/settleEncounterOverride/);
+    expect(runSessionSource).toMatch(/overrideAuthority\.canDmWrite/);
+    expect(runSessionSource).toMatch(/encounterSyncOverrideBannerKey/);
+    expect(runSessionSource).toMatch(/revokeEncounterOverrideIfUnauthorized/);
+    expect(runSessionSource).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
+    expect(runSessionSource).toMatch(/overrideAuthority\.staleIdentity/);
+    expect(runSessionSource).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
+    expect(runSessionSource).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
+    expect(runSessionSource).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
 
     const auth: EncounterOverrideAuthority = {
       canDmWrite: true,

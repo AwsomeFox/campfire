@@ -213,16 +213,40 @@ function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
 }
 
 /**
+ * BattleMap needs the combatant shape for map placement, but the Player Display
+ * still runs in an authenticated DM browser. Reapply the player-safe HP and
+ * turn-state projection before rendering any token state.
+ */
+function redactCombatantForCast(c: Combatant): Combatant {
+  const safe = safeCombatant(c);
+  return {
+    ...c,
+    hpCurrent: safe.hpCurrent,
+    hpMax: safe.hpMax,
+    hpBand: safe.hpBand,
+    // BattleMap's shared Combatant input requires this object. Populate it
+    // solely with neutral values so no turn workspace state reaches the TV.
+    turnState: {
+      used: {},
+      movementUsedFt: 0,
+      concentration: null,
+      pendingConcentrationChecks: [],
+      delaying: false,
+      readied: null,
+    },
+  };
+}
+
+/**
  * Player-safe encounter slice for the Cast map scene. Combatants and AoE are
  * filtered; grid/fog fields are kept so the read-only BattleMap can render the
  * same projection a player sees on the run-session page.
  */
 export function safeEncounterForCast(encounter: EncounterWithCombatants): EncounterWithCombatants {
   const fog = encounter.fog;
-  const combatants =
-    fog?.enabled === true
-      ? encounter.combatants.map((c) => redactTokenInFog(c, fog))
-      : encounter.combatants;
+  const combatants = encounter.combatants
+    .map(redactCombatantForCast)
+    .map((c) => (fog?.enabled === true ? redactTokenInFog(c, fog) : c));
   const aoe: AoeTemplate[] = filterAoeTemplatesForViewer(encounter.aoe ?? [], fog);
   return { ...encounter, combatants, aoe };
 }

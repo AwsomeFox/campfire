@@ -9,12 +9,12 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ENCOUNTER_LIST_PAGE = resolve(__dirname, '../../src/features/encounters/EncounterListPage.tsx');
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const ADD_COMBATANT_PANEL = resolve(__dirname, '../../src/features/encounters/combat/AddCombatantPanel.tsx');
 const EN_LOCALE = resolve(__dirname, '../../src/i18n/locales/en/encounters.json');
 
 test.describe('cold start to roll for initiative optimization (issue #1477)', () => {
   const encounterList = readFileSync(ENCOUNTER_LIST_PAGE, 'utf8');
-  const runSession = readFileSync(RUN_SESSION_PAGE, 'utf8');
+  const addCombatantPanel = readFileSync(ADD_COMBATANT_PANEL, 'utf8');
   const locale = JSON.parse(readFileSync(EN_LOCALE, 'utf8')) as { encounters?: Record<string, string> };
 
   test('EncounterListPage provides default name and single-tap creation', () => {
@@ -32,9 +32,9 @@ test.describe('cold start to roll for initiative optimization (issue #1477)', ()
     expect(locale.encounters?.quickFight).toBe('Quick fight');
   });
 
-  test('RunSessionPage provides an Add whole party bulk button in the Party tab', () => {
-    expect(runSession).toMatch(/addAllFromParty/);
-    expect(runSession).toMatch(/data-testid="add-whole-party-button"/);
+  test('AddCombatantPanel provides an Add whole party bulk button in the Party tab', () => {
+    expect(addCombatantPanel).toMatch(/addAllFromParty/);
+    expect(addCombatantPanel).toMatch(/data-testid="add-whole-party-button"/);
     expect(locale.encounters?.addWholeParty).toBe('Add whole party ({{count}})');
   });
 });

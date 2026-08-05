@@ -15,7 +15,7 @@ import {
 } from '../../src/features/encounters/aoeHitTest';
 import { resolveGridCalibration } from '../../src/features/encounters/mapRenderedBounds';
 
-const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 
 const CTX: AoeHitTestContext = { gridSize: 10, gridScale: 5, mapRect: DEFAULT_AOE_MAP_RECT };
 
@@ -191,8 +191,11 @@ test.describe('aoePolygonVertices parity with RunSessionPage', () => {
 
 test.describe('RunSessionPage wiring (issue #626)', () => {
   test('ApplyDamageBar uses combatantsInAoe and exposes per-template AoE buttons', () => {
-    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    expect(source).toMatch(/from ['"]\.\/aoeHitTest['"]/);
+    const source = [
+      readFileSync(BATTLE_MAP, 'utf8'),
+      readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8'),
+    ].join('\n');
+    expect(source).toMatch(/from ['"]\.\.\/aoeHitTest['"]/);
     expect(source).toMatch(/combatantsInAoe/);
     expect(source).toMatch(/apply-damage-aoe-/);
     expect(source).toMatch(/onApplyToAll/);

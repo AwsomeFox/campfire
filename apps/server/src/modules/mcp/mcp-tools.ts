@@ -39,6 +39,7 @@ import {
   DifficultyBand,
   EncounterShape,
   EncounterUpdate,
+  EncounterEndTurn,
   EncounterNextTurn,
   EncounterPreviewRequest,
   EncounterCommit,
@@ -1253,11 +1254,18 @@ export class McpToolsService {
           .describe(
             'Filter to a single installed rule pack by slug (e.g. "open5e-srd", "pf2e-srd") — the campaign-scoped path (issue #717).',
           ),
+        campaignId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional campaign id to include campaign homebrew entries in search results for members.'),
       },
-      async ({ query, type, pack }) => {
+      async ({ query, type, pack, campaignId }) => {
         const page = await this.rules.search(
-          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
+          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined, campaignId: campaignId as number | undefined },
           5,
+          user,
         );
         return page.items.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
@@ -1277,8 +1285,16 @@ export class McpToolsService {
       'Get a single rule entry (spell/monster/item/condition/etc.) by id, including its full body and structured ' +
         'dataJson (e.g. a monster statblock\'s ability scores, HP, AC, traits, actions, reactions, and legendary actions). ' +
         'Ids come from lookup_rule.',
-      { entryId: Id.describe('Rule entry id — from lookup_rule') },
-      async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
+      {
+        entryId: Id.describe('Rule entry id — from lookup_rule'),
+        campaignId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional campaign id to resolve campaign homebrew entries for members.'),
+      },
+      async ({ entryId, campaignId }) => this.rules.getEntryOrThrow(entryId as number, campaignId as number | undefined, user),
     );
 
     this.tool(server, 'list_campaign_homebrew', 'List non-archived private homebrew for one campaign.', { campaignId: CampaignIdArg, includeArchived: z.boolean().optional() }, async ({ campaignId, includeArchived }) => this.rules.listCampaignHomebrew(campaignId as number, user, Boolean(includeArchived)));
@@ -4734,22 +4750,16 @@ export class McpToolsService {
       'End the CURRENT combatant\'s turn (issue #413). The DM may always end it; a player may end the turn of their ' +
         'OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server validates ' +
         'ownership + that it is actually that combatant\'s turn, serializes advancement, resolves start/end-of-turn ' +
-        'effects, and guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
+        'effects. Pass idempotencyKey (a stable id minted once for this ONE advance, reused verbatim on every retry) so ' +
+        'retrying after a timeout replays the original result instead of advancing twice. ' +
+        'It also guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
         'acting) and a 409 is returned if the turn already moved on. When the campaign requires DM confirmation a ' +
         'player end-turn is staged (409); the DM then advances it directly (a DM end-turn / next-turn is the confirmation).',
-      {
-        encounterId: Id.describe('Encounter id'),
-        expectedCurrentCombatantId: Id.nullable().optional().describe('Double-advance guard: the combatant you believe currently has the turn'),
-      },
-      async ({ encounterId, expectedCurrentCombatantId }) => {
+      { encounterId: Id.describe('Encounter id'), ...EncounterEndTurn.shape },
+      async ({ encounterId, ...body }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
-        return this.encounters.endTurn(
-          encounterId as number,
-          { expectedCurrentCombatantId: expectedCurrentCombatantId as number | null | undefined },
-          user,
-          role,
-        );
+        return this.encounters.endTurn(encounterId as number, body as EncounterEndTurn, user, role);
       },
     );
 

@@ -12,11 +12,12 @@ import {
 import { pendingFogForEncounter, reconcileFogSyncState } from '../../src/features/encounters/fogSyncState';
 
 const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const FOG_GRID = resolve(__dirname, '../../src/features/encounters/fogGridReveal.ts');
 
 test.describe('fog editor (issue #472)', () => {
   test('RunSessionPage wires erase, select, undo, and region editing', () => {
-    const source = readFileSync(RUN_SESSION, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toMatch(/modeBtn\('erase'/);
     expect(source).toMatch(/modeBtn\('select'/);
     expect(source).toMatch(/map-fog-undo/);
@@ -33,7 +34,7 @@ test.describe('fog editor (issue #472)', () => {
   });
 
   test('keyboard help mentions fog undo and erase tools', () => {
-    const source = readFileSync(RUN_SESSION, 'utf8');
+    const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toMatch(/Ctrl\+Z.*fog|fog.*undo/i);
     expect(source).toMatch(/Erase|erase/);
   });

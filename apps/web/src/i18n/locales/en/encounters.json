@@ -100,7 +100,38 @@
       "transcriptLabel": "Driver transcript",
       "openTable": "Open full table"
     },
+    "turnBeat": {
+      "takeover": "YOU'RE UP — {{name}}",
+      "ticker": "{{name}}'s turn",
+      "round": "Round {{round}}",
+      "titlePrefix": "● Your turn — "
+    },
     "map": {
+      "tokenDetails": {
+        "label": "Token detail",
+        "full": "Full",
+        "minimal": "Minimal",
+        "off": "Off",
+        "hp": "Health: {{state}}",
+        "hpStates": {
+          "healthy": "healthy",
+          "bloodied": "bloodied",
+          "critical": "critical",
+          "down": "down"
+        },
+        "currentTurn": "Current turn",
+        "dying": "Dying",
+        "dead": "Dead",
+        "concentration": "Concentrating: {{effect}}",
+        "conditions": "Conditions for {{name}}: {{conditions}}",
+        "moreConditions": "{{count}} more conditions for {{name}}",
+        "moreConditions_zero": "No more conditions for {{name}}",
+        "moreConditions_one": "{{count}} more condition for {{name}}",
+        "moreConditions_two": "{{count}} more conditions for {{name}}",
+        "moreConditions_few": "{{count}} more conditions for {{name}}",
+        "moreConditions_many": "{{count}} more conditions for {{name}}",
+        "moreConditions_other": "{{count}} more conditions for {{name}}"
+      },
       "derivatives": {
         "processing": "Preparing faster map sizes — showing the full-size board for now.",
         "stale": "Showing an optimised copy made before this map last changed.",
@@ -108,6 +139,78 @@
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
       }
+    },
+    "workspace": {
+      "yourTurn": "It's your turn.",
+      "readiedPlaceholder": "Ready action trigger…",
+      "readiedAria": "Readied action trigger",
+      "setReady": "Set ready",
+      "clearReady": "Clear ready",
+      "readiedLabel": "Readied",
+      "activeEffects": "Active effects",
+      "rd": "rd",
+      "save": "save",
+      "remove": "remove",
+      "startOfTurn": "Start of turn",
+      "beforeYouEnd": "Before you end",
+      "suggestedActions": "Suggested actions",
+      "searchActions": "Search actions…",
+      "searchActionsAria": "Search suggested actions",
+      "targets": "{{count}} target",
+      "targets_other": "{{count}} targets",
+      "aoe": "AoE",
+      "use": "Use",
+      "noMatchingActions": "No matching actions.",
+      "endMyTurn": "End my turn →",
+      "endTurn": "End turn →",
+      "dmAdvancesTurns": "The DM advances turns in this campaign.",
+      "endingTurnAsksDm": "Ending your turn will ask the DM to confirm."
+    },
+    "run": {
+      "rollInitiative": "Roll initiative",
+      "rollRemaining": "Roll remaining ({{count}})",
+      "start": "Start",
+      "nextTurn": "Next turn →",
+      "end": "End",
+      "reopen": "Reopen",
+      "endDialog": {
+        "title": "End this encounter?",
+        "body": "Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite.",
+        "confirm": "End encounter",
+        "pending": "Ending encounter…"
+      },
+      "reopenDialog": {
+        "title": "Reopen this encounter?",
+        "body": "It returns to Running where combat left off. Character sheets were synced when it ended — if a sheet has healed, rested, or otherwise changed since then, choose which HP to keep before reopening.",
+        "noConflicts": "No sheet HP conflicts — combatant snapshots still match the sheets.",
+        "confirm": "Reopen encounter",
+        "pending": "Reopening encounter…"
+      },
+      "addCombatant": "Add combatant",
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+    },
+    "actionFlow": {
+      "noTargets": "No legal targets."
+    },
+    "checks": {
+      "requestCheck": "Request a check",
+      "character": "Character",
+      "chooseCharacter": "Choose a character…",
+      "check": "Check",
+      "chooseCheck": "Choose a check…",
+      "pickCharacterFirst": "Pick a character first",
+      "dc": "DC",
+      "consequenceOptional": "Consequence (optional)",
+      "rolled": "Rolled ",
+      "consequence": "Consequence: "
+    },
+    "wizard": {
+      "step1": "1. Parameters",
+      "step2": "2. Roster",
+      "step3": "3. Save encounter",
+      "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
+      "none": "— none —",
+      "noStatblock": "No statblock detail — HP/CR may be incomplete."
     },
     "resourceTracker": {
       "title": "Resource Tracker",

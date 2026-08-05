@@ -305,7 +305,7 @@ export function TurnWorkspace({
           banner below is a purely visual cue and is intentionally not its own live region. */}
       {turn.isYourTurn && (
         <div className="rounded-md px-3 py-2 font-semibold" style={{ background: 'var(--cf-difficulty-easy-bg)', color: 'var(--cf-difficulty-easy-fg)' }}>
-          It’s your turn.
+          {t('encounters.workspace.yourTurn')}
         </div>
       )}
 
@@ -445,8 +445,8 @@ export function TurnWorkspace({
               id="turn-readied-input"
               type="text"
               className="input cf-target-44"
-              placeholder="Ready action trigger…"
-              aria-label="Readied action trigger"
+              placeholder={t('encounters.workspace.readiedPlaceholder')}
+              aria-label={t('encounters.workspace.readiedAria')}
               value={readiedDraft}
               disabled={controlsDisabled}
               maxLength={200}
@@ -470,7 +470,7 @@ export function TurnWorkspace({
                 turnState.mutate({ readied: trimmed || null });
               }}
             >
-              Set ready
+              {t('encounters.workspace.setReady')}
             </button>
             {currentTurnState?.readied && (
               <button
@@ -483,12 +483,12 @@ export function TurnWorkspace({
                   turnState.mutate({ readied: null });
                 }}
               >
-                Clear ready
+                {t('encounters.workspace.clearReady')}
               </button>
             )}
           </div>
           {currentTurnState?.readied && (
-            <p className="text-xs text-muted m-0 mt-1">Readied: {currentTurnState.readied}</p>
+            <p className="text-xs text-muted m-0 mt-1">{t('encounters.workspace.readiedLabel')}: {currentTurnState.readied}</p>
           )}
         </section>
       )}
@@ -496,15 +496,15 @@ export function TurnWorkspace({
       {/* Active effects (duration + save timing). */}
       {turn.activeEffects.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-white mb-1.5">Active effects</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.workspace.activeEffects')}</h3>
           <ul className="list-none p-0 m-0 space-y-1">
             {turn.activeEffects.map((e) => (
               <li key={e.id} className="text-sm text-muted flex items-center gap-2">
                 <span className="text-white">{e.name}</span>
-                {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} rd</span>}
-                {e.saveAbility && <span className="text-[11px]">save: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
+                {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} {t('encounters.workspace.rd')}</span>}
+                {e.saveAbility && <span className="text-[11px]">{t('encounters.workspace.save')}: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
                 <button type="button" className="btn btn-ghost text-[11px] cf-target-44" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
-                  remove
+                  {t('encounters.workspace.remove')}
                 </button>
               </li>
             ))}
@@ -517,7 +517,7 @@ export function TurnWorkspace({
         <section className="grid gap-3 sm:grid-cols-2">
           {turn.startPrompts.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-white mb-1">Start of turn</h3>
+              <h3 className="text-sm font-semibold text-white mb-1">{t('encounters.workspace.startOfTurn')}</h3>
               <ul className="list-none p-0 m-0 space-y-1">
                 {turn.startPrompts.map((p) => (
                   <li key={p.id} className="text-sm text-muted">• {p.message}</li>
@@ -527,7 +527,7 @@ export function TurnWorkspace({
           )}
           {turn.endPrompts.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-white mb-1">Before you end</h3>
+              <h3 className="text-sm font-semibold text-white mb-1">{t('encounters.workspace.beforeYouEnd')}</h3>
               <ul className="list-none p-0 m-0 space-y-1">
                 {turn.endPrompts.map((p) => (
                   <li key={p.id} className="text-sm text-muted">• {p.message}</li>
@@ -541,13 +541,13 @@ export function TurnWorkspace({
       {/* Suggested actions, searchable inline. */}
       {turn.suggestedActions.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-white mb-1.5">Suggested actions</h3>
+          <h3 className="text-sm font-semibold text-white mb-1.5">{t('encounters.workspace.suggestedActions')}</h3>
           <input
             id="turn-suggested-actions-search"
             type="search"
             className="input mb-2 w-full"
-            placeholder="Search actions…"
-            aria-label="Search suggested actions"
+            placeholder={t('encounters.workspace.searchActions')}
+            aria-label={t('encounters.workspace.searchActionsAria')}
             value={actionFilter}
             onChange={(e) => setActionFilter(e.target.value)}
           />
@@ -587,7 +587,7 @@ export function TurnWorkspace({
               if (size) rangeText += rangeText ? ` (${size})` : size;
               let targetText = '';
               if (targetCount !== undefined) {
-                targetText = targetCount > 0 ? `${targetCount} target${targetCount > 1 ? 's' : ''}` : 'AoE';
+                targetText = targetCount > 0 ? t('encounters.workspace.targets', { count: targetCount }) : t('encounters.workspace.aoe');
               }
               
               return (
@@ -626,13 +626,13 @@ export function TurnWorkspace({
                       data-testid="suggested-action-use"
                       onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
                     >
-                      Use
+                      {t('encounters.workspace.use')}
                     </button>
                   )}
                 </div>
               );
             })}
-            {actionItems[activeTab].length === 0 && <p className="text-sm text-muted py-2 m-0">No matching actions.</p>}
+            {actionItems[activeTab].length === 0 && <p className="text-sm text-muted py-2 m-0">{t('encounters.workspace.noMatchingActions')}</p>}
           </div>
         </section>
       )}
@@ -645,13 +645,13 @@ export function TurnWorkspace({
             onClick={() => onEndTurn?.(turn.current!.combatantId)}
             data-testid="workspace-end-turn"
           >
-            {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
+            {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">The DM advances turns in this campaign.</span>
+          <span className="text-sm text-muted">{t('encounters.workspace.dmAdvancesTurns')}</span>
         ) : null}
         {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">Ending your turn will ask the DM to confirm.</span>
+          <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
         )}
       </div>
     </Card>
