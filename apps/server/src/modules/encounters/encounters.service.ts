@@ -3674,7 +3674,18 @@ export class EncountersService {
       hpMax ??= source.hpMax ?? undefined;
       if (input.initMod === undefined) {
         initMod = source.initMod;
-        initBreakdown = manualInitiativeBreakdown(adapter, initMod);
+      }
+      const sourceInitBreakdown = parseInitiativeBreakdown(source.initiativeBreakdown);
+      if (sourceInitBreakdown) {
+        const terms = initiativeTermsForModifier(sourceInitBreakdown, initMod);
+        initBreakdown = CombatantInitiativeBreakdown.parse({
+          die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+          roll: null,
+          modifier: initMod,
+          total: null,
+          terms,
+          formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+        });
       }
       if (input.initiativeGroup === undefined) initiativeGroup = source.initiativeGroup;
       if (input.tokenSize === undefined) tokenSize = source.tokenSize as TokenSize;

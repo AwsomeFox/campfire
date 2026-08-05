@@ -3660,6 +3660,42 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     });
   });
 
+  it('preserves a duplicate source initiative breakdown', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `duplicate-init-${Date.now()}`, name: 'Duplicate initiative', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'duplicate-initiative-source',
+        name: 'Initiative Source',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 12 }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(source.status).toBe(201);
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body.initiativeBreakdown).toEqual(source.body.initiativeBreakdown);
+  });
+
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
