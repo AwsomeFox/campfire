@@ -15,5 +15,7 @@ data/
 *.tsbuildinfo
 # Nested worktrees used by VS Code Copilot backlog workers.
 /.copilot-worktrees/
+# Nested worktrees used by Claude Code backlog workers.
+/.claude/worktrees/
 # Internal agent-tooling state, not project content (issue #1662 review: Devin).
 .cursor/pr-babysit-state.json
