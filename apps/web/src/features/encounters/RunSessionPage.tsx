@@ -2,6 +2,7 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
@@ -13,7 +14,7 @@ import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
@@ -577,6 +578,13 @@ export default function RunSessionPage() {
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -670,6 +678,9 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // React state disables the source row after render; the ref closes the same-tick
+  // double-click window before that render can happen.
+  const pendingDuplicateCombatantIds = useRef(new Set<number>());
   const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
     setPendingCombatantIds((prev) => {
       const next = new Set(prev);
@@ -1693,6 +1704,44 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
     },
   });
+
+  const duplicateCombatant = useMutation({
+    mutationFn: ({ body }: { combatantId: number; body: Record<string, unknown> }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants`, body),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      pendingDuplicateCombatantIds.current.delete(combatantId);
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  const requestDuplicateCombatant = useCallback(
+    (combatant: Combatant, rosterNames: readonly string[]) => {
+      if (riskyBlocked || reconcileBlocks || pendingDuplicateCombatantIds.current.has(combatant.id)) return;
+      pendingDuplicateCombatantIds.current.add(combatant.id);
+      markCombatantPending(combatant.id, true);
+      duplicateCombatant.mutate({
+        combatantId: combatant.id,
+        body: {
+          kind: combatant.kind,
+          duplicateOfCombatantId: combatant.id,
+          name: duplicateCombatantName(combatant.name, rosterNames),
+          ruleEntryId: combatant.ruleEntryId ?? undefined,
+          statblock: combatant.statblock ?? undefined,
+          hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
+          initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
+          tokenSize: combatant.tokenSize,
+        },
+      });
+    },
+    [duplicateCombatant, markCombatantPending, reconcileBlocks, riskyBlocked],
+  );
 
   const combatantTurnState = useMutation({
     mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
@@ -3426,11 +3475,12 @@ export default function RunSessionPage() {
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3761,6 +3811,9 @@ export default function RunSessionPage() {
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
                   canRemove={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={

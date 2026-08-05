@@ -218,6 +218,8 @@
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete."
     },
+    "duplicate": "تكرار",
+    "duplicateCombatant": "تكرار {{name}}",
     "resourceTracker": {
       "title": "متتبع الموارد",
       "features": "القدرات",
