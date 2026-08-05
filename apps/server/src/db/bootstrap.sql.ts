@@ -1765,6 +1765,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   npc_id INTEGER REFERENCES npcs(id) ON DELETE SET NULL,
   npc_disposition_snapshot TEXT,
+  npc_identity_source_id INTEGER,
   name TEXT NOT NULL,
   initiative INTEGER,
   init_mod INTEGER NOT NULL DEFAULT 0,

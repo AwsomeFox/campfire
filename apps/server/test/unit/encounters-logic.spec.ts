@@ -1093,6 +1093,17 @@ describe('encounters — redactEncounterEventsForViewer (issue #869)', () => {
     expect(redacted[0].detail).toBe('took 8 damage');
   });
 
+  it('masks an unlinked duplicate by its internal NPC identity source', () => {
+    const duplicate = { id: 12, name: 'The Traitor 2', npcId: null, npcIdentitySourceId: 99 };
+    const [redacted] = redactEncounterEventsForViewer(
+      [ev({ id: 1, type: 'damage', target: duplicate.name, targetId: duplicate.id, detail: `${duplicate.name} took 8 damage` })],
+      [duplicate],
+      new Set([99]),
+    );
+    expect(JSON.stringify(redacted)).not.toMatch(/Traitor/);
+    expect(redacted.target).toBe(UNKNOWN_COMBATANT_LABEL);
+  });
+
   it('scrubs name-bearing detail prose (legacy turn lines) when the NPC is hidden', () => {
     const events = [
       ev({

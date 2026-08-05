@@ -1357,7 +1357,7 @@ export class EncountersService {
     }
 
     const combatantRows = await this.listCombatantRows(encounterId);
-    const linkedNpcIds = combatantRows.map((c) => c.npcId).filter((n): n is number => n !== null);
+    const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
     const hiddenNpcIds = new Set<number>();
     if (linkedNpcIds.length > 0) {
       const hiddenRows = await this.db
@@ -1368,7 +1368,7 @@ export class EncountersService {
     }
     return redactEncounterEventsForViewer(
       events,
-      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId })),
+      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId, npcIdentitySourceId: c.npcIdentitySourceId })),
       hiddenNpcIds,
     );
   }
@@ -1695,7 +1695,7 @@ export class EncountersService {
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
       // here we sever the identity link (null npcId) and mask the name — the token still shows
       // in initiative (its position matters to play) but not who it is.
-      const linkedNpcIds = list.map((c) => c.npcId).filter((n): n is number => n !== null);
+      const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
       if (linkedNpcIds.length > 0) {
         const hiddenRows = await this.db
           .select({ id: npcs.id })
@@ -1703,9 +1703,12 @@ export class EncountersService {
           .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
         const hiddenIds = new Set(hiddenRows.map((r) => r.id));
         if (hiddenIds.size > 0) {
-          list = list.map((c) =>
-            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL } : c,
-          );
+          list = list.map((c) => {
+            const source = combatantRows.find((row) => row.id === c.id);
+            return source && [source.npcId, source.npcIdentitySourceId].some((id) => id !== null && hiddenIds.has(id))
+              ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL }
+              : c;
+          });
         }
       }
       // Fog of war (issue #40 / #463): withhold the position of any token in an
@@ -2362,8 +2365,8 @@ export class EncountersService {
     // Enemy CRs: monsters plus NPCs whose captured/current campaign disposition is
     // hostile. A non-DM must not learn a hidden NPC's allegiance or statblock through
     // this aggregate, so hidden (and unlinked) NPC combatants fail closed for that view.
-    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
-    const npcIds = npcCombatants.map((c) => c.npcId as number);
+    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && (c.npcId !== null || c.npcIdentitySourceId !== null));
+    const npcIds = [...new Set(npcCombatants.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((id): id is number => id !== null)))];
     const hostileNpcIds = new Set<number>();
     const hiddenNpcIds = new Set<number>();
     if (npcIds.length > 0) {
@@ -2379,12 +2382,14 @@ export class EncountersService {
     const dmView = viewerRole === undefined || viewerRole === 'dm';
     const enemyCombatants = combatantRows.filter((c) => {
       if (c.kind === 'monster') return true;
-      if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
+      const npcIdentityId = c.npcIdentitySourceId ?? c.npcId;
+      const hasHiddenNpcIdentity = [c.npcId, c.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id));
+      if (c.kind !== 'npc' || (!dmView && (npcIdentityId === null || hasHiddenNpcIdentity))) return false;
       // Preparation is still authored world state: show the NPC's live
       // disposition until start() captures historical allegiance for play.
       const disposition = encounterRow.status === 'preparing'
-        ? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '')
-        : c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+        ? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '')
+        : c.npcDispositionSnapshot ?? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '');
       return disposition.trim().toLowerCase() === 'hostile';
     });
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
@@ -3621,7 +3626,7 @@ export class EncountersService {
     let initMod = input.initMod ?? 0;
     let initBreakdown = manualInitiativeBreakdown(adapter, initMod);
     const initModel = initiativeModelForAdapter(adapter);
-    const initiativeGroup =
+    let initiativeGroup =
       input.initiativeGroup !== undefined
         ? input.initiativeGroup
         : initModel.mode === 'group'
@@ -3648,6 +3653,7 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let npcIdentitySourceId: number | null = null;
     let npcDispositionSnapshot: string | null = null;
     let spCurrent = 0;
     let spMax = 0;
@@ -3659,6 +3665,60 @@ export class EncountersService {
     // as eac/kac/the HP-model fields below — stays null for monster/npc combatants.
     let speed: number | null = null;
     let statblockJson: string | null = null;
+    let tokenSize = input.tokenSize ?? 'medium';
+    let duplicateRuleEntryId: number | undefined;
+    let duplicateStatblockJson: string | null = null;
+    let replacesSourceRuleEntry = false;
+
+    if (input.duplicateOfCombatantId !== undefined) {
+      const [source] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, input.duplicateOfCombatantId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!source || (source.kind !== 'monster' && source.kind !== 'npc')) {
+        throw new BadRequestException('Duplicate source must be a monster or NPC in this encounter');
+      }
+      if (input.kind !== source.kind) {
+        throw new BadRequestException('Duplicate kind must match its source combatant');
+      }
+      if (input.npcId !== undefined || input.characterId !== undefined) {
+        throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
+      }
+      name ??= source.name;
+      replacesSourceRuleEntry = input.ruleEntryId !== undefined && input.ruleEntryId !== source.ruleEntryId;
+      if (!replacesSourceRuleEntry) hpMax ??= source.hpMax ?? undefined;
+      if (input.initMod === undefined) {
+        initMod = source.initMod;
+      }
+      const sourceInitBreakdown = parseInitiativeBreakdown(source.initiativeBreakdown);
+      if (sourceInitBreakdown) {
+        const terms = initiativeTermsForModifier(sourceInitBreakdown, initMod);
+        initBreakdown = CombatantInitiativeBreakdown.parse({
+          die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+          roll: null,
+          modifier: initMod,
+          total: null,
+          terms,
+          formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+        });
+      }
+      if (input.initiativeGroup === undefined) initiativeGroup = source.initiativeGroup;
+      if (input.tokenSize === undefined) tokenSize = source.tokenSize as TokenSize;
+      duplicateRuleEntryId = source.ruleEntryId ?? undefined;
+      duplicateStatblockJson = source.statblockJson;
+      npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
+      npcDispositionSnapshot = source.npcDispositionSnapshot;
+      // A duplicate starts fresh, but it must retain the source's configured defenses
+      // and pool capacities. In particular, manual Starfinder combatants do not have a
+      // rule entry from which EAC/KAC, stamina, or resolve can be re-derived.
+      eac = source.eac;
+      kac = source.kac;
+      spMax = source.spMax;
+      spCurrent = source.spMax;
+      rpMax = source.rpMax;
+      rpCurrent = source.rpMax;
+    }
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
     // it as the default name. HP/initiative still come from a linked statblock
@@ -3759,13 +3819,14 @@ export class EncountersService {
         initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
         initMod = initBreakdown.modifier;
       }
-    } else if (input.ruleEntryId !== undefined) {
+    } else if (input.ruleEntryId !== undefined || duplicateRuleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
       // real rule_entries row — 400 rather than silently dropping it and inserting a
       // combatant with a dangling reference.
-      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, input.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
+      const requestedRuleEntryId = input.ruleEntryId ?? duplicateRuleEntryId!;
+      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, requestedRuleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       if (!entry) {
-        throw new BadRequestException(`Rule entry ${input.ruleEntryId} not found`);
+        throw new BadRequestException(`Rule entry ${requestedRuleEntryId} not found`);
       }
       ruleEntryId = entry.id;
       name = name ?? entry.name;
@@ -3778,21 +3839,21 @@ export class EncountersService {
         hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
-      if (mapped.stamina != null && typeof mapped.stamina === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.stamina != null && typeof mapped.stamina === 'number') {
         spMax = mapped.stamina;
         spCurrent = mapped.stamina;
       }
-      if (mapped.resolve != null && typeof mapped.resolve === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.resolve != null && typeof mapped.resolve === 'number') {
         rpMax = mapped.resolve;
         rpCurrent = mapped.resolve;
       }
-      if (mapped.eac != null && typeof mapped.eac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.eac != null && typeof mapped.eac === 'number') {
         eac = mapped.eac;
       }
-      if (mapped.kac != null && typeof mapped.kac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
-      if (input.initMod === undefined) {
+      if (input.initMod === undefined && (input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry)) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
@@ -3834,6 +3895,8 @@ export class EncountersService {
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
+    } else if (duplicateStatblockJson !== null && input.ruleEntryId === undefined) {
+      statblockJson = duplicateStatblockJson;
     } else if (
       input.kind === 'monster' &&
       characterId === null &&
@@ -3914,6 +3977,8 @@ export class EncountersService {
             conditions: characterId !== null ? characterConditions : '[]',
             conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
+            npcIdentitySourceId,
+            tokenSize,
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
@@ -5665,14 +5730,14 @@ export class EncountersService {
       // below borrow the combatant's raw name, so a hidden NPC's identity must be
       // masked before it reaches that label — same rule the quick-roll dice log
       // already applies (issue #1850).
-      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
       const hiddenNpcIds = new Set<number>();
       if (npcIdsInRoll.length > 0) {
         const hiddenRows = tx.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIdsInRoll), eq(npcs.hidden, true))).all();
         for (const r of hiddenRows) hiddenNpcIds.add(r.id);
       }
-      const diceLogName = (row: { kind: string; npcId: number | null; name: string }): string =>
-        row.kind === 'npc' && row.npcId !== null && hiddenNpcIds.has(row.npcId) ? UNKNOWN_COMBATANT_LABEL : row.name;
+      const diceLogName = (row: { kind: string; npcId: number | null; npcIdentitySourceId: number | null; name: string }): string =>
+        row.kind === 'npc' && [row.npcId, row.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id)) ? UNKNOWN_COMBATANT_LABEL : row.name;
 
       // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
       // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
@@ -5720,6 +5785,7 @@ export class EncountersService {
         rolled = unrolled.map((row) => {
           const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
           const natural = initiative - row.initMod;
+          const diceLogNpcId = row.npcIdentitySourceId ?? row.npcId;
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
           // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever
           // the stored breakdown's terms summed to when it was last written — a DM's PATCH
@@ -5740,7 +5806,7 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
-            ...(row.kind === 'npc' && row.npcId !== null ? { npcId: row.npcId } : {}),
+            ...(row.kind === 'npc' && diceLogNpcId !== null ? { npcId: diceLogNpcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
@@ -6052,8 +6118,9 @@ export class EncountersService {
         // to a hide that happens after the roll was already recorded.
         if (!fresh.hidden) {
           let hiddenNpcName = false;
-          if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
-            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, freshCombatant.npcId)).limit(1).all();
+          const npcIdentityId = freshCombatant.npcIdentitySourceId ?? freshCombatant.npcId;
+          if (freshCombatant.kind === 'npc' && npcIdentityId !== null) {
+            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, npcIdentityId)).limit(1).all();
             hiddenNpcName = npc?.hidden === true;
           }
           const label = `${hiddenNpcName ? UNKNOWN_COMBATANT_LABEL : freshCombatant.name} · Initiative`;
@@ -6068,7 +6135,7 @@ export class EncountersService {
               label,
               source: 'rolled',
               encounterId,
-              ...(freshCombatant.kind === 'npc' && freshCombatant.npcId !== null ? { npcId: freshCombatant.npcId } : {}),
+              ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
             },
             user,
           );
@@ -6165,7 +6232,7 @@ export class EncountersService {
     // Fresh-prep encounters (including campaign clones) deliberately have no
     // historical allegiance. Capture the linked NPC's current disposition exactly
     // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
-    const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+    const npcIds = [...new Set(rows.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
       const npcDispositionById = new Map(
@@ -6181,7 +6248,7 @@ export class EncountersService {
       for (const [npcId, disposition] of npcDispositionById) {
         tx.update(combatants)
           .set({ npcDispositionSnapshot: disposition })
-          .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
+          .where(and(eq(combatants.encounterId, encounterId), or(eq(combatants.npcId, npcId), eq(combatants.npcIdentitySourceId, npcId))))
           .run();
       }
 
@@ -8307,20 +8374,21 @@ export class EncountersService {
 
     // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
     let isActorHidden = false;
-    if (encounter.hidden) {
-      isActorHidden = true;
-    } else if (combatantRow) {
-      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+    let npcIdentityId: number | null = null;
+    if (combatantRow) {
+      npcIdentityId = combatantRow.npcIdentitySourceId ?? combatantRow.npcId;
+      if (combatantRow.kind === 'npc' && npcIdentityId !== null) {
         const [npc] = await this.db
           .select({ hidden: npcs.hidden })
           .from(npcs)
-          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .where(and(eq(npcs.id, npcIdentityId), eq(npcs.campaignId, encounter.campaignId)))
           .limit(1);
         if (npc?.hidden) {
           isActorHidden = true;
         }
       }
     }
+    if (encounter.hidden) isActorHidden = true;
 
     const mode = body.mode || 'flat';
     let formula = '';
@@ -8384,6 +8452,10 @@ export class EncountersService {
         label: diceLabel,
         actor: diceActor,
         natural20: isNat20 ? 1 : 0,
+        encounterId,
+        ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
+          ? { npcId: npcIdentityId }
+          : {}),
       },
       user,
     );
