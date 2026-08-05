@@ -237,7 +237,7 @@ export function ActionUsePanel({
                     {c.name}
                   </button>
                 ))}
-                {candidates.length === 0 && <span className="text-muted" style={{ fontSize: 12 }}>No legal targets.</span>}
+                {candidates.length === 0 && <span className="text-muted" style={{ fontSize: 12 }}>{t('encounters.actionFlow.noTargets')}</span>}
               </div>
             </div>
           )}

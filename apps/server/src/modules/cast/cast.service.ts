@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, gt, sql } from 'drizzle-orm';
 import type {
+  CastSafetyState,
   CastSession,
   CastSessionCreate,
   CastSessionCreated,
@@ -30,6 +31,7 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { EncounterMapService, type EncounterMapView } from '../encounters/encounter-map.service';
+import { TableSafetyService } from '../safety/table-safety.service';
 
 const CAST_VIEWER_ROLE: Role = 'viewer';
 // A cast link is an anonymous player-safe projection, never a party-sheet credential.
@@ -80,6 +82,7 @@ export class CastService {
     private readonly campaignsService: CampaignsService,
     private readonly encountersService: EncountersService,
     private readonly encounterMaps: EncounterMapService,
+    private readonly tableSafety: TableSafetyService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CastSession[]> {
@@ -233,6 +236,24 @@ export class CastService {
   async runningEncounters(token: string): Promise<Encounter[]> {
     const cast = this.resolveActive(token);
     return this.encountersService.listForCampaign(cast.campaignId, 'running', CAST_VIEWER_ROLE);
+  }
+
+  /**
+   * Read-only X-Card state for the cast display (issue #1908).
+   *
+   * The shared TV has no member identity, so it cannot call the member-facing
+   * `GET /campaigns/:id/safety` (`TableSafetyController.get`, which requires membership).
+   * This projects `TableSafetyService.getHold()` down to the one field every gate
+   * reads — no actor, name, note, or timestamp ever reaches an anonymous capability.
+   *
+   * Uses `resolveActive`, the same uniform-404 + access-bookkeeping path every other
+   * cast route uses. That does mean a 5s poll bumps `access_count` on every tick (the
+   * same double-count caution as the #1438 review on the encounters list) — acceptable
+   * here because the safety poll is the only signal a cast client has for this state.
+   */
+  safety(token: string): CastSafetyState {
+    const cast = this.resolveActive(token);
+    return { active: this.tableSafety.getHold(cast.campaignId).active };
   }
 
   /**
