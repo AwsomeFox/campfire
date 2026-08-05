@@ -3620,6 +3620,32 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       .send({ kind: 'monster', name: 'Armored Drone 2', hpMax: 20, initMod: 2, duplicateOfCombatantId: source.body.id });
     expect(duplicate.status).toBe(201);
     expect(duplicate.body).toMatchObject({ eac: 17, kac: 19, spCurrent: 8, spMax: 8, rpCurrent: 4, rpMax: 4 });
+
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `replacement-starfinder-${Date.now()}`, name: 'Replacement Starfinder', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [replacementEntry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'replacement-drone',
+        name: 'Replacement Drone',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 13, stamina: 9, resolve: 5, eac: 21, kac: 23, abilityScores: { DEX: 18 } }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const replacement = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: replacementEntry.id });
+    expect(replacement.status).toBe(201);
+    expect(replacement.body).toMatchObject({ initMod: 4, eac: 21, kac: 23, spCurrent: 9, spMax: 9, rpCurrent: 5, rpMax: 5 });
   });
 
   it('derives manual combatant defaults from the duplicate source for REST and MCP callers', async () => {

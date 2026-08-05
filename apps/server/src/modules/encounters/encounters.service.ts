@@ -3822,21 +3822,21 @@ export class EncountersService {
         hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
-      if (input.duplicateOfCombatantId === undefined && mapped.stamina != null && typeof mapped.stamina === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.stamina != null && typeof mapped.stamina === 'number') {
         spMax = mapped.stamina;
         spCurrent = mapped.stamina;
       }
-      if (input.duplicateOfCombatantId === undefined && mapped.resolve != null && typeof mapped.resolve === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.resolve != null && typeof mapped.resolve === 'number') {
         rpMax = mapped.resolve;
         rpCurrent = mapped.resolve;
       }
-      if (input.duplicateOfCombatantId === undefined && mapped.eac != null && typeof mapped.eac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.eac != null && typeof mapped.eac === 'number') {
         eac = mapped.eac;
       }
-      if (input.duplicateOfCombatantId === undefined && mapped.kac != null && typeof mapped.kac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined) && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
-      if (input.initMod === undefined && input.duplicateOfCombatantId === undefined) {
+      if (input.initMod === undefined && (input.duplicateOfCombatantId === undefined || input.ruleEntryId !== undefined)) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
