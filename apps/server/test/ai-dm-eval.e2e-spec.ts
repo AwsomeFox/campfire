@@ -1,6 +1,7 @@
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { mockTokenCount } from '../src/modules/ai-dm/providers/mock-provider';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
+import { renderComprehensionSection } from '../src/modules/ai-driver/driver-comprehension';
 import request from 'supertest';
 
 /**
@@ -66,8 +67,13 @@ describe('ai-dm eval harness — scripted narration + metering (e2e)', () => {
     const res = await h.takeTurn(campaignId, { prompt, kind: 'narrate' });
     expect(res.status).toBe(201);
 
-    // Bridge meters totalTokens = prompt-side (system + user) + completion, derived deterministically.
-    const promptTokens = mockTokenCount(instructions + prompt);
+    // Bridge meters totalTokens = prompt-side (system + user) + completion, derived
+    // deterministically. The system side is the seat's freeform instructions PLUS #874's
+    // unconditional `## Comprehension` baseline (see `withComprehensionProfile` in
+    // ai-dm.service.ts) — not the bare instructions string, now that that section always
+    // applies to this same `takeTurn` entry point.
+    const systemPrompt = `${instructions}\n\n${renderComprehensionSection(undefined)}`;
+    const promptTokens = mockTokenCount(systemPrompt + prompt);
     const completionTokens = mockTokenCount(narration);
     const expectedTotal = promptTokens + completionTokens;
     expect(res.body.tokensUsed).toBe(expectedTotal);
@@ -115,9 +121,12 @@ describe('ai-dm eval harness — prompt assembly + tool-call round-trip (e2e)', 
     h.script({ text: 'ok' });
     await h.takeTurn(campaignId, { prompt: 'The bard sings.', kind: 'narrate' });
 
-    // The mock recorded exactly what the AiDm seam sent the model.
+    // The mock recorded exactly what the AiDm seam sent the model. `system` is no longer JUST
+    // `seat.instructions` — #874's `## Comprehension` baseline is always appended underneath it
+    // on this same entry point (see the #1049 table-style precedent this follows).
     const req = h.mock.received.at(-1)!;
-    expect(req.system).toBe('You are the grim DM.'); // seat.instructions → system prompt
+    expect(req.system).toBe(`You are the grim DM.\n\n${renderComprehensionSection(undefined)}`);
+    expect(req.system).toContain('You are the grim DM.'); // seat.instructions → system prompt, still first
     expect(req.messages).toEqual([{ role: 'user', content: 'The bard sings.' }]);
     // The tool registry offered to the model is the normalized MCP registry.
     expect(req.tools?.map((t) => t.name)).toEqual(['roll_dice', 'update_hp']);

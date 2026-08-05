@@ -89,8 +89,13 @@ describe('table style reaches the narration surfaces it should (#1049)', () => {
     expect(system).toContain('Persona line.');
   });
 
-  it('an unconfigured seat sends a byte-identical prompt to the pre-#1049 one', async () => {
-    // The feature costs zero tokens until a DM opts in; a default seat must render NOTHING.
+  it('an unconfigured seat renders NO table style, though #874 adds its own unconditional baseline', async () => {
+    // The #1049 feature itself still costs zero tokens until a DM opts in — that half of this
+    // assertion is unchanged. What changed is #874: `## Comprehension`'s baseline (chunking, the
+    // "What changed"/"What can you do" ending, Simplify/Recap/Explain support) is the issue's
+    // stated DEFAULT and is therefore appended even on a seat that never touched EITHER feature,
+    // so this prompt is no longer byte-identical to the one #1049 shipped. See
+    // ai-dm-comprehension-profile.e2e-spec.ts for that section's own dedicated coverage.
     const plain = await h.createCampaign('Unstyled');
     await h.configureSeat(plain, { tokenBudget: 100_000 });
     await request(h.server).put(`/api/v1/campaigns/${plain}/ai-dm`).set(dm).send({ enabled: true, instructions: 'Just persona.' });
@@ -99,7 +104,8 @@ describe('table style reaches the narration surfaces it should (#1049)', () => {
     expect(res.status).toBe(201);
     const system = h.mock.received[0].system ?? '';
     expect(system).not.toContain(TABLE_STYLE_HEADING);
-    expect(system).toBe('Just persona.');
+    expect(system).toContain('Just persona.');
+    expect(system).toContain('## Comprehension');
   });
 
   /**
@@ -142,5 +148,8 @@ describe('table style reaches the narration surfaces it should (#1049)', () => {
     expect(system).toContain('Persona line.');
     // ...and without the table's narration voice, which steers live play rather than a record.
     expect(system).not.toContain(TABLE_STYLE_HEADING);
+    // #874 — same exclusion, for the same reason: the scribe's own prompt assembly never calls
+    // `withComprehensionProfile`, so its baseline never reaches a filed session record either.
+    expect(system).not.toContain('## Comprehension');
   });
 });
