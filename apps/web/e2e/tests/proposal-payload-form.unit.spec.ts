@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { QuestCreate, QuestUpdate, CharacterCreate, EncounterGenerate } from '@campfire/schema';
+import { QuestCreate, QuestUpdate, CharacterCreate, EncounterGenerate, NpcUpdate } from '@campfire/schema';
 import {
   buildProposalDraftPayload,
   computeGuidedProposalPreview,
@@ -474,5 +474,44 @@ test.describe('proposalPayloadForm: optional booleans are tri-state (issue #769 
     // the key is a real, visible difference — the entity goes from DM-only-by-default to
     // explicitly public.
     expect(diffProposalChangedKeys({ title: 'Q' }, { title: 'Q', hidden: false })).toEqual(['hidden']);
+  });
+});
+
+test.describe('proposalPayloadForm: empty string vs null (issue #769 review)', () => {
+  const npcFields = describeProposalFields(NpcUpdate);
+  const npcJsonKeys = jsonFieldKeys(NpcUpdate);
+
+  test('a nullable string already stored as "" is NOT rewritten to null by opening the editor', () => {
+    // `initProposalFieldText` seeds both `null` and `''` as the same empty control, and the
+    // nullable branch used to win — so `portraitUrl: ""` came back as `null` merely because a
+    // reviewer opened the editor and approved. The two differ in the column and on every later
+    // read, and the editor this replaced round-tripped `""` verbatim.
+    const original = { name: 'Guard', portraitUrl: '' };
+    const text = initProposalFieldText(npcFields, npcJsonKeys, original);
+    const bool = initProposalFieldBool(npcFields, original);
+    const { data } = buildProposalDraftPayload(npcFields, npcJsonKeys, text, bool, original);
+    expect(data.portraitUrl).toBe('');
+    // ...and nothing is reported as changed, because nothing changed.
+    expect(diffProposalChangedKeys(original, data)).toEqual([]);
+  });
+
+  test('a nullable string stored as null still round-trips as null', () => {
+    const original = { name: 'Guard', portraitUrl: null };
+    const text = initProposalFieldText(npcFields, npcJsonKeys, original);
+    const bool = initProposalFieldBool(npcFields, original);
+    const { data } = buildProposalDraftPayload(npcFields, npcJsonKeys, text, bool, original);
+    expect(data.portraitUrl).toBeNull();
+    expect(diffProposalChangedKeys(original, data)).toEqual([]);
+  });
+
+  test('clearing a nullable string that HELD a value still sends null — the real clear', () => {
+    // The fix must not cost the deliberate clear: this is the case the nullable branch exists
+    // for, and it still reaches it because the seeded value was not an empty string.
+    const original = { name: 'Guard', portraitUrl: 'https://example.test/p.png' };
+    const text = initProposalFieldText(npcFields, npcJsonKeys, original);
+    const bool = initProposalFieldBool(npcFields, original);
+    const { data } = buildProposalDraftPayload(npcFields, npcJsonKeys, { ...text, portraitUrl: '' }, bool, original);
+    expect(data.portraitUrl).toBeNull();
+    expect(diffProposalChangedKeys(original, data)).toEqual(['portraitUrl']);
   });
 });

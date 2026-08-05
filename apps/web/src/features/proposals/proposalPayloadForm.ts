@@ -292,6 +292,8 @@ function applyScalarField(
   data: Record<string, unknown>,
   fieldErrors: Record<string, string>,
   wasPresent: boolean,
+  /** The value the working payload carried for this key — `null` and `''` are DIFFERENT. */
+  originalValue: unknown,
 ): void {
   if (raw === '') {
     // Same "omit != false" invariant the boolean branch below documents, and it applies
@@ -320,6 +322,13 @@ function applyScalarField(
     // of any enum — so those keep omitting, and the diff below no longer reports an omitted
     // key as a change, so the preview stops promising a clear that cannot be expressed.
     if (f.optional && !wasPresent) delete data[f.key];
+    // An empty string that was ALREADY an empty string stays one (review). Both `null` and
+    // `''` seed the same empty control, and the nullable branch used to fire first — so a
+    // field like `portraitUrl` (`z.string().max(500).nullable().default(null)`) stored as
+    // `''` was submitted as an explicit `null` merely because a reviewer opened the editor
+    // and approved. The two are distinct in the column and on every later read, and the
+    // editor this replaced round-tripped `""` verbatim, so that was a silent regression.
+    else if (originalValue === '') data[f.key] = '';
     else if (f.nullable) data[f.key] = null;
     else if (f.optional && (f.kind === 'text' || f.kind === 'textarea')) data[f.key] = '';
     else if (f.optional) delete data[f.key];
@@ -375,7 +384,7 @@ export function buildProposalDraftPayload(
       }
       continue;
     }
-    applyScalarField(f, text[f.key] ?? '', data, fieldErrors, f.key in passthroughBase);
+    applyScalarField(f, text[f.key] ?? '', data, fieldErrors, f.key in passthroughBase, passthroughBase[f.key]);
   }
 
   for (const key of jsonKeys) {
