@@ -860,13 +860,16 @@ function MyProposalCard({
       ) : (
         <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
       )}
-      {editError && <p role="alert" className="text-[11px] text-rose-400 m-0">{editError}</p>}
+      {editing && editError && <p role="alert" className="text-[11px] text-rose-400 m-0">{editError}</p>}
       <div className="flex items-center gap-2 justify-end">
         {!isDelete && (
           <button
             type="button"
             className="text-[11px] text-secondary hover:text-white"
-            onClick={() => setEditing((cur) => !cur)}
+            onClick={() => {
+              setEditing((cur) => !cur);
+              setEditError(null);
+            }}
           >
             {editing ? 'Cancel edit' : 'Edit payload'}
           </button>

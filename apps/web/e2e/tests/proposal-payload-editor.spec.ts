@@ -199,3 +199,55 @@ test.describe('proposal payload editor', () => {
     ]);
   });
 });
+
+test.describe('proposal payload editor: proposer self-view revise', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('revising a pending proposal uses the same schema-driven editor and clears a stale error on cancel', async ({ page }) => {
+    const { campaignId } = seed();
+    const revisions: Array<{ id: number; body: unknown }> = [];
+    const patchStatus = 400;
+
+    await page.route('**/api/v1/campaigns/*/proposals', async (route: Route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          proposal(601, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+        ]),
+      });
+    });
+    await page.route('**/api/v1/proposals/*', async (route: Route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback();
+        return;
+      }
+      const id = Number(route.request().url().match(/proposals\/(\d+)/)?.[1]);
+      revisions.push({ id, body: route.request().postDataJSON() });
+      await route.fulfill({
+        status: patchStatus,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Simulated revise failure' }),
+      });
+    });
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await expect(titleField).toBeVisible();
+    await titleField.fill('Revised title');
+    await page.getByRole('button', { name: 'Save' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Simulated revise failure' });
+    await expect(error).toBeVisible();
+    await expect.poll(() => revisions).toEqual([
+      { id: 601, body: { payload: { title: 'Revised title', giverNpcId: null, parentId: null } } },
+    ]);
+
+    // Cancelling the edit clears the stale network error instead of leaving it stranded
+    // once the editor (and its own error surface) has unmounted.
+    await page.getByRole('button', { name: 'Cancel edit' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Simulated revise failure' })).toHaveCount(0);
+  });
+});
