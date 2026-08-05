@@ -37,6 +37,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectTurnBeat(yours, { ...yours, round: 2 })).toBe('your-turn');
   });
 
+  test('renders an active-removal successor frame as a fresh owned turn', () => {
+    const successor = { ...initial, combatantId: 15, isYourTurn: true };
+    expect(detectSseTurnBeat(initial, successor)).toBe('your-turn');
+  });
+
   test('classifies ordinary changes and round wraps for the viewer-safe ticker', () => {
     expect(detectTurnBeat(initial, { ...initial, combatantId: 13 })).toBe('turn');
     expect(detectTurnBeat(initial, { ...initial, combatantId: 13, round: 2 })).toBe('round-wrap');

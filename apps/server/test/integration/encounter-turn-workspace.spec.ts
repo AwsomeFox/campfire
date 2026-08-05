@@ -240,6 +240,52 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(c2).not.toBe(c1);
   });
 
+  it('emits turn edges when removing and restoring the active combatant', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, events } = build();
+    const { campaignId, encounterId, c1, c2 } = seed(orm);
+    const frames: Array<{
+      type: string;
+      currentCombatantId?: number | null;
+      round?: number;
+      turnIndex?: number;
+      combatantKind?: string | null;
+      turnReverted?: true;
+    }> = [];
+    const subscription = events.streamFor(campaignId).subscribe((event) => frames.push(event));
+
+    const removal = await service.removeCombatant(encounterId, c1, dmUser, 'dm');
+
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'encounter.updated', encounterId }),
+      expect.objectContaining({
+        type: 'encounter.turn_changed',
+        encounterId,
+        currentCombatantId: c2,
+        round: 1,
+        turnIndex: 0,
+        combatantKind: 'character',
+      }),
+    ]);
+
+    frames.length = 0;
+    await service.undoRemoveCombatant(encounterId, removal.undoToken, dmUser, 'dm');
+    subscription.unsubscribe();
+
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'encounter.updated', encounterId }),
+      expect.objectContaining({
+        type: 'encounter.turn_changed',
+        encounterId,
+        currentCombatantId: c1,
+        round: 1,
+        turnIndex: 0,
+        combatantKind: 'character',
+        turnReverted: true,
+      }),
+    ]);
+  });
+
   it('undo resets the restored combatant’s per-turn action economy', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();

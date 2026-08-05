@@ -5118,6 +5118,12 @@ export class EncountersService {
     // click at the end of that window survives ordinary network latency.
     const expiresAt = new Date(Date.now() + 30_000).toISOString();
     let emittedEncounter!: typeof encounters.$inferSelect;
+    let emittedTurnChange: {
+      round: number;
+      turnIndex: number;
+      currentCombatantId: number | null;
+      combatantKind: Combatant['kind'] | null;
+    } | null = null;
     let replayed = false;
     let removedConcentrationCascades: { combatantId: number; combatantName: string; condition: ConditionInstance }[] = [];
 
@@ -5271,6 +5277,15 @@ export class EncountersService {
         // Keep this SQL expression out of the persisted undo snapshot.
         if (freshEncounter.currentCombatantId === combatantId) {
           turnVersionUpdate = { turnVersion: sql`${encounters.turnVersion} + 1` };
+          // A removal can advance the active actor just like endTurn. Preserve that
+          // turn edge for connected clients, including a lair transition with no
+          // current combatant, while ordinary roster edits remain updated-only.
+          emittedTurnChange = {
+            round: afterEncounter.round,
+            turnIndex: afterEncounter.turnIndex,
+            currentCombatantId: afterEncounter.currentCombatantId,
+            combatantKind: startingAfterRemoval?.kind ?? null,
+          };
         }
       }
 
@@ -5381,7 +5396,12 @@ export class EncountersService {
       emittedEncounter = freshEncounter;
     });
 
-    if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    if (!replayed) {
+      this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+      if (emittedTurnChange) {
+        this.emitEncounterEvent('encounter.turn_changed', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden, emittedTurnChange);
+      }
+    }
     for (const cascade of removedConcentrationCascades) {
       await this.appendEvent(encounterId, emittedEncounter.round, 'condition', {
         actor: null,
@@ -5398,6 +5418,13 @@ export class EncountersService {
     let restoredCharacterId: number | null = null;
     let restoredNpcId: number | null = null;
     let emittedEncounter!: typeof encounters.$inferSelect;
+    let emittedTurnChange: {
+      round: number;
+      turnIndex: number;
+      currentCombatantId: number | null;
+      combatantKind: Combatant['kind'] | null;
+      turnReverted: true;
+    } | null = null;
     let replayed = false;
     try {
       this.db.transaction((tx) => {
@@ -5532,6 +5559,15 @@ export class EncountersService {
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
+          if (before.currentCombatantId !== current.currentCombatantId) {
+            emittedTurnChange = {
+              round: before.round,
+              turnIndex: restoredTurnIndex,
+              currentCombatantId: before.currentCombatantId,
+              combatantKind: snapshot.kind as Combatant['kind'],
+              turnReverted: true,
+            };
+          }
           if (after.escalationEventId != null) tx.delete(encounterEvents).where(and(eq(encounterEvents.id, after.escalationEventId), eq(encounterEvents.encounterId, encounterId))).run();
         } else if (runningAdapter) {
           const restoredRoster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain);
@@ -5572,7 +5608,12 @@ export class EncountersService {
       }
       throw err;
     }
-    if (!replayed) this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+    if (!replayed) {
+      this.emitEncounterEvent('encounter.updated', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden);
+      if (emittedTurnChange) {
+        this.emitEncounterEvent('encounter.turn_changed', emittedEncounter.campaignId, encounterId, emittedEncounter.hidden, emittedTurnChange);
+      }
+    }
     return combatantToDomain(restored);
   }
 
