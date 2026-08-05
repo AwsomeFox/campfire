@@ -1601,9 +1601,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const token = await playerAgent.post('/api/v1/tokens').send({ name: 'mcp-1971-player', scope: 'player', writeScope: 'direct', campaignId });
     const playerClient = await mcpClient(token.body.token);
     const dmClient = await mcpClient(dmToken);
+    let createdEncounterId: number | undefined;
     try {
       await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
       const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
+      createdEncounterId = encounter.id;
       const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
       const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
       await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
@@ -1618,6 +1620,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(replay.isError).toBeFalsy();
       expect(parseResult(replay)).toEqual(parseResult(first));
     } finally {
+      if (createdEncounterId) {
+        await dmClient.callTool({ name: 'delete_encounter', arguments: { encounterId: createdEncounterId } }).catch(() => {});
+      }
       await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: true, dmControlsTurns: true });
     }
   });
