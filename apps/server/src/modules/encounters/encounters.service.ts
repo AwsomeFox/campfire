@@ -4519,7 +4519,7 @@ export class EncountersService {
       if (replayed) return replayed;
       if (roll === null) throw new Error('Death-save dice roll was not persisted');
       const persistedRoll = roll as DiceRoll;
-      this.rolls.emitDiceRolled(persistedRoll);
+      this.rolls.emitDiceRolled?.(persistedRoll);
 
       return { combatant: updated, roll: persistedRoll };
     } catch (err) {
@@ -6217,7 +6217,7 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
     if (!freshEncounter.hidden) {
       for (const rec of recordedRolls) {
-        this.rolls.emitDiceRolled(rec);
+        this.rolls.emitDiceRolled?.(rec);
       }
     }
 
@@ -6493,7 +6493,7 @@ export class EncountersService {
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
       if (roll && !freshEncounterRow.hidden) {
-        this.rolls.emitDiceRolled(roll);
+        this.rolls.emitDiceRolled?.(roll);
       }
       return { combatant: committed, roll };
     } catch (err) {
