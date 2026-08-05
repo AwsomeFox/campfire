@@ -2440,9 +2440,14 @@ export default function RunSessionPage() {
   // might have missed. This supplies an authoritative owner result for the
   // hidden-tab title after reconnects as well as ordinary stream delivery.
   useEffect(() => {
-    if (currentCombatantId !== undefined) {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    if (currentCombatantId === undefined) {
+      // A missed SSE edge can leave a stale owned /turn result behind while a
+      // same-round lair action clears the current combatant in the poll.
+      // Clear the optimistic owner immediately, then refetch the workspace.
+      setTurnOwnerFromEvent(false);
+      setTurnOwnerPendingCombatantId(null);
     }
+    void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
   }, [currentCombatantId, eid, queryClient]);
 
   // The event path wins immediately (especially when it clears an owned

@@ -58,7 +58,7 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
       return () => window.clearTimeout(tickerTimer);
     }
     setShowTakeover(true);
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    if (!reducedMotion && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate([100, 50, 100]);
     }
     const takeoverTimer = window.setTimeout(() => setShowTakeover(false), 2_500);

@@ -49,6 +49,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/if \(kind && \(combatant \|\| event\.currentCombatantId != null \|\| tickerKind === 'round-wrap'\)\) \{[\s\S]*\} else if \(kind\) \{[\s\S]*setTurnBeat\(null\);/);
   });
 
+  test('clears owned state and refreshes /turn when the poll observes no active combatant', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/if \(currentCombatantId === undefined\) \{[\s\S]*setTurnOwnerFromEvent\(false\);[\s\S]*setTurnOwnerPendingCombatantId\(null\);[\s\S]*void queryClient\.invalidateQueries\(\{ queryKey: queryKeys\.encounterTurn\(eid\) \}\);/);
+  });
+
   test('accepts the optional turn_changed frame fields and rejects malformed values', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
@@ -83,6 +88,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
     expect(source).toMatch(/if \(!beat\) \{\s*setShowTakeover\(false\);\s*setShowTicker\(false\);/);
     expect(source).toMatch(/if \(beat\.kind !== 'your-turn'\) \{\s*setShowTakeover\(false\);/);
+  });
+
+  test('skips owned-turn vibration when reduced motion is preferred', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/TurnChangeBeat.tsx'), 'utf8');
+    expect(source).toMatch(/if \(!reducedMotion && typeof navigator !== 'undefined' && typeof navigator\.vibrate === 'function'\)/);
   });
 
   test('keeps the transient takeover click-through and pulses only its active vitals card', () => {
