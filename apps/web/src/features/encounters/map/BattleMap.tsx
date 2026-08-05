@@ -321,6 +321,7 @@ export function BattleMap({
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
   const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
   const [editingAoeDraft, setEditingAoeDraft] = useState(false);
+  const pendingAoeDraftRef = useRef<string | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -1430,6 +1431,10 @@ export function BattleMap({
     // Keep unfocused fields truthful after a drag, keyboard nudge, or concurrent
     // DM update, but never replace text while the player is actively typing it.
     if (editingAoeDraft) return;
+    if (pendingAoeDraftRef.current === selectedAoe.id && aoeDraft) {
+      if (aoeDraft.x === String(selectedAoe.x) && aoeDraft.y === String(selectedAoe.y) && aoeDraft.sizeFt === String(selectedAoe.sizeFt) && aoeDraft.angleDeg === String(selectedAoe.angleDeg)) pendingAoeDraftRef.current = null;
+      else return;
+    }
     setAoeDraft({
       id: selectedAoe.id,
       x: String(selectedAoe.x),
@@ -1864,8 +1869,11 @@ export function BattleMap({
                     else setAoeDraft((draft) => draft && { ...draft, x: e.target.value });
                   }}
                   onBlur={(e) => {
+                    const x = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, x: String(x) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.currentTarget.value) || 0) });
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { x });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1884,8 +1892,11 @@ export function BattleMap({
                     else setAoeDraft((draft) => draft && { ...draft, y: e.target.value });
                   }}
                   onBlur={(e) => {
+                    const y = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, y: String(y) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.currentTarget.value) || 0) });
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { y });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1903,8 +1914,11 @@ export function BattleMap({
                     else setAoeDraft((draft) => draft && { ...draft, sizeFt: e.target.value });
                   }}
                   onBlur={(e) => {
+                    const sizeFt = Math.max(1, Number(e.currentTarget.value) || 1);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, sizeFt: String(sizeFt) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.currentTarget.value) || 1) });
+                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1923,8 +1937,11 @@ export function BattleMap({
                       else setAoeDraft((draft) => draft && { ...draft, angleDeg: e.target.value });
                     }}
                     onBlur={(e) => {
+                      const angleDeg = Number(e.currentTarget.value) || 0;
+                      if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, angleDeg: String(angleDeg) });
+                      pendingAoeDraftRef.current = selectedAoe.id;
                       setEditingAoeDraft(false);
-                      if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.currentTarget.value) || 0 });
+                      if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg });
                     }}
                     style={{ width: 56 }}
                   />

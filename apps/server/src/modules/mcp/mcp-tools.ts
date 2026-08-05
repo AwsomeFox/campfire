@@ -1405,7 +1405,7 @@ export class McpToolsService {
         'Hidden encounter, archived campaign, and ended encounter protections match declare_aoe_template and REST.',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
-        templateId: z.string().min(1).max(40).describe('AoE template id supplied when it was declared'),
+        templateId: AoeTemplateDeclare.shape.id.describe('AoE template id supplied when it was declared'),
       },
       async ({ encounterId, templateId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

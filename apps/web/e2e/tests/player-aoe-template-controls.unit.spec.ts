@@ -32,6 +32,7 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(BATTLE_MAP).toContain('if (editingAoeDraft) return;');
     expect(BATTLE_MAP).toContain('onFocus={() => setEditingAoeDraft(true)}');
     expect(BATTLE_MAP).toContain('setEditingAoeDraft(false);');
+    expect(BATTLE_MAP).toContain('pendingAoeDraftRef.current = selectedAoe.id;');
   });
 
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {
