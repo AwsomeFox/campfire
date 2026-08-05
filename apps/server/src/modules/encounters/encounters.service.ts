@@ -3878,7 +3878,7 @@ export class EncountersService {
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
-    } else if (duplicateStatblockJson !== null) {
+    } else if (duplicateStatblockJson !== null && input.ruleEntryId === undefined) {
       statblockJson = duplicateStatblockJson;
     } else if (
       input.kind === 'monster' &&
