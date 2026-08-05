@@ -7388,6 +7388,41 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
     ]));
   });
 
+  it('rejects scoped AoE writes without rewriting malformed saved templates or emitting side effects', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const protectedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Malformed saved AoE', hidden: false })
+    ).body.id;
+    const savedAoe = JSON.stringify([
+      { ...declaration, id: 'surviving-template', declaredByUserId: null },
+      { id: 'invalid-template', shape: 'not-a-shape' },
+    ]);
+    await db.update(encountersTable).set({ aoe: savedAoe }).where(eq(encountersTable.id, protectedId));
+    const before = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      expect((await request(server).post(`/api/v1/encounters/${protectedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+      const after = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+      expect(after?.aoe).toBe(savedAoe);
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+      expect(
+        (await db.select().from(auditLog).where(eq(auditLog.entityId, protectedId))).filter((row) => row.action.startsWith('encounter.aoe.')),
+      ).toEqual([]);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === protectedId)).toEqual([]);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
   it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
     const server = ctx.app.getHttpServer();
     const hiddenId = (

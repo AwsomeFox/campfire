@@ -239,13 +239,26 @@ function parseFog(text: string | null): FogState | null {
 
 /**
  * Parse the stored AoE-templates JSON back into an AoeTemplate[] (issue #238). Same defensive
- * degrade-to-empty as parseFog: corrupt/legacy text or an entry that no longer validates is
- * dropped rather than failing the whole encounter read — templates are a display aid.
+ * degrade-to-empty as parseFog: corrupt/legacy text or any invalid entry makes the stored
+ * list unreadable rather than failing the whole encounter read — templates are a display aid.
  */
 function parseAoe(text: string | null): AoeTemplateType[] {
   if (text == null) return [];
   const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
   return parsed.success ? parsed.data : [];
+}
+
+/**
+ * Scoped AoE writes must never persist parseAoe's read-time degraded value: doing so
+ * could turn one malformed saved entry into a destructive rewrite of the whole list.
+ */
+function parseAoeForScopedWrite(text: string | null): AoeTemplateType[] {
+  if (text == null) return [];
+  const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
+  if (!parsed.success) {
+    throw new ConflictException('Encounter AoE templates contain invalid saved data and must be repaired before they can be changed');
+  }
+  return parsed.data;
 }
 
 function parseCombatantStatblock(text: string | null): CombatantStatblock | null {
@@ -2265,7 +2278,7 @@ export class EncountersService {
       this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
-      const current = parseAoe(fresh.aoe);
+      const current = parseAoeForScopedWrite(fresh.aoe);
       const existingIndex = current.findIndex((candidate) => candidate.id === templateId);
       if (existingIndex >= 0) {
         const existing = current[existingIndex];
@@ -2344,7 +2357,7 @@ export class EncountersService {
       this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
-      const current = parseAoe(fresh.aoe);
+      const current = parseAoeForScopedWrite(fresh.aoe);
       const index = current.findIndex((candidate) => candidate.id === templateId);
       if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
       const existing = current[index];
@@ -2404,7 +2417,7 @@ export class EncountersService {
       this.assertCampaignWritableInTx(tx, fresh.campaignId);
       this.assertMutable(fresh);
 
-      const current = parseAoe(fresh.aoe);
+      const current = parseAoeForScopedWrite(fresh.aoe);
       const existing = current.find((candidate) => candidate.id === templateId);
       if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
       if (role !== 'dm' && existing.declaredByUserId !== user.id) {
