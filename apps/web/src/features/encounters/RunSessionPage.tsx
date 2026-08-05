@@ -1651,6 +1651,9 @@ export default function RunSessionPage() {
   const actionLegalTargetIds = useMemo(() => pendingActionUse && pendingActionUse.spec.targets.count > 0
     ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
     : [], [encounter?.combatants, pendingActionUse]);
+  const actionTargetsAtCapacity = !!pendingActionUse
+    && pendingActionUse.spec.targets.count > 0
+    && actionTargetIds.length >= pendingActionUse.spec.targets.count;
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
     setAoeHitLayout(layout);
@@ -3545,7 +3548,7 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
-          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, onToggle: toggleActionTarget } : null}
+          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: toggleActionTarget } : null}
           impactTargetIds={actionImpactTargetIds}
         />
       )}
@@ -4029,7 +4032,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
-                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, onToggle: () => toggleActionTarget(c.id) } : null}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}

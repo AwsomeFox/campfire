@@ -52,18 +52,26 @@ test('legal target affordances support repeated pointer and keyboard selection',
     readFile(resolve(process.cwd(), 'src/features/encounters/combat/CombatantRow.tsx'), 'utf8'),
   ]);
 
-  expect(mapSource).toContain("const targetClickable = legalTarget && !targeting?.declared && tool === 'move' && !viewportPan && !movable;");
+  expect(mapSource).toContain("const targetClickable = legalTarget && targetAvailable && !targeting?.declared && tool === 'move' && !viewportPan && !movable;");
   expect(mapSource).toContain('tabIndex={movable || targetClickable ? 0 : -1}');
   expect(mapSource).toContain("e.key === 'Enter' || e.key === ' '");
   expect(mapSource).toContain('if (movable) onTokenKeyDown(e, c);');
   expect(mapSource).toContain('if (movable) setSelectedTokenId(c.id);');
   expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
-  expect(mapSource).toContain("const targetable = (targeting?.legalIds.includes(c.id) ?? false) && !targeting?.declared;");
+  expect(mapSource).toContain('const targetAvailable = selectedTarget || !targeting?.atCapacity;');
+  expect(mapSource).toContain('&& ((targeting?.selectedIds.includes(c.id) ?? false) || !targeting?.atCapacity);');
+  expect(mapSource).toContain('aria-disabled={legalTarget && !targetAvailable ? true : undefined}');
   expect(mapSource).toContain('if (targetClickable && e.isPrimary)');
   expect(mapSource).toContain('clientX: e.clientX, clientY: e.clientY');
   expect(mapSource).toContain('strokeWidth={2}');
   expect(mapSource).not.toContain('event.detail === 1');
   expect(rosterSource).toContain('data-testid={`combatant-target-toggle-${combatant.id}`}');
   expect(rosterSource).toContain('aria-pressed={targeting.selected}');
-  expect(rosterSource).toContain('disabled={targeting.declared}');
+  expect(rosterSource).toContain('disabled={targeting.declared || targetSelectionUnavailable}');
+});
+
+test('target affordances disable unselected targets at the action target limit', async () => {
+  const sessionSource = await readFile(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+  expect(sessionSource).toContain('const actionTargetsAtCapacity = !!pendingActionUse');
+  expect(sessionSource).toContain('atCapacity: actionTargetsAtCapacity');
 });

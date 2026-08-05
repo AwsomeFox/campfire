@@ -195,7 +195,7 @@ export type BattleMapProps = {
   castToken?: string | null;
   hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
-  targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; onToggle: (id: number) => void } | null;
+  targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; atCapacity: boolean; onToggle: (id: number) => void } | null;
   impactTargetIds?: readonly number[];
 };
 
@@ -933,7 +933,9 @@ export function BattleMap({
     const point = pointerToPercent(e, true);
     if (!point) return;
     const captureTarget = e.currentTarget;
-    const targetable = (targeting?.legalIds.includes(c.id) ?? false) && !targeting?.declared;
+    const targetable = (targeting?.legalIds.includes(c.id) ?? false)
+      && !targeting?.declared
+      && ((targeting?.selectedIds.includes(c.id) ?? false) || !targeting?.atCapacity);
     if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
@@ -2380,9 +2382,10 @@ export function BattleMap({
                   const selectedForBatch = selectedTokenIds.has(c.id);
                   const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
                   const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  const targetAvailable = selectedTarget || !targeting?.atCapacity;
                   // Map gestures retain precedence outside move mode, and movable tokens keep
                   // their drag behavior.
-                  const targetClickable = legalTarget && !targeting?.declared && tool === 'move' && !viewportPan && !movable;
+                  const targetClickable = legalTarget && targetAvailable && !targeting?.declared && tool === 'move' && !viewportPan && !movable;
                   const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
@@ -2412,6 +2415,7 @@ export function BattleMap({
                       tabIndex={movable || targetClickable ? 0 : -1}
                       aria-label={tokenLabel}
                       aria-pressed={legalTarget ? selectedTarget : undefined}
+                      aria-disabled={legalTarget && !targetAvailable ? true : undefined}
                       aria-describedby="map-keyboard-help"
                       aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
@@ -2422,8 +2426,8 @@ export function BattleMap({
                         pointerEvents: movable || targetClickable ? 'auto' : 'none',
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
-                        opacity: isDragging ? 0.85 : targeting && !legalTarget ? 0.6 : 1,
-                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
+                        opacity: isDragging ? 0.85 : targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1,
+                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => {
@@ -2437,7 +2441,7 @@ export function BattleMap({
                         const targetGesture = targetGestureRef.current;
                         if (targetGesture?.tokenId === c.id) {
                           targetGestureRef.current = null;
-                          if (!targetGesture.moved && legalTarget) {
+                          if (!targetGesture.moved && legalTarget && targetAvailable) {
                             event.stopPropagation();
                             targeting?.onToggle(c.id);
                           }
@@ -2448,7 +2452,7 @@ export function BattleMap({
                         if (targetClickable && !isDragging) targeting?.onToggle(c.id);
                       }}
                       onKeyDown={(e) => {
-                        if (legalTarget && !targeting?.declared && (e.key === 'Enter' || e.key === ' ')) {
+                        if (legalTarget && targetAvailable && !targeting?.declared && (e.key === 'Enter' || e.key === ' ')) {
                           e.preventDefault();
                           e.stopPropagation();
                           targeting?.onToggle(c.id);

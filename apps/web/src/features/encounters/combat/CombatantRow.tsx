@@ -122,7 +122,7 @@ export type CombatantRowProps = {
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
-  targeting?: { legal: boolean; selected: boolean; declared: boolean; onToggle: () => void } | null;
+  targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
 };
 
 export function CombatantRow({
@@ -285,6 +285,7 @@ export function CombatantRow({
       : hpFeedbackEvents.some((event) => event.crit)
         ? ' cf-hp-feedback-anchor--crit'
         : '';
+  const targetSelectionUnavailable = targeting?.legal && targeting.atCapacity && !targeting.selected;
 
   return (
     <div
@@ -302,12 +303,12 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
-        opacity: down ? 0.55 : 1,
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : targetSelectionUnavailable ? 0.65 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
       onClick={(event) => {
-        if (!targeting?.legal || targeting.declared) return;
+        if (!targeting?.legal || targeting.declared || targetSelectionUnavailable) return;
         const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
         if (interactive && interactive !== event.currentTarget) return;
         targeting.onToggle();
@@ -319,9 +320,10 @@ export function CombatantRow({
           type="button"
           className="btn btn-ghost cf-target-44"
           data-testid={`combatant-target-toggle-${combatant.id}`}
-          aria-label={`${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
+          aria-label={targetSelectionUnavailable ? `Target limit reached; ${combatant.name} cannot be selected` : `${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
           aria-pressed={targeting.selected}
-          disabled={targeting.declared}
+          disabled={targeting.declared || targetSelectionUnavailable}
+          title={targetSelectionUnavailable ? 'Target limit reached' : undefined}
           onClick={targeting.onToggle}
           style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
         >
