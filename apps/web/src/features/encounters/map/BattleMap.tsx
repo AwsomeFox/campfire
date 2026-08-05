@@ -1395,10 +1395,18 @@ export function BattleMap({
   }
   function updatePlayerAoeFromDraft(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
     void Promise.resolve().then(() => updateAoe(id, patch)).catch(() => {
-      // The server rejected this edit. Drop the stale optimistic text so the
-      // next encounter state (or an immediate local drag) repopulates truthfully.
+      // The server rejected this edit. Restore an editable draft from the
+      // last known template; clearing it leaves a focused controlled input
+      // without a draft for its onChange handler to update.
       if (pendingAoeDraftRef.current === id) pendingAoeDraftRef.current = null;
-      setAoeDraft(null);
+      const template = aoeTemplates.find((candidate) => candidate.id === id);
+      setAoeDraft(template ? {
+        id: template.id,
+        x: String(template.x),
+        y: String(template.y),
+        sizeFt: String(template.sizeFt),
+        angleDeg: String(template.angleDeg),
+      } : null);
     });
   }
   function removeAoe(id: string) {
