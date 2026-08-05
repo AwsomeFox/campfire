@@ -2427,7 +2427,7 @@ export function BattleMap({
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => {
-                        if (targetClickable) {
+                        if (targetClickable && e.isPrimary) {
                           e.stopPropagation();
                           return;
                         }
@@ -2455,6 +2455,7 @@ export function BattleMap({
                           return;
                         }
                         if (movable) onTokenKeyDown(e, c);
+                        else if (targetClickable) e.stopPropagation();
                       }}
                       onFocus={(e) => {
                         if (movable) setSelectedTokenId(c.id);

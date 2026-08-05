@@ -20,6 +20,7 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
     expect(src).toMatch(/role="button"/);
     expect(src).toMatch(/tabIndex=\{movable \|\| targetClickable \? 0 : -1\}/);
     expect(src).toMatch(/legalTarget && !targeting\?\.declared && \(e\.key === 'Enter' \|\| e\.key === ' '\)/);
+    expect(src).toMatch(/else if \(targetClickable\) e\.stopPropagation\(\);/);
     expect(src).toMatch(/onTokenKeyDown\(e, c\);/);
     expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
     expect(src).toMatch(/aria-describedby="map-keyboard-help"/);
