@@ -134,9 +134,15 @@ export function CampaignMetadataFields({
             itself communicates scope — this is a campaign-wide backdrop, not the live threat of
             the current scene/session/encounter. TermHelp carries the full object/timeframe/
             audience/owner/consequence definition and explicitly distinguishes it from encounter
-            difficulty, HP danger bands, and Session Zero safety boundaries. The trigger is placed
-            after the <select>, not between the label and it, so it does not shift the field's tab
-            position relative to Name/Description/Cancel/Save. */}
+            difficulty, HP danger bands, and Session Zero safety boundaries.
+
+            The trigger sits AFTER the <select> rather than between the label and it, so the
+            label-then-control reading order is preserved and a keyboard user reaches the select
+            itself — the thing they came to change — before the help affordance. It does add a
+            Tab stop: TermHelp renders a focusable <button>, so the order becomes
+            Name → Description → danger select → help → Cancel/Save. An earlier version of this
+            comment claimed the placement did not shift tab position at all, which was wrong and
+            would have misled the next person reasoning about focus order (issue #871 review). */}
         <label htmlFor={dangerId}>Campaign danger level</label>
         <div className="flex items-center gap-2 flex-wrap">
           <select
