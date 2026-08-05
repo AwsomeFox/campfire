@@ -26,6 +26,7 @@ import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
   CampaignSummary,
+  CastSafetyState,
   Encounter,
   EncounterWithCombatants,
   HpBand,
@@ -43,7 +44,7 @@ import {
 import { GameIcon } from '../../components/GameIcon';
 import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
-import { SafetyHoldDisplayOverlay } from '../../components/SafetyHoldBar';
+import { SafetyHoldDisplayOverlay, SafetyHoldOverlayView } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
 import { useAuth } from '../../app/auth';
@@ -63,11 +64,15 @@ import {
   type SafeQuest,
 } from './playerSafe';
 import {
+  CastSafetyPoller,
   PlayerDisplayLoadSequencer,
   playerDisplaySyncMessage,
   playerDisplaySyncState,
   projectionAfterLoadFailure,
+  runCastSafetyPoll,
   runPlayerDisplayLoad,
+  shouldApplyCastSafetyResult,
+  shouldMarkCastSafetyUnknown,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
 } from './playerDisplayLoad';
@@ -348,6 +353,140 @@ export default function PlayerDisplayPage() {
   // Pauses while the cast tab is hidden; refetches immediately on becoming visible
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
+
+  /**
+   * X-Card state for the cast-token route (issue #1908).
+   *
+   * A cast client has no member identity and cannot call the member-scoped
+   * `GET /campaigns/:id/safety` that backs the authed overlay, so it polls the
+   * anonymous `/cast/:token/safety` capability on the same visible-tab cadence as
+   * the rest of this page — comfortably inside the 15s bound raising a hold must
+   * blank the display within.
+   *
+   * `runCastSafetyPoll`/`CastSafetyPoller` (see that module's doc for the
+   * full history, including the nine-round comparison-based scheme this
+   * replaced) allows at most one HTTP request in flight at a time. Because
+   * there is never a second, differently-ordered response to reconcile
+   * against, out-of-order application is structurally impossible rather
+   * than merely checked-for: whichever response arrives IS the most recent
+   * observation, unconditionally. A tick firing while one is still
+   * outstanding does NOT simply wait for the next scheduled tick, though
+   * (round 13a): it coalesces onto a follow-up that fires the INSTANT the
+   * in-flight request concludes, so a hold raised during that busy window
+   * is observed as soon as the poller is next free. The trade this accepts
+   * is explicit and bounded: a hung request delays observing whatever
+   * happens next, up to `CAST_SAFETY_POLL_TIMEOUT_MS` — see that
+   * constant's doc for why the bound holds. A single slow-but-not-timed-out
+   * request is ALSO bounded: a `false` (or a failure, judged by elapsed
+   * time since the last confirmation rather than its own duration — round
+   * 11c) that concludes too long after being issued
+   * (`CAST_SAFETY_OBSERVATION_FRESHNESS_MS`, measured on a monotonic clock
+   * immune to wall-clock jumps — round 13b) resolves `{ kind: 'unknown' }`
+   * rather than `ok`, and `shouldMarkCastSafetyUnknown` reverts
+   * `castSafetyKnown` to false on that outcome — reverting to the curtain
+   * rather than trusting a stale "safe" verdict. Fail safe throughout: an
+   * ignored tick and a genuine, promptly-concluded failure on the current
+   * request leave the last-known hold state alone rather than guessing a
+   * new value — neither can ever clear an active curtain. The regular
+   * projection poll already surfaces a hard failure
+   * (expired/revoked token) for the page as a whole.
+   *
+   * `castSafetyKnown` tracks whether a poll has EVER actually succeeded,
+   * separately from the last-known `active` value: "no hold" and "never
+   * successfully checked" are different states, and only the former may
+   * render as an open display. Until the first `ok`, the overlay renders as
+   * if a hold were active — the same fail-safe bias as everywhere else in
+   * this poll, applied to its own unconfirmed starting state. Both reset to
+   * "unknown" whenever the cast identity (token) changes — a route
+   * transition between two `/cast/:campaignId/:token` URLs reuses this
+   * component, and carrying over the PRIOR campaign's last-known state would
+   * let a display that last confirmed "no hold" there render the NEW
+   * campaign open, even if its hold is already active, until its own poll
+   * happens to succeed.
+   *
+   * That reset happens DURING RENDER, not in a `useEffect` — React's
+   * documented pattern for resetting derived state when an identity changes
+   * ("adjusting state when a prop changes"), not a workaround. `useEffect`
+   * runs as a passive effect after the browser may already have painted, so
+   * an effect-based reset can let the OLD identity's last-known state paint
+   * for one real frame before the reset catches up. Comparing against a ref
+   * and calling the setters inline (guarded so it fires at most once per
+   * identity, not every render) closes that window entirely: React re-runs
+   * the component with the reset state before anything commits to the
+   * screen.
+   *
+   * That still leaves a narrower window open on the COMMIT side: the render-
+   * time reset and `poller.invalidate()` (which runs in the OLD effect's
+   * passive cleanup, strictly after commit) are not the same instant. If the
+   * old identity's in-flight request resolves in between — after the render-
+   * time reset has already committed the new identity's "unknown" state, but
+   * before `invalidate()` has aborted it — `runCastSafetyPoll` has no way to
+   * know a component-level identity change is pending; it still sees an
+   * ordinary in-flight request and can legitimately resolve `ok`. Applying
+   * that result would use the OLD identity's value to set the NEW identity's
+   * state. No poller design closes this on its own: it operates within one
+   * identity, not across the identity boundary the component owns. So the
+   * commit site itself re-checks the identity this specific call was
+   * actually made for (captured once, at the top of `loadCastSafety`, before
+   * any `await`) against `castSafetyIdentityRef.current` — which by the time
+   * this promise resolves already reflects whatever the LATEST render
+   * committed — and only applies the result when they still match. A
+   * mismatch means some later identity change has already superseded this
+   * call; the result is silently dropped rather than applied, exactly like
+   * an ordinary ignored poll result.
+   */
+  const [castSafetyActive, setCastSafetyActive] = useState(false);
+  const [castSafetyKnown, setCastSafetyKnown] = useState(false);
+  const castSafetyPollerRef = useRef(new CastSafetyPoller());
+  const castSafetyIdentityRef = useRef<string | null>(null);
+  const castSafetyIdentity = isCastMode && castToken ? castToken : null;
+  if (castSafetyIdentityRef.current !== castSafetyIdentity) {
+    castSafetyIdentityRef.current = castSafetyIdentity;
+    setCastSafetyActive(false);
+    setCastSafetyKnown(false);
+  }
+  const loadCastSafety = useCallback(async () => {
+    if (!isCastMode || !castToken) return;
+    // Capture the identity this call is FOR, before the `await` — the ref it
+    // is compared against below can change while this request is in flight
+    // (an SPA transition to a new cast token). See the doc above for why the
+    // poller's own single-writer/invalidate machinery cannot substitute for
+    // this check.
+    const requestIdentity = castToken;
+    const result = await runCastSafetyPoll(castSafetyPollerRef.current, (signal) =>
+      castRequest<CastSafetyState>(castToken, `${API}/cast/${castToken}/safety`, { signal }),
+    );
+    if (shouldApplyCastSafetyResult(result, requestIdentity, castSafetyIdentityRef.current)) {
+      setCastSafetyActive(result.active);
+      setCastSafetyKnown(true);
+    } else if (shouldMarkCastSafetyUnknown(result, requestIdentity, castSafetyIdentityRef.current)) {
+      // A confirmed `false` (or a failure/hygiene-timeout) arrived too long
+      // after being issued to trust as still describing the CURRENT state
+      // — revert to "not yet confirmed" (curtain shown) rather than
+      // silently keep whatever was last believed. See the module doc's
+      // round 11a for why this bounds worst-case exposure to a single
+      // poll timeout instead of two.
+      setCastSafetyKnown(false);
+    }
+    // 'ignored' (skipped while busy, aborted, or unmount/identity-change), a
+    // 'failed' result that concluded within the freshness window, or either
+    // outcome above whose captured identity no longer matches the live one
+    // (superseded by a later identity change) all leave
+    // castSafetyActive/castSafetyKnown untouched — see fail-safe note above.
+  }, [castToken, isCastMode]);
+
+  useEffect(() => {
+    const poller = castSafetyPollerRef.current;
+    if (isCastMode) void loadCastSafety();
+    // Abort the in-flight poll (if any) on unmount or when the cast identity
+    // (token) changes, so a late response never calls setState past that
+    // point.
+    return () => {
+      poller.invalidate();
+    };
+  }, [isCastMode, loadCastSafety]);
+
+  usePollWhileVisible(() => void loadCastSafety(), POLL_MS, isCastMode);
 
   const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
     const key = ++mapPingSeq.current;
@@ -871,6 +1010,11 @@ export default function PlayerDisplayPage() {
       ref={controlsRef}
       className="cf-screen-control-stack"
       data-visible={keepControlsVisible ? 'true' : 'false'}
+      // Only the cast/kiosk route's stack needs to sit above the safety
+      // curtain (see SCREEN_CSS below) — the authenticated route's stack,
+      // including the DM cockpit, must stay under it like every other
+      // authenticated control.
+      data-cast-mode={isCastMode ? 'true' : 'false'}
     >
       <div className="cf-screen-controls">
         <button
@@ -1180,13 +1324,21 @@ export default function PlayerDisplayPage() {
         <div className="cf-scene-body" data-testid={`cf-scene-${scene}`} data-scene={scene}>
           {sceneContent}
         </div>
-        {/* #599 — the shared display's half of the safety hold. A TV in the corner of the room
-            cannot raise a hold (on the /cast token route it has no member identity at all), but
-            it absolutely must stop showing the fight when one is raised: a monitor still
-            rendering initiative order through a safety stop is the loudest possible way for
-            this feature to fail. Authed route only — the cast-token client cannot read the
-            member-scoped safety endpoint, and is documented as an uncovered surface. */}
-        {!isCastMode && <SafetyHoldDisplayOverlay campaignId={cid} />}
+        {/* #599 / #1908 — the shared display's half of the safety hold. A TV in the corner of
+            the room cannot raise a hold (on the /cast token route it has no member identity at
+            all), but it absolutely must stop showing the fight when one is raised: a monitor
+            still rendering initiative order through a safety stop is the loudest possible way
+            for this feature to fail. The cast-token client cannot read the member-scoped safety
+            endpoint, so it polls the anonymous `/cast/:token/safety` capability instead
+            (`loadCastSafety` above) and renders the same overlay markup via
+            `SafetyHoldOverlayView`. Renders active until the first poll actually succeeds
+            (`!castSafetyKnown`) — "no hold" and "never successfully checked" must not look
+            the same as an open display. */}
+        {isCastMode ? (
+          <SafetyHoldOverlayView active={castSafetyActive || !castSafetyKnown} />
+        ) : (
+          <SafetyHoldDisplayOverlay campaignId={cid} />
+        )}
       </div>
     </div>,
   );
@@ -1711,7 +1863,21 @@ const SCREEN_CSS = `
 }
 .cf-screen.centered { display: flex; align-items: center; justify-content: center; }
 
-/* Operator control stack (issue #595 wiring preserved verbatim). */
+/* Operator control stack (issue #595 wiring preserved verbatim). Base
+   z-index: 20 -- NOT auto. This stack (position: fixed) shares a stacking
+   context with sibling content this route renders after it in the DOM (the
+   stage: intermission/blackout/party/combat views, several of which are
+   themselves position: absolute|fixed with no z-index of their own, e.g.
+   .cf-blackout). Two position:*, z-index:auto siblings stack by DOM order,
+   and this div is emitted BEFORE that content -- so leaving it at auto (as
+   round 12 did, to get it under the curtain) let the stage paint on TOP of
+   it, silently covering and disabling every operator button on BOTH routes
+   (round 13 finding: broken controls are worse than the curtain-coverage
+   gap round 12 was chasing). 20 is comfortably above ordinary in-flow/stage
+   content and, just as importantly, comfortably BELOW --cf-layer-dialog
+   (50): on the authenticated route this keeps the stack under the safety
+   curtain, same as every other authenticated control, without needing an
+   auto/no-z-index fallback to get there. */
 .cf-screen .cf-screen-control-stack {
   position: fixed;
   top: 14px;
@@ -1721,6 +1887,30 @@ const SCREEN_CSS = `
   opacity: 1;
   pointer-events: auto;
   transition: opacity 0.4s ease;
+}
+/* On the cast/kiosk route ONLY (data-cast-mode="true"), raise ABOVE
+   --cf-layer-dialog (issue #1908) instead of the baseline 20 above -- and
+   only for what actually renders there: the Exit-kiosk button and the
+   fullscreen/wake-lock notices (role !== 'dm' in cast mode, so the DM
+   cockpit block below never renders here regardless). The safety curtain
+   (.cf-safety-display, same tier as every other dialog) is also this
+   page's fail-safe DEFAULT before the first /safety poll succeeds, and can
+   persist indefinitely if that poll keeps failing. On the cast/kiosk route
+   "Exit kiosk" is the ONLY affordance a touch-only shared TV has -- a
+   curtain that outranks it would strand the device with no way to leave
+   kiosk mode without a second device. .cf-exit-pin (the PIN dialog this
+   stack opens) sits one tier higher still, so it in turn is never trapped
+   under this stack once open.
+   On the AUTHENTICATED route, this same div also carries the DM cockpit
+   (scene picker, paging, aspect toggle) -- that must stay under the
+   curtain (the base rule's z-index: 20, well below --cf-layer-dialog's 50,
+   already achieves this) like every other authenticated control, so an
+   active X-Card still blanks the whole operator surface it is meant to
+   cover, matching the pre-#1908 authed overlay behavior exactly (round 12
+   finding, still fixed -- just not by dropping the base z-index to auto,
+   which is what broke this route's controls in round 13). */
+.cf-screen .cf-screen-control-stack[data-cast-mode="true"] {
+  z-index: calc(var(--cf-layer-dialog, 50) + 1);
 }
 /* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
    reveal painted even before React flips data-visible (issue #595). */
@@ -1835,7 +2025,10 @@ const SCREEN_CSS = `
 .cf-exit-pin {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* Above both the safety curtain (--cf-layer-dialog) and the control stack
+     that opens this dialog (issue #1908) — this dialog must never be
+     strandable under either, matching the control-stack comment above. */
+  z-index: calc(var(--cf-layer-dialog, 50) + 2);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -1925,6 +2118,7 @@ const SCREEN_CSS = `
   gap: 2.4cqw;
   font-size: max(15px, 2.7cqh);
   color: var(--color-neutral-200);
+  pointer-events: none;
 }
 .cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
 .cf-screen .cf-status-round { font-weight: 600; }

@@ -31,7 +31,7 @@ function semantic(page: Page, kind: 'quest-status' | 'npc-disposition', value: s
  * scene, so switch the stage there before asserting on the cast display. */
 async function showCastQuestsScene(page: Page): Promise<void> {
   await page.mouse.move(24, 24);
-  await page.getByTestId('cf-scene-btn-quests').click();
+  await page.getByTestId('cf-scene-btn-quests').click({ force: true });
   await expect(page.getByTestId('cf-stage')).toHaveAttribute('data-scene', 'quests');
 }
 

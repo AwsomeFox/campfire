@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type {
+  CastSafetyState,
   CastSession,
   CastSessionCreated,
   CastSessionMutationResult,
@@ -178,6 +179,29 @@ export class PublicCastController {
     @Param('encounterId', ParseIntPipe) encounterId: number,
   ): Promise<EncounterWithCombatants> {
     return this.cast.encounter(token, encounterId);
+  }
+
+  /**
+   * X-Card state for the cast display (issue #1908).
+   *
+   * A cast client has no member identity, so it cannot call the member-facing
+   * `GET /campaigns/:id/safety`. This is the same anonymity contract minus everything:
+   * no actor, name, note, or timestamp — just the one field every gate reads.
+   */
+  @Public()
+  @Header('Cache-Control', 'private, no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  @Get('safety')
+  @ApiOperation({
+    summary: 'Read whether the table safety hold (X-Card) is active, for the cast display',
+    description:
+      'Public capability endpoint. Returns exactly `{ active }` — no actor, name, note, or timestamp. ' +
+      'Invalid, revoked, expired, archived, and deleted sessions 404 uniformly, like every sibling cast route.',
+  })
+  @ApiResponse({ status: 200, description: 'Whether play is currently frozen.' })
+  @ApiResponse({ status: 404, description: 'Cast session is invalid, revoked, or expired.' })
+  async safety(@Param('token') token: string): Promise<CastSafetyState> {
+    return this.cast.safety(token);
   }
 
   /**

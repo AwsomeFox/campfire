@@ -1,7 +1,18 @@
-import { expect, test, type Request } from '@playwright/test';
+import { expect, test, type Page, type Request } from '@playwright/test';
 import { stateFor } from './seed';
 
 const TOKEN = `cf_cast_${'a'.repeat(48)}`;
+
+/** Client-side navigation — pushState + popstate is exactly what a client-side
+ * navigation does to createBrowserRouter, reusing the mounted route element
+ * rather than remounting it the way `page.goto()` would. See
+ * `ai-table-campaign-switch.spec.ts` (#572) for the same technique. */
+async function navigateClientSide(page: Page, to: string): Promise<void> {
+  await page.evaluate((href) => {
+    window.history.pushState({}, '', href);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+  }, to);
+}
 const CAST_PARTY = [{
   id: 1,
   name: 'Ember',
@@ -63,6 +74,13 @@ test.describe('Player Display cast sessions', () => {
       castCalls.push(route.request().url());
       expectCastFetchWithoutCookies(route.request());
       return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    });
+    // Issue #1908: the display fails safe (renders the curtain) until the first
+    // safety poll actually succeeds, so this route must resolve for any test that
+    // interacts with the page underneath it.
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) => {
+      castCalls.push(route.request().url());
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) });
     });
     await page.route(`**/api/v1/cast/${TOKEN}/exit`, (route) => {
       castCalls.push(route.request().url());
@@ -155,6 +173,9 @@ test.describe('Player Display cast sessions', () => {
     await page.route(`**/api/v1/cast/${TOKEN}/encounters/${encounterId}`, (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(encounter) }),
     );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) }),
+    );
 
     await page.addInitScript(() => {
       window.localStorage.setItem('cf.screen.scene.7', 'map');
@@ -180,15 +201,232 @@ test.describe('Player Display cast sessions', () => {
     expect(encounterMapCalls).toEqual([]);
     expect(await page.getByRole('img', { name: 'Battle map' }).getAttribute('srcset')).toBeNull();
   });
+
+  /**
+   * Issue #1908 — a cast client has no member identity, so it cannot read the
+   * member-scoped `GET /campaigns/:id/safety` behind `useTableSafety`. It must still
+   * blank the fight when the table raises an X-Card: this proves the anonymous
+   * `/cast/:token/safety` poll drives the same overlay the authed route uses.
+   */
+  test('cast display blanks on an X-Card safety hold and restores on release', async ({ page }) => {
+    let holdActive = false;
+    const safetyCalls: Request[] = [];
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) => {
+      safetyCalls.push(route.request());
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ active: holdActive }),
+      });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+
+    // Fetched on mount, before the first poll tick — proves the safety projection
+    // itself carries no more than `{ active }` over the wire (no cookies either,
+    // same anonymity contract as every other cast route).
+    await expect.poll(() => safetyCalls.length).toBeGreaterThan(0);
+    expectCastFetchWithoutCookies(safetyCalls[0]);
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
+
+    // Raising the hold must blank the display within the acceptance criteria's 15s
+    // bound; the page polls every 5s, comfortably inside it. The overlay is a
+    // `position: fixed` full-viewport scrim (same markup the authed route renders),
+    // so it visually covers the scene beneath it without unmounting it.
+    holdActive = true;
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('safety-display-overlay')).toContainText('The table is paused.');
+
+    // Releasing restores the scene.
+    holdActive = false;
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
+  });
+
+  /**
+   * Issue #1908 rework, round 4 — "no hold" and "never successfully checked"
+   * are different states, and only the confirmed former may render as an open
+   * display. Before the first `/safety` poll actually resolves, the page
+   * cannot yet distinguish "no hold" from "don't know" — it must fail safe
+   * and render as if a hold were active, not default to the open scene.
+   */
+  test('cast display shows the curtain until the first safety poll succeeds, even when no hold is active', async ({ page }) => {
+    let releaseSafety!: () => void;
+    const safetyGate = new Promise<void>((resolve) => {
+      releaseSafety = resolve;
+    });
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, async (route) => {
+      await safetyGate; // hold the response open until the test explicitly releases it
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ active: false }),
+      });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+
+    // The first /safety poll is still in flight — no hold is actually active,
+    // but that isn't known yet. The display must fail safe rather than
+    // assume the open scene.
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // Once the poll actually succeeds and confirms no hold, the curtain lifts.
+    releaseSafety();
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Party' }).getByText('Ember', { exact: true })).toBeVisible();
+  });
+
+  /**
+   * Issue #1908 rework, round 6 — `/cast/:campaignId/:token` is a single
+   * unkeyed route element, so a client-side transition between two different
+   * cast identities REUSES the mounted `PlayerDisplayPage`, not remounts it.
+   * The prior campaign's last-known safety state must not survive that
+   * transition: a display that last confirmed "no hold" on campaign A must
+   * fail safe (show the curtain) for campaign B until B's OWN poll succeeds
+   * — even if B's hold is already active and its poll is slow to confirm it.
+   */
+  test('safety knowledge resets to unknown on a client-side cast identity change, even when the new hold is already active', async ({ page }) => {
+    const CAMPAIGN_B = 8;
+    const TOKEN_B = `cf_cast_${'b'.repeat(48)}`;
+    let releaseSafetyB!: () => void;
+    const safetyBGate = new Promise<void>((resolve) => {
+      releaseSafetyB = resolve;
+    });
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+
+    // Campaign A: confirmed no hold.
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) }),
+    );
+
+    // Campaign B: its hold is ALREADY active, but the safety poll is slow to
+    // confirm it — the case that matters is what the display shows in the
+    // gap, not just the eventual correct value.
+    await page.route(`**/api/v1/cast/${TOKEN_B}/summary`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(castSummary(CAMPAIGN_B, 'Second Cast Campaign')),
+      }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN_B}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN_B}/safety`, async (route) => {
+      await safetyBGate;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: true }) });
+    });
+
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cf.screen.scene.7', 'party');
+      window.localStorage.setItem('cf.screen.scene.8', 'party');
+    });
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByRole('heading', { name: 'Cast-Safe Campaign' })).toBeVisible();
+    await expect(page.getByTestId('safety-display-overlay')).toHaveCount(0);
+
+    await navigateClientSide(page, `/cast/${CAMPAIGN_B}/${TOKEN_B}`);
+    await expect(page.getByRole('heading', { name: 'Second Cast Campaign' })).toBeVisible();
+
+    // Campaign A's confirmed "no hold" must not carry over: campaign B's own
+    // poll hasn't resolved yet, so the display must fail safe.
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // Confirms this isn't just the fail-safe default settling into the
+    // correct value by coincidence — B's hold really is active.
+    releaseSafetyB();
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+    await expect(page.getByTestId('safety-display-overlay')).toContainText('The table is paused.');
+  });
+
+  /**
+   * Issue #1908 rework, round 7 — the safety curtain is now also this page's
+   * fail-safe DEFAULT (before the first `/safety` poll succeeds) and can
+   * persist indefinitely if that poll keeps failing. On the cast/kiosk route
+   * "Exit kiosk" is the ONLY affordance a touch-only shared TV has to leave
+   * kiosk mode — a curtain that visually and interactively outranks it would
+   * strand the device with no way out short of a second device. The button
+   * must stay clickable (and the PIN dialog it opens must stay usable) with
+   * the curtain up.
+   */
+  test('Exit kiosk stays clickable, and its PIN dialog stays usable, while the safety curtain is showing', async ({ page }) => {
+    let releaseSafety!: () => void;
+    const safetyGate = new Promise<void>((resolve) => {
+      releaseSafety = resolve;
+    });
+    let exitVerified = false;
+
+    await page.route('**/api/v1/campaigns/**', (route) => route.abort());
+    await page.route(`**/api/v1/cast/${TOKEN}/summary`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(castSummary()) }),
+    );
+    await page.route(`**/api/v1/cast/${TOKEN}/encounters?status=running`, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+    );
+    // The safety poll never resolves in this test — the curtain stays up via
+    // the fail-safe default for the whole test, exactly like a persistently
+    // failing/slow safety endpoint in production.
+    await page.route(`**/api/v1/cast/${TOKEN}/safety`, async (route) => {
+      await safetyGate;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ active: false }) });
+    });
+    await page.route(`**/api/v1/cast/${TOKEN}/exit`, (route) => {
+      expect(route.request().postDataJSON()).toEqual({ pin: '123456' });
+      exitVerified = true;
+      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+    });
+
+    await page.addInitScript(() => window.localStorage.setItem('cf.screen.scene.7', 'party'));
+    await page.goto(`/cast/7/${TOKEN}`);
+    await expect(page.getByTestId('safety-display-overlay')).toBeVisible();
+
+    // The Exit kiosk button must remain clickable with the curtain up.
+    await page.getByRole('button', { name: 'Exit kiosk' }).click();
+    const exitDialog = page.getByRole('dialog', { name: 'Exit kiosk mode?' });
+    await expect(exitDialog).toBeVisible();
+    await page.getByLabel('Exit PIN').fill('123456');
+    await page.getByRole('button', { name: 'Verify and sign in' }).click();
+    await expect.poll(() => exitVerified).toBe(true);
+
+    releaseSafety();
+  });
 });
 
 /** 1x1 transparent PNG — the map bytes' contents are irrelevant, only their source is. */
 const TRANSPARENT_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
-function castSummary() {
+function castSummary(id = 7, name = 'Cast-Safe Campaign') {
   return {
-    campaign: { id: 7, name: 'Cast-Safe Campaign', sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
+    campaign: { id, name, sessionCount: 0, latestSessionNumber: 0, ruleSystem: '' },
     currentLocation: null,
     quests: [],
     npcs: [],
