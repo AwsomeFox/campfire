@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, inArray, lte } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, notExists, sql } from 'drizzle-orm';
 import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { diceRolls, encounters, npcs } from '../../db/schema';
@@ -183,26 +183,37 @@ export class RollsService implements OnApplicationBootstrap {
         .limit(limit);
       return rows.map(toDomain);
     }
-    // Issue #1904 review finding: applying the DB LIMIT before redaction can hand a non-DM
-    // caller a short (or empty) page while older VISIBLE rolls exist just past the cutoff —
-    // the newest `limit` rows might happen to be exactly the ones redaction then drops.
-    // Fetch a wider CANDIDATE window, redact THAT, and only then take the requested page —
-    // never the other way around. The candidate window covers the durable retention ceiling
-    // when it is finite (in the common case that already IS the whole per-campaign table,
-    // since the background sweep keeps it pruned to that size) and falls back to the
-    // platform default as a query-cost safety net when retention is configured unbounded
-    // (0/negative — "keep everything" is a deliberate operator choice about durable history,
-    // not license for an unbounded per-request query).
-    const retention = resolveDiceRollsRetention();
-    const candidateLimit = Math.max(limit, retention > 0 ? retention : DEFAULT_DICE_ROLLS_RETENTION);
+    // Issue #1904 review finding (2 rounds): applying the LIMIT before dropping
+    // hidden-encounter rolls can hand a non-DM caller a short (or empty) page while older
+    // VISIBLE rolls exist just past the cutoff. The first fix widened the candidate window
+    // and redacted in app code — CORRECT, but it made every non-DM poll of this endpoint
+    // (the hottest one in live play) fetch up to the full retention ceiling instead of the
+    // page actually asked for, ~20x the DB/JSON-decode work per poll. Pushing the exclusion
+    // into the query itself removes the amplification rather than bounding it: a correlated
+    // NOT EXISTS drops a row whose encounter is hidden RIGHT THERE, so the existing LIMIT is
+    // already correct and the SQL engine (not this process) does the filtering work.
+    //
+    // Hidden-NPC label masking deliberately stays OUT of this query: unlike the
+    // encounter-hidden case, it never removes a row (see maskHiddenNpcLabels below) — only
+    // the ROW-COUNT-changing predicate needs to be pushed into SQL to fix pagination; a
+    // predicate that just swaps a label can stay a plain, LIMIT-bounded post-process.
     const rows = await this.db
       .select()
       .from(diceRolls)
-      .where(eq(diceRolls.campaignId, campaignId))
+      .where(
+        and(
+          eq(diceRolls.campaignId, campaignId),
+          notExists(
+            this.db
+              .select({ one: sql`1` })
+              .from(encounters)
+              .where(and(eq(encounters.id, diceRolls.encounterId), eq(encounters.hidden, true))),
+          ),
+        ),
+      )
       .orderBy(desc(diceRolls.id))
-      .limit(candidateLimit);
-    const redacted = await this.redactForRole(rows.map(toDomain));
-    return redacted.slice(0, limit);
+      .limit(limit);
+    return this.maskHiddenNpcLabels(rows.map(toDomain));
   }
 
   /**
@@ -227,50 +238,71 @@ export class RollsService implements OnApplicationBootstrap {
    * redacts what a non-DM may no longer see, regardless of what was safe to persist at
    * WRITE time. A roll naming a now-hidden ENCOUNTER is dropped wholesale (mirrors that
    * hidden encounters are indistinguishable from nonexistent for a non-DM elsewhere in this
-   * codebase); a roll naming a combatant linked to a now-hidden NPC keeps its row (the dice
-   * log entry itself is not secret — only the label's naming — mirroring how a hidden-NPC
-   * combatant token still shows in initiative order without exposing who it is) but has its
-   * label replaced.
+   * codebase); a roll naming a combatant linked to a now-hidden NPC keeps its row and gets
+   * its label masked via {@link maskHiddenNpcLabels}.
+   *
+   * Used only by {@link redactRollForRole} (the single-roll idempotent-replay path), where
+   * there is no SQL query to push a filter into — `listForCampaign` instead expresses the
+   * row-dropping encounter check directly in its query (a correlated `NOT EXISTS`) and calls
+   * `maskHiddenNpcLabels` on its own already-paginated result, so a non-DM's list read never
+   * pays for an app-level filter over a wide over-fetched candidate window (issue #1904
+   * follow-up review finding: the earlier app-level version of this filter, applied here,
+   * required exactly that over-fetch to keep pagination correct, ~20x the per-poll cost on
+   * the hottest polling endpoint in live play).
    */
-  // The reconstructed label assumes the exact "<name> · Initiative" suffix every current
-  // npcId-tagged producer writes (encounters.service.ts's bulk and per-combatant initiative
-  // rolls — the only callers that set npcId today), and matches the SAME string those write
-  // paths already use for an NPC hidden AT roll time, so a masked entry looks identical
-  // regardless of when the hide happened. Revisit this if a future roll type starts tagging
-  // npcId for a different action label.
   private async redactForRole(rolls: DiceRoll[]): Promise<DiceRoll[]> {
     const encounterIds = [...new Set(rolls.map((r) => r.encounterId).filter((id): id is number => id !== undefined))];
+    if (encounterIds.length === 0) return this.maskHiddenNpcLabels(rolls);
+
+    const hiddenEncounterIds = new Set(
+      (await this.db.select({ id: encounters.id }).from(encounters).where(and(inArray(encounters.id, encounterIds), eq(encounters.hidden, true)))).map(
+        (r) => r.id,
+      ),
+    );
+    const survivors =
+      hiddenEncounterIds.size === 0 ? rolls : rolls.filter((r) => r.encounterId === undefined || !hiddenEncounterIds.has(r.encounterId));
+    return this.maskHiddenNpcLabels(survivors);
+  }
+
+  /**
+   * Issue #1904: masks the label (and severs `npcId`) of any roll linked to a combatant
+   * whose NPC is CURRENTLY hidden — the dice log entry itself is not secret, only the
+   * label's naming, mirroring how a hidden-NPC combatant token still shows in initiative
+   * order without exposing who it is. Deliberately does NOT drop the row: unlike the
+   * hidden-ENCOUNTER case, this never changes the result's row count, so `listForCampaign`
+   * can call it directly on its already-paginated (LIMIT-bounded) page with no risk of
+   * shrinking it below the requested size — no over-fetch needed for this half of
+   * redaction, only for the row-dropping encounter check (pushed into SQL instead, see
+   * `listForCampaign`).
+   *
+   * The reconstructed label assumes the exact "<name> · Initiative" suffix every current
+   * npcId-tagged producer writes (encounters.service.ts's bulk and per-combatant initiative
+   * rolls — the only callers that set npcId today), and matches the SAME string those write
+   * paths already use for an NPC hidden AT roll time, so a masked entry looks identical
+   * regardless of when the hide happened. Revisit this if a future roll type starts tagging
+   * npcId for a different action label.
+   */
+  private async maskHiddenNpcLabels(rolls: DiceRoll[]): Promise<DiceRoll[]> {
     const npcIds = [...new Set(rolls.map((r) => r.npcId).filter((id): id is number => id !== undefined))];
-    if (encounterIds.length === 0 && npcIds.length === 0) return rolls;
+    if (npcIds.length === 0) return rolls;
 
-    const hiddenEncounterIds = encounterIds.length
-      ? new Set(
-          (await this.db.select({ id: encounters.id }).from(encounters).where(and(inArray(encounters.id, encounterIds), eq(encounters.hidden, true)))).map(
-            (r) => r.id,
-          ),
-        )
-      : new Set<number>();
-    const hiddenNpcIds = npcIds.length
-      ? new Set(
-          (await this.db.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIds), eq(npcs.hidden, true)))).map((r) => r.id),
-        )
-      : new Set<number>();
-    if (hiddenEncounterIds.size === 0 && hiddenNpcIds.size === 0) return rolls;
+    const hiddenNpcIds = new Set(
+      (await this.db.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIds), eq(npcs.hidden, true)))).map((r) => r.id),
+    );
+    if (hiddenNpcIds.size === 0) return rolls;
 
-    return rolls
-      .filter((r) => r.encounterId === undefined || !hiddenEncounterIds.has(r.encounterId))
-      .map((r) => {
-        if (r.npcId === undefined || !hiddenNpcIds.has(r.npcId)) return r;
-        // Issue #1904 review finding (reported 3x): masking the LABEL is not enough while
-        // `npcId` survives the object spread — a stable id is exactly what lets a player
-        // correlate this roll with a later reveal of the same NPC ("the creature that
-        // rolled initiative back then IS this one"), reconstructing the identity the label
-        // mask was supposed to withhold. Null it out alongside the label, same as the
-        // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
-        // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
-        const { npcId: _npcId, ...withoutNpcId } = r;
-        return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` };
-      });
+    return rolls.map((r) => {
+      if (r.npcId === undefined || !hiddenNpcIds.has(r.npcId)) return r;
+      // Issue #1904 review finding (reported 3x): masking the LABEL is not enough while
+      // `npcId` survives the object spread — a stable id is exactly what lets a player
+      // correlate this roll with a later reveal of the same NPC ("the creature that
+      // rolled initiative back then IS this one"), reconstructing the identity the label
+      // mask was supposed to withhold. Null it out alongside the label, same as the
+      // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
+      // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
+      const { npcId: _npcId, ...withoutNpcId } = r;
+      return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` };
+    });
   }
 
   /**
