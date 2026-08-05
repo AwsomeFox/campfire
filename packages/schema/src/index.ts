@@ -12911,3 +12911,19 @@ export const CampaignLibraryTemplateSave = z.object({ entityType: LibraryEntityT
 export type CampaignLibraryTemplateSave = z.infer<typeof CampaignLibraryTemplateSave>;
 export const CampaignLibraryTemplateInstantiate = z.object({ name: LibraryName.optional(), refs: z.record(z.string().max(80), Id).default({}) }).strict();
 export type CampaignLibraryTemplateInstantiate = z.infer<typeof CampaignLibraryTemplateInstantiate>;
+
+export const EncounterTemplateRosterEntry = z.object({
+  kind: CombatantKind.exclude(['character']),
+  name: z.string().min(1).max(120),
+  statblock: CombatantStatblock.nullable().optional().default(null),
+  hpMax: z.number().int().min(0),
+  initMod: z.number().int().default(0),
+  tokenSize: TokenSize.default('medium'),
+  sortOrder: z.number().int().default(0),
+  count: z.number().int().min(1).default(1),
+});
+export type EncounterTemplateRosterEntry = z.infer<typeof EncounterTemplateRosterEntry>;
+
+export const EncounterTemplateRoster = z.array(EncounterTemplateRosterEntry);
+export type EncounterTemplateRoster = z.infer<typeof EncounterTemplateRoster>;
+

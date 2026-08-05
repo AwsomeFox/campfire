@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import type { RequestUser } from '../../src/common/user.types';
-import { campaigns, characters, inventoryItems } from '../../src/db/schema';
+import { combatants, campaignLibraryTemplates, campaigns, characters, encounters, inventoryItems, npcs } from '../../src/db/schema';
+import { CombatantStatblock, EncounterTemplateRoster, EncounterTemplateRosterEntry } from '@campfire/schema';
 import { nowIso } from '../../src/common/time';
 
 describe('CampaignLibraryService unit coverage tests', () => {
@@ -166,4 +168,196 @@ describe('CampaignLibraryService unit coverage tests', () => {
 
     expect(emitSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'character.updated', campaignId, characterId: character.id }));
   });
+
+  it('validates EncounterTemplateRosterEntry schema bounds and default fields', () => {
+    const valid = EncounterTemplateRosterEntry.parse({
+      kind: 'monster',
+      name: 'Goblin',
+      hpMax: 10,
+    });
+    expect(valid).toMatchObject({
+      kind: 'monster',
+      name: 'Goblin',
+      statblock: null,
+      hpMax: 10,
+      initMod: 0,
+      tokenSize: 'medium',
+      sortOrder: 0,
+      count: 1,
+    });
+
+    expect(() => EncounterTemplateRosterEntry.parse({ kind: 'invalid_kind', name: 'X', hpMax: 5 })).toThrow();
+    expect(() => EncounterTemplateRosterEntry.parse({ kind: 'monster', name: '', hpMax: 5 })).toThrow();
+    expect(() => EncounterTemplateRosterEntry.parse({ kind: 'monster', name: 'X', hpMax: -1 })).toThrow();
+    expect(() => EncounterTemplateRosterEntry.parse({ kind: 'monster', name: 'X', hpMax: 5, count: 0 })).toThrow();
+
+    const roster = EncounterTemplateRoster.parse([valid, { kind: 'npc', name: 'Guard', hpMax: 20, count: 2 }]);
+    expect(roster.length).toBe(2);
+  });
+
+  it('snapshots roster composition, strips play state, and excludes PCs / linked NPCs when saving encounter templates', async () => {
+    const ts = nowIso();
+    const [enc] = await db.insert(encounters).values({ campaignId, name: 'Goblin Ambush', createdAt: ts, updatedAt: ts }).returning();
+    const [pcChar] = await db.insert(characters).values({ campaignId, name: 'Hero PC', createdAt: ts, updatedAt: ts }).returning();
+    const [npcEntity] = await db.insert(npcs).values({ campaignId, name: 'Guide NPC', createdAt: ts, updatedAt: ts }).returning();
+
+    const gobStatblock = {
+      ac: 15,
+      abilityScores: { STR: 8, DEX: 14, CON: 10, INT: 10, WIS: 8, CHA: 8 },
+      actions: [{ name: 'Scimitar', kind: 'melee', toHit: '+4', damage: '1d6+2 slashing', notes: '' }],
+      traits: [], resources: {}, spellSlots: {}, notes: 'Sneaky',
+    };
+
+    // Add 4 Goblins with mid-fight play state
+    for (let i = 1; i <= 4; i++) {
+      await db.insert(combatants).values({
+        encounterId: enc.id,
+        kind: 'monster',
+        name: `Goblin ${i}`,
+        statblockJson: JSON.stringify(gobStatblock),
+        hpMax: 10,
+        hpCurrent: 3, // Damaged!
+        initMod: 2,
+        initiative: 14, // Mid-fight initiative!
+        initiativeBreakdown: '1d20+2',
+        initiativeGroup: 'monsters',
+        hpTemp: 4,
+        deathState: 'dying',
+        deathSaveSuccesses: 1,
+        deathSaveFailures: 2,
+        conditions: '["blinded"]',
+        conditionInstances: JSON.stringify([{ id: 'c1', name: 'blinded' }]),
+        turnState: JSON.stringify({ movementUsed: 10 }),
+        activeEffects: JSON.stringify([{ id: 'ae1', name: 'Bess' }]),
+        tokenX: 25.5,
+        tokenY: 40.0,
+        tokenSize: 'small',
+        sortOrder: i - 1,
+      });
+    }
+
+    // Add 1 PC combatant
+    await db.insert(combatants).values({
+      encounterId: enc.id,
+      kind: 'character',
+      characterId: pcChar.id,
+      name: pcChar.name,
+      hpMax: 25,
+      hpCurrent: 25,
+      initMod: 1,
+      initiative: 18,
+      sortOrder: 4,
+    });
+
+    // Add 1 linked NPC combatant
+    await db.insert(combatants).values({
+      encounterId: enc.id,
+      kind: 'npc',
+      npcId: npcEntity.id,
+      name: npcEntity.name,
+      hpMax: 15,
+      hpCurrent: 15,
+      initMod: 0,
+      initiative: 8,
+      sortOrder: 5,
+    });
+
+    // Save as template
+    const template = await libraryService.saveTemplate(campaignId, { entityType: 'encounter', entityId: enc.id, name: 'Ambush Template' }, dmActor, 'dm');
+
+    const snapshot = template.snapshot as { roster?: Array<Record<string, unknown>> };
+    expect(snapshot.roster).toBeDefined();
+    expect(snapshot.roster).toHaveLength(1);
+    expect(snapshot.roster![0]).toMatchObject({
+      kind: 'monster',
+      name: 'Goblin',
+      count: 4,
+      hpMax: 10,
+      initMod: 2,
+      tokenSize: 'small',
+      sortOrder: 0,
+      statblock: gobStatblock,
+    });
+
+    // Instantiate template
+    const instantiated = await libraryService.instantiateTemplate(campaignId, template.id, { name: 'Instantiated Ambush' }, dmActor, 'dm');
+    const newEncId = instantiated.entityId;
+
+    const instantiatedCombatants = await db.select().from(combatants).where(eq(combatants.encounterId, newEncId)).orderBy(combatants.sortOrder);
+    expect(instantiatedCombatants).toHaveLength(4);
+
+    // Assert full HP, initiative null, play state cleared, no PCs/linked NPCs
+    for (let i = 0; i < 4; i++) {
+      const c = instantiatedCombatants[i];
+      expect(c.name).toBe(`Goblin ${i + 1}`);
+      expect(c.kind).toBe('monster');
+      expect(c.hpMax).toBe(10);
+      expect(c.hpCurrent).toBe(10); // Restored full HP!
+      expect(c.hpTemp).toBe(0); // Restored 0 temp HP!
+      expect(c.initiative).toBeNull(); // Initiative cleared!
+      expect(c.initiativeBreakdown).toBeNull();
+      expect(c.initiativeGroup).toBeNull();
+      expect(c.deathState).toBe('none');
+      expect(c.deathSaveSuccesses).toBe(0);
+      expect(c.deathSaveFailures).toBe(0);
+      expect(c.conditions).toBe('[]');
+      expect(c.conditionInstances).toBeNull();
+      expect(c.turnState).toBeNull();
+      expect(c.activeEffects).toBeNull();
+      expect(c.tokenX).toBeNull();
+      expect(c.tokenY).toBeNull();
+      expect(CombatantStatblock.parse(JSON.parse(c.statblockJson!))).toMatchObject(CombatantStatblock.parse(gobStatblock));
+    }
+  });
+
+  it('instantiates pre-existing templates without roster backwards-compatibly', async () => {
+    const ts = nowIso();
+    const [enc] = await db.insert(encounters).values({ campaignId, name: 'Bare Encounter', createdAt: ts, updatedAt: ts }).returning();
+    const template = await libraryService.saveTemplate(campaignId, { entityType: 'encounter', entityId: enc.id, name: 'Bare Template' }, dmActor, 'dm');
+
+    // Mutate stored snapshotJson to omit 'roster' completely to simulate legacy template
+    const [row] = await db.select().from(campaignLibraryTemplates).where(eq(campaignLibraryTemplates.id, template.id));
+    const rawSnapshot = JSON.parse(row.snapshotJson);
+    delete rawSnapshot.roster;
+    await db.update(campaignLibraryTemplates)
+      .set({ snapshotJson: JSON.stringify(rawSnapshot) })
+      .where(eq(campaignLibraryTemplates.id, template.id));
+
+    // Instantiate legacy bare template
+    const instantiated = await libraryService.instantiateTemplate(campaignId, template.id, { name: 'Instantiated Bare' }, dmActor, 'dm');
+    const newEncId = instantiated.entityId;
+    const instantiatedCombatants = await db.select().from(combatants).where(eq(combatants.encounterId, newEncId));
+    expect(instantiatedCombatants).toHaveLength(0);
+  });
+
+  it('preserves raw names for singleton entries and fails fast on invalid roster', async () => {
+    const ts = nowIso();
+    const [enc] = await db.insert(encounters).values({ campaignId, name: 'Boss Fight', createdAt: ts, updatedAt: ts }).returning();
+    await db.insert(combatants).values({
+      encounterId: enc.id,
+      kind: 'monster',
+      name: 'Goblin Boss 1',
+      hpMax: 30,
+      hpCurrent: 30,
+      initMod: 3,
+      sortOrder: 0,
+    });
+
+    const template = await libraryService.saveTemplate(campaignId, { entityType: 'encounter', entityId: enc.id, name: 'Boss Template' }, dmActor, 'dm');
+    const snapshot = template.snapshot as { roster?: Array<Record<string, unknown>> };
+    expect(snapshot.roster![0].name).toBe('Goblin Boss 1'); // Singleton raw name preserved!
+
+    const instantiated = await libraryService.instantiateTemplate(campaignId, template.id, { name: 'Instantiated Boss' }, dmActor, 'dm');
+    const instantiatedCombatants = await db.select().from(combatants).where(eq(combatants.encounterId, instantiated.entityId));
+    expect(instantiatedCombatants[0].name).toBe('Goblin Boss 1');
+
+    // Mutate stored snapshotJson to contain invalid roster
+    await db.update(campaignLibraryTemplates)
+      .set({ snapshotJson: JSON.stringify({ ...snapshot, roster: [{ invalidField: true }] }) })
+      .where(eq(campaignLibraryTemplates.id, template.id));
+
+    await expect(libraryService.instantiateTemplate(campaignId, template.id, { name: 'Fail' }, dmActor, 'dm'))
+      .rejects.toThrow();
+  });
 });
+

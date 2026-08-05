@@ -19,6 +19,7 @@ import {
   pf2eProficiencyBonus,
   resolveAttackForAdapter,
   halveDamage,
+  inferActionSpecFromText,
   isResolvableSpec,
   parseSignedBonus,
   pickOutcomeBranch,
@@ -349,3 +350,49 @@ describe('isResolvableSpec — fallback gate (no silent math)', () => {
     expect(isResolvableSpec(undefined)).toBe(false);
   });
 });
+
+describe('inferActionSpecFromText — sheet action spec inference (issue #1930)', () => {
+  it('infers an attack spec from "+5" and "1d8+3 slashing"', () => {
+    const spec = inferActionSpecFromText('+5', '1d8+3 slashing', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d8', flat: 3, type: 'slashing' }]);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('infers an attack spec from bare bonus with no damage', () => {
+    const spec = inferActionSpecFromText('+5', '', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('infers a save spec from "DC 15" and "3d6 fire"', () => {
+    const spec = inferActionSpecFromText('DC 15', '3d6 fire', 'spell');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('save');
+    expect(spec?.save.dc.dc).toBe(15);
+    expect(spec?.outcomes.failure?.damage).toEqual([{ formula: '3d6', flat: 0, type: 'fire' }]);
+    expect(spec?.outcomes.success?.halfDamage).toBe(true);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('preserves negative flat damage modifiers ("1d4-1 poison")', () => {
+    const spec = inferActionSpecFromText('+5', '1d4-1 poison', '');
+    expect(spec).toBeDefined();
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d4', flat: -1, type: 'poison' }]);
+  });
+
+  it('returns undefined for non-resolvable text or empty input', () => {
+    expect(inferActionSpecFromText('', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('versatile', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('', '3d6 fire', 'save')).toBeUndefined();
+  });
+});
+
+
