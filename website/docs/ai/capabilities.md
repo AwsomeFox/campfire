@@ -535,8 +535,9 @@ one has a narrative fallback and the other does not:
 - A dice roll's roller display name *is* redacted for a roller who has not consented,
   falling back to the in-fiction character name — campaign canon the DM owns — or
   "Unknown". The roll itself (and the character name) is always kept either way.
-- An encounter event's acting member's account id (`performedBy`) carries no narrative
-  value a recap ever uses — nothing renders it — so it is stripped unconditionally,
+- An encounter event's acting member's account id (`performedBy.userId`) carries no
+  narrative value a recap ever uses — nothing renders it — so it is stripped
+  unconditionally,
   regardless of consent, rather than redacted per member. The mechanical trail itself
   (round, type, combatant/character names, damage/heal/condition detail) is never dropped:
   gating it on consent would gut recap quality for exactly the fights a recap is about,

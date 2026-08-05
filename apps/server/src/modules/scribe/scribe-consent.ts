@@ -59,10 +59,17 @@ function withoutRollerUserId(
  * `encounters[].events` is the round-by-round damage/heal/condition/death/turn trail
  * (issue #1068). It is NOT gated on per-member consent, and deliberately so: combatants
  * are campaign entities, not user accounts, and there is no per-event author to check
- * consent for — `actor`/`target` are combatant/character names, which (like a dice roll's
- * `actor`) are campaign canon the DM owns, not member-identifying. Dropping events wholesale
- * to be "safe" would gut recap quality for exactly the fights a recap is about, for no
- * privacy gain.
+ * consent for — for the overwhelming majority of events `actor`/`target` are
+ * combatant/character names, which (like a dice roll's `actor`) are campaign canon the DM
+ * owns, not member-identifying. Dropping events wholesale to be "safe" would gut recap
+ * quality for exactly the fights a recap is about, for no privacy gain.
+ *
+ * That "overwhelming majority" is doing real work, and an earlier version of this comment
+ * asserted it without the qualifier (issue #1520 review). `token_batch` events are the
+ * counterexample: `applyTokenBatch`/`undoTokenBatch` persist them with
+ * `actor: user.name, actorId: null` — the acting member's DISPLAY NAME, not a combatant.
+ * So `actor` is campaign canon exactly when the event names a combatant, and is a user
+ * attribution otherwise. See {@link USER_ATTRIBUTED_EVENT_TYPES}.
  *
  * The ONE genuinely member-identifying value an event carries is `performedBy.userId` — the
  * real account id (or PAT `token:<name>`) of whoever committed the action that produced the
@@ -87,6 +94,52 @@ function withoutPerformedByUserId(
         }
       : encounter,
   );
+}
+
+/**
+ * Encounter-event types whose `actor` is a USER's display name rather than a combatant's.
+ *
+ * Exactly one today (`token_batch`, written by `applyTokenBatch`/`undoTokenBatch` as
+ * `actor: user.name, actorId: null`), but the set — not the single string — is the contract,
+ * because the failure mode here is a future producer quietly adding a second one. A guard
+ * test in `scribe-consent.spec.ts` scans every `insert(encounterEvents)` call in the server
+ * for `actor: user.name` and requires each such event type to appear in this set, so adding
+ * a producer without adding it here fails rather than silently leaking a display name.
+ *
+ * Stripping (rather than redacting per consent) matches `performedBy.userId`'s treatment and
+ * for the same reason: a recap never renders a token-placement actor — `buildRecapDraft`
+ * only reads `encounterLine`, which does not touch events — so there is no narrative
+ * fallback to preserve and nothing to gate. The event itself, its round, type and `detail`
+ * ("N token placements") all survive; only the member's name goes.
+ */
+export const USER_ATTRIBUTED_EVENT_TYPES: ReadonlySet<string> = new Set(['token_batch']);
+
+/**
+ * Clear `actor` on events whose actor is a user attribution rather than campaign canon.
+ *
+ * Applied on BOTH egress paths, like the two strips above — a member's display name reaching
+ * an external model is the same disclosure whether the recap is drafted locally or not.
+ */
+function withoutUserAttributedActors(
+  encounters: RecapDraftSource['encounters'],
+): RecapDraftSource['encounters'] {
+  return encounters.map((encounter) =>
+    encounter.events
+      ? {
+          ...encounter,
+          events: encounter.events.map((event) =>
+            USER_ATTRIBUTED_EVENT_TYPES.has(event.type) ? { ...event, actor: null } : event,
+          ),
+        }
+      : encounter,
+  );
+}
+
+/** Both event-level strips, in one call, so the two egress paths cannot drift apart. */
+function sanitizeEncounterEvents(
+  encounters: RecapDraftSource['encounters'],
+): RecapDraftSource['encounters'] {
+  return withoutUserAttributedActors(withoutPerformedByUserId(encounters));
 }
 
 /**
@@ -160,7 +213,7 @@ export function filterSourceForExternalAiConsent(
     source: {
       ...source,
       resolvedInbox,
-      encounters: withoutPerformedByUserId(source.encounters),
+      encounters: sanitizeEncounterEvents(source.encounters),
       ...(diceRolls ? { diceRolls } : {}),
     },
     consent: {
@@ -206,7 +259,7 @@ export function retainSourceForLocalGeneration(
     source: {
       ...source,
       resolvedInbox,
-      encounters: withoutPerformedByUserId(source.encounters),
+      encounters: sanitizeEncounterEvents(source.encounters),
       ...(source.diceRolls ? { diceRolls: withoutRollerUserId(source.diceRolls) } : {}),
     },
     consent: {

@@ -1,10 +1,13 @@
 import { describe, expect, it } from '@jest/globals';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { RecapDraftSource } from '../../src/modules/sessions/sessions.service';
 import {
   applyScribeConsent,
   filterSourceForExternalAiConsent,
   retainSourceForLocalGeneration,
   withheldConsentDetail,
+  USER_ATTRIBUTED_EVENT_TYPES,
 } from '../../src/modules/scribe/scribe-consent';
 
 function source(): RecapDraftSource {
@@ -58,6 +61,27 @@ function source(): RecapDraftSource {
             performedBy: { userId: '10', role: 'player', kind: 'human' },
             metadata: {},
             createdAt: '2026-01-01T00:00:00.000Z',
+          },
+          {
+            // A token_batch event, written by applyTokenBatch/undoTokenBatch as
+            // `actor: user.name, actorId: null` — the acting MEMBER's display name, not a
+            // combatant (issue #1520 review). The counterexample to "actor is always
+            // campaign canon".
+            id: 41,
+            encounterId: 20,
+            round: 1,
+            type: 'token_batch',
+            actor: 'Dana The Player',
+            target: null,
+            actorId: null,
+            targetId: null,
+            detail: '3 token placements',
+            chainId: null,
+            parentEventId: null,
+            phase: null,
+            performedBy: { userId: '10', role: 'dm', kind: 'human' },
+            metadata: {},
+            createdAt: '2026-01-01T00:00:01.000Z',
           },
         ],
       },
@@ -266,7 +290,7 @@ describe('scribe encounter-event boundary (#1520)', () => {
   it('leaves an event with no performedBy (legacy row) untouched', () => {
     const withLegacyEvent = source();
     withLegacyEvent.encounters[0]!.events!.push({
-      id: 41,
+      id: 42,
       encounterId: 20,
       round: 1,
       type: 'turn',
@@ -285,7 +309,12 @@ describe('scribe encounter-event boundary (#1520)', () => {
 
     const result = filterSourceForExternalAiConsent(withLegacyEvent, 'member_consent', new Set());
 
-    expect(result.source.encounters[0]?.events?.[1]?.performedBy).toBeNull();
+    // Located by id, not by position: this asserted `events[1]` and broke the moment the
+    // shared fixture grew a second event, which is a test coupled to fixture ordering rather
+    // than to the behaviour it names.
+    const legacy = result.source.encounters[0]?.events?.find((e) => e.id === 42);
+    expect(legacy).toBeDefined();
+    expect(legacy?.performedBy).toBeNull();
   });
 });
 
@@ -420,5 +449,94 @@ describe('withheld-material message (#501)', () => {
 
     expect(filtered.consent.excludedInboxByConsent).toBe(2);
     expect(withheldConsentDetail('no inbox/encounter material', filtered.consent)).toContain('AI content policy');
+  });
+});
+
+/**
+ * Issue #1520 review (Codex). The boundary above was written on the premise that an event's
+ * `actor` is always a combatant/character name — campaign canon the DM owns — and therefore
+ * never member-identifying. That premise has a counterexample: `applyTokenBatch` and
+ * `undoTokenBatch` persist `type: 'token_batch'` events with `actor: user.name, actorId: null`,
+ * so the acting MEMBER's display name was reaching `draft_session_recap`'s external MCP client
+ * even after `performedBy.userId` was nulled, and regardless of consent.
+ *
+ * The first two tests assert the actual filtered payload on each egress path. The third is the
+ * one that matters most in a year: it scans the producers rather than the sanitizer, so a NEW
+ * event type that stores a user's name fails here instead of silently leaking.
+ */
+describe('scribe encounter-event user-attributed actors (#1520 review)', () => {
+  it('clears a token_batch actor on the external path — it is a member display name, not campaign canon', () => {
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const events = result.source.encounters[0]?.events ?? [];
+    const tokenBatch = events.find((e) => e.type === 'token_batch');
+    expect(tokenBatch).toBeDefined();
+    expect(tokenBatch?.actor).toBeNull();
+    expect(JSON.stringify(result.source)).not.toContain('Dana The Player');
+  });
+
+  it('clears it on the LOCAL path too, and is unaffected by consent', () => {
+    const local = retainSourceForLocalGeneration(source(), 'member_consent');
+    const consenting = filterSourceForExternalAiConsent(source(), 'member_consent', new Set(['10']));
+
+    for (const result of [local, consenting]) {
+      const tokenBatch = (result.source.encounters[0]?.events ?? []).find((e) => e.type === 'token_batch');
+      expect(tokenBatch?.actor).toBeNull();
+    }
+  });
+
+  it('keeps the token_batch event itself — only the name goes, not the trail', () => {
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const tokenBatch = (result.source.encounters[0]?.events ?? []).find((e) => e.type === 'token_batch');
+    expect(tokenBatch).toMatchObject({ round: 1, type: 'token_batch', detail: '3 token placements' });
+  });
+
+  it('leaves a combatant-named actor alone — the canon case is the majority and must survive', () => {
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const damage = (result.source.encounters[0]?.events ?? []).find((e) => e.type === 'damage');
+    expect(damage?.actor).toBe('Rook');
+  });
+
+  it('every server producer that writes `actor: user.name` has its event type in the strip set', () => {
+    // Scans the PRODUCERS, not the sanitizer. A pure test of USER_ATTRIBUTED_EVENT_TYPES
+    // could never notice a new `insert(encounterEvents)` call storing a display name — which
+    // is exactly how this defect shipped. Reading the call sites is what makes it catchable.
+    const files = [
+      'src/modules/encounters/encounters.service.ts',
+      'src/modules/encounters/action-resolver.service.ts',
+    ];
+
+    const offenders: string[] = [];
+    for (const rel of files) {
+      const code = readFileSync(resolve(__dirname, '../../', rel), 'utf8');
+      for (const match of code.matchAll(/insert\(encounterEvents\)\.values\(\{([\s\S]{0,600}?)\}\)/g)) {
+        const block = match[1] ?? '';
+        if (!/actor:\s*user\.name/.test(block)) continue;
+        const type = /type:\s*'([a-z_]+)'/.exec(block)?.[1];
+        if (!type || !USER_ATTRIBUTED_EVENT_TYPES.has(type)) {
+          offenders.push(`${rel}: type=${type ?? '<unknown>'}`);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('the scan actually finds the known producer — otherwise the guard above passes vacuously', () => {
+    // Without this, a regex that matched nothing would report "no offenders" forever.
+    const code = readFileSync(
+      resolve(__dirname, '../../src/modules/encounters/encounters.service.ts'),
+      'utf8',
+    );
+    const blocks = [...code.matchAll(/insert\(encounterEvents\)\.values\(\{([\s\S]{0,600}?)\}\)/g)]
+      .map((m) => m[1] ?? '')
+      .filter((b) => /actor:\s*user\.name/.test(b));
+
+    expect(blocks.length).toBeGreaterThanOrEqual(2); // applyTokenBatch + undoTokenBatch
+    for (const block of blocks) {
+      expect(/type:\s*'token_batch'/.test(block)).toBe(true);
+    }
   });
 });
