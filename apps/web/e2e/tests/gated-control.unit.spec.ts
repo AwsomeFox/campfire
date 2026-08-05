@@ -2,10 +2,12 @@
  * GatedControl pure logic (issue #1933) — the visibility/merge rules behind the shared
  * gating-reason affordance, pinned without a browser. The React wrapper itself
  * (`GatedControl.tsx`) is exercised by `combatant-row-sync-disable.spec.ts` and
- * `turn-workspace-gates.spec.ts` (real browser, CI-validated).
+ * `gated-control-measure.spec.ts` (real browser, CI-validated).
  */
 import { expect, test } from '@playwright/test';
 import {
+  applyGatedHintEvent,
+  clearTapHint,
   GATED_HINT_STATE_IDLE,
   gatedTooltipVisible,
   isCoarsePointerQuery,
@@ -62,6 +64,43 @@ test.describe('mergeDescribedBy (issue #1933)', () => {
 
   test('an existing aria-describedby is preserved, not clobbered', () => {
     expect(mergeDescribedBy('existing-hint', 'gated-reason-1')).toBe('existing-hint gated-reason-1');
+  });
+});
+
+test.describe('applyGatedHintEvent (issue #1933 review finding)', () => {
+  test('desktop: mouseEnter/focus latch, mouseLeave/blur release, on a fine pointer', () => {
+    let state = applyGatedHintEvent(GATED_HINT_STATE_IDLE, 'mouseEnter', false);
+    expect(state.hovered).toBe(true);
+    state = applyGatedHintEvent(state, 'mouseLeave', false);
+    expect(state.hovered).toBe(false);
+    state = applyGatedHintEvent(state, 'focus', false);
+    expect(state.focused).toBe(true);
+    state = applyGatedHintEvent(state, 'blur', false);
+    expect(state.focused).toBe(false);
+  });
+
+  test('a coarse pointer ignores mouseEnter/mouseLeave/focus/blur entirely — they are compatibility artifacts of a tap, not real hover/focus', () => {
+    let state = applyGatedHintEvent(GATED_HINT_STATE_IDLE, 'mouseEnter', true);
+    expect(state).toEqual(GATED_HINT_STATE_IDLE);
+    state = applyGatedHintEvent(state, 'focus', true);
+    expect(state).toEqual(GATED_HINT_STATE_IDLE);
+  });
+
+  test('tapStart only applies on a coarse pointer', () => {
+    expect(applyGatedHintEvent(GATED_HINT_STATE_IDLE, 'tapStart', true).tapHintActive).toBe(true);
+    expect(applyGatedHintEvent(GATED_HINT_STATE_IDLE, 'tapStart', false).tapHintActive).toBe(false);
+  });
+
+  test('the exact review-finding sequence: tap, then its compatibility mouseEnter + focus, then the tap timer firing — hint ends up hidden, not stuck on', () => {
+    // A tap on real touch hardware fires, in order: pointerup (tapStart), a compatibility
+    // mouseenter, and a focus move — with no mouseleave/blur ever following on that device.
+    let state = applyGatedHintEvent(GATED_HINT_STATE_IDLE, 'tapStart', true);
+    state = applyGatedHintEvent(state, 'mouseEnter', true);
+    state = applyGatedHintEvent(state, 'focus', true);
+    expect(gatedTooltipVisible(state)).toBe(true); // visible immediately after the tap
+    // GATED_HINT_MS elapses: the timer calls clearTapHint directly (no DOM event).
+    state = clearTapHint(state);
+    expect(gatedTooltipVisible(state)).toBe(false); // and it actually goes away
   });
 });
 

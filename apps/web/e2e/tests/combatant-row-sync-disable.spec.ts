@@ -214,12 +214,19 @@ test.describe('CombatantRow sync-gate disable, not unmount (issue #1746)', () =>
       // A tap is a real click in a real browser — force it, since Playwright's own
       // actionability check refuses to `.click()` an aria-disabled element (the same
       // check `toBeDisabled()` uses), which is correct: nothing should actually happen.
+      // A tap ALSO moves focus to the element on real touch hardware (and fires
+      // compatibility mouseenter/mouseover) — simulate that explicitly, since GatedControl
+      // must not let a latched `focused`/`hovered` state keep the hint alive forever once
+      // the coarse-pointer timer would otherwise clear it (issue #1933 review finding).
       await increaseBtn.click({ force: true });
+      await increaseBtn.focus();
       const hint = page.getByTestId('gated-control-hint').first();
       await expect(hint).toBeVisible();
       await expect(hint).toHaveText('Paused while reconnecting to live updates.');
 
-      // Hides again on its own after ~2s (GATED_HINT_MS), without another interaction.
+      // Hides again on its own after ~2s (GATED_HINT_MS) even though focus never left the
+      // button — on a coarse pointer, hover/focus are not meaningful signals (that's the
+      // premise of `(hover: none)`), so only the tap timer drives visibility here.
       await expect(page.getByTestId('gated-control-hint')).toHaveCount(0, { timeout: 4_000 });
 
       releaseEvents();

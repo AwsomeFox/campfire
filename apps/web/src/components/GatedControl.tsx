@@ -51,7 +51,10 @@ import {
   type PointerEvent,
   type ReactElement,
 } from 'react';
+import { sanitizeFieldPrefix } from './Field';
 import {
+  applyGatedHintEvent,
+  clearTapHint,
   GATED_HINT_MS,
   GATED_HINT_STATE_IDLE,
   gatedTooltipVisible,
@@ -63,6 +66,25 @@ import {
 
 /** Media query for "touch, no hover" — already used for touch-only affordances (index.css). */
 const COARSE_POINTER_QUERY = '(hover: none) and (pointer: coarse)';
+
+/**
+ * Whether the CURRENT device is a coarse pointer, checked live (not memoized) so it reflects
+ * reality at the moment of each event rather than whatever it was on first render.
+ *
+ * This gates the hover/focus handlers below: a tap on real touch hardware also fires
+ * compatibility mouse events (`mouseenter`/`mouseover`) and moves focus to the element, so
+ * without this check `hovered`/`focused` would latch `true` on tap and never clear (nothing
+ * on a touch device naturally fires `mouseleave`/`blur` afterward) — the reason bubble would
+ * stay visible forever instead of hiding again after {@link GATED_HINT_MS}. On a coarse
+ * pointer, hover/focus are not meaningful signals at all (that is the entire premise of the
+ * `(hover: none)` media feature), so this component treats them as no-ops there and lets only
+ * the tap-hint timer (`onPointerUp` below) drive visibility.
+ */
+function isCoarsePointerNow(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && isCoarsePointerQuery(window.matchMedia(COARSE_POINTER_QUERY));
+}
 
 type GatableProps = {
   disabled?: boolean;
@@ -91,8 +113,11 @@ export type GatedControlProps = {
 
 /** Shared gating-reason affordance — see the module doc comment above. */
 export function GatedControl({ reason, children }: GatedControlProps): ReactElement {
+  // React's useId() returns colon-delimited values (e.g. ":r1:"), which are invalid inside a
+  // CSS id selector (`#gated-control-reason-:r1:` throws) — sanitizeFieldPrefix strips them,
+  // the same helper Field.tsx and its other callers already use for this exact purpose.
   const generatedId = useId();
-  const reasonId = `gated-control-reason-${generatedId}`;
+  const reasonId = `gated-control-reason-${sanitizeFieldPrefix(generatedId)}`;
   const gated = reason != null && reason !== '';
 
   const [hint, setHint] = useState<GatedHintState>(GATED_HINT_STATE_IDLE);
@@ -142,30 +167,28 @@ export function GatedControl({ reason, children }: GatedControlProps): ReactElem
       event.stopPropagation();
     },
     onMouseEnter: (event: MouseEvent<HTMLElement>) => {
-      setHint((prev) => ({ ...prev, hovered: true }));
+      setHint((prev) => applyGatedHintEvent(prev, 'mouseEnter', isCoarsePointerNow()));
       existing.onMouseEnter?.(event);
     },
     onMouseLeave: (event: MouseEvent<HTMLElement>) => {
-      setHint((prev) => ({ ...prev, hovered: false }));
+      setHint((prev) => applyGatedHintEvent(prev, 'mouseLeave', isCoarsePointerNow()));
       existing.onMouseLeave?.(event);
     },
     onFocus: (event: FocusEvent<HTMLElement>) => {
-      setHint((prev) => ({ ...prev, focused: true }));
+      setHint((prev) => applyGatedHintEvent(prev, 'focus', isCoarsePointerNow()));
       existing.onFocus?.(event);
     },
     onBlur: (event: FocusEvent<HTMLElement>) => {
-      setHint((prev) => ({ ...prev, focused: false }));
+      setHint((prev) => applyGatedHintEvent(prev, 'blur', isCoarsePointerNow()));
       existing.onBlur?.(event);
     },
     onPointerUp: (event: PointerEvent<HTMLElement>) => {
-      const coarse = typeof window !== 'undefined'
-        && typeof window.matchMedia === 'function'
-        && isCoarsePointerQuery(window.matchMedia(COARSE_POINTER_QUERY));
+      const coarse = isCoarsePointerNow();
+      setHint((prev) => applyGatedHintEvent(prev, 'tapStart', coarse));
       if (coarse) {
-        setHint((prev) => ({ ...prev, tapHintActive: true }));
         clearTapTimer();
         tapTimerRef.current = setTimeout(() => {
-          setHint((prev) => ({ ...prev, tapHintActive: false }));
+          setHint(clearTapHint);
         }, GATED_HINT_MS);
       }
       existing.onPointerUp?.(event);

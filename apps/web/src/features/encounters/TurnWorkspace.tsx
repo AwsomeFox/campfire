@@ -650,7 +650,10 @@ export function TurnWorkspace({
           safety hold at all (the server rejects it — assertNoSafetyHold — but the button
           stayed live and just failed on click). Both are now surfaced as a mounted,
           disabled button with a GatedControl reason instead: the control a player would
-          reach for stays in the same place, explaining itself, rather than disappearing. */}
+          reach for stays in the same place, explaining itself, rather than disappearing.
+          `turnEndGateReason` decides APPLICABILITY (is this viewer's control at all — DM
+          or the turn's owner) before layering on any reason, so a plain onlooker still
+          gets nothing, hold or no hold — see that function's doc comment. */}
       {(() => {
         const gateReasonKey = turnEndGateReason({
           canEndTurn: turn.canEndTurn,

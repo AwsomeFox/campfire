@@ -41,9 +41,24 @@ test.describe('turnEndGateReason (issue #1933)', () => {
     ).toBe('dmControlsTurns');
   });
 
-  test('canEndTurn false but neither isYourTurn nor dmControlsTurns applies: no reason (unreachable in practice — TurnWorkspace only renders for the DM or the current owner)', () => {
+  test('a plain onlooker (not the DM, not this turn\'s owner): no reason — applicability wins over dmControlsTurns', () => {
+    // TurnWorkspace renders for every viewer of a running encounter, not only the DM/owner
+    // (only its action-economy detail section is owner/DM-gated) — a true onlooker reaches
+    // this resolver with both canEndTurn and isYourTurn false.
     expect(
       turnEndGateReason({ ...BASE, canEndTurn: false, isYourTurn: false, dmControlsTurns: false }),
+    ).toBeNull();
+  });
+
+  test('a plain onlooker during a safety hold STILL gets no reason — applicability must be decided before the hold, or a disabled End-turn button flickers into existence for viewers who never had one', () => {
+    expect(
+      turnEndGateReason({
+        ...BASE,
+        canEndTurn: false,
+        isYourTurn: false,
+        dmControlsTurns: false,
+        safetyHoldActive: true,
+      }),
     ).toBeNull();
   });
 

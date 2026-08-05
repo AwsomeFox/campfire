@@ -34,6 +34,53 @@ export function isCoarsePointerQuery(mql: { matches: boolean } | null | undefine
   return mql?.matches === true;
 }
 
+/**
+ * Hover/focus events GatedControl wires up. `tapStart` is the coarse-pointer branch
+ * (`onPointerUp` in the component) — distinct from `mouseEnter`/`focus` because a tap can
+ * legitimately arrive alongside them (see {@link applyGatedHintEvent}'s doc comment).
+ */
+export type GatedHintEvent = 'mouseEnter' | 'mouseLeave' | 'focus' | 'blur' | 'tapStart';
+
+/**
+ * Reduce one DOM event into the next hint-visibility state (issue #1933 review finding).
+ *
+ * A tap on real touch hardware ALSO fires compatibility `mouseenter`/`mouseover` and moves
+ * focus to the element — there is no corresponding `mouseleave`/`blur` afterward on such a
+ * device (nothing "unhovers" a finger that already lifted). If `mouseEnter`/`focus` were
+ * allowed to latch `hovered`/`focused: true` on a coarse pointer, the reason bubble would
+ * stay visible forever instead of hiding again after {@link GATED_HINT_MS} — the bubble
+ * would never look at `isCoarsePointer` again once shown. The fix: `isCoarsePointer` gates
+ * `mouseEnter`/`mouseLeave`/`focus`/`blur` to no-ops (hover/focus are not meaningful signals
+ * on a device with no hover at all — that is the entire premise of `(hover: none)`), and
+ * `tapStart` only ever applies while coarse. Only the tap timer
+ * ({@link GatedControl}'s `setTimeout(GATED_HINT_MS)`, which calls this reducer with no
+ * corresponding event — it just flips `tapHintActive` back off directly) can end the
+ * bubble's visibility on such a device.
+ */
+export function applyGatedHintEvent(
+  state: GatedHintState,
+  event: GatedHintEvent,
+  isCoarsePointer: boolean,
+): GatedHintState {
+  switch (event) {
+    case 'mouseEnter':
+      return isCoarsePointer ? state : { ...state, hovered: true };
+    case 'mouseLeave':
+      return isCoarsePointer ? state : { ...state, hovered: false };
+    case 'focus':
+      return isCoarsePointer ? state : { ...state, focused: true };
+    case 'blur':
+      return isCoarsePointer ? state : { ...state, focused: false };
+    case 'tapStart':
+      return isCoarsePointer ? { ...state, tapHintActive: true } : state;
+  }
+}
+
+/** What the tap timer sets on expiry — independent of any DOM event. */
+export function clearTapHint(state: GatedHintState): GatedHintState {
+  return { ...state, tapHintActive: false };
+}
+
 /** Merge this control's own reason-node id into whatever `aria-describedby` the wrapped
  * element already carried, rather than clobbering it. */
 export function mergeDescribedBy(existing: string | undefined, ownId: string): string {
