@@ -102,32 +102,25 @@ test.describe('combat tracker — DM view', () => {
     for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
       const control = page.getByRole('button', { name, exact: true });
       await expect(control).toBeVisible();
-      // Scroll to the control before asserting it is in the viewport (issue #1994).
+      // Assert REACHABILITY, not scroll position (issue #1994).
       //
-      // Without this, the assertion measured the page's SCROLL POSITION rather than the
-      // control's reachability, and it raced an auto-scroll. Measured on this page at this
-      // viewport: the document is ~4-6x the viewport tall, the player-display controls sit
-      // near its top, and shortly after load `window.scrollY` settles around 1786 — putting
-      // all three controls ~1600px ABOVE the fold. `toBeVisible` still passes (they are
-      // rendered), while `toBeInViewport` reports ratio 0 and keeps reporting it, because
-      // once the page has scrolled the state is stable. Whether the assertions won that race
-      // decided whether the test passed, which is why it failed intermittently on PR runs
-      // and looked deceptively branch-specific.
+      // What goes wrong without this: the encounter document is 4-6x the viewport tall at
+      // this size, these controls sit near its top, and the page auto-scrolls shortly after
+      // load — measured, `window.scrollY` settles around 1786, putting all three roughly
+      // 1600px above the fold. `toBeVisible` still passes (they are rendered); a viewport
+      // check reports ratio 0 and keeps reporting it, because once scrolled that state is
+      // stable. So the assertion was really testing whether it had won a race against the
+      // auto-scroll, which is why it failed intermittently rather than consistently.
       //
-      // This does NOT weaken what #762 guards. That issue was about these controls being
-      // unusable at tablet width — clipped or unreachable. A control clipped horizontally
-      // cannot be brought into view by scrolling in a layout that does not scroll on x, so
-      // it still fails here; what no longer fails is "the page happened to be scrolled".
-      // Re-scroll on EVERY attempt (review). A single `scrollIntoViewIfNeeded()` before a
-      // retrying assertion leaves the same race one notch further along: the auto-scroll
-      // happens at an unpredictable moment after load, so if it lands between the scroll and
-      // the poll, `toBeInViewport` re-measures without ever re-scrolling and fails with the
-      // identical `viewport ratio 0`. Polling around the scroll closes that window.
+      // Why the scroll is INSIDE the poll: the auto-scroll fires at an unpredictable moment,
+      // so scrolling once before a retrying assertion just moves the same race later — the
+      // retry re-measures but never re-scrolls. Each attempt re-establishes position.
       //
-      // The predicate asserts full containment rather than a non-zero ratio, which is the
-      // stricter reading of #762 and keeps the guard that matters: a control clipped on the x
-      // axis fails `left >= 0 && right <= innerWidth` and cannot be scrolled out of that,
-      // because this layout does not scroll horizontally.
+      // Why full containment rather than a viewport ratio: `toBeInViewport` passes on any
+      // non-zero overlap, so a partially clipped control satisfied it. `left >= 0 &&
+      // right <= innerWidth` is what preserves #762's actual guarantee — these controls were
+      // unusable at tablet width — and scrolling cannot paper over it, because this layout
+      // does not scroll horizontally.
       await expect
         .poll(async () => {
           await control.scrollIntoViewIfNeeded();
