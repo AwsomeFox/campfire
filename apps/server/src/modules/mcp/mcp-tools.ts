@@ -4535,7 +4535,7 @@ export class McpToolsService {
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
         'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. For kind="npc" ' +
         'pass npcId to link a campaign NPC (its name is used); give hpMax or a ruleEntryId statblock for its HP. Pass ' +
-        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N".',
+        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N". Optional `tokenSize` controls the token footprint.',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,

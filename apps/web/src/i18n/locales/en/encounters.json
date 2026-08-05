@@ -221,6 +221,8 @@
       "heuristicDifficultyBadge": "Target band: heuristic",
       "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own."
     },
+    "duplicate": "Duplicate",
+    "duplicateCombatant": "Duplicate {{name}}",
     "resourceTracker": {
       "title": "Resource Tracker",
       "features": "Features",

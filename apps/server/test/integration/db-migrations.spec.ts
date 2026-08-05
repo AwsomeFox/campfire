@@ -29,6 +29,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
+  it('boots a fresh database before the combatants table exists (#1924)', () => {
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'combatants')).toContain('npc_identity_source_id');
+    } finally { fresh.sqlite.close(); }
+  });
+
   it('adds every migrated column when upgrading an old-shaped DB', () => {
     dataDir = makeTempDataDir();
     writeOldSchemaDb(dataDir);
@@ -2408,6 +2416,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     } finally {
       upgraded.sqlite.close();
     }
+  });
+  it('adds and backfills NPC identity sources without blocking fresh bootstrap (#1924)', () => {
+    expect(MIGRATION_NAMES).toContain('0145b_combatants_npc_identity_source_1924');
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE combatants DROP COLUMN npc_identity_source_id');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145b_combatants_npc_identity_source_1924');
+      const now = '2026-08-05T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy identity source campaign', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Legacy identity source encounter', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO npcs (id, campaign_id, name, created_at, updated_at) VALUES (42, 1, 'Legacy NPC identity', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO combatants (encounter_id, kind, npc_id, name, hp_current, hp_max) VALUES (1, 'npc', 42, 'Legacy NPC', 1, 1)").run();
+    } finally { legacy.close(); }
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatants')).toContain('npc_identity_source_id');
+      expect(upgraded.sqlite.prepare('SELECT npc_identity_source_id FROM combatants WHERE name = ?').get('Legacy NPC')).toEqual({ npc_identity_source_id: 42 });
+    } finally { upgraded.sqlite.close(); }
   });
   it('adds the rule_packs manifest_hash column when upgrading a pre-#1518 DB (#1518)', () => {
     expect(MIGRATION_NAMES).toContain('0148_rule_packs_manifest_hash_1518');

@@ -10319,12 +10319,14 @@ export type SavedTokenFormation = z.infer<typeof SavedTokenFormation>;
 
 export const CombatantCreate = z.object({
   kind: CombatantKind,
+  duplicateOfCombatantId: Id.optional(),
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
   npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  tokenSize: TokenSize.optional(),
   // OSR group-initiative side label (issue #765). When the campaign adapter uses group
   // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
   // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.
