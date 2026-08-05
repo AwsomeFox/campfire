@@ -1356,7 +1356,7 @@ export function CombatantRow({
           aria-label={t('encounters.duplicateCombatant', { name: combatant.name })}
           title={t('encounters.duplicate')}
         >
-          <UIIcon name="copy" size="xs" />
+          <UIIcon name="add" size="xs" />
         </button>
       )}
       {canRemove && (
