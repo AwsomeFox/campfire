@@ -1027,9 +1027,10 @@ export default function RunSessionPage() {
   }, [eid]);
 
   // A loaded encounter is a silent baseline. This prevents opening an already
-  // running encounter (or any ordinary refetch) from replaying a turn-start beat.
+  // running encounter (or any ordinary refetch) from replaying a turn-start beat,
+  // while keeping the baseline current if the stream missed an intervening edge.
   useEffect(() => {
-    if (previousTurnBeatRef.current?.encounterId === eid || !encounter || encounter.id !== eid) return;
+    if (!encounter || encounter.id !== eid) return;
     const current = encounter.currentCombatantId == null
       ? undefined
       : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
