@@ -3594,6 +3594,37 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(JSON.stringify(playerRolls.body)).not.toMatch(/Later Hidden NPC|the Betrayer/);
   });
 
+  it('keeps a hidden NPC quick roll masked when only its hidden encounter is revealed later', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Hidden encounter quick-roll NPC', hidden: true })
+    ).body.id as number;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Reveal without NPC', hidden: true });
+    const combatantId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, hpMax: 10 })
+    ).body.id as number;
+    const quickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/quick-roll`)
+      .set(dm)
+      .send({ combatantId, actionName: 'Hidden encounter quick-roll NPC attack', kind: 'to-hit', expr: '+3', mode: 'flat' });
+    expect(quickRoll.status).toBe(201);
+
+    expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}`).set(dm).send({ hidden: false })).status).toBe(200);
+    const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    const masked = playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id);
+    expect(masked).toMatchObject({ label: UNKNOWN_COMBATANT_LABEL, actor: UNKNOWN_COMBATANT_LABEL });
+    expect(JSON.stringify(masked)).not.toContain('Hidden encounter quick-roll NPC');
+  });
+
   it('duplicates manual Starfinder defenses and pool maxima with fresh pools', async () => {
     const server = ctx.app.getHttpServer();
     const db = ctx.app.get<DrizzleDb>(DB);

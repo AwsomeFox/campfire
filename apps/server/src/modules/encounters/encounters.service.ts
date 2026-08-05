@@ -8336,9 +8336,7 @@ export class EncountersService {
     // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
     let isActorHidden = false;
     let npcIdentityId: number | null = null;
-    if (encounter.hidden) {
-      isActorHidden = true;
-    } else if (combatantRow) {
+    if (combatantRow) {
       npcIdentityId = combatantRow.npcIdentitySourceId ?? combatantRow.npcId;
       if (combatantRow.kind === 'npc' && npcIdentityId !== null) {
         const [npc] = await this.db
@@ -8351,6 +8349,7 @@ export class EncountersService {
         }
       }
     }
+    if (encounter.hidden) isActorHidden = true;
 
     const mode = body.mode || 'flat';
     let formula = '';
