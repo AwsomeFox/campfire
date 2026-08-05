@@ -1230,10 +1230,11 @@ export default function RunSessionPage() {
             : 'turn';
           // A lair action has no roster combatant, but a round-wrap still has
           // useful, non-secret feedback for every viewer.
-          if (kind && (combatant || tickerKind === 'round-wrap')) {
+          if (kind && (combatant || event.currentCombatantId != null || tickerKind === 'round-wrap')) {
             setTurnBeat({
               key: ++turnBeatSequence.current,
               combatantId: event.currentCombatantId ?? null,
+              pending: combatant == null && event.currentCombatantId != null,
               kind,
               tickerKind,
               name: combatant?.name ?? '',
@@ -2391,6 +2392,10 @@ export default function RunSessionPage() {
     () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
     [encounter],
   );
+  const currentCombatant = useMemo(
+    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
+    [encounter?.combatants, currentCombatantId],
+  );
 
   const { data: turnWorkspace } = useQuery({
     queryKey: queryKeys.encounterTurn(eid),
@@ -2421,6 +2426,23 @@ export default function RunSessionPage() {
   // the one owned takeover once both reads identify the same combatant.
   useEffect(() => {
     if (
+      !turnBeat?.pending
+      || turnBeat.combatantId !== currentCombatantId
+      || !currentCombatant
+    ) return;
+    setTurnBeat((previous) => previous?.pending && previous.combatantId === currentCombatant.id
+      ? {
+          ...previous,
+          key: ++turnBeatSequence.current,
+          pending: false,
+          name: currentCombatant.name,
+          identityBackground: tokenIdentityBackground(currentCombatant),
+        }
+      : previous);
+  }, [currentCombatant, currentCombatantId, turnBeat?.combatantId, turnBeat?.pending]);
+
+  useEffect(() => {
+    if (
       !turnWorkspace
       || !turnBeat
       || turnWorkspace.isYourTurn !== true
@@ -2429,14 +2451,16 @@ export default function RunSessionPage() {
       || turnBeat.kind === 'your-turn'
     ) return;
     setTurnBeat((previous) => previous && previous.combatantId === currentCombatantId
-      ? { ...previous, key: ++turnBeatSequence.current, kind: 'your-turn' }
+      ? {
+          ...previous,
+          key: ++turnBeatSequence.current,
+          kind: 'your-turn',
+          pending: false,
+          name: currentCombatant?.name ?? previous.name,
+          identityBackground: currentCombatant ? tokenIdentityBackground(currentCombatant) : previous.identityBackground,
+        }
       : previous);
-  }, [currentCombatantId, turnBeat?.combatantId, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
-
-  const currentCombatant = useMemo(
-    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
-    [encounter?.combatants, currentCombatantId],
-  );
+  }, [currentCombatant, currentCombatantId, turnBeat?.combatantId, turnBeat?.kind, turnWorkspace?.current?.combatantId, turnWorkspace?.isYourTurn]);
 
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {

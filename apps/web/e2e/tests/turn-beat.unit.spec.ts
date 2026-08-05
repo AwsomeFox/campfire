@@ -76,6 +76,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const rosterCombatantKnown = event\.currentCombatantId == null \|\| combatant != null;/);
     expect(source).toMatch(/setTurnOwnerFromEvent\(rosterCombatantKnown && \(ownerDataReady \|\| combatant\?\.characterId == null\) \? isYourTurn : null\);/);
+    expect(source).toMatch(/pending: combatant == null && event\.currentCombatantId != null,/);
   });
 
   test('keeps Player Display to the paired encounter update load', () => {

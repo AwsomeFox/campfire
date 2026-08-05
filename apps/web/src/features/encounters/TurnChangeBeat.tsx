@@ -7,6 +7,7 @@ import type { TurnBeatKind } from './turnBeat';
 export type TurnChangeBeatEvent = {
   key: number;
   combatantId: number | null;
+  pending?: boolean;
   kind: TurnBeatKind;
   tickerKind: 'turn' | 'round-wrap';
   name: string;
@@ -31,6 +32,13 @@ export function TurnChangeBeat({ beat, isYourTurn }: Props) {
 
   useEffect(() => {
     if (!beat) {
+      setShowTakeover(false);
+      setShowTicker(false);
+      return;
+    }
+    // The SSE edge can arrive before this viewer's authorized roster refetch.
+    // Retain it for hydration, but never render a nameless turn announcement.
+    if (beat.pending) {
       setShowTakeover(false);
       setShowTicker(false);
       return;
