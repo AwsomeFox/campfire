@@ -6,7 +6,12 @@ import { vitalsSpeedFor } from '../../src/features/encounters/PlayerVitalsHeader
  * Issue #1910 — PlayerVitalsHeader's speed display used to guess at an untyped
  * `(stats as any).speed`, which never resolved against the real (typed) schema
  * field and always fell through to a hardcoded '30' string. `vitalsSpeedFor`
- * replaces that guess with the real character/combatant `speed` fields.
+ * replaces that guess with the real character/combatant `speed` fields, in the
+ * SAME precedence order the server's getTurnWorkspace resolution uses (PR #1980
+ * review — Devin/Codex finding: the client and server previously disagreed, so a
+ * mid-fight sheet edit showed one number in the header and a different one in the
+ * turn panel): combatant snapshot first, then the character's live speed, then the
+ * caller-supplied adapter default (no more hardcoded 30 — Copilot/Codex finding).
  */
 
 function character(overrides: Partial<Character> = {}): Character {
@@ -103,20 +108,28 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
 }
 
 test.describe('vitalsSpeedFor (issue #1910)', () => {
-  test('the character sheet speed wins when set (mirrors the AC lookup precedent in this file)', () => {
-    expect(vitalsSpeedFor(character({ speed: 25 }), combatant({ speed: 40 }))).toBe(25);
+  test('the combatant add-time snapshot wins over the character sheet, matching the server precedence exactly (Devin B / Codex)', () => {
+    // A mid-fight sheet edit (character.speed 40) must NOT override the frozen
+    // combatant snapshot (25) — this is the exact inversion Devin/Codex flagged:
+    // the header used to show 40 here while the turn panel enforced 25.
+    expect(vitalsSpeedFor(character({ speed: 40 }), combatant({ speed: 25 }), 30)).toBe(25);
   });
 
-  test('a combatant add-time snapshot is the fallback when the character record has no speed', () => {
-    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: 35 }))).toBe(35);
+  test('the character live speed is the fallback when the combatant has no snapshot', () => {
+    expect(vitalsSpeedFor(character({ speed: 35 }), combatant({ speed: null }), 30)).toBe(35);
   });
 
-  test('falls back to the untouched 30 default when neither has a speed set', () => {
-    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: null }))).toBe(30);
-    expect(vitalsSpeedFor(undefined, combatant({ speed: null }))).toBe(30);
+  test('falls back to the caller-supplied adapter default (not a hardcoded 30) when neither has a speed set', () => {
+    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: null }), 30)).toBe(30);
+    expect(vitalsSpeedFor(undefined, combatant({ speed: null }), 25)).toBe(25);
+  });
+
+  test('returns null (not a fabricated 0) when the adapter has no movement slot at all (Copilot finding)', () => {
+    expect(vitalsSpeedFor(character({ speed: null }), combatant({ speed: null }), undefined)).toBeNull();
   });
 
   test('speed 0 (e.g. a homebrew immobilized state) is a real value, not treated as unset', () => {
-    expect(vitalsSpeedFor(character({ speed: 0 }), combatant({ speed: 40 }))).toBe(0);
+    expect(vitalsSpeedFor(character({ speed: 0 }), combatant({ speed: null }), 30)).toBe(0);
+    expect(vitalsSpeedFor(character({ speed: 40 }), combatant({ speed: 0 }), 30)).toBe(0);
   });
 });

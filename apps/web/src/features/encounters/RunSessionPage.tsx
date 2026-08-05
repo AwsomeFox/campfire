@@ -13,7 +13,7 @@ import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
@@ -576,6 +576,13 @@ export default function RunSessionPage() {
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -3425,11 +3432,12 @@ export default function RunSessionPage() {
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);

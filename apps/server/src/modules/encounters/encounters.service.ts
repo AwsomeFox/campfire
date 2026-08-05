@@ -2262,6 +2262,11 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as the single-combatant
+            // addCombatant() path — without it, an auto-added party member's movement
+            // max would resolve through the character's LIVE speed on every read
+            // instead of freezing at the value the sheet had when the fight started.
+            speed: character.speed,
             // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
             // intervening sheet edits made while the encounter was ended.
             sheetSyncedUpdatedAt: character.updatedAt,
@@ -3461,6 +3466,10 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as addCombatant()/create() —
+            // otherwise a party member auto-added by the generator resolves through
+            // the character's LIVE speed instead of freezing at fight-start.
+            speed: character.speed,
             sheetSyncedUpdatedAt: character.updatedAt,
             // #1047: carry the sheet's structured copy in too. No translation needed —
             // a sheet instance already has the round-scoped fields null, so it enters as an

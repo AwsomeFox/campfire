@@ -278,6 +278,13 @@ const asArr = (v: unknown): Rec[] => (Array.isArray(v) ? v.map(asRec) : []);
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null);
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
+// Issue #1910: `speed` (unlike `ac`) has a schema-level `min(0)` — a malformed/negative
+// import value would otherwise write past the domain contract and fail zod validation
+// on the next read (bricking the imported sheet), so clamp at the import boundary.
+const nonNegativeIntOrNull = (v: unknown): number | null => {
+  const n = intOrNull(v);
+  return n == null ? null : Math.max(0, n);
+};
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
 /**
@@ -2525,6 +2532,7 @@ export class CampaignsService {
             background: str(c.background),
             stats: jsonCol(c.stats, '{}'),
             ac: intOrNull(c.ac),
+            speed: nonNegativeIntOrNull(c.speed),
             hpCurrent: intOr(c.hpCurrent, 10),
             hpMax: intOr(c.hpMax, 10),
             // #1667 half B: write the paired condition columns through the sheet helper.
@@ -2752,6 +2760,10 @@ export class CampaignsService {
               initMod: intOr(c.initMod, 0),
               hpCurrent: intOr(c.hpCurrent, 10),
               hpMax: intOr(c.hpMax, 10),
+              // Issue #1910: carry the add-time speed snapshot through import so a
+              // re-imported encounter's movement budget matches what was exported,
+              // rather than silently falling back to the adapter default.
+              speed: nonNegativeIntOrNull(c.speed),
               conditions: jsonCol(c.conditions, '[]'),
               ruleEntryId: compendiumResolved.ruleEntryId,
               sortOrder: intOr(c.sortOrder, 0),

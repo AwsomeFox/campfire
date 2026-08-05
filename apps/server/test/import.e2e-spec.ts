@@ -1645,3 +1645,83 @@ describe('campaign import — scheduledAt validation at the boundary (issue #152
     expect(past.body.items.map((s: { title: string }) => s.title)).not.toContain('Offset night');
   });
 });
+
+/**
+ * Issue #1910 review (Codex finding, confirmed) — adding `speed` to Character/Combatant
+ * without updating campaigns.service.ts's explicit import-side reconstruction meant a
+ * campaign exported with a non-default speed silently lost it on re-import, falling back
+ * to the adapter default. The export side already carries it for free (CharactersService
+ * .listForExport / EncountersService.getWithCombatantsOrThrow both spread the full domain
+ * object), so this pins the round-trip on the (previously missing) import side for both
+ * the character's own `speed` and the combatant's add-time snapshot.
+ */
+describe('campaign import — character/combatant speed round-trip (issue #1910)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let characterId: number;
+  let exportDoc: Record<string, unknown>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i1910-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Speedy Party' });
+    campaignId = campRes.body.id;
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'Dashing Dwarf',
+      className: 'Fighter',
+      level: 3,
+      hpMax: 20,
+      status: 'active',
+      speed: 25,
+    });
+    characterId = charRes.body.id;
+    expect(charRes.body.speed).toBe(25);
+
+    // The real party auto-add path (not a hand-stamped combatant) — proves the
+    // encounter-creation snapshot fix is what's actually under test here too.
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Skirmish' });
+    expect(encRes.body.combatants).toHaveLength(1);
+    expect(encRes.body.combatants[0].speed).toBe(25);
+
+    const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    exportDoc = exportRes.body;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('the export payload carries both the character speed and the combatant snapshot', () => {
+    const exportedChar = (exportDoc.characters as Array<{ id: number; speed: number | null }>).find(
+      (c) => c.id === characterId,
+    );
+    expect(exportedChar?.speed).toBe(25);
+    const exportedEncounters = exportDoc.encounters as Array<{ combatants: Array<{ speed: number | null }> }>;
+    expect(exportedEncounters).toHaveLength(1);
+    expect(exportedEncounters[0].combatants[0].speed).toBe(25);
+  });
+
+  it('a character and its combatant snapshot survive export -> import with speed intact', async () => {
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    expect(imported.id).not.toBe(campaignId);
+
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const importedChar = chars.body.find((c: { name: string }) => c.name === 'Dashing Dwarf');
+    expect(importedChar).toBeDefined();
+    expect(importedChar.speed).toBe(25);
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    expect(encs.body).toHaveLength(1);
+    const encDetail = await dmAgent.get(`/api/v1/encounters/${encs.body[0].id}`);
+    const importedCombatant = encDetail.body.combatants.find((c: { kind: string }) => c.kind === 'character');
+    expect(importedCombatant).toBeDefined();
+    expect(importedCombatant.speed).toBe(25);
+  });
+});

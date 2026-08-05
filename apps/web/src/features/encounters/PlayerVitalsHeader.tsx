@@ -11,24 +11,37 @@ interface PlayerVitalsHeaderProps {
   onSetHpMax?: (combatantId: number, max: number) => void;
   turnPulse?: boolean;
   currentCombatantId?: number;
+  /**
+   * The active campaign's adapter movement-slot max (e.g. 30 for 5e), or `undefined`
+   * when the adapter declares no movement slot at all (e.g. PF2e). Computed by the
+   * caller from `actionEconomyForAdapter` — this component renders one row per
+   * combatant, not the single current-turn actor the server resolves a movement max
+   * for, so there is no per-combatant server value to thread through here.
+   */
+  movementDefault?: number;
 }
 
 /**
- * Movement speed shown in the sticky vitals header (issue #1910). The character
- * sheet's own `speed` is the live source of truth (mirrors the AC lookup just above
- * this component, which also reads `char?.ac` first); the combatant's add-time
- * snapshot is the fallback for a combatant whose character record didn't resolve;
- * 30 is the same adapter-default fallback the untyped `(stats as any).speed ?? '30'`
- * guess used previously — this just replaces the fabricated guess with the real,
- * typed fields.
+ * Movement speed shown in the sticky vitals header (issue #1910). Mirrors the SAME
+ * resolution order the server uses in getTurnWorkspace (encounters.service.ts):
+ * combatant add-time snapshot first (frozen so a mid-fight sheet edit never shows a
+ * different number here than the turn panel enforces), then the character sheet's
+ * live speed (covers a combatant added before this column existed), then the
+ * caller-supplied adapter default. Returns `null` — not a fabricated 0 — when the
+ * campaign's adapter has no movement slot at all; the caller must not render a
+ * fabricated speed for a system that doesn't have one.
  */
-export function vitalsSpeedFor(character: Character | undefined, combatant: Combatant): number {
-  if (character?.speed != null) return character.speed;
+export function vitalsSpeedFor(
+  character: Character | undefined,
+  combatant: Combatant,
+  movementDefault: number | undefined,
+): number | null {
   if (combatant.speed != null) return combatant.speed;
-  return 30;
+  if (character?.speed != null) return character.speed;
+  return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId, movementDefault }: PlayerVitalsHeaderProps) {
   useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
@@ -50,7 +63,7 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
-        const speed = vitalsSpeedFor(char, c);
+        const speed = vitalsSpeedFor(char, c, movementDefault);
         const spellSaveDc = (char?.stats as any)?.spellSaveDc ?? (char?.stats as any)?.spell_save_dc ?? '—';
         const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
         
@@ -106,10 +119,12 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
                 <GameIcon slug="shield" size={14} className="text-muted" />
                 <span className="font-bold">{ac}</span>
               </div>
-              <div className="flex flex-col items-center cf-target-44 justify-center">
-                <span className="text-xs text-muted leading-none">Speed</span>
-                <span className="font-bold">{speed}</span>
-              </div>
+              {speed != null && (
+                <div className="flex flex-col items-center cf-target-44 justify-center">
+                  <span className="text-xs text-muted leading-none">Speed</span>
+                  <span className="font-bold">{speed}</span>
+                </div>
+              )}
               {spellSaveDc !== '—' && (
                 <div className="flex flex-col items-center cf-target-44 justify-center hidden sm:flex">
                   <span className="text-xs text-muted leading-none">Spell DC</span>

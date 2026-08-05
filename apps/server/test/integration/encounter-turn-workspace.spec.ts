@@ -1160,6 +1160,42 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
       expect(movementMax(workspace)).toBe(25);
     });
+
+    // Devin review on PR #1980: the two BULK party auto-add paths (create()'s party
+    // INSERT and the generator's) build their combatant rows explicitly and must also
+    // stamp `speed`, not just the single-combatant addCombatant() path exercised above —
+    // otherwise every real, auto-added PC (the common case; addCombatant is only for a
+    // mid-fight late join) would resolve through the character's LIVE speed on every
+    // read, silently breaking the frozen-snapshot invariant for essentially all fights.
+    it('an auto-added party member (via the real create() path, not a hand-stamped combatant) keeps a frozen movement max across a mid-fight sheet edit', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Auto Add Campaign', createdAt: ts, updatedAt: ts }).returning().all();
+      const [character] = orm
+        .insert(characters)
+        .values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Auto PC', speed: 25, createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      // The real party auto-add path — no manual combatant INSERT, no hand-stamped speed.
+      // hidden:false — encounters are private-by-default (#754), and player1 needs to
+      // read the turn workspace below.
+      const created = await service.create(campaign.id, { name: 'Ambush', hidden: false }, dmUser, 'dm');
+      expect(created.combatants).toHaveLength(1);
+      const combatantId = created.combatants[0].id;
+      orm.update(encounters).set({ status: 'running', currentCombatantId: combatantId }).where(eq(encounters.id, created.id)).run();
+
+      const before = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(before)).toBe(25);
+
+      // The DM edits the sheet mid-encounter (e.g. a Haste spell) — the auto-added
+      // combatant's frozen snapshot must still win, exactly like the manually-added case.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, character.id)).run();
+
+      const after = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(after)).toBe(25);
+    });
   });
 
   describe('spellbook data — spells/spellSlots on the turn workspace (issue #1900)', () => {
