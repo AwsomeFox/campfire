@@ -1602,6 +1602,10 @@ export const diceRolls = sqliteTable('dice_rolls', {
   source: text('source').notNull().default('rolled'),
   actor: text('actor'),
   natural20: integer('natural20'),
+  // Issue #1904: optional identity ties for later read-time redaction (see RollResult in
+  // packages/schema for the full rationale) — null for the vast majority of rolls.
+  encounterId: integer('encounter_id'),
+  npcId: integer('npc_id'),
   createdAt: text('created_at').notNull(),
 });
 

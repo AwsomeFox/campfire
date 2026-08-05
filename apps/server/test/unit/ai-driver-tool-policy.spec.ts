@@ -17,6 +17,7 @@ import {
   DRIVER_UNGUARDED_LIVE_PLAY_TOOLS,
   DRIVER_LIVE_PLAY_TOOL_ARG_RULES,
   guardDriverLivePlayArgs,
+  isDriverToolAllowed,
 } from '../../src/modules/ai-driver/ai-driver.service';
 import {
   AiMapGenerationRequest,
@@ -225,6 +226,18 @@ describe('driver-tool-policy (#474)', () => {
       for (const name of DRIVER_UNGUARDED_LIVE_PLAY_TOOLS) {
         expect(DRIVER_LIVE_PLAY_TOOL_NAMES).toContain(name);
       }
+    });
+
+    // Issue #1904 review finding: roll_combatant_initiative (the per-combatant sibling of
+    // roll_initiative) was added to the MCP catalog without a matching entry on the driver's
+    // live-play allow-list, so the built-in AI-DM driver could roll a whole roster's initiative
+    // but silently could not fill in one late-joining combatant — isDriverToolAllowed default-denies
+    // any mutating, non-proposal-capable tool absent from DRIVER_LIVE_PLAY_TOOLS.
+    it('#1904: roll_combatant_initiative is on the live-play allow-list, unguarded, same as its roll_initiative/roll_death_save siblings', () => {
+      expect(DRIVER_LIVE_PLAY_TOOL_NAMES).toContain('roll_combatant_initiative');
+      expect(DRIVER_UNGUARDED_LIVE_PLAY_TOOLS.has('roll_combatant_initiative')).toBe(true);
+      expect(DRIVER_GUARDED_LIVE_PLAY_TOOLS.has('roll_combatant_initiative')).toBe(false);
+      expect(isDriverToolAllowed({ name: 'roll_combatant_initiative', mutating: true, proposalCapable: false })).toBe(true);
     });
 
     it('mechanically proves every DRIVER_GUARDED_LIVE_PLAY_TOOLS entry has a REAL branch, not a fall-through (the exact #1495 bug)', () => {

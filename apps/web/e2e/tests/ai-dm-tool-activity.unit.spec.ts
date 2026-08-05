@@ -65,6 +65,23 @@ test.describe('resolveToolActivity encounter identity (#825)', () => {
     expect(chip.label).toContain('other encounter');
   });
 
+  // Issue #1904 review finding: roll_combatant_initiative starts with "roll_", which the
+  // prefix heuristic in toolResource() would otherwise classify as 'dice' BEFORE ever
+  // reaching the combatant/encounter substring rules — exactly why roll_initiative and
+  // roll_death_save need (and have) an exact-name override below. Without one, the open
+  // combat tracker never refetches after an AI-driven per-combatant initiative roll, and
+  // the cross-encounter toast filter (gated on resource === 'encounter', #825) stops
+  // scoping the event to the fight it actually hit.
+  test('roll_combatant_initiative classifies as encounter, not dice, and deep-links like its siblings', () => {
+    expect(toolResource('roll_combatant_initiative')).toBe('encounter');
+    const chip = resolveToolActivity(tool({ name: 'roll_combatant_initiative', encounterId: 7 }), {
+      campaignId: 1,
+      encounterId: 3,
+    });
+    expect(chip.href).toBe('/c/1/encounters/7');
+    expect(chip.label).toContain('other encounter');
+  });
+
   test('matching ids keep a plain label and link the same fight', () => {
     const chip = resolveToolActivity(tool({ name: 'next_turn', encounterId: 3 }), {
       campaignId: 1,

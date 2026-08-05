@@ -166,7 +166,7 @@ import { CommentsService } from '../comments/comments.service';
 import { SchedulingService } from '../sessions/scheduling.service';
 import { OrganizedPlayService } from '../sessions/organized-play.service';
 import { ScribeService } from '../scribe/scribe.service';
-import { filterHidden } from '../../common/redact';
+import { filterHidden, isVisibleTo } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
 // Dice-roll retention is applied inside ScribeService.assembleSourceWithConsent, which
@@ -1550,9 +1550,10 @@ export class McpToolsService {
       'Get the current-turn workspace (issue #413): the active combatant, round, next actor, and — for the DM or the ' +
         'current combatant\'s owner — the adapter-defined action-economy slots (with usage + plain-language help), ' +
         'movement / reaction / concentration / active effects, suggested actions from the sheet, EQUIPPED inventory ' +
-        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, and the ' +
-        'start/end-of-turn prompts to resolve before advancing. Read-only. The detailed workspace is withheld from ' +
-        'other viewers (a monster\'s abilities/effects never leak to players).',
+        'items (issue #1901 — same merged index space as list_usable_actions/resolve_action), or statblock, the ' +
+        'start/end-of-turn prompts to resolve before advancing, and — for a character actor — its persisted spell ' +
+        'slots and derived castable spells (issue #1900). Read-only. The detailed workspace (including spells/slots) ' +
+        'is withheld from other viewers (a monster\'s abilities/effects never leak to players).',
       { encounterId: Id.describe('Encounter id — from list_encounters') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -4588,6 +4589,48 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number, true);
         const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
         return this.encounters.rollDeathSave(encounterId as number, combatantId as number, idempotencyKey as string, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'roll_combatant_initiative',
+      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Combatant id — from get_encounter'),
+        idempotencyKey: IdempotencyKey.unwrap().describe('Client-minted action intent key; reuse for retries of this roll'),
+        overwrite: z.boolean().optional().describe('DM only: re-roll a combatant that already has initiative set'),
+      },
+      async ({ encounterId, combatantId, idempotencyKey, overwrite }) => {
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        // Issue #1904 review finding: mirror the REST handler's viewer-role visibility
+        // pre-check (POST .../roll-initiative in encounters.controller.ts) so a viewer
+        // hitting a HIDDEN encounter's id gets the same 404 a nonexistent id gets. Without
+        // this, a viewer-role caller falls straight into the stricter 'player' role gate
+        // below and gets 403 instead — distinguishable from a real 404, which leaks that
+        // the hidden encounter exists (hidden entities must be indistinguishable from
+        // nonexistent for a non-DM).
+        if (
+          !isVisibleTo(
+            { hidden: row.hidden },
+            await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }),
+          )
+        ) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+        return this.encounters.rollCombatantInitiative(
+          encounterId as number,
+          combatantId as number,
+          idempotencyKey as string,
+          overwrite as boolean | undefined,
+          user,
+          role,
+        );
       },
     );
 

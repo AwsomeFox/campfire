@@ -1436,6 +1436,11 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_dice',
   'roll_action_dice',
   'roll_initiative',
+  // #1904 review finding: the per-combatant sibling of roll_initiative was missing here,
+  // so the driver could roll a whole roster's initiative but not fill in one combatant
+  // (e.g. a late-joining monster) without the DM doing it manually. Same classification
+  // as roll_initiative/roll_death_save below (unguarded — see DRIVER_UNGUARDED_LIVE_PLAY_TOOLS).
+  'roll_combatant_initiative',
   'roll_death_save',
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   'roll_check',
@@ -1600,7 +1605,7 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  * Reasons a tool needs no argument-level guard:
  *  - it is a dice/save roll with no persisted effect on its own — nothing has happened until
  *    something else applies the result (roll_dice, roll_action_dice, roll_initiative,
- *    roll_death_save, saving_throw);
+ *    roll_combatant_initiative, roll_death_save, saving_throw);
  *  - begin_encounter/end_encounter/remove_combatant are fully bounded by the PER-PROFILE policy
  *    classes already (PROFILE_TOOL_OVERRIDES denies or confirms them outright in every profile
  *    that matters — there is no argument shape to further restrict);
@@ -1617,6 +1622,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_dice',
   'roll_action_dice',
   'roll_initiative',
+  'roll_combatant_initiative',
   'roll_death_save',
   'saving_throw',
   'roll_check',
