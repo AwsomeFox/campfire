@@ -309,6 +309,58 @@ describe('Player Display cast sessions (e2e)', () => {
     expect((await request(server).get(mapPath)).status).toBe(404);
   });
 
+  it('serves exactly { active } for the cast X-Card poll, 404s uniformly for a dead token, and never leaks actor/name/note (#1908)', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/cast-sessions`)
+      .set(dm)
+      .send({ label: 'Safety TV', expiresAt: futureExpiry() });
+    const token = created.body.token as string;
+    const safetyPath = `/api/v1/cast/${token}/safety`;
+
+    // No hold: exactly one key, active: false.
+    const idle = await request(server).get(safetyPath);
+    expect(idle.status).toBe(200);
+    expect(Object.keys(idle.body)).toEqual(['active']);
+    expect(idle.body).toEqual({ active: false });
+
+    // A named activation on the member route must not leak the name, timestamp, or
+    // anything else through the anonymous cast projection — only `active` flips.
+    const hold = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/safety/hold`)
+      .set(dm)
+      .send({ anonymous: false });
+    expect(hold.status).toBe(200);
+    expect(hold.body.activatedByName).toBeTruthy();
+
+    const active = await request(server).get(safetyPath);
+    expect(active.status).toBe(200);
+    expect(Object.keys(active.body)).toEqual(['active']);
+    expect(active.body).toEqual({ active: true });
+    expect(JSON.stringify(active.body)).not.toContain(hold.body.activatedByName);
+    expect(active.body).not.toHaveProperty('activatedByName');
+    expect(active.body).not.toHaveProperty('activatedAt');
+    expect(active.body).not.toHaveProperty('campaignId');
+    expect(active.headers['cache-control']).toContain('no-store');
+    expect(active.headers['referrer-policy']).toBe('no-referrer');
+
+    // Release restores it.
+    const release = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/safety/release`)
+      .set(dm)
+      .send({ recovery: 'resume' });
+    expect(release.status).toBe(200);
+    const released = await request(server).get(safetyPath);
+    expect(released.body).toEqual({ active: false });
+
+    // Invalid, revoked, and expired tokens all 404 uniformly — no safety state disclosed.
+    const bogus = `cf_cast_${'0'.repeat(48)}`;
+    expect((await request(server).get(`/api/v1/cast/${bogus}/safety`)).status).toBe(404);
+
+    expect((await request(server).delete(`/api/v1/campaigns/${campaignId}/cast-sessions/${created.body.session.id}`).set(dm)).status).toBe(200);
+    expect((await request(server).get(safetyPath)).status).toBe(404);
+  });
+
   it('refuses cast credentials that would outlive the 30-day ceiling', async () => {
     const server = ctx.app.getHttpServer();
     const tooFar = new Date(Date.now() + 400 * 24 * 60 * 60 * 1000).toISOString();

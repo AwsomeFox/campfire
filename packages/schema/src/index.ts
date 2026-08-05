@@ -1386,6 +1386,17 @@ export type CastSessionExit = z.infer<typeof CastSessionExit>;
 export const CastSessionMutationResult = z.object({ revoked: z.number().int().nonnegative() });
 export type CastSessionMutationResult = z.infer<typeof CastSessionMutationResult>;
 
+/**
+ * Payload served by the UNauthenticated `GET /cast/:token/safety` endpoint (issue #1908).
+ *
+ * A cast client has no member identity, so it gets the same anonymity contract as the
+ * member-facing {@link TableSafetyHold} minus everything: no actor, no name, no note, no
+ * timestamps, no counts. `active` is the only field any gate ever reads, and it is the
+ * only field a shared-TV display needs to blank the fight.
+ */
+export const CastSafetyState = z.object({ active: z.boolean() });
+export type CastSafetyState = z.infer<typeof CastSafetyState>;
+
 // Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
 // Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
 // what an absent player needs to catch up on the session.

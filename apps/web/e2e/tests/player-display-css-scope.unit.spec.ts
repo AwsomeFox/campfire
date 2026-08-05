@@ -233,3 +233,46 @@ test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
     expect(screenCss).not.toMatch(/var\(--color-danger\s*,/);
   });
 });
+
+test.describe('safety curtain z-index scoping (issue #1908, rounds 12-13)', () => {
+  // `.cf-screen-control-stack` renders BOTH the cast/kiosk route's Exit
+  // button (which must stay above the safety curtain — issue #1908 round
+  // 7) AND, on the authenticated route, the DM cockpit (scene picker,
+  // paging, aspect toggle — issue #823). Round 12: elevating the whole
+  // stack's z-index unconditionally lifted the authenticated cockpit above
+  // the curtain too, regressing the authed overlay's original
+  // full-viewport-blocking behavior. Round 13: the round-12 fix over-
+  // corrected by dropping the base rule's z-index to `auto` entirely,
+  // which let the stage (rendered after this stack in the DOM, and itself
+  // several position:*, z-index:auto siblings) paint OVER the operator
+  // controls on BOTH routes, disabling them outright — broken controls are
+  // worse than the curtain-coverage gap round 12 was chasing. The base
+  // rule needs a real, non-auto baseline (`20`, the pre-#1908 value) that
+  // sits above ordinary stage content but still comfortably below
+  // `--cf-layer-dialog` (50, the curtain's tier); only the cast-mode
+  // variant raises above that tier.
+  test('the base control-stack rule keeps a real (non-auto) z-index below the curtain tier; only cast mode goes above it', () => {
+    const screenCss = extractScreenCss(READ(PAGE_PATH));
+    const bareRuleMatch = screenCss.match(/\.cf-screen\s+\.cf-screen-control-stack\s*\{([^}]*)\}/);
+    expect(bareRuleMatch, 'base .cf-screen-control-stack rule not found').not.toBeNull();
+    const bareZIndexMatch = bareRuleMatch?.[1].match(/z-index:\s*(\d+)\s*;/);
+    expect(bareZIndexMatch, 'base rule must declare a literal (non-auto, non-curtain-relative) z-index').not.toBeNull();
+    const bareZIndex = Number(bareZIndexMatch?.[1]);
+    // Below the curtain's --cf-layer-dialog tier (50) — see index.css —
+    // so the authenticated cockpit still stays covered when the curtain
+    // is up (round 12's requirement, preserved).
+    expect(bareZIndex).toBeGreaterThan(0);
+    expect(bareZIndex).toBeLessThan(50);
+
+    const castModeRuleMatch = screenCss.match(
+      /\.cf-screen\s+\.cf-screen-control-stack\[data-cast-mode="true"\]\s*\{([^}]*)\}/,
+    );
+    expect(castModeRuleMatch, 'cast-mode-scoped .cf-screen-control-stack rule not found').not.toBeNull();
+    expect(castModeRuleMatch?.[1]).toMatch(/z-index:\s*calc\(var\(--cf-layer-dialog/);
+  });
+
+  test('the control stack carries a data-cast-mode attribute reflecting isCastMode', () => {
+    const pageSource = READ(PAGE_PATH);
+    expect(pageSource).toMatch(/data-cast-mode=\{isCastMode \? 'true' : 'false'\}/);
+  });
+});
