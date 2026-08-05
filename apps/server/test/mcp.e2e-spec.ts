@@ -1608,9 +1608,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       createdEncounterId = encounter.id;
       const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
       const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
-      await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
+      for (const c of encounter.combatants) {
+        await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: c.id, initiative: 0 } });
+      }
       await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: hero.id, initiative: 99 } });
-      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 1 } });
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 50 } });
       await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } });
       const args = { encounterId: encounter.id, expectedCurrentCombatantId: hero.id, idempotencyKey: 'mcp-player-end-turn-1971' };
       const first = await playerClient.callTool({ name: 'end_turn', arguments: args });
