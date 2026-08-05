@@ -158,9 +158,10 @@ export default function CharacterPage() {
   const navigate = useNavigate();
   const { me } = useAuth();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
-  // Rule-system adapter resolved from the active campaign (issue #234): drives ability
+  const activeCampaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
+  // Rule-system adapter resolved from the active campaign (issue #234, #2003): drives ability
   // modifiers and the condition vocabulary instead of a call-site 5e default.
-  const adapter = ruleSystemAdapter(useCampaign(Number.isFinite(cid) ? cid : undefined)?.ruleSystem);
+  const adapter = ruleSystemAdapter(activeCampaign?.ruleSystem, activeCampaign?.customMechanicsProfile);
 
   const [character, setCharacter] = useState<Character | null>(null);
   const [members, setMembers] = useState<CampaignMember[]>([]);

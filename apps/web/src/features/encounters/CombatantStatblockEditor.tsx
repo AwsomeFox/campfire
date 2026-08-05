@@ -12,6 +12,7 @@ import {
   ruleSystemAdapter,
   statblockPresentation,
   STANDARD_D20_ABILITY_FIELDS,
+  type CustomMechanicsProfile,
 } from '@campfire/schema';
 import { Btn } from '../../components/ui';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
@@ -25,16 +26,21 @@ export function CombatantStatblockEditor({
   onChange,
   disabled = false,
   ruleSystem,
+  customMechanicsProfile,
 }: {
   value: CombatantStatblock | null;
   onChange: (next: CombatantStatblock) => void;
   disabled?: boolean;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
 }) {
   useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
   const presentation = useMemo(() => statblockPresentation(ruleSystem), [ruleSystem]);
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(
+    () => ruleSystemAdapter(ruleSystem, customMechanicsProfile),
+    [ruleSystem, customMechanicsProfile],
+  );
   const abilityFields = useMemo(
     () => adapter.characterSheet?.abilityFields ?? STANDARD_D20_ABILITY_FIELDS,
     [adapter],

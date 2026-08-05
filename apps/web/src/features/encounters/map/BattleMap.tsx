@@ -6,7 +6,7 @@ import { GatedControl } from '../../../components/GatedControl';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { FloatingNumbers } from '../FloatingNumbers';
-import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter } from '@campfire/schema';
+import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter, type CustomMechanicsProfile } from '@campfire/schema';
 import { useQuery } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../../lib/api';
 import { reconcileFogSyncState } from '../fogSyncState';
@@ -232,6 +232,7 @@ export type BattleMapProps = {
   castToken?: string | null;
   hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; atCapacity: boolean; onToggle: (id: number) => void } | null;
   impactTargetIds?: readonly number[];
   /**
@@ -284,6 +285,7 @@ export function BattleMap({
   castToken = null,
   hpFeedbackByCombatant = new Map(),
   ruleSystem,
+  customMechanicsProfile,
   targeting = null,
   impactTargetIds = [],
   colorVisionAssist = false,
@@ -571,7 +573,10 @@ export function BattleMap({
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
   const hexOrientation = encounter.hexOrientation ?? 'pointy';
-  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
+  const gridDistanceRule = useMemo(
+    () => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem, customMechanicsProfile)),
+    [ruleSystem, customMechanicsProfile],
+  );
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -3525,6 +3530,7 @@ export type ApplyDamageBarProps = {
   label: string;
   diceTotal?: number;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   targets: Combatant[];
   aoeTemplates?: AoeTemplate[];
   aoeHitContext?: AoeHitTestContext | null;
@@ -3540,6 +3546,7 @@ export function ApplyDamageBar({
   label,
   diceTotal,
   ruleSystem,
+  customMechanicsProfile,
   targets,
   aoeTemplates = [],
   aoeHitContext,
@@ -3556,8 +3563,9 @@ export function ApplyDamageBar({
   const [aoeSaveOutcomes, setAoeSaveOutcomes] = useState<Partial<Record<number, DamageSaveOutcome>>>({});
   const [isCrit, setIsCrit] = useState(false);
   const delta = mode === 'heal' ? amount : -amount;
-  const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
-  const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
+  const mapAdapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
+  const damageTypes = mapAdapter.damageTypes ?? [];
+  const supportsDamageRules = mapAdapter.supportsDirectDamageRules === true;
   const damage = mode === 'damage' && supportsDamageRules
     ? {
         damageType: normalizeDirectDamageType(damageType),

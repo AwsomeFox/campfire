@@ -565,6 +565,47 @@ export const LabyrinthLordAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES
 export const OldSchoolEssentialsAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['old-school-essentials']);
 export const OseAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES.ose);
 
+export const HomebrewMechanicsProfile = z
+  .object({
+    slug: z.string().min(1).max(80),
+    label: z.string().min(1).max(120),
+    mechanicsSummary: z.string().max(500).default(''),
+    abilityTable: z.enum(['bx-banded', 'sw-banded', 'adnd-linear']),
+    abilityCap: z.number().int().min(1).max(10).optional().default(3),
+    saves: z.array(z.string().min(1).max(80)).min(1).max(12).optional().default(['Poison', 'Wands', 'Paralysis', 'Breath', 'Spells']),
+    acMode: z.enum(['descending', 'ascending']),
+    acAnchor: z.number().int().min(0).max(30).optional().default(10),
+    initiativeMode: z.enum(['individual', 'group']).optional().default('individual'),
+    initiativeDie: z.number().int().min(2).max(100).optional().default(6),
+    initiativeUsesDexMod: z.boolean().optional().default(false),
+    tiebreak: z.enum(['dex-then-order', 'order-only']).optional().default('dex-then-order'),
+    conditions: z.array(z.string().min(1).max(60)).min(1).max(40).optional(),
+  })
+  .strict();
+export type HomebrewMechanicsProfile = z.infer<typeof HomebrewMechanicsProfile>;
+export type CustomMechanicsProfile = HomebrewMechanicsProfile;
+
+export function tryCreateHomebrewRuleSystemAdapter(rawProfile: unknown): RuleSystemAdapter | null {
+  const parsed = HomebrewMechanicsProfile.safeParse(rawProfile);
+  if (!parsed.success) return null;
+  const data = parsed.data;
+  return createOsrVariantAdapter({
+    slug: data.slug,
+    label: data.label,
+    mechanicsSummary: data.mechanicsSummary,
+    abilityTable: data.abilityTable,
+    abilityCap: data.abilityCap,
+    saves: data.saves,
+    acMode: data.acMode,
+    acAnchor: data.acAnchor,
+    initiativeMode: data.initiativeMode,
+    initiativeDie: data.initiativeDie,
+    initiativeUsesDexMod: data.initiativeUsesDexMod,
+    tiebreak: data.tiebreak,
+    conditions: data.conditions,
+  });
+}
+
 /** Map from rule-pack slug → native adapter (issue #765). */
 export const OSR_VARIANT_ADAPTERS: Record<string, RuleSystemAdapter> = {
   'basic-fantasy': BasicFantasyAdapter,

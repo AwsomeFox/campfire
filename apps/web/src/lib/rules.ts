@@ -17,7 +17,7 @@
  * server's dead/absent-default gate — a source that needs a mirror URL is
  * surfaced honestly with a URL field rather than a broken install button.
  */
-import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem } from '@campfire/schema';
+import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem, CustomMechanicsProfile, RuleSystemAdapter } from '@campfire/schema';
 import {
   actionEconomyForAdapter,
   ddbImportSupported,
@@ -290,12 +290,25 @@ export function mechanicsForPackSlug(slug: string | null | undefined): string | 
 }
 
 /**
+ * Helper to resolve the rule system adapter for a campaign object, including its
+ * optional custom mechanics profile (issue #2003).
+ */
+export function ruleSystemAdapterForCampaign(
+  campaign?: { ruleSystem?: string | null; customMechanicsProfile?: CustomMechanicsProfile | null } | null,
+): RuleSystemAdapter {
+  return ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile);
+}
+
+/**
  * The rule-system label a campaign's `ruleSystem` slug resolves to for COMBAT — via the
  * schema's adapter registry, which falls back to D&D 5e for any unknown/removed slug. Use
  * this to explain what an unrecognised (e.g. uninstalled) slug actually behaves as.
  */
-export function ruleSystemAdapterLabel(slug: string | null | undefined): string {
-  return ruleSystemAdapter(slug ?? '').label;
+export function ruleSystemAdapterLabel(
+  slug: string | null | undefined,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): string {
+  return ruleSystemAdapter(slug ?? '', customMechanicsProfile).label;
 }
 
 export type RulesetCapabilityStatus = 'available' | 'fallback' | 'limited' | 'unavailable';

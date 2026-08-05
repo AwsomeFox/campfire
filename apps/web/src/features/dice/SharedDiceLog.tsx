@@ -56,7 +56,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const { me } = useAuth();
   const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const campaign = useCampaign(campaignId);
-  const supportsActionDice = Boolean(ruleSystemAdapter(campaign?.ruleSystem).attributeDicePool);
+  const supportsActionDice = Boolean(
+    ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile).attributeDicePool,
+  );
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [physical, setPhysical] = useState<PhysicalRollFormFields>(EMPTY_PHYSICAL_ROLL_FORM);

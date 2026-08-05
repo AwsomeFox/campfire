@@ -75,6 +75,8 @@ export * from './spell-slots';
 export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
+import { HomebrewMechanicsProfile } from './osr-adapter';
+export * from './osr-adapter';
 export * from './character-creation';
 export * from './narration-language';
 export * from './leveled-conditions';
@@ -6071,21 +6073,10 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) {
  */
 export function ruleSystemAdapter(
   ruleSystem?: string | null,
-  customMechanicsProfile?: OsrMechanicsProfile | null,
+  customMechanicsProfile?: unknown,
 ): RuleSystemAdapter {
-  // `isRegisteredRuleSystemSlug`, not `ADAPTERS[ruleSystem]` truthiness: bracket access walks
-  // the prototype chain, so a campaign whose slug is 'constructor' / 'toString' / 'valueOf'
-  // would resolve an Object.prototype member as its combat adapter. Using the same predicate
-  // the server's homebrew-override guard uses also keeps the two definitions of "this is a
-  // built-in system" from drifting apart.
   if (ruleSystem && isRegisteredRuleSystemSlug(ruleSystem)) return ADAPTERS[ruleSystem];
-  if (ruleSystem && customMechanicsProfile && customMechanicsProfile.slug === ruleSystem) {
-    // VALIDATED, not cast (review). The server reads this column with an unchecked
-    // `JSON.parse`, so a row from an older version, a restored backup, a hand repair, or an
-    // untrusted export document reaches here unchecked. Building from it directly meant an
-    // out-of-enum `abilityTable` silently degraded to `bx-banded` — wrong maths presented as
-    // the table's own. A profile that fails validation is treated exactly like no profile at
-    // all, falling through to the default below rather than throwing on a hot read path.
+  if (customMechanicsProfile && typeof customMechanicsProfile === 'object') {
     const adapter = tryCreateHomebrewRuleSystemAdapter(customMechanicsProfile);
     if (adapter) return adapter;
   }

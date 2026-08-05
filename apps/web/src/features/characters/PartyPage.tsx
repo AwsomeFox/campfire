@@ -43,7 +43,7 @@ export default function PartyPage() {
   // as explicitly 5e here, matching the server's compatibility gate.
   const campaign = useCampaign(id);
   const ddbAllowed = ddbImportSupported(campaign?.ruleSystem);
-  const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+  const adapter = ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile);
 
   // Full sheets are caller-scoped. The separate roster lets every member see the
   // party without widening those sheets (and stays light enough for the 5s poll).

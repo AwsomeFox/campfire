@@ -103,7 +103,7 @@ export function ResourceTrackerPanel({
   // stamina/night cadence instead of a generic short/long rest that restores no SP and
   // spends no RP.
   const campaign = useCampaign(campaignId);
-  const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+  const adapter = ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile);
   const restOptions = restOptionsForAdapter(adapter);
   // Issue #1902 rework: `CampaignProvider`'s campaign list loads asynchronously, so on
   // first paint `useCampaign(campaignId)` can still be `undefined` for a moment even

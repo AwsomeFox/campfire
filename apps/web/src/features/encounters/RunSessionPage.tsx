@@ -4118,6 +4118,7 @@ export default function RunSessionPage() {
           label={pendingApply.label}
           diceTotal={pendingApply.diceTotal}
           ruleSystem={campaign?.ruleSystem}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
           targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
           applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}

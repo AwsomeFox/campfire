@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
+import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec, CustomMechanicsProfile } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
@@ -54,6 +54,7 @@ interface TurnWorkspaceProps {
   turn: TurnWorkspaceData | undefined;
   isDm: boolean;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   /** Current combatant turn state (delay / ready) from the encounter roster. */
   currentTurnState?: CombatantTurnState;
   /** When true, conflict-prone turn controls stay disabled (issue #471). */
@@ -132,6 +133,7 @@ export function TurnWorkspace({
   turn,
   isDm,
   ruleSystem,
+  customMechanicsProfile,
   currentTurnState,
   actionsDisabled = false,
   deathSavePending = false,
@@ -154,7 +156,10 @@ export function TurnWorkspace({
   const [activeTab, setActiveTab] = useState<'action' | 'bonus' | 'reaction' | 'other'>('action');
   const [showSpellbook, setShowSpellbook] = useState(false);
 
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(
+    () => ruleSystemAdapter(ruleSystem, customMechanicsProfile),
+    [ruleSystem, customMechanicsProfile],
+  );
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
 
   const settle = () => {
