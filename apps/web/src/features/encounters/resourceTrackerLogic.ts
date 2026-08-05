@@ -91,16 +91,26 @@ export function spellSlotPatchBody(
  * the nested shape (the whole-statblock PATCH this replaces used to build) is a
  * guaranteed 400. `target` is exactly one of `{ key }` or `{ spellLevel }`; `delta` is
  * computed relative to the rendered `currentUsed`, matching {@link spellSlotPatchBody}.
- * No `expectedUpdatedAt`/CAS token: unlike the whole-statblock PATCH, this endpoint reads
- * the combatant row fresh inside its own transaction and needs no client-supplied
- * revision to stay race-free.
+ *
+ * No whole-encounter `expectedUpdatedAt`/CAS token: unlike the whole-statblock PATCH, this
+ * endpoint reads the combatant row fresh inside its own transaction, so a second writer's
+ * write never gets silently overwritten by a stale whole-blob PATCH. But `currentUsed` IS
+ * still sent as `expectedUsed` (issue #1909 review, Codex P2) — a DIFFERENT race the fresh
+ * row-read does NOT close: a pip click is an ABSOLUTE intent ("set used to N") converted
+ * to a relative `delta` against whatever `used` THIS client last rendered. If two clients
+ * both last rendered `used: 0` and both click the first pip, both send `delta: 1`; the
+ * transactional read makes each write internally consistent, but nothing stops the SECOND
+ * caller's delta from applying on top of the FIRST's fresh result (committing `used: 2`,
+ * not the `1` either caller intended). `expectedUsed` closes that: the server verifies it
+ * against the FRESH value inside its own transaction and 409s on a mismatch instead of
+ * applying a delta computed from a baseline that has since moved.
  */
 export function combatantResourceAdjustBody(
   target: { key: string } | { spellLevel: number },
   currentUsed: number,
   nextUsed: number,
-): Pick<CombatantResourceAdjust, 'key' | 'spellLevel' | 'delta'> {
-  return { ...target, delta: nextUsed - currentUsed };
+): Pick<CombatantResourceAdjust, 'key' | 'spellLevel' | 'delta' | 'expectedUsed'> {
+  return { ...target, delta: nextUsed - currentUsed, expectedUsed: currentUsed };
 }
 
 /**

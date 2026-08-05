@@ -85,18 +85,38 @@ test.describe('resourceTrackerLogic (issue #1902)', () => {
   });
 
   // Issue #1909: body for POST .../combatants/:cid/resources — a monster/NPC statblock
-  // pip click, relative delta, no CAS token (the server reads the combatant row fresh
-  // inside its own transaction).
-  test('combatantResourceAdjustBody sends { key, delta } for a feature resource, relative to current used', () => {
-    // Spending: used 0 -> 1 is delta +1.
-    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 0, 1)).toEqual({ key: 'kiPoints', delta: 1 });
-    // Restoring: used 2 -> 0 is delta -2.
-    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 2, 0)).toEqual({ key: 'kiPoints', delta: -2 });
+  // pip click, relative delta. No WHOLE-ENCOUNTER CAS token (the server reads the
+  // combatant row fresh inside its own transaction), but `currentUsed` is ALSO sent as
+  // `expectedUsed` (issue #1909 review, Codex P2) — a per-resource CAS guard against a
+  // DIFFERENT race the fresh-row read does not close: two callers who both last rendered
+  // the same `used` and both click the same absolute pip position would otherwise both
+  // send the identical delta, the second landing on top of the first's fresh result
+  // instead of 409ing. See `withStatblockRevision`'s neighbor, `combatantResourceAdjustBody`
+  // itself, for the full mechanism.
+  test('combatantResourceAdjustBody sends { key, delta, expectedUsed } for a feature resource, relative to current used', () => {
+    // Spending: used 0 -> 1 is delta +1, expectedUsed is the rendered baseline (0).
+    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 0, 1)).toEqual({ key: 'kiPoints', delta: 1, expectedUsed: 0 });
+    // Restoring: used 2 -> 0 is delta -2, expectedUsed is the rendered baseline (2).
+    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 2, 0)).toEqual({ key: 'kiPoints', delta: -2, expectedUsed: 2 });
   });
 
-  test('combatantResourceAdjustBody sends { spellLevel, delta } for a spell slot, relative to current used', () => {
-    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 0, 1)).toEqual({ spellLevel: 2, delta: 1 });
-    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 1, 0)).toEqual({ spellLevel: 2, delta: -1 });
+  test('combatantResourceAdjustBody sends { spellLevel, delta, expectedUsed } for a spell slot, relative to current used', () => {
+    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 0, 1)).toEqual({ spellLevel: 2, delta: 1, expectedUsed: 0 });
+    expect(combatantResourceAdjustBody({ spellLevel: 2 }, 1, 0)).toEqual({ spellLevel: 2, delta: -1, expectedUsed: 1 });
+  });
+
+  // Issue #1909 review (Codex P2): the actual gap Codex found — a pip click represents an
+  // ABSOLUTE intent, converted to a relative `delta` client-side against a RENDERED
+  // `currentUsed`. Two callers who both last rendered `used: 0` and both click "set to 1"
+  // both compute `delta: 1`; without `expectedUsed`, the server's transactional fresh-row
+  // read makes each write internally consistent but does not stop the second delta from
+  // applying on top of the first's fresh result (committing `used: 2`, not the `1` either
+  // caller intended). `expectedUsed: currentUsed` is what closes that — proven at the
+  // server layer in `resources.spec.ts`'s "stale pip click" tests; this pins that the WEB
+  // caller actually sends it.
+  test('combatantResourceAdjustBody sends currentUsed as expectedUsed — the per-resource stale-click guard (Codex review)', () => {
+    expect(combatantResourceAdjustBody({ key: 'kiPoints' }, 0, 1).expectedUsed).toBe(0);
+    expect(combatantResourceAdjustBody({ spellLevel: 3 }, 1, 2).expectedUsed).toBe(1);
   });
 
   // Issue #1909 review (Codex P2): the in-app statblock editor's whole-statblock PATCH

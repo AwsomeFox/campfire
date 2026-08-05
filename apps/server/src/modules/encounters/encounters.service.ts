@@ -8523,7 +8523,7 @@ export class EncountersService {
   async adjustCombatantResource(
     encounterId: number,
     combatantId: number,
-    patch: { key?: string; spellLevel?: number; delta?: number; idempotencyKey?: string },
+    patch: { key?: string; spellLevel?: number; delta?: number; expectedUsed?: number; idempotencyKey?: string },
     user: RequestUser,
     role: Role,
   ): Promise<Combatant> {
@@ -8574,7 +8574,7 @@ export class EncountersService {
           key: patch.idempotencyKey,
           encounterId,
           campaignId: encounter.campaignId,
-          fingerprint: encounterOpFingerprint({ combatantId, key: patch.key, spellLevel: patch.spellLevel, delta }),
+          fingerprint: encounterOpFingerprint({ combatantId, key: patch.key, spellLevel: patch.spellLevel, delta, expectedUsed: patch.expectedUsed }),
         }
       : null;
     let replayed: Combatant | null = null;
@@ -8624,6 +8624,16 @@ export class EncountersService {
           const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
           if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
           this.assertMutable(freshEncounter);
+          // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
+          // deleted/ended status, not the CAMPAIGN's lifecycle — if the campaign was
+          // archived or trashed in the window between the controller/MCP tool's role gate
+          // and this transaction, `assertMutable` alone would let this write commit anyway.
+          // Every OTHER encounter-write transaction that re-reads a fresh encounter row
+          // pairs it with this recheck (`addCombatant` `:3863`, `removeCombatant` `:5163`,
+          // `undoRemoveCombatant` `:5459`, `rollCombatantInitiative` `:5953`) —
+          // `updateCombatant` itself turns out to be a pre-existing exception (missing it
+          // too), noted here rather than silently left unmentioned.
+          this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
           const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
           if (!character) throw new NotFoundException(`No such character ${characterId}`);
 
@@ -8633,6 +8643,26 @@ export class EncountersService {
             const slot = slots[levelKey];
             if (!slot || slot.max <= 0) {
               throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+            }
+            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
+            // ("set this slot's used to N") converted to a relative delta against whatever
+            // `used` the caller last rendered. The transactional fresh-row read above
+            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
+            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
+            // from landing on top of a first caller's fresh result (two clicks of "set to
+            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
+            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
+            // "restore 2 charges", never sends it) but when present is checked against the
+            // FRESH `slot.used` read just above, inside this same transaction — the same
+            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
+            // instead of the whole sheet/statblock.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: slot.used,
+              });
             }
             const nextUsed = slot.used + delta;
             if (nextUsed < 0 || nextUsed > slot.max) {
@@ -8649,6 +8679,16 @@ export class EncountersService {
           } else if (patch.key) {
             const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
             const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
+            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
+            // spell-slot branch above.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: res.used,
+              });
+            }
             const nextUsed = res.used + delta;
             if (nextUsed < 0 || nextUsed > res.max) {
               throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
@@ -8720,6 +8760,10 @@ export class EncountersService {
           const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
           if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
           this.assertMutable(freshEncounter);
+          // Issue #1909 review (Codex P2): see the character branch's identical comment
+          // above — `assertMutable` alone does not cover an archive/trash of the CAMPAIGN
+          // landing in the window between the role gate and this transaction.
+          this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
           const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
           if (!fresh || !fresh.statblockJson) {
             throw new BadRequestException('This combatant has no inline statblock resources');
@@ -8748,6 +8792,26 @@ export class EncountersService {
             if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
               throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
             }
+            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
+            // ("set this slot's used to N") converted to a relative delta against whatever
+            // `used` the caller last rendered. The transactional fresh-row read above
+            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
+            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
+            // from landing on top of a first caller's fresh result (two clicks of "set to
+            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
+            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
+            // "restore 2 charges", never sends it) but when present is checked against the
+            // FRESH `slot.used` read just above, inside this same transaction — the same
+            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
+            // instead of the whole encounter.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: slot.used,
+              });
+            }
             const nextUsed = slot.used + delta;
             if (nextUsed < 0 || nextUsed > slot.max) {
               throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
@@ -8767,6 +8831,16 @@ export class EncountersService {
             // a non-numeric `used`/`max`.
             if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
               throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
+            }
+            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
+            // spell-slot branch above.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: res.used,
+              });
             }
             const nextUsed = res.used + delta;
             if (nextUsed < 0 || nextUsed > res.max) {

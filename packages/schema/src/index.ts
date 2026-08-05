@@ -10384,12 +10384,26 @@ export const CombatantUpdate = z.object({
  * `idempotencyKey` reuses the issue #580 convention `CombatantUpdate.idempotencyKey`
  * documents just above: this is a RELATIVE write, so a lost-response retry must replay the
  * original outcome rather than double-spend the resource.
+ *
+ * `expectedUsed` (issue #1909 review, Codex P2) closes a DIFFERENT race than the delta
+ * mechanics above protect against: a pip click represents an ABSOLUTE intent ("set this
+ * pip to used=1"), converted to a relative `delta` against whatever `used` this caller last
+ * rendered. If two callers both last rendered `used: 0` and both click the first pip, both
+ * send `delta: 1` — the transactional fresh-row read prevents the WHOLE-BLOB lost-update
+ * this endpoint replaced (issue #1909's headline bug), but does nothing to stop the SECOND
+ * delta from applying on top of the FIRST's fresh result (`used: 0 -> 1`, then `1 -> 2`),
+ * silently landing on a value neither caller intended. Optional so a caller with a purely
+ * relative intent (an AI DM's "restore 2 charges", or any caller not tracking a rendered
+ * baseline) is unaffected; when present, the server verifies it against the FRESH `used`
+ * inside the same transaction that computes `delta` and 409s on a mismatch instead of
+ * applying a delta computed from a baseline that has since moved.
  */
 export const CombatantResourceAdjust = z
   .object({
     key: z.string().min(1).max(80).optional(),
     spellLevel: z.number().int().min(1).max(9).optional(),
     delta: z.number().int().optional().default(1),
+    expectedUsed: z.number().int().min(0).optional(),
     idempotencyKey: IdempotencyKey,
   })
   .strict()

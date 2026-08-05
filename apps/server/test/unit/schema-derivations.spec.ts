@@ -159,4 +159,13 @@ describe('schema — CombatantResourceAdjust (issue #1909)', () => {
   it('rejects an unknown field (.strict())', () => {
     expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', used: 3 }).success).toBe(false);
   });
+
+  // Issue #1909 review (Codex P2): `expectedUsed` is the per-resource stale-click guard —
+  // optional (a purely relative caller never sends it), non-negative integer when present.
+  it('accepts an optional expectedUsed, non-negative integer, for the per-resource stale-click guard', () => {
+    expect(CombatantResourceAdjust.parse({ key: 'kiPoints', expectedUsed: 0 }).expectedUsed).toBe(0);
+    expect(CombatantResourceAdjust.parse({ key: 'kiPoints' }).expectedUsed).toBeUndefined();
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', expectedUsed: -1 }).success).toBe(false);
+    expect(CombatantResourceAdjust.safeParse({ key: 'kiPoints', expectedUsed: 1.5 }).success).toBe(false);
+  });
 });

@@ -367,6 +367,88 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(rows.some((r: any) => r.action === 'encounter.combatant.resource' && String(r.actor).startsWith(String(user.id)))).toBe(true);
   });
 
+  // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
+  // deleted/ended status, not the CAMPAIGN's lifecycle — if the campaign is archived or
+  // trashed in the window between the controller/MCP tool's role gate and this
+  // transaction, the write must still be rejected. Character branch counterpart to the
+  // statblock-branch test in the "issue #1909: statblock combatants" describe block below.
+  it("an archived campaign rejects a character resource write, even though the encounter itself is still running (Codex review)", async () => {
+    const user = { id: '1', username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Archive Race Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Archive Race Fight', status: 'running', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1 })
+      .returning()
+      .all();
+
+    // Simulates the campaign being archived in the window between the REST/MCP role gate
+    // (which runs before this call, outside the service) and this transaction — the
+    // encounter itself is untouched (still 'running'), so only a campaign-lifecycle
+    // recheck INSIDE the transaction can catch this.
+    db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, camp.id)).run();
+
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1 }, user, 'dm'),
+    ).rejects.toThrow(ForbiddenException);
+
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['layOnHands'].used).toBe(0);
+  });
+
+  // Issue #1909 review (Codex P2): character-branch counterpart to the statblock-branch
+  // stale-click tests below — `delta` encodes an ABSOLUTE pip intent converted to a
+  // relative delta against a RENDERED `used`; `expectedUsed` catches a second, now-stale
+  // caller before it silently double-applies.
+  it('a second stale pip click on the SAME character resource 409s instead of silently double-applying (Codex review)', async () => {
+    const user = { id: '1', username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Stale Click Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db.insert(encounters).values({ campaignId: camp.id, name: 'Stale Click Fight', status: 'running', createdAt: ts, updatedAt: ts }).returning().all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1 })
+      .returning()
+      .all();
+
+    await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1, expectedUsed: 0 }, user, 'dm');
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'layOnHands', delta: 1, expectedUsed: 0 }, user, 'dm'),
+    ).rejects.toThrow(ConflictException);
+
+    const character = await charactersService.getRowOrThrow(c.id);
+    expect(JSON.parse(character.resources)['layOnHands'].used).toBe(1);
+  });
+
   // Issue #1909 review (Codex P2): for a character-linked combatant the resource lives on
   // the CHARACTER row, not the combatant — `Combatant` has no resources/spellSlots field at
   // all, so the response cannot show the committed value regardless of freshness. Pins the
@@ -615,6 +697,56 @@ describe('inline spell slots & character resources (issue #422)', () => {
       expect(statblock.spellSlots['2'].used).toBe(1);
     });
 
+    // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent converted to a
+    // relative delta client-side against a RENDERED `used`. Two callers who both last
+    // rendered `used: 0` and both click "set to 1" both send `delta: 1` — the transactional
+    // fresh-row read (proven by the test above) does not stop the SECOND delta from
+    // applying on top of the FIRST's fresh result, landing on `used: 2` when both callers
+    // intended `1`. `expectedUsed` closes this: the second call's stale expectation (0) no
+    // longer matches the fresh value (1) that the first call already committed.
+    it('a second stale pip click on the SAME statblock resource 409s instead of silently double-applying (Codex review)', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      // Both "callers" last rendered used: 0 and both click the first pip (used: 0 -> 1),
+      // so both compute delta: 1, expectedUsed: 0 — exactly what combatantResourceAdjustBody
+      // would send from two tabs open to the same pre-spend state.
+      const first = await encountersService.adjustCombatantResource(
+        enc.id, comb.id, { key: 'kiPoints', delta: 1, expectedUsed: 0 }, user, 'dm',
+      );
+      expect(first.statblock.resources.kiPoints.used).toBe(1);
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1, expectedUsed: 0 }, user, 'dm'),
+      ).rejects.toThrow(ConflictException);
+
+      // Still 1 — the stale second click did not land on top of the first's fresh result.
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(1);
+    });
+
+    it('a stale pip click on a statblock spell slot 409s the same way (Codex review)', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1, expectedUsed: 0 }, user, 'dm');
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1, expectedUsed: 0 }, user, 'dm'),
+      ).rejects.toThrow(ConflictException);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).spellSlots['2'].used).toBe(1);
+    });
+
+    it('omitting expectedUsed keeps a purely relative write unguarded, matching the documented opt-in contract (Codex review)', async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      // No expectedUsed at all: an AI DM's "restore 2 charges" intent, no rendered baseline
+      // to compare against. Both calls succeed, landing on used: 2 — this is NOT the race
+      // the finding describes (that requires a rendered, now-stale, absolute intent).
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm');
+      const second = await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm');
+      expect(second.statblock.resources.kiPoints.used).toBe(2);
+    });
+
     it('statblock overspend and below-zero restore return typed 400 with nothing written', async () => {
       const { user, enc, comb } = await seedStatblockEncounter();
 
@@ -683,6 +815,23 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
       const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
       expect(JSON.parse(row.statblockJson!).spellSlots['2'].used).toBeUndefined();
+    });
+
+    // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
+    // deleted/ended status, not the CAMPAIGN's lifecycle. Every other encounter-write
+    // transaction that re-reads a fresh encounter row pairs it with
+    // `assertCampaignWritableInTx` (addCombatant, removeCombatant, undoRemoveCombatant,
+    // rollCombatantInitiative) — this endpoint's statblock branch was missing it.
+    it('an archived campaign rejects a statblock resource write, even though the encounter itself is still running (Codex review)', async () => {
+      const { user, camp, enc, comb } = await seedStatblockEncounter();
+      db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, camp.id)).run();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(ForbiddenException);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
     });
 
     it('a non-character combatant with no inline statblock resources still 400s', async () => {

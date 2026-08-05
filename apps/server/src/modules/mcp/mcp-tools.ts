@@ -4619,6 +4619,11 @@ export class McpToolsService {
         key: z.string().min(1).max(80).optional().describe('Feature resource key (exactly one of key or spellLevel required)'),
         spellLevel: z.number().int().min(1).max(9).optional().describe('Spell slot level 1-9 (exactly one of key or spellLevel required)'),
         delta: z.number().int().optional().describe('Relative to current used; +1 spends, -1 restores (default +1)'),
+        expectedUsed: z.number().int().min(0).optional().describe(
+          'Optional per-resource CAS guard: the `used` value get_encounter/get_character last showed for this ' +
+            'resource. If another writer changed it since, the request 409s instead of silently applying delta on ' +
+            'top of the new value. Omit for a purely relative intent (e.g. "restore 2 charges") with no rendered baseline.',
+        ),
         idempotencyKey: IdempotencyKey.describe('Client-minted intent key; reuse for retries of this exact spend/restore'),
       },
       async ({ encounterId, combatantId, ...fields }) => {
