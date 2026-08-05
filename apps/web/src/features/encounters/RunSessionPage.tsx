@@ -8716,6 +8716,7 @@ function AddCombatantPanel({
   return (
     <Card
       className="space-y-3"
+      data-testid="add-combatant-dropzone"
       onDragOver={(event: React.DragEvent) => {
         if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
           event.preventDefault();
