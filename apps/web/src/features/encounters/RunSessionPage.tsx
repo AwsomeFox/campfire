@@ -3567,7 +3567,14 @@ export default function RunSessionPage() {
           aoeDeclarerNames={aoeDeclarerNames}
           canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
           onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
-          onUpdateAoe={(templateId, patch) => { void updateAoeTemplate(templateId, patch).catch(reportError); }}
+          onUpdateAoe={async (templateId, patch) => {
+            try {
+              await updateAoeTemplate(templateId, patch);
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
           onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
           onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}

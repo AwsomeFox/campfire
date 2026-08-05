@@ -33,6 +33,10 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(BATTLE_MAP).toContain('onFocus={() => setEditingAoeDraft(true)}');
     expect(BATTLE_MAP).toContain('setEditingAoeDraft(false);');
     expect(BATTLE_MAP).toContain('pendingAoeDraftRef.current = selectedAoe.id;');
+    expect(BATTLE_MAP).toContain('function updatePlayerAoeFromDraft');
+    expect(BATTLE_MAP).toContain('setAoeDraft(null);');
+    expect(RUN_SESSION).toContain('onUpdateAoe={async (templateId, patch) =>');
+    expect(RUN_SESSION).toContain('throw error;');
   });
 
   test('the new declaration callbacks do not extend the existing damage-application surface', () => {

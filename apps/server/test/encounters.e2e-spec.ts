@@ -7286,7 +7286,7 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
   let campaignId: number;
   let encounterId: number;
 
-  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -7330,6 +7330,13 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
         (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player).send({ declaredByUserId: 'dev:p-2' })).status,
       ).toBe(400);
 
+      const playerMoved = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(player)
+        .send({ x: 40 });
+      expect(playerMoved.status).toBe(200);
+      expect(playerMoved.body).toMatchObject({ x: 40, angleDeg: 45, color: '#663399' });
+
       const dmUpdated = await request(server)
         .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
         .set(dm)
@@ -7346,8 +7353,8 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
       const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
         .map((row) => row.action)
         .filter((action) => action.startsWith('encounter.aoe.'));
-      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.remove']);
-      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(3);
+      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.update', 'encounter.aoe.remove']);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(4);
     } finally {
       subscription.unsubscribe();
     }
@@ -7419,6 +7426,10 @@ describe('encounters — player-declared AoE templates (issue #1913)', () => {
     expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(dm)).body.aoe).toHaveLength(1);
     expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
     expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
+    // A template hidden by fog cannot be distinguished from a missing id through
+    // either player mutation route.
+    expect((await request(server).patch(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer)).status).toBe(404);
 
     await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);

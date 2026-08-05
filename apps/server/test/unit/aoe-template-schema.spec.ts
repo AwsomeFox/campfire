@@ -26,4 +26,8 @@ describe('AoE template write contracts (issue #1913)', () => {
     expect(AoeTemplateUpdate.safeParse({ x: 50, sizeFt: 40, angleDeg: 90 }).success).toBe(true);
     expect(AoeTemplateUpdate.safeParse({ x: 50, declaredByUserId: 'dev:another-player' }).success).toBe(false);
   });
+
+  it('does not materialize declaration defaults on an omitted update field', () => {
+    expect(AoeTemplateUpdate.parse({ x: 50 })).toEqual({ x: 50 });
+  });
 });

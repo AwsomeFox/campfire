@@ -2313,6 +2313,11 @@ export class EncountersService {
       if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
       const existing = current[index];
       if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        // A template outside revealed fog must remain indistinguishable from a
+        // missing id, including on player-addressable write routes.
+        if (filterAoeTemplatesForViewer([existing], parseFog(fresh.fog), { viewerUserId: user.id }).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
         throw new ForbiddenException('Players may modify only their own AoE templates.');
       }
 
@@ -2369,6 +2374,10 @@ export class EncountersService {
       const existing = current.find((candidate) => candidate.id === templateId);
       if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
       if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        // Match reads and updates: unrevealed templates are non-enumerating.
+        if (filterAoeTemplatesForViewer([existing], parseFog(fresh.fog), { viewerUserId: user.id }).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
         throw new ForbiddenException('Players may remove only their own AoE templates.');
       }
       tx.update(encounters)

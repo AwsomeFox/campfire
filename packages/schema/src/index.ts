@@ -9202,7 +9202,17 @@ export type AoeTemplateDeclare = z.infer<typeof AoeTemplateDeclare>;
  * route supplies the template id; ownership and declarer attribution always
  * remain server-controlled.
  */
-export const AoeTemplateUpdate = AoeTemplateDeclare.omit({ id: true }).partial().strict();
+// This intentionally does not derive from `AoeTemplateDeclare.partial()`: Zod
+// defaults on the declaration schema would materialize omitted `angleDeg` and
+// `color` keys, turning a one-field PATCH into an accidental reset.
+export const AoeTemplateUpdate = z.object({
+  shape: AoeShape.optional(),
+  x: z.number().min(0).max(100).optional(),
+  y: z.number().min(0).max(100).optional(),
+  sizeFt: z.number().positive().max(1000).optional(),
+  angleDeg: z.number().min(-360).max(360).optional(),
+  color: z.string().max(24).nullable().optional(),
+}).strict();
 export type AoeTemplateUpdate = z.infer<typeof AoeTemplateUpdate>;
 
 /**
@@ -13046,4 +13056,3 @@ export type EncounterTemplateRosterEntry = z.infer<typeof EncounterTemplateRoste
 
 export const EncounterTemplateRoster = z.array(EncounterTemplateRosterEntry);
 export type EncounterTemplateRoster = z.infer<typeof EncounterTemplateRoster>;
-

@@ -184,7 +184,7 @@ export type BattleMapProps = {
   onSetAoe: (aoe: AoeTemplate[]) => void;
   canDeclareAoe?: boolean;
   onDeclareAoe?: (template: Omit<AoeTemplate, 'declaredByUserId'>) => void;
-  onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void;
+  onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void | Promise<void>;
   onRemoveAoe?: (templateId: string) => void;
   onClearPlayerAoe?: () => void;
   aoeDeclarerNames?: ReadonlyMap<string, string>;
@@ -1387,9 +1387,17 @@ export function BattleMap({
       onDeclareAoe(declaration);
     }
   }
-  function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
-    if (effectiveCanDmWrite) onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-    else onUpdateAoe(id, patch);
+  function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>): void | Promise<void> {
+    if (effectiveCanDmWrite) return onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    return onUpdateAoe(id, patch);
+  }
+  function updatePlayerAoeFromDraft(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
+    void Promise.resolve().then(() => updateAoe(id, patch)).catch(() => {
+      // The server rejected this edit. Drop the stale optimistic text so the
+      // next encounter state (or an immediate local drag) repopulates truthfully.
+      if (pendingAoeDraftRef.current === id) pendingAoeDraftRef.current = null;
+      setAoeDraft(null);
+    });
   }
   function removeAoe(id: string) {
     if (selectedAoeId === id) setSelectedAoeId(null);
@@ -1873,7 +1881,7 @@ export function BattleMap({
                     if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, x: String(x) });
                     pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { x });
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { x });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1896,7 +1904,7 @@ export function BattleMap({
                     if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, y: String(y) });
                     pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { y });
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { y });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1918,7 +1926,7 @@ export function BattleMap({
                     if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, sizeFt: String(sizeFt) });
                     pendingAoeDraftRef.current = selectedAoe.id;
                     setEditingAoeDraft(false);
-                    if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt });
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { sizeFt });
                   }}
                   style={{ width: 56 }}
                 />
@@ -1941,7 +1949,7 @@ export function BattleMap({
                       if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, angleDeg: String(angleDeg) });
                       pendingAoeDraftRef.current = selectedAoe.id;
                       setEditingAoeDraft(false);
-                      if (!effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg });
+                      if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { angleDeg });
                     }}
                     style={{ width: 56 }}
                   />

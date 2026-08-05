@@ -40,6 +40,7 @@ import {
   DifficultyBand,
   EncounterShape,
   AoeTemplateDeclare,
+  AoeTemplateUpdate,
   EncounterUpdate,
   EncounterEndTurn,
   EncounterNextTurn,
@@ -1378,7 +1379,7 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id: a repeated id upserts this template'),
-        ...AoeTemplateDeclare.omit({ id: true }).partial().shape,
+        ...AoeTemplateUpdate.shape,
       },
       async ({ encounterId, templateId, ...template }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
