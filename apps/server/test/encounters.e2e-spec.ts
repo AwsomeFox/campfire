@@ -7281,6 +7281,126 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
   });
 });
 
+describe('encounters — player-declared AoE templates (issue #1913)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Player AoE Campaign' })).body.id;
+    encounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Visible Player AoE', hidden: false })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('stamps the caller, rejects spoofing, enforces ownership, and audits/SSEs writes', async () => {
+    const server = ctx.app.getHttpServer();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const spoof = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ ...declaration, declaredByUserId: 'dev:p-2' });
+      expect(spoof.status).toBe(400);
+
+      const created = await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration);
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ ...declaration, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status,
+      ).toBe(403);
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player).send({ declaredByUserId: 'dev:p-2' })).status,
+      ).toBe(400);
+
+      const dmUpdated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(dm)
+        .send({ x: 60, angleDeg: 90 });
+      expect(dmUpdated.status).toBe(200);
+      expect(dmUpdated.body).toMatchObject({ id: 'player-cone', x: 60, angleDeg: 90, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer)).status,
+      ).toBe(403);
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player)).status).toBe(200);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)))
+        .map((row) => row.action)
+        .filter((action) => action.startsWith('encounter.aoe.'));
+      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.remove']);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(3);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Hidden Player AoE', hidden: true })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(viewer).send(declaration)).status).toBe(403);
+
+    const endedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Player AoE', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended', endedAt: new Date().toISOString() }).where(eq(encountersTable.id, endedId));
+    expect((await request(server).post(`/api/v1/encounters/${endedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const capId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'AoE cap', hidden: false })
+    ).body.id;
+    const fifty = Array.from({ length: 50 }, (_, index) => ({ ...declaration, id: `cap-${index}` }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(fifty) }).where(eq(encountersTable.id, capId));
+    expect((await request(server).post(`/api/v1/encounters/${capId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const fogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Fogged player AoE', hidden: false })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${fogId}`).set(dm).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(player).send(declaration)).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(dm)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
+
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);
+  });
+});
+
 // Issue #126 (location/quest/session linking + summary + note pinning) and
 // issue #58 (difficulty band). Own campaign + fixtures so nothing else pollutes the
 // party or the campaign summary.

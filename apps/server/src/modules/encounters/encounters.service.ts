@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -87,6 +87,8 @@ type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
+type AoeTemplateDeclareInput = z.infer<typeof AoeTemplateDeclare>;
+type AoeTemplateUpdateInput = z.infer<typeof AoeTemplateUpdate>;
 type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -2187,6 +2189,175 @@ export class EncountersService {
     // encounter is revealed the ping can be re-issued.
     if (hidden) return;
     this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
+  }
+
+  /**
+   * Enforce the role and secrecy rules shared by the player-addressable AoE write
+   * routes. This deliberately runs inside the transaction, after the campaign
+   * lifecycle recheck, so a hidden/ended/archived state transition cannot race a
+   * declaration. Hidden encounters must stay non-enumerating for every non-DM.
+   */
+  private assertAoeTemplateWriteAccess(encounter: typeof encounters.$inferSelect, role: Role): void {
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounter.id} not found`);
+    }
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not declare or modify AoE templates.');
+    }
+  }
+
+  /**
+   * Create one player- or DM-declared AoE template (issue #1913). Attribution is
+   * stamped from the authenticated caller rather than accepted from the request.
+   */
+  async declareAoeTemplate(
+    encounterId: number,
+    input: AoeTemplateDeclareInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<AoeTemplateType> {
+    const template = AoeTemplateDeclare.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let declared: AoeTemplateType | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertMutable(fresh);
+
+      const current = parseAoe(fresh.aoe);
+      if (current.some((candidate) => candidate.id === template.id)) {
+        throw new ConflictException(`AoE template ${template.id} already exists`);
+      }
+      if (current.length >= 50) {
+        throw new ConflictException('An encounter may have at most 50 AoE templates');
+      }
+
+      declared = { ...template, declaredByUserId: user.id };
+      tx.update(encounters)
+        .set({ aoe: toJsonText([...current, declared]), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aoe.declare',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: declared!.id,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return declared!;
+  }
+
+  /** Update an AoE template while preserving the server-owned declarer identity. */
+  async updateAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    input: AoeTemplateUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<AoeTemplateType> {
+    const patch = AoeTemplateUpdate.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let updated: AoeTemplateType | undefined;
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertMutable(fresh);
+
+      const current = parseAoe(fresh.aoe);
+      const index = current.findIndex((candidate) => candidate.id === templateId);
+      if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
+      const existing = current[index];
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        throw new ForbiddenException('Players may modify only their own AoE templates.');
+      }
+
+      // `AoeTemplateUpdate` cannot include id or declarer. Re-parse the joined
+      // value so the persisted array always retains the full AoeTemplate invariant.
+      updated = AoeTemplate.parse({ ...existing, ...patch, declaredByUserId: existing.declaredByUserId });
+      if (isDeepStrictEqual(updated, existing)) {
+        emittedEncounter = fresh;
+        return;
+      }
+      current[index] = updated;
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.aoe.update',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: templateId,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return updated!;
+  }
+
+  /** Remove an AoE template under the same secrecy, lifecycle, and ownership gates. */
+  async removeAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ ok: true }> {
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertMutable(fresh);
+
+      const current = parseAoe(fresh.aoe);
+      const existing = current.find((candidate) => candidate.id === templateId);
+      if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        throw new ForbiddenException('Players may remove only their own AoE templates.');
+      }
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current.filter((candidate) => candidate.id !== templateId)), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aoe.remove',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: templateId,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return { ok: true };
   }
 
   /**
