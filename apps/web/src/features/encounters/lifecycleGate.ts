@@ -93,3 +93,18 @@ export function nextTurnGateReason(input: {
 export function syncOnlyGateReason(riskyBlocked: boolean): LifecycleGateReason {
   return riskyBlocked ? 'syncBlocked' : null;
 }
+
+/**
+ * `t()`-resolve a gate reason key, or `undefined` when there is none.
+ *
+ * Lives beside the resolvers rather than in one component because `nextTurn` has three
+ * entry points (the keyboard shortcut, the header button, and the lair-action card's
+ * "Done →"), and a per-component copy of this is how the third one ended up without a
+ * reason at all (issue #1933 review).
+ */
+export function gateReasonText(
+  key: LifecycleGateReason,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | undefined {
+  return key ? t(`run.gate.${key}`) : undefined;
+}

@@ -4,13 +4,13 @@ import { GatedControl } from '../../components/GatedControl';
 import type { EncounterLifecycleActions } from './encounterLifecycleActions';
 import { ENCOUNTER_SYNC_BANNER_TESTID } from './encounterSyncState';
 import {
+  gateReasonText,
   nextTurnGateReason,
   rollInitiativeGateReason,
   startGateReason,
   startRosterHintReason,
   syncOnlyGateReason,
   undoTurnGateReason,
-  type LifecycleGateReason,
 } from './lifecycleGate';
 
 /** Ties the Start button to its standing roster instruction for assistive tech. */
@@ -219,14 +219,6 @@ export function DmLifecycleHeader({
       )}
     </div>
   );
-}
-
-/** `t()`-resolve a lifecycle gate reason key, or `undefined` when there is none. */
-function gateReasonText(
-  key: LifecycleGateReason,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string | undefined {
-  return key ? t(`run.gate.${key}`) : undefined;
 }
 
 /** Informational sync state, deliberately rendered outside the header flex row. */

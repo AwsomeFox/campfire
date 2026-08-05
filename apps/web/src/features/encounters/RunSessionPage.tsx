@@ -4,6 +4,8 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
+import { GatedControl } from '../../components/GatedControl';
+import { gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -3487,9 +3489,18 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
-                Done →
-              </Btn>
+              // Issue #1933 review: this is the THIRD entry point to `nextTurn`, alongside
+              // the keyboard shortcut and DmLifecycleHeader's button. Both of those got the
+              // safety-hold mirror; this one did not, so a DM resolving a lair action while
+              // the table is paused fired a write `assertNoSafetyHold` rejects and got a
+              // bare error — the exact "server rejects and the UI cannot say why" outcome
+              // this issue exists to remove. Same shared resolver as the header, so all
+              // three agree by construction rather than by three people remembering.
+              <GatedControl reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t)}>
+                <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
+                  Done →
+                </Btn>
+              </GatedControl>
             )}
           </div>
         </Card>
