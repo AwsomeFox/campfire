@@ -3547,7 +3547,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/npcs`)
         .set(dm)
-        .send({ name: 'Later Hidden NPC', hidden: false })
+        .send({ name: 'Later Hidden NPC · the Betrayer', hidden: false })
     ).body.id;
     const encounter = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
@@ -3564,14 +3564,34 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       .set(dm)
       .send({ combatantId, actionName: 'Late strike', kind: 'to-hit', expr: '+3', mode: 'flat' });
     expect(quickRoll.status).toBe(201);
-    expect(quickRoll.body.roll.actor).toBe('Later Hidden NPC');
+    expect(quickRoll.body.roll.actor).toBe('Later Hidden NPC · the Betrayer');
     expect((await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [unstructuredRoll] = await db
+      .insert(diceRolls)
+      .values({
+        campaignId,
+        rollerUserId: 'dev:dm-1',
+        rollerName: 'dm-1',
+        expr: '1d20',
+        rolls: '[1]',
+        total: 1,
+        label: 'Unstructured roll label',
+        actor: 'Later Hidden NPC · the Betrayer',
+        npcId,
+        createdAt: new Date().toISOString(),
+      })
+      .returning();
     const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
     expect(playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id)).toMatchObject({
       actor: UNKNOWN_COMBATANT_LABEL,
       label: `${UNKNOWN_COMBATANT_LABEL} · Late strike (to-hit)`,
     });
-    expect(JSON.stringify(playerRolls.body)).not.toMatch(/Later Hidden NPC/);
+    expect(playerRolls.body.find((roll: { id: number }) => roll.id === unstructuredRoll.id)).toMatchObject({
+      actor: UNKNOWN_COMBATANT_LABEL,
+      label: UNKNOWN_COMBATANT_LABEL,
+    });
+    expect(JSON.stringify(playerRolls.body)).not.toMatch(/Later Hidden NPC|the Betrayer/);
   });
 
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
