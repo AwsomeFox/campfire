@@ -2455,7 +2455,6 @@ export function BattleMap({
                           return;
                         }
                         if (movable) onTokenKeyDown(e, c);
-                        else if (targetClickable) e.stopPropagation();
                       }}
                       onFocus={(e) => {
                         if (movable) setSelectedTokenId(c.id);
