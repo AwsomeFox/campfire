@@ -340,7 +340,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(applyBar).toHaveCount(0);
       const errorNote = page.getByTestId('error-note');
       await expect(errorNote).toBeVisible();
-      await expect(errorNote).toContainText(/Only (a|the) DM (may|can) set/i);
+      await expect(errorNote).toContainText(/Only the DM can set who dealt that damage/i);
     } finally {
       await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => undefined);
       await teardownDrill(dm, drill);
