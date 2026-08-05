@@ -13,13 +13,13 @@ import { useDisclosure } from '../../../components/useDisclosure';
  * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
  * default so the initiative row stays scannable mid-fight.
  */
-export type CombatantStatblockProps = {
+export type Props = {
   ruleEntryId: number;
   ruleSystem: string | null;
   campaignId?: number;
 };
 
-export function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: CombatantStatblockProps) {
+export function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: Props) {
   useTranslation();
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,

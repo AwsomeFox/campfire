@@ -27,7 +27,7 @@ const ADD_TAB_LABELS: Record<AddTab, string> = {
   npc: 'NPC',
 };
 
-export type AddCombatantPanelProps = {
+export type Props = {
   encounterId: number;
   campaignId: number;
   characters: Character[];
@@ -43,7 +43,7 @@ export function AddCombatantPanel({
   existingCombatantCharacterIds,
   rulePack,
   onAdded,
-}: AddCombatantPanelProps) {
+}: Props) {
   const { t } = useTranslation();
   const announce = useAnnounce();
   const [tab, setTab] = useState<AddTab>('manual');
