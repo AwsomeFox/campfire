@@ -68,6 +68,7 @@ import {
   characterSheetDraftFrom,
   characterSheetDraftsEqual,
   isCharacterSheetDirty,
+  normalizeRestoredDraft,
   snapshotCharacterSheetDraft,
 } from './characterSheetFormState';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -911,17 +912,29 @@ function SheetEditForm({
     baseline,
     serverUpdatedAt: character.updatedAt,
     isDraftEqual: characterSheetDraftsEqual,
+    // Issue #1910 review (Devin, PR #1980): readFormDraft only validates the
+    // envelope (v: 1) + that `data` exists, not the field set — a draft
+    // persisted before `speed` joined CharacterSheetDraft restores with
+    // `data.speed === undefined`. Feeding that straight into setSpeed puts a
+    // non-string into state typed `string`, and save()'s later `speed.trim()`
+    // throws inside the async handler — an unhandled rejection (the handler
+    // is `void save()`), so the Save button silently does nothing.
+    // normalizeRestoredDraft fills every field defensively, not just the one
+    // reported line — see its own doc comment for why the rest of this shape
+    // has no CURRENT equivalent gap, but could gain one the next time a field
+    // is added here.
     onRestoreDraft: (restored) => {
-      setName(restored.name);
-      setSpecies(restored.species);
-      setClassName(restored.className);
-      setBackground(restored.background);
-      setLevel(restored.level);
-      setAc(restored.ac);
-      setSpeed(restored.speed);
-      setHpMax(restored.hpMax);
-      setStatus(restored.status);
-      setStats({ ...restored.stats });
+      const safe = normalizeRestoredDraft(restored);
+      setName(safe.name);
+      setSpecies(safe.species);
+      setClassName(safe.className);
+      setBackground(safe.background);
+      setLevel(safe.level);
+      setAc(safe.ac);
+      setSpeed(safe.speed);
+      setHpMax(safe.hpMax);
+      setStatus(safe.status);
+      setStats(safe.stats);
     },
     onDiscard: onCancel,
     onSave: save,

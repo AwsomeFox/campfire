@@ -57,6 +57,35 @@ export function characterSheetDraftsEqual(a: CharacterSheetDraft, b: CharacterSh
   );
 }
 
+/**
+ * Issue #1910 review (Devin, PR #1980): `readFormDraft` validates only the
+ * envelope (`v: 1`) and that `data` exists — never the field set — so a draft
+ * persisted before a field joined `CharacterSheetDraft` restores with that key
+ * `undefined`. Feeding that straight into `setSpeed`/etc puts a non-string into
+ * state typed `string`; `save()`'s later `field.trim()` then throws inside the
+ * async handler (`void save()`, so the rejection is unhandled) — the Save
+ * button silently does nothing. `speed` (added by #1910) is the one field with
+ * a REAL exposure today: every other field here shipped in the very first
+ * version of this draft shape (issue #641), so no version of the app has ever
+ * persisted a draft missing them. Normalizing the whole shape in one place
+ * (rather than one `?? fallback` per call site) closes the class defensively
+ * against the next field this shape gains, not just the reported line.
+ */
+export function normalizeRestoredDraft(restored: Partial<CharacterSheetDraft>): CharacterSheetDraft {
+  return {
+    name: restored.name ?? '',
+    species: restored.species ?? '',
+    className: restored.className ?? '',
+    background: restored.background ?? '',
+    level: restored.level ?? '',
+    ac: restored.ac ?? '',
+    speed: restored.speed ?? '',
+    hpMax: restored.hpMax ?? '',
+    status: restored.status ?? 'active',
+    stats: { ...restored.stats },
+  };
+}
+
 export function snapshotCharacterSheetDraft(input: {
   name: string;
   species: string;
