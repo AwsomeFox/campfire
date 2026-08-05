@@ -74,25 +74,29 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     // Stable accessible names — the speech-recognition / screen-reader contract.
     const nameField = editor.getByRole('textbox', { name: /^Name/ });
     const descField = editor.getByRole('textbox', { name: 'Description' });
-    const dangerField = editor.getByRole('combobox', { name: 'Danger level' });
+    const dangerField = editor.getByRole('combobox', { name: 'Campaign danger level' });
     await expect(nameField).toBeVisible();
     await expect(descField).toBeVisible();
     await expect(dangerField).toBeVisible();
 
     // The required marker is exposed to assistive tech via the label text.
-    await expect(editor.locator('label')).toContainText([/Name/, /Description/, /Danger level/]);
+    await expect(editor.locator('label')).toContainText([/Name/, /Description/, /Campaign danger level/]);
 
     // Label activation: clicking a <label> focuses its associated input via htmlFor.
     await editor.locator('label', { hasText: 'Description' }).click();
     await expect(descField).toBeFocused();
     await editor.locator('label', { hasText: 'Name' }).click();
     await expect(nameField).toBeFocused();
-    await editor.locator('label', { hasText: 'Danger level' }).click();
+    await editor.locator('label', { hasText: 'Campaign danger level' }).click();
     await expect(dangerField).toBeFocused();
 
     // Character help is present and counts live characters.
     await nameField.fill('E2E750 renamed');
     await expect(editor.getByText(/14\/120 characters/i)).toBeVisible();
+
+    // Issue #871: contextual help distinguishing campaign danger level from encounter
+    // difficulty, HP danger, and Session Zero safety boundaries is reachable here.
+    await expect(editor.getByTestId('term-help-trigger-dangerLevel')).toBeVisible();
 
     const a11y = await new AxeBuilder({ page }).include('[aria-label="Edit campaign details"]').analyze();
     expect(a11y.violations).toEqual([]);
@@ -121,7 +125,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     await page.keyboard.press('Tab');
     await expect(editor.getByRole('textbox', { name: 'Description' })).toBeFocused();
     await page.keyboard.press('Tab');
-    await expect(editor.getByRole('combobox', { name: 'Danger level' })).toBeFocused();
+    await expect(editor.getByRole('combobox', { name: 'Campaign danger level' })).toBeFocused();
 
     // Save is disabled until something actually changes (dirty gate).
     const save = editor.getByRole('button', { name: 'Save' });
@@ -239,7 +243,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     for (const [labelText, id] of [
       ['Name', 'dashboard-campaign-name'],
       ['Description', 'dashboard-campaign-desc'],
-      ['Danger level', 'dashboard-campaign-danger'],
+      ['Campaign danger level', 'dashboard-campaign-danger'],
     ] as const) {
       const label = dashboardEditor.locator('label', { hasText: new RegExp(`^${labelText}`) });
       await expect(label).toHaveAttribute('for', id);
@@ -254,7 +258,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     for (const [labelText, id] of [
       ['Name', 'settings-name'],
       ['Description', 'settings-desc'],
-      ['Danger level', 'settings-danger'],
+      ['Campaign danger level', 'settings-danger'],
     ] as const) {
       const label = settingsGeneral.locator('label', { hasText: new RegExp(`^${labelText}`) });
       await expect(label).toHaveAttribute('for', id);
@@ -279,7 +283,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
       const controls = [
         editor.getByRole('textbox', { name: /^Name/ }),
         editor.getByRole('textbox', { name: 'Description' }),
-        editor.getByRole('combobox', { name: 'Danger level' }),
+        editor.getByRole('combobox', { name: 'Campaign danger level' }),
         editor.getByRole('button', { name: 'Cancel' }),
         editor.getByRole('button', { name: 'Save' }),
       ];

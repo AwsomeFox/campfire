@@ -27,6 +27,7 @@ const REQUIRED_TERMS = [
   'storylines',
   'coDm',
   'driver',
+  'dangerLevel',
 ] as const;
 
 test.describe('glossary term help (#518)', () => {
