@@ -40,7 +40,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     const rolls = new RollsService(db);
     const fsDeletion = new FsDeletionService(db, audit);
     const attachments = new AttachmentsService(db, audit, fsDeletion, new AttachmentDerivativesService(db));
-    const campaignLibrary = new CampaignLibraryService(db, audit);
+    const campaignLibrary = new CampaignLibraryService(db, audit, events);
 
     const access = new CampaignAccessService(db, new RoleResolver(db));
     charactersService = new CharactersService(db, audit, revisions, events, rolls, access);
@@ -108,6 +108,53 @@ describe('inline spell slots & character resources (issue #422)', () => {
     await expect(
       charactersService.adjustResource(c.id, { key: 'focusPoints', delta: -5 }, user, 'player'),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  /**
+   * Issue #1902 rework, fourth review pass — `source` is a real `ResourcePatch`/
+   * `CharacterResource` field (provenance: "granted by the Boots of Speed", "Feat: Alert",
+   * etc.), but `adjustResource` used to rebuild `resources[patch.key]` from only
+   * max/used/name/recharge, silently dropping it on the very first `used`-only pip write
+   * even though the caller never asked to touch `source` at all.
+   */
+  it('#1902 preserves a resource\'s existing source metadata across a used-only write', async () => {
+    const user = { id: 1, username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Source Metadata Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Lini',
+        ownerUserId: '1',
+        resources: JSON.stringify({
+          luckyCharm: { max: 1, used: 0, name: 'Lucky Charm', recharge: 'long-rest', source: 'Boots of Speed' },
+        }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+
+    // A plain pip click: only `used` changes. `source` is not mentioned in the patch at
+    // all — the caller has no way to even express "keep it", it must survive on its own.
+    const afterPip = await charactersService.adjustResource(c.id, { key: 'luckyCharm', used: 1 }, user, 'player');
+    expect(afterPip.resources['luckyCharm'].used).toBe(1);
+    expect(afterPip.resources['luckyCharm'].source).toBe('Boots of Speed');
+    expect(afterPip.resources['luckyCharm'].name).toBe('Lucky Charm');
+    expect(afterPip.resources['luckyCharm'].recharge).toBe('long-rest');
+
+    // A patch that explicitly sets `source` DOES update it — `source` is a real write
+    // field on ResourcePatch, not something the server should refuse to ever change.
+    const afterRename = await charactersService.adjustResource(c.id, { key: 'luckyCharm', source: 'Ring of Fortune' }, user, 'player');
+    expect(afterRename.resources['luckyCharm'].source).toBe('Ring of Fortune');
+    // ...and that explicit write didn't clobber the OTHER untouched fields either.
+    expect(afterRename.resources['luckyCharm'].used).toBe(1);
   });
 
   /**

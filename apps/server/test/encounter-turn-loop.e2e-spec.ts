@@ -130,26 +130,31 @@ describe('encounter turn loop (e2e)', () => {
 
   it('escalation die test', async () => {
     const server = ctx.app.getHttpServer();
-    
-    // The escalation die starts at 0, and increments by 1 each round (up to 6) in 13th age
-    // We can also POST to /escalation to override it
-    
+
+    // The escalation die starts at 0, and increments by 1 each round (up to 6) in 13th age.
+    // The DM override lever is POST /escalation { override: <0-6> } (see
+    // EncounterEscalationUpdate in packages/schema/src/index.ts) — the response's
+    // escalationDie reflects the override value once set.
+
     const escRes = await request(server).post(`/api/v1/encounters/${encounterId}/escalation`).set(dm).send({ override: 3 });
     expect(escRes.status).toBe(201);
     expect(escRes.body.escalationDie).toBe(3);
   });
 
-  it('operating on ended encounter gets 409', async () => {
+  it('operating on ended/preparing-only encounter gets the documented status errors', async () => {
     const server = ctx.app.getHttpServer();
-    
+
     const endRes = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
     expect(endRes.status).toBe(201);
-    
-    // Try to start again
+
+    // /start requires status === 'preparing'; re-starting an ended encounter is a
+    // client input error (400), not a state conflict — see the guard's comment in
+    // encounters.service.ts `start()`.
     const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
     expect(startRes.status).toBe(400);
-    
-    // Try to advance turn
+
+    // /next-turn requires status === 'running'; on an ended encounter that is also
+    // a 400 (checked before the 409 "has ended — reopen it" guard applies).
     const nextRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
     expect(nextRes.status).toBe(400);
   });

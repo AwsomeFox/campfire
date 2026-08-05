@@ -187,6 +187,19 @@
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete."
+    },
+    "resourceTracker": {
+      "title": "Resource Tracker",
+      "features": "Features",
+      "spellSlots": "Spell Slots",
+      "level": "Level {{level}}",
+      "partyRest": "Party Rest",
+      "confirmRest": "{{kind}} for {{name}}?",
+      "restError": "Couldn't complete the rest.",
+      "updateResourceError": "Couldn't update the resource.",
+      "updateSlotError": "Couldn't update the spell slot.",
+      "ambiguousResolved": "We couldn't confirm that action completed at the time, but the values shown are now up to date — check them before retrying.",
+      "setUsedTitle": "Set used to {{val}}"
     }
   }
 }

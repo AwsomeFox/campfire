@@ -740,11 +740,26 @@ export function isKnownCondition(vocab: readonly string[], name: string): boolea
   if (!needle) return false;
   return vocab.some((c) => c.toLowerCase() === needle);
 }
-/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+/**
+ * Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot
+ * maxima are edited via PATCH `spellSlots`. `expectedUpdatedAt` is the same optimistic-
+ * concurrency guard as {@link ExpectedUpdatedAt} everywhere else (issue #1902 rework): a
+ * `delta` is meaningless without knowing what it is relative to, so a caller that read
+ * `used` from a render and echoes back the character's `updatedAt` at that moment gets a
+ * 409 instead of a silently-misapplied delta if another client changed the sheet (this
+ * slot or otherwise) in between. Omitted => unconditional write, matching every other
+ * caller of this contract (AI DM/MCP tools included) exactly as before.
+ *
+ * {@link ResourcePatch} carries the identical guard for the sibling resource contract
+ * (issue #1902 rework, round 24) — the two are separate hand-written shapes, not one
+ * merged type, but the same rule.
+ */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
+export type SpellSlotPatch = z.infer<typeof SpellSlotPatch>;
 /**
  * Spend, restore, or configure one bounded character resource (issue #422/#1578) —
  * `hitDice`/`rage`/`kiPoints` under 5e, `focusPoints` under PF2e, or a custom pool the
@@ -757,6 +772,13 @@ export const SpellSlotPatch = z.object({
  * resource's current `used`, `used` sets it absolutely; the service applies `used` first
  * when both are sent, then `delta`. Spending past 0 or restoring past `max` is a 400, not
  * a clamp (see `CharactersService.adjustResource`'s own doc comment for why).
+ *
+ * `expectedUpdatedAt` is the same optimistic-concurrency guard as {@link SpellSlotPatch}'s
+ * own field (issue #1902 rework, round 24): an absolute `used` is a full overwrite, not a
+ * delta, so a caller that read `used` from a stale render and echoes back the character's
+ * `updatedAt` at that moment gets a 409 instead of silently undoing a concurrent spend/rest
+ * from another tab, a REST client, or an MCP caller. Omitted => unconditional write,
+ * matching every other caller of this contract exactly as before.
  */
 export const ResourcePatch = z.object({
   key: z.string().min(1).max(80),
@@ -766,6 +788,7 @@ export const ResourcePatch = z.object({
   name: z.string().min(1).max(80).optional(),
   recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
   source: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([
@@ -10490,7 +10513,24 @@ export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
 export const TurnSuggestedAction = z.object({
   name: z.string().min(1).max(160),
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  // ALWAYS the action-economy/kind hint, never a display label — the web client keys BOTH
+  // the Action/Bonus/Reaction/Other tab bucketing and the fallback spell-list detection off
+  // this string (see TurnWorkspace.tsx), so overloading it with something else (e.g. an
+  // equipping item's name) breaks both for any equipped item whose economy slot isn't
+  // explicit in `spec.cost.slot` — or, worse, silently renders a mundane item as a
+  // fabricated spell entry the moment its name happens to contain "spell" (issue #1901
+  // review: devin-ai-integration on PR #1951).
   source: z.string().max(40),
+  /**
+   * The equipping item's name (issue #1901), for a row contributed by a character's
+   * equipped-item action — `null` for a hand-authored sheet action or a monster/NPC
+   * statblock action. Kept SEPARATE from `source` (see above) precisely so the "equipped:
+   * <item>" label the web UI renders alongside an action never contaminates `source`'s
+   * economy-hint meaning. Capped at 200 to match `InventoryItem.name` (review:
+   * chatgpt-codex-connector P2) — a shorter limit here would reject an otherwise-valid
+   * item's full name once forwarded into this field, failing this exported response schema.
+   */
+  equippedItemName: z.string().max(200).nullable().default(null),
   summary: z.string().max(600).default(''),
   toHit: z.string().default(''),
   damage: z.string().default(''),
@@ -10757,6 +10797,27 @@ export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
   equipped: z.boolean().optional(),
   equipSlot: z.string().max(60).nullable().optional(),
   equippedAction: CharacterAction.nullable().optional(),
+  /**
+   * Issue #1901 rework: when equipping (equipped:true) into a slot another of this
+   * character's items already occupies, the server normally rejects with 409
+   * INVENTORY_SLOT_CONFLICT so the caller can choose what to do. Setting this true
+   * instead makes the whole swap ATOMIC — the incumbent is unequipped in the SAME
+   * transaction as this equip, rather than the caller issuing an unequip PATCH followed
+   * by a separate equip PATCH (a sequence with a real window: another writer can claim
+   * the slot between the two requests, or the second request can simply fail, leaving
+   * the character wearing neither item). Ignored when there is no conflict, or when
+   * this write isn't an equip transition at all.
+   */
+  displaceEquipped: z.boolean().optional(),
+  /**
+   * Issue #1901 review (chatgpt-codex-connector P2): an optional CAS-style guard for
+   * `displaceEquipped` — the id of the incumbent item the caller is confirming displacement
+   * of (from an earlier 409 INVENTORY_SLOT_CONFLICT body). If another writer has since
+   * changed who occupies the target slot, the server rejects with a FRESH 409 naming the new
+   * incumbent instead of silently displacing whichever item happens to be there when this
+   * request lands.
+   */
+  expectedConflictingItemId: Id.optional(),
 });
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
@@ -10976,6 +11037,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('encounter.updated'),
     campaignId: Id,
     encounterId: Id,
+    // Issue #1902 rework (round 19, codex P2): most `encounter.updated` frames are pure
+    // combat-log/turn activity (a roll, a token move) with NO character-sheet write behind
+    // them — every connected client refetching the WHOLE campaign character list on each
+    // one is wasted work during a busy fight. Set `true` only by the specific writers that
+    // ACTUALLY mirror onto a linked character sheet in the same commit (the apply-action
+    // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
+    // invalidate `campaignCharacters` precisely instead of on every encounter update.
+    sheetMirrored: z.boolean().optional(),
     at: IsoDate,
   }),
   z.object({

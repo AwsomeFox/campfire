@@ -187,6 +187,19 @@
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete."
+    },
+    "resourceTracker": {
+      "title": "متتبع الموارد",
+      "features": "القدرات",
+      "spellSlots": "خانات التعاويذ",
+      "level": "المستوى {{level}}",
+      "partyRest": "راحة الفريق",
+      "confirmRest": "{{kind}} لـ {{name}}؟",
+      "restError": "تعذر إكمال الراحة.",
+      "updateResourceError": "تعذر تحديث المورد.",
+      "updateSlotError": "تعذر تحديث خانة التعويذة.",
+      "ambiguousResolved": "لم نتمكن من تأكيد اكتمال هذا الإجراء في حينه، لكن القيم المعروضة محدثة الآن — تحقق منها قبل إعادة المحاولة.",
+      "setUsedTitle": "تعيين المستخدم إلى {{val}}"
     }
   }
 }

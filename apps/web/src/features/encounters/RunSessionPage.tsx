@@ -78,7 +78,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import {
   beginReconcile,
@@ -1641,6 +1641,15 @@ export default function RunSessionPage() {
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
           invalidateCampaignCharacters(queryClient, cid);
+          // Issue #1901 review (devin-ai-integration): an inventory equip/unequip also
+          // emits character.updated (the combat-action list changed, not just the sheet
+          // fields campaignCharacters covers) — but a character change can only ever affect
+          // the DERIVED action reads (the per-combatant actions query, the turn workspace's
+          // suggestedActions), never the encounter root, its difficulty derivation, or its
+          // combat log. The broader invalidateEncounter() used here originally busted all of
+          // those on every sheet edit — a refetch storm during busy play (party rest
+          // follow-ups, several players editing sheets at once) on the app's heaviest screen.
+          invalidateEncounterActions(queryClient, eid);
           return;
         }
         // Issue #415: a DM check request landed (or was answered) — refetch the campaign
@@ -1661,6 +1670,22 @@ export default function RunSessionPage() {
           return;
         }
         invalidateEncounter(queryClient, eid);
+        // Issue #1902 rework (round 12, devin; narrowed round 19, codex P2): several
+        // in-combat writes mirror HP/conditions or a spell-slot/resource spend onto the
+        // linked character SHEET (action-resolver's apply path, `adjustCombatantResource`)
+        // while emitting only `encounter.updated` — no `character.updated` frame, so
+        // `shouldInvalidateInlineCharacters` above never fires for them. With
+        // `campaignCharacters` left stale, `ResourceTrackerPanel`'s cached `char.updatedAt`
+        // (the `expectedUpdatedAt` CAS token it sends on a spell-slot spend) goes stale
+        // too — a player just healed or damaged mid-combat could get a spurious 409 on
+        // their VERY NEXT, otherwise-valid slot spend, for up to the 10s poll interval.
+        // Round 12 invalidated on EVERY `encounter.updated` frame to close this, but most
+        // frames (an ordinary roll, a token move) mirror no sheet at all — refetching the
+        // whole campaign character list on each one is wasted work during a busy fight.
+        // The server now tags exactly the frames that mirrored a sheet with
+        // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
+        // needed.
+        if (event.sheetMirrored) invalidateCampaignCharacters(queryClient, cid);
       },
       [eid, cid, navigate, queryClient, addPing],
     ),
@@ -3708,12 +3733,12 @@ export default function RunSessionPage() {
                     c.characterId != null &&
                     canEditCombatant(c) &&
                     (canDmWrite || (encounter.status === 'running' && c.id === currentCombatantId))
-                      ? (actionIndex) => {
-                          const ch = charactersById.get(c.characterId!);
-                          const act = ch?.actions[actionIndex];
-                          if (!act?.spec) return;
-                          onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
-                        }
+                      ? // Issue #1901: CharacterStatCard now hands back the SERVER's merged
+                        // action index (sheet actions + equipped-item actions) plus its
+                        // name/spec directly — no more re-deriving them from
+                        // `ch.actions[actionIndex]`, which silently missed anything past
+                        // the raw sheet's length.
+                        (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
                   onUseMonsterAction={
@@ -3792,7 +3817,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
@@ -6988,8 +7013,12 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
-  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
-  onUseAction?: (actionIndex: number) => void;
+  /**
+   * Issue #414 / #425 / #1901: open the structured action Use flow. Carries the action's
+   * name/spec alongside the (server-merged, for a character) index — same shape as
+   * `onUseMonsterAction` below.
+   */
+  onUseAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
@@ -7989,6 +8018,11 @@ function CombatantRow({
             openOnActiveTurn={openCardOnActiveTurn}
             /* Click-to-roll only from an active owned card, or any card for the DM. */
             campaignId={campaignId}
+            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+               actions) — mounting this card already implies DM-or-owner (see the `character`
+               prop gate above), matching listUsableActions' own authorization. */
+            encounterId={encounterId}
+            combatantId={combatant.id}
             onError={onRollError}
             onApplyDamage={onApplyDamage}
             onUseAction={onUseAction}
