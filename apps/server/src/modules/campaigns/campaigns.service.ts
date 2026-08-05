@@ -278,12 +278,20 @@ const asArr = (v: unknown): Rec[] => (Array.isArray(v) ? v.map(asRec) : []);
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null);
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
-// Issue #1910: `speed` (unlike `ac`) has a schema-level `min(0)` — a malformed/negative
-// import value would otherwise write past the domain contract and fail zod validation
-// on the next read (bricking the imported sheet), so clamp at the import boundary.
+// Issue #1910 review (Devin, PR #1980, on c3ea4545): `speed` (unlike `ac`) has a
+// schema-level `min(0)`, so a malformed/negative import value would otherwise write
+// past the domain contract and fail zod validation on the next read (bricking the
+// imported sheet) — that part of the original fix was right. But the original
+// version of this helper CLAMPED a negative value to 0 via Math.max(0, n), which
+// collided with this PR's own stated design: 0 is a REAL value (a homebrew
+// immobilized PC), and null means "unset" so the turn workspace falls through to
+// the adapter default. Clamping a corrupted/hand-edited negative import to 0 would
+// silently paralyze that PC instead of landing it on the adapter default. Returns
+// null for anything out of range so it's always schema-valid AND preserves the
+// null/0 distinction the rest of the PR depends on.
 const nonNegativeIntOrNull = (v: unknown): number | null => {
   const n = intOrNull(v);
-  return n == null ? null : Math.max(0, n);
+  return n == null || n < 0 ? null : n;
 };
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
