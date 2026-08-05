@@ -66,6 +66,9 @@ function toDomain(row: typeof users.$inferSelect): User {
     textSize: row.textSize as User['textSize'],
     diceTheme: (row.diceTheme ?? 'nocturne') as User['diceTheme'],
     timeFormat: (row.timeFormat ?? 'system') as User['timeFormat'],
+    // Issue #851 — organizer eligibility. Nullable-safe for a legacy row read before
+    // migration 0162 runs; defaults to the upgrade-safe true.
+    canCreateCampaigns: row.canCreateCampaigns ?? true,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -328,6 +331,15 @@ export class UsersService {
         passwordHash: hashPassword(input.password),
         serverRole: input.serverRole ?? 'user',
         disabled: false,
+        // Issue #851 — a brand-new account (admin-created OR self-service signup,
+        // which reuses this method — see AuthService.signup()) starts as NOT an
+        // approved organizer. This is deliberately independent of the column's own
+        // upgrade-safety default (true): that default only backfills EXISTING rows
+        // on an upgrading DB so the 'approved_organizers' policy never silently
+        // revokes someone who could already create campaigns — it must not extend
+        // permissively to accounts created going forward, or that policy would be
+        // meaningless for anyone who signs up (or is added) after it is turned on.
+        canCreateCampaigns: false,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -350,6 +362,9 @@ export class UsersService {
         passwordHash: null,
         serverRole: input.serverRole,
         disabled: false,
+        // Issue #851 — same reasoning as create() above: a freshly auto-provisioned
+        // SSO account is not an approved organizer by default.
+        canCreateCampaigns: false,
         oidcSub: input.oidcSub,
         createdAt: ts,
         updatedAt: ts,
@@ -416,6 +431,11 @@ export class UsersService {
       }
       if (input.serverRole !== undefined) update.serverRole = input.serverRole;
       if (input.disabled !== undefined) update.disabled = input.disabled;
+      // Issue #851 — admin-managed organizer eligibility for the 'approved_organizers'
+      // campaign-creation policy. No last-admin-style guard needed: this never caps
+      // server-admin power (hasServerAdminPower() bypasses it entirely), only the
+      // 'approved_organizers' policy tier for ordinary users.
+      if (input.canCreateCampaigns !== undefined) update.canCreateCampaigns = input.canCreateCampaigns;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
       return toDomain(row);

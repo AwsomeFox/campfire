@@ -1012,6 +1012,12 @@ export const users = sqliteTable('users', {
   timeFormat: text('time_format').notNull().default('system'),
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
+  // Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
+  // campaign-creation policy (settings.campaignCreationPolicy). Defaults TRUE so an
+  // upgrade never revokes an existing user's ability to create/import a campaign —
+  // only an admin who deliberately switches the policy AND revokes this per-user can
+  // narrow it. Ignored entirely under the 'everyone'/'admins_only' policies.
+  canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1044,6 +1050,19 @@ export const passwordResetRequests = sqliteTable('password_reset_requests', {
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
+});
+
+// Issue #851 — the safe request/approval flow for a restricted campaign-creation
+// policy. Mirrors passwordResetRequests above: a user files a 'pending' row, an
+// admin approves or denies it (approving flips users.canCreateCampaigns to true).
+export const campaignCreationRequests = sqliteTable('campaign_creation_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'denied'
+  note: text('note').notNull().default(''),
+  requestedAt: text('requested_at').notNull(),
+  decidedAt: text('decided_at'),
+  decidedBy: text('decided_by'), // audit actor string (auditActor()), null until decided
 });
 
 /**

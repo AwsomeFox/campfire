@@ -271,6 +271,49 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before shared-instance governance (issue #851):
+ * `users.can_create_campaigns` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN —
+ * defaulting every EXISTING user to true is deliberate: switching
+ * settings.campaignCreationPolicy to 'approved_organizers' must never silently
+ * revoke a user's pre-existing ability to create/import a campaign; an admin who
+ * wants to narrow it does so per-user afterwards.
+ */
+function migrateUsersTableForCanCreateCampaigns851(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasCanCreateCampaigns = columns.some((c) => c.name === 'can_create_campaigns');
+  if (hasCanCreateCampaigns) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 1');
+}
+
+/**
+ * Issue #851 — the campaign-creation request/approval flow's table. A single new
+ * CREATE TABLE / CREATE INDEX, so this is a recorded no-op on fresh DBs
+ * (BOOTSTRAP_SQL already declares it) and a one-time create on upgraded DBs.
+ * Mirrors bootstrap.sql.ts exactly.
+ */
+function migrateCampaignCreationRequestsTable851(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+      ON campaign_creation_requests(user_id, status);
+  `);
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -5060,6 +5103,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
+  // #851 shared-instance governance: organizer eligibility flag + the creation
+  // request/approval table.
+  { name: '0162_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
+  { name: '0163_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
 ];
 
 /**

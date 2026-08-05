@@ -6511,6 +6511,13 @@ export const User = z.object({
   diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
+  /**
+   * Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
+   * campaign-creation policy. Defaults true (upgrade-safe: an existing user's
+   * ability to create/import a campaign is never silently revoked). Ignored under
+   * the 'everyone'/'admins_only' policies.
+   */
+  canCreateCampaigns: z.boolean().default(true),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6525,7 +6532,7 @@ export const UserCreate = z.object({ username: User.shape.username, password: Pa
 // Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
 // account is always serverRole 'user' (never admin) and the route is gated on allowSignup.
 export const SignupRequest = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional() });
-export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
+export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional(), canCreateCampaigns: z.boolean().optional() });
 export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits
 
 // Self-service preferences (PATCH /me/preferences) — separate from admin-only UserUpdate above.
@@ -6603,6 +6610,15 @@ export const OidcRecoveryCategory = z.enum([
 ]);
 export type OidcRecoveryCategory = z.infer<typeof OidcRecoveryCategory>;
 
+// Issue #851 — shared-instance governance: who may create/import a campaign at all.
+//  - 'everyone'            — any authenticated user (the historical, pre-#851 default;
+//                            an upgrading instance must not retroactively lock anyone out).
+//  - 'approved_organizers' — server admins, plus any user with User.canCreateCampaigns=true.
+//  - 'admins_only'         — real server-admin power only (hasServerAdminPower(), NOT the raw
+//                            serverRole — a PAT minted without adminEnabled stays capped).
+export const CampaignCreationPolicy = z.enum(['everyone', 'approved_organizers', 'admins_only']);
+export type CampaignCreationPolicy = z.infer<typeof CampaignCreationPolicy>;
+
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
@@ -6618,9 +6634,80 @@ export const ServerSettings = z.object({
   // regardless of any per-campaign budget still remaining. Admin-managed from the
   // AI console (PUT /settings/ai/caps).
   aiServerTokenCap: z.number().int().nonnegative().max(1_000_000_000).default(0),
+  // Issue #851 — who may create/import a campaign. Defaults to the pre-existing
+  // unrestricted behavior so an upgrade never locks out an existing user.
+  campaignCreationPolicy: CampaignCreationPolicy.default('everyone'),
+  // Issue #851 — per-user / server-wide campaign ceilings. null = unlimited (the
+  // pre-existing behavior). "Active" counts only status='active' campaigns; "total"
+  // counts every non-trashed campaign (active + paused + completed) a user owns
+  // (campaignMembers.primaryOwner) or the server holds.
+  maxActiveCampaignsPerUser: z.number().int().positive().nullable().default(null),
+  maxTotalCampaignsPerUser: z.number().int().positive().nullable().default(null),
+  maxActiveCampaignsServerWide: z.number().int().positive().nullable().default(null),
+  maxTotalCampaignsServerWide: z.number().int().positive().nullable().default(null),
+  // Issue #851 — operator default storage quota inherited atomically by a brand-new
+  // campaign (create/import/clone). null = unlimited (matches the pre-#851 default
+  // for every campaign already on disk — this only ever affects NEW rows going
+  // forward, never retroactively changes an existing campaign's storageQuotaBytes).
+  defaultCampaignStorageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
+
+/**
+ * Issue #851 — effective campaign-creation allowance for the CALLING user, computed
+ * server-side (GET /campaigns/allowance) so a wizard/import button can show real
+ * numbers before the caller commits to the flow. Never itself an authorization
+ * decision surface for the client to trust blindly — the server re-checks every
+ * one of these at create/import/clone time regardless of what this reports.
+ */
+export const CampaignAllowanceReason = z.enum([
+  'ok',
+  'policy_admins_only',
+  'policy_requires_approval',
+  'limit_active_per_user',
+  'limit_total_per_user',
+  'limit_active_server_wide',
+  'limit_total_server_wide',
+]);
+export type CampaignAllowanceReason = z.infer<typeof CampaignAllowanceReason>;
+
+const CampaignAllowanceCounter = z.object({ used: z.number().int().nonnegative(), max: z.number().int().positive().nullable() });
+export const CampaignAllowance = z.object({
+  policy: CampaignCreationPolicy,
+  canCreate: z.boolean(),
+  reason: CampaignAllowanceReason,
+  activePerUser: CampaignAllowanceCounter,
+  totalPerUser: CampaignAllowanceCounter,
+  activeServerWide: CampaignAllowanceCounter,
+  totalServerWide: CampaignAllowanceCounter,
+  defaultStorageQuotaBytes: z.number().int().nonnegative().nullable(),
+  /** Whether the caller already has an undecided creation request pending. */
+  hasPendingRequest: z.boolean(),
+});
+export type CampaignAllowance = z.infer<typeof CampaignAllowance>;
+
+// Issue #851 — the safe request/approval flow for a restricted creation policy.
+// Mirrors the shape of the existing forgot-password admin-approved flow
+// (passwordResetRequests): a user files a 'pending' row, an admin decides it.
+export const CampaignCreationRequestStatus = z.enum(['pending', 'approved', 'denied']);
+export type CampaignCreationRequestStatus = z.infer<typeof CampaignCreationRequestStatus>;
+
+export const CampaignCreationRequest = z.object({
+  id: Id,
+  userId: Id,
+  username: z.string(),
+  displayName: z.string(),
+  status: CampaignCreationRequestStatus,
+  note: z.string().max(500).default(''),
+  requestedAt: z.string(),
+  decidedAt: z.string().nullable(),
+  decidedBy: z.string().nullable(),
+});
+export type CampaignCreationRequest = z.infer<typeof CampaignCreationRequest>;
+
+export const CampaignCreationRequestCreate = z.object({ note: z.string().max(500).optional() });
+export const CampaignCreationRequestDecision = z.object({ note: z.string().max(500).optional() });
 
 // ── OIDC / SSO in-app configuration (server-admin only) ──────────────────────
 // Persisted alongside server settings so OIDC can be configured from the admin

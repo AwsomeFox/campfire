@@ -114,6 +114,7 @@ import {
   preflightCompendiumImport,
   resolveImportedCombatantRuleEntryId,
 } from './compendium-import';
+import { CampaignGovernanceDeniedError, CampaignGovernanceService } from './campaign-governance.service';
 
 function safeImportedCompendiumSnapshot(value: unknown): string | null {
   const parsed = CompendiumSnapshot.safeParse(value);
@@ -190,6 +191,84 @@ function assertUploadsWritable(): void {
       `Upload directory is not writable (cannot stage the import): ${
         err instanceof Error ? err.message : String(err)
       }`,
+    );
+  }
+}
+
+/**
+ * Issue #851: cap on the TOTAL bytes an archive is allowed to expand to once every
+ * referenced entry (campaign.json + each manifest attachment) is decompressed. This
+ * is deliberately measured from what the importer actually reads — only
+ * manifest-referenced entries are ever decompressed or persisted (see
+ * importArchive's attachment loop), so an attacker cannot inflate this figure with
+ * unreferenced padding entries packed into the zip; those are never touched.
+ * Larger than MAX_IMPORT_ARCHIVE_BYTES (the COMPRESSED cap) since a legitimate
+ * export of several full-size uncompressed PNG/JPEG maps expands very little
+ * (images are already compressed), but a pathological archive could still expand
+ * disproportionately — this is the independent backstop for that.
+ */
+export const MAX_IMPORT_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Issue #851: minimum free space uploadsRoot()'s filesystem must retain AFTER
+ * writing this import's attachment bytes, mirroring the same reserve-margin
+ * pattern the scheduled-backup disk guard uses (BACKUP_MIN_FREE_BYTES, 512 MiB
+ * default) — never fully drain the volume the DB itself lives on for one import.
+ */
+export const IMPORT_DISK_RESERVE_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Issue #851 — running-total accounting for an archive's uncompressed size, checked
+ * BEFORE persistence starts (importArchive calls this as each entry is decompressed,
+ * ahead of any staging/DB write). Exported with an overridable `capBytes` so a test
+ * can pin an exact boundary without allocating a real multi-hundred-MB buffer.
+ */
+export function accumulateImportUncompressedBytes(
+  runningTotal: number,
+  addedBytes: number,
+  capBytes: number = MAX_IMPORT_UNCOMPRESSED_BYTES,
+): number {
+  const next = runningTotal + addedBytes;
+  if (next > capBytes) {
+    throw new BadRequestException('Import archive exceeds the maximum uncompressed size once expanded.');
+  }
+  return next;
+}
+
+/**
+ * Issue #851 — preflight the uploads volume's free space BEFORE any byte is staged
+ * to disk (persistence starts right after this call, in importCampaign's staging
+ * step). `requiredBytes` is the sum of every attachment's decompressed length this
+ * import will actually write. `statfs`/`reserveBytes`/`root` are overridable so a
+ * test can pin an exact free-space boundary without touching the real filesystem.
+ */
+export function assertImportDiskReserve(
+  requiredBytes: number,
+  opts: {
+    statfs?: (path: string) => { bavail: number; bsize: number };
+    root?: string;
+    reserveBytes?: number;
+  } = {},
+): void {
+  if (requiredBytes <= 0) return;
+  const root = opts.root ?? uploadsRoot();
+  const reserveBytes = opts.reserveBytes ?? IMPORT_DISK_RESERVE_BYTES;
+  const statfs = opts.statfs ?? fs.statfsSync;
+  let stat: { bavail: number; bsize: number };
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    stat = statfs(root);
+  } catch {
+    // Cannot statfs (e.g. platform without it, or a filesystem quirk) — do not block
+    // the import on a diagnostic we cannot perform; assertUploadsWritable() already
+    // proves the volume is writable, which is the load-bearing guarantee.
+    return;
+  }
+  const freeBytes = stat.bavail * stat.bsize;
+  if (freeBytes - requiredBytes < reserveBytes) {
+    throw new BadRequestException(
+      `Not enough free disk space to import this archive: needs ~${requiredBytes} bytes and a ` +
+        `${reserveBytes} byte reserve, but only ${freeBytes} bytes are free.`,
     );
   }
 }
@@ -375,6 +454,10 @@ export class CampaignsService {
     // Issue #1707: trash() sends the account-wide `campaign_trashed` signal. NotificationsModule
     // is a leaf module (only DbModule), so importing it here creates no cycle.
     private readonly notifications: NotificationsService,
+    // Issue #851: shared-instance governance (creation policy, per-user/server-wide
+    // limits, default storage quota) — enforced atomically inside create/importCampaign/clone's
+    // own transaction. See CampaignGovernanceService.enforceTx for why.
+    private readonly governance: CampaignGovernanceService,
   ) {}
 
   /**
@@ -568,7 +651,15 @@ export class CampaignsService {
     if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
   }
 
-  /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
+  /**
+   * Creates a campaign, subject to the shared-instance governance policy (issue #851):
+   * an operator can restrict WHO may create/import (admins only / approved organizers /
+   * everyone — the pre-#851 default), cap active/total campaigns per-user and server-wide,
+   * and set a default storage quota every new campaign inherits. The policy/limit check and
+   * the insert happen in ONE synchronous transaction so a denial rolls back cleanly and two
+   * concurrent creates cannot both slip past a limit — see CampaignGovernanceService.enforceTx.
+   * Creator is auto-inserted as 'dm' (skipped for dev:* users).
+   */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
     await this.validateRuleSystem(input.ruleSystem);
     // A brand-new campaign has no locations/attachments of its own yet, so any
@@ -579,38 +670,63 @@ export class CampaignsService {
     if (input.mapAttachmentId != null) {
       throw new BadRequestException('mapAttachmentId cannot be set on campaign create (no attachments exist yet)');
     }
+    const govCtx = await this.governance.resolveContext(user);
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(campaigns)
-      .values({
-        name: input.name,
-        description: input.description ?? '',
-        status: input.status ?? 'active',
-        currentLocationId: input.currentLocationId ?? null,
-        dangerLevel: input.dangerLevel ?? 'low',
-        dmControlsProgression: input.dmControlsProgression ?? false,
-        dmControlsTurns: input.dmControlsTurns ?? false,
-        requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
-        publicRecapSharingEnabled: true,
-        // Brand-new campaigns that start archived cannot accept joins until the
-        // DM both unarchives and deliberately re-enables invites (#857).
-        publicInvitesEnabled: (input.status ?? 'active') === 'active',
-        narrationLanguage: input.narrationLanguage ?? 'en',
-        aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
-        sessionCount: 0,
-        latestSessionNumber: 0,
-        ruleSystem: input.ruleSystem ?? '',
-        mapAttachmentId: input.mapAttachmentId ?? null,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    let row: typeof campaigns.$inferSelect;
+    try {
+      row = this.db.transaction((tx) => {
+        this.governance.enforceTx(tx, govCtx);
+        const [inserted] = tx
+          .insert(campaigns)
+          .values({
+            name: input.name,
+            description: input.description ?? '',
+            status: input.status ?? 'active',
+            currentLocationId: input.currentLocationId ?? null,
+            dangerLevel: input.dangerLevel ?? 'low',
+            dmControlsProgression: input.dmControlsProgression ?? false,
+            dmControlsTurns: input.dmControlsTurns ?? false,
+            requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
+            publicRecapSharingEnabled: true,
+            // Brand-new campaigns that start archived cannot accept joins until the
+            // DM both unarchives and deliberately re-enables invites (#857).
+            publicInvitesEnabled: (input.status ?? 'active') === 'active',
+            narrationLanguage: input.narrationLanguage ?? 'en',
+            aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
+            sessionCount: 0,
+            latestSessionNumber: 0,
+            ruleSystem: input.ruleSystem ?? '',
+            mapAttachmentId: input.mapAttachmentId ?? null,
+            // Issue #851: the operator's default quota, inherited atomically with the row
+            // itself. null (unlimited) unless an admin has configured one — never touches
+            // any EXISTING campaign's own storageQuotaBytes.
+            storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
 
-    if (!user.devRole) {
-      const numericId = Number(user.id);
-      if (Number.isInteger(numericId)) {
-        await this.members.addCreatorAsDm(row.id, numericId);
+        if (!user.devRole) {
+          const numericId = Number(user.id);
+          if (Number.isInteger(numericId)) {
+            this.members.addCreatorAsDmTx(tx, inserted.id, numericId, ts);
+          }
+        }
+        return inserted;
+      });
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort, outside the rolled-back transaction (see AuditService.log's doc).
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'campaign.create.denied',
+          entityType: 'campaign',
+          detail: `reason=${err.code}`,
+        });
       }
+      throw err;
     }
 
     await this.audit.log({
@@ -620,6 +736,7 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: row.id,
       campaignId: row.id,
+      detail: govCtx.defaultStorageQuotaBytes != null ? `storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : undefined,
     });
     return toDomain(row);
   }
@@ -1131,6 +1248,10 @@ export class CampaignsService {
     const source = await this.getOrThrow(id);
     const template = input.mode === 'template';
     const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
+    // Issue #851: a clone creates a brand-new campaign row too, so it is governed
+    // exactly like create/import — same policy, same per-user/server-wide limits,
+    // same operator default quota (NOT the source campaign's own quota).
+    const govCtx = await this.governance.resolveContext(user);
 
     // Read everything up front — only the writes need the transaction. Trashed
     // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
@@ -1256,7 +1377,12 @@ export class CampaignsService {
       dstAttachmentId: number;
       mime: string;
     }[] = [];
-    const newId = this.db.transaction((tx) => {
+    let newId: number;
+    try {
+    newId = this.db.transaction((tx) => {
+      // Issue #851: the authoritative, race-free governance check — first statement
+      // inside the transaction, atomic with the insert below.
+      this.governance.enforceTx(tx, govCtx);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -1276,6 +1402,9 @@ export class CampaignsService {
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
+          // Issue #851: the operator's default quota, inherited atomically with the
+          // row — deliberately NOT the source campaign's own storageQuotaBytes.
+          storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
           createdAt: ts,
           updatedAt: ts,
         })
@@ -1959,6 +2088,20 @@ export class CampaignsService {
 
       return cloneId;
     });
+    } catch (err) {
+      // Issue #851: a governance denial rolled back the transaction (no row committed) —
+      // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
+      if (err instanceof CampaignGovernanceDeniedError) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'campaign.create.denied',
+          entityType: 'campaign',
+          detail: `reason=${err.code}, path=clone, sourceCampaignId=${id}`,
+        });
+      }
+      throw err;
+    }
 
     // Issue #524/#435: publish attachment bytes after the entity rows committed.
     for (const p of pendingAttachmentCopies) {
@@ -1988,7 +2131,9 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: newId,
       campaignId: newId,
-      detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
+      detail:
+        `cloned from campaign ${id} (${template ? 'template' : 'full'})` +
+        (govCtx.defaultStorageQuotaBytes != null ? `, storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : ''),
     });
 
     // #1049 review: carrying `proactiveSettings` is not the same as HONOURING them. The watcher
@@ -2071,6 +2216,13 @@ export class CampaignsService {
     const doc = input;
     const campaignSrc = asRec(doc.campaign);
     const name = (str(input.name) || str(campaignSrc.name) || 'Imported Campaign').slice(0, 120);
+
+    // Issue #851: resolve the shared-instance governance context (settings + this
+    // caller's organizer flag) up front — it needs async DB reads, and the actual
+    // gate (CampaignGovernanceService.enforceTx) must run SYNCHRONOUSLY inside the
+    // transaction below, atomically with the insert, so a denial rolls back cleanly
+    // and two concurrent imports cannot both slip past a limit.
+    const govCtx = await this.governance.resolveContext(user);
 
     // Keep the source rule system only if that pack is installed here — otherwise a
     // dangling slug would silently break Compendium lookups scoped by pack.
@@ -2263,6 +2415,9 @@ export class CampaignsService {
     }
 
     const newId = this.db.transaction((tx) => {
+      // Issue #851: the authoritative, race-free governance check — first statement
+      // inside the transaction, atomic with the insert below.
+      this.governance.enforceTx(tx, govCtx);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -2284,6 +2439,9 @@ export class CampaignsService {
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
+          // Issue #851: the operator's default quota, inherited atomically with the
+          // row — never touches an existing campaign's own storageQuotaBytes.
+          storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
           createdAt: ts,
           updatedAt: ts,
         })
@@ -3194,7 +3352,9 @@ export class CampaignsService {
             // can see why an item they expected to be equipped is not.
             (equipIssuesResolved > 0
               ? ` (auto-unequipped ${equipIssuesResolved} inventory item${equipIssuesResolved === 1 ? '' : 's'} with an invalid or conflicting equip slot)`
-              : ''),
+              : '') +
+            // Issue #851: record the effective default quota this import inherited.
+            (govCtx.defaultStorageQuotaBytes != null ? `, storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : ''),
           createdAt: ts,
         })
         .run();
@@ -3290,6 +3450,19 @@ export class CampaignsService {
       compendiumPreflight,
       compendiumDetachedCount,
     };
+    } catch (err) {
+      // Issue #851: a governance denial rolled back the transaction (no row committed) —
+      // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
+      if (err instanceof CampaignGovernanceDeniedError) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'campaign.create.denied',
+          entityType: 'campaign',
+          detail: `reason=${err.code}, path=import`,
+        });
+      }
+      throw err;
     } finally {
       // Always sweep the staging dir, success OR failure. On success the staged
       // files were renamed away (consumed); on failure the tx rolled back and
@@ -3334,9 +3507,19 @@ export class CampaignsService {
       );
     }
 
+    let manifestText: string;
+    try {
+      manifestText = await manifestFile.async('string');
+    } catch {
+      throw new BadRequestException('campaign.json in the archive could not be read.');
+    }
+    // Issue #851: start the archive's uncompressed-size accounting from the manifest
+    // text itself — every byte this import will actually decompress counts, not just
+    // the attachment payloads below.
+    let unpackedBytes = accumulateImportUncompressedBytes(0, Buffer.byteLength(manifestText, 'utf8'));
     let doc: unknown;
     try {
-      doc = JSON.parse(await manifestFile.async('string'));
+      doc = JSON.parse(manifestText);
     } catch {
       throw new BadRequestException('campaign.json in the archive is not valid JSON.');
     }
@@ -3368,6 +3551,10 @@ export class CampaignsService {
         continue;
       }
       const bytes = await entry.async('nodebuffer');
+      // Issue #851: preflight the running uncompressed total BEFORE this entry's bytes
+      // are staged/persisted anywhere — reject the whole archive once expansion crosses
+      // the cap, rather than silently truncating what gets imported.
+      unpackedBytes = accumulateImportUncompressedBytes(unpackedBytes, bytes.length);
       if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
         attachmentsSkipped += 1;
         continue;
@@ -3406,6 +3593,11 @@ export class CampaignsService {
         ...metadata.data,
       });
     }
+
+    // Issue #851: preflight the uploads volume's free space against the bytes this
+    // import will actually stage, BEFORE importCampaign starts writing anything.
+    const totalAttachmentBytes = attachmentFiles.reduce((sum, a) => sum + a.bytes.length, 0);
+    assertImportDiskReserve(totalAttachmentBytes);
 
     const result = await this.importCampaign(input, user, attachmentFiles);
     // Fold the preflight skip count into the result (importCampaign only sees the

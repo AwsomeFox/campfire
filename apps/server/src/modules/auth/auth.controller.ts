@@ -237,6 +237,10 @@ export class MeController {
           textSize: 'default',
           diceTheme: 'nocturne',
           timeFormat: 'system',
+          // Issue #851 — dev:* header users are synthetic (no DB row) and never
+          // subject to campaign-creation governance (CampaignGovernanceService
+          // bypasses them entirely); true is the harmless, upgrade-safe default.
+          canCreateCampaigns: true,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },

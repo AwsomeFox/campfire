@@ -15,12 +15,16 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiConsumes, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from './campaigns.service';
+import { CampaignGovernanceService } from './campaign-governance.service';
 import {
   CampaignCloneDto,
   CampaignCreateDto,
+  CampaignCreationRequestCreateDto,
+  CampaignCreationRequestDecisionDto,
   CampaignImportDto,
   CampaignPurgeDto,
   CampaignUpdateDto,
@@ -44,6 +48,7 @@ export class CampaignsController {
   constructor(
     private readonly campaigns: CampaignsService,
     private readonly access: CampaignAccessService,
+    private readonly governance: CampaignGovernanceService,
   ) {}
 
   @Get()
@@ -119,6 +124,72 @@ export class CampaignsController {
   @ApiResponse({ status: 200, description: 'Trashed campaigns.' })
   listTrash(@CurrentUser() user: RequestUser) {
     return this.campaigns.listTrashedForUser(user);
+  }
+
+  @Get('allowance')
+  @ApiOperation({
+    summary: "The caller's effective campaign-creation allowance (issue #851)",
+    description:
+      'Any authenticated user. Reports the server-wide creation policy, active/total per-user and ' +
+      'server-wide campaign counts against their configured limits, the operator default storage quota ' +
+      'new campaigns inherit, and whether the caller already has a pending creation request. A display aid ' +
+      'ONLY — POST /campaigns, /campaigns/import, /campaigns/import/archive, and /campaigns/:id/clone re-check ' +
+      'every one of these server-side regardless of what this reports.',
+  })
+  @ApiResponse({ status: 200, description: 'Effective allowance for the caller.' })
+  allowance(@CurrentUser() user: RequestUser) {
+    return this.governance.getAllowance(user);
+  }
+
+  @Post('creation-requests')
+  @ApiOperation({
+    summary: 'Request campaign-creation access (issue #851)',
+    description:
+      "Any authenticated user. Files a 'pending' request an admin can approve or deny — the safe request/approval " +
+      "flow for when settings.campaignCreationPolicy is 'admins_only' or 'approved_organizers'. 409 if the caller " +
+      'already has an undecided request.',
+  })
+  @ApiResponse({ status: 201, description: 'The filed request.' })
+  @ApiResponse({ status: 409, description: 'Caller already has a pending request.' })
+  createCreationRequest(@Body() body: CampaignCreationRequestCreateDto, @CurrentUser() user: RequestUser) {
+    return this.governance.createRequest(user, body.note);
+  }
+
+  @Get('creation-requests')
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'List pending campaign-creation requests', description: 'Server-admin only.' })
+  @ApiResponse({ status: 200, description: 'Pending requests, newest first.' })
+  listCreationRequests() {
+    return this.governance.listPendingRequests();
+  }
+
+  @Post('creation-requests/:id/approve')
+  @ServerRoles('admin')
+  @ApiOperation({
+    summary: 'Approve a campaign-creation request',
+    description: "Server-admin only. Flips the requester's canCreateCampaigns to true atomically with the decision.",
+  })
+  @ApiResponse({ status: 201, description: 'The decided request.' })
+  @ApiResponse({ status: 409, description: 'Request was already decided.' })
+  async approveCreationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignCreationRequestDecisionDto,
+    @CurrentUser() actor: RequestUser,
+  ) {
+    return this.governance.decide(id, 'approved', actor, body.note);
+  }
+
+  @Post('creation-requests/:id/deny')
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'Deny a campaign-creation request', description: 'Server-admin only.' })
+  @ApiResponse({ status: 201, description: 'The decided request.' })
+  @ApiResponse({ status: 409, description: 'Request was already decided.' })
+  async denyCreationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignCreationRequestDecisionDto,
+    @CurrentUser() actor: RequestUser,
+  ) {
+    return this.governance.decide(id, 'denied', actor, body.note);
   }
 
   @Get(':id')

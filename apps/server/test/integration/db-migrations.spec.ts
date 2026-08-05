@@ -45,7 +45,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     try {
       // users — the 12-step rebuild path (password_hash NOT NULL -> nullable) plus later ADDs.
       const userCols = columnNames(sqlite, 'users');
-      expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size', 'can_create_campaigns']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
         expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
@@ -260,6 +260,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // 0039 (issue #307): icon_slug ADD COLUMN backfills the pre-existing item with ''.
       expect((sqlite.prepare('SELECT icon_slug FROM inventory_items WHERE id = 1').get() as { icon_slug: string }).icon_slug).toBe('');
       expect((sqlite.prepare('SELECT admin_enabled FROM api_tokens WHERE id = 1').get() as { admin_enabled: number }).admin_enabled).toBe(0);
+      // 0162 (#851): can_create_campaigns ADD COLUMN backfills the pre-existing legacy
+      // user to 1 (true) — an upgrade must never silently revoke someone's pre-existing
+      // ability to create/import a campaign once an operator turns on the
+      // 'approved_organizers' policy.
+      expect(
+        (sqlite.prepare('SELECT can_create_campaigns FROM users WHERE id = 1').get() as { can_create_campaigns: number })
+          .can_create_campaigns,
+      ).toBe(1);
       expect(
         sqlite
           .prepare('SELECT family_id, refresh_consumed_at, revoked_at, family_revoked_at FROM oauth_access_tokens WHERE id = 1')
@@ -509,6 +517,19 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
+      // 0162/0163 (#851): shared-instance governance — organizer flag + the
+      // campaign-creation request/approval flow's table, created new on an old-shaped DB.
+      expect(MIGRATION_NAMES).toContain('0162_users_can_create_campaigns_851');
+      expect(MIGRATION_NAMES).toContain('0163_campaign_creation_requests_851');
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_creation_requests'").get(),
+      ).toBeTruthy();
+      expect(columnNames(sqlite, 'campaign_creation_requests')).toEqual(
+        expect.arrayContaining(['user_id', 'status', 'note', 'requested_at', 'decided_at', 'decided_by']),
+      );
+      expect(
+        (sqlite.pragma('index_list(campaign_creation_requests)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_campaign_creation_requests_user');
       expect(columnNames(sqlite, 'entity_revisions')).toEqual(
         expect.arrayContaining([
           'author_source',

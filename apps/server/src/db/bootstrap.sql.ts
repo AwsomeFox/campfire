@@ -918,6 +918,7 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
+  can_create_campaigns INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -946,6 +947,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Issue #851 — the safe request/approval flow for a restricted campaign-creation
+-- policy. Mirrors password_reset_requests above: a user files a 'pending' row, an
+-- admin approves or denies it (approving flips users.can_create_campaigns to 1).
+CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT NOT NULL DEFAULT '',
+  requested_at TEXT NOT NULL,
+  decided_at TEXT,
+  decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+  ON campaign_creation_requests(user_id, status);
 
 -- Single-row install-identity table (issue #723): the per-install UUID
 -- (stable across backup/restore — it lives INSIDE the restored DB) and a
