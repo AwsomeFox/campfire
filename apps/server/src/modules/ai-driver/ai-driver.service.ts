@@ -68,6 +68,7 @@ import {
   renderRecentHistorySection,
 } from './driver-history';
 import { renderTableStyleSection } from './driver-style';
+import { renderComprehensionSection } from './driver-comprehension';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -7645,6 +7646,12 @@ export class AiDriverService {
     // subordination does not depend on where it happens to sit.
     const tableStyle = renderTableStyleSection(seat.stylePresets);
     if (tableStyle) parts.push(tableStyle);
+    // #874 — comprehension profile, immediately after table style: both are standing DM
+    // preferences about how the table is run, but this one carries the issue's stated DEFAULT
+    // (chunking, the "What changed" / "What can you do" ending, non-exclusive suggestions
+    // alongside free text, rules kept apart from prose, and Simplify/Recap/Explain support), so
+    // — unlike table style — it is never skipped even on an all-`default` seat.
+    parts.push(renderComprehensionSection(seat.comprehensionProfile));
 
     const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
     parts.push(buildNarrationLanguageContract(language, provenance));

@@ -1,5 +1,5 @@
 import type { aiDmSeats } from '../../db/schema';
-import { AiDmMode, AiDmProactiveSettings, AiDmSeat, AiDmStylePresets } from '@campfire/schema';
+import { AiDmComprehensionProfile, AiDmMode, AiDmProactiveSettings, AiDmSeat, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Which AI-seat fields travel on clone / export / import — stated ONCE (issue #1049).
@@ -112,6 +112,8 @@ export const AI_SEAT_FIELD_ROLE = {
   proactiveSettings: 'config',
   // #1049 — the reported casualty.
   stylePresets: 'config',
+  // #874 — same DM-authored-steering reasoning as stylePresets immediately above.
+  comprehensionProfile: 'config',
   // #1045 — likewise silently dropped.
   actionQueueDepth: 'config',
 
@@ -180,6 +182,7 @@ export function portableAiSeat(row: AiDmSeatRow): PortableAiSeat {
     tokenBudget: row.tokenBudget,
     proactiveSettings: row.proactiveSettings,
     stylePresets: row.stylePresets,
+    comprehensionProfile: row.comprehensionProfile,
     actionQueueDepth: row.actionQueueDepth,
   };
 }
@@ -302,6 +305,8 @@ export function readPortableAiSeat(
     tokenBudget: clamp(intOr(src.tokenBudget, 0), TOKEN_BUDGET_MIN, TOKEN_BUDGET_MAX),
     proactiveSettings: parseOrDefault(AiDmProactiveSettings, src.proactiveSettings, 'proactiveSettings', warn),
     stylePresets: parseOrDefault(AiDmStylePresets, src.stylePresets, 'stylePresets', warn),
+    // #874 — same per-block (not per-axis) fallback reasoning as stylePresets immediately above.
+    comprehensionProfile: parseOrDefault(AiDmComprehensionProfile, src.comprehensionProfile, 'comprehensionProfile', warn),
     // CLAMPED to the same 1..20 the seat schema enforces, not merely floored at 0.
     //
     // The previous line was `Math.max(0, …)` sitting directly beneath a comment explaining that

@@ -7679,6 +7679,119 @@ export const AI_DM_STYLE_PRESET_AXES = [
   { key: 'npcDepth', label: 'NPC depth' },
 ] as const;
 
+/**
+ * COMPREHENSION PROFILE (issue #874).
+ *
+ * A DIFFERENT axis from {@link AiDmStylePresets}. Style is a taste preference (voice, tone);
+ * this is an ACCESSIBILITY preference — how readable a turn's narration is for the humans at
+ * THIS table, independent of what voice the DM likes. Same mechanism as #1049 on purpose: a
+ * closed, bounded set of dropdowns that complement the freeform `instructions` textarea rather
+ * than replace it, and `'default'` on every axis states no preference.
+ *
+ * Its COST is not #1049's, and the difference matters for prompt-budget expectations (review).
+ * Table style renders nothing at all until a DM opts in. This section always renders: its
+ * baseline IS the issue's stated default behaviour, owed to every table whether or not anyone
+ * has visited the settings page. So an all-`'default'` profile costs the baseline section, and
+ * it is only the four per-axis LINES that are zero-cost while left on `'default'`. The whole
+ * section is bounded by `AI_DM_COMPREHENSION_SECTION_MAX_TOKENS`.
+ *
+ * The four axes are exactly the issue's acceptance criteria: how complex the vocabulary/sentence
+ * structure may be, how long a paragraph runs before breaking, how much sensory description to
+ * layer in, and how many suggested actions to close a turn with. All four are prompt GUIDANCE —
+ * see driver-comprehension.ts, the pure renderer, for the baseline behaviour (chunking, the
+ * "What changed" / "What can you do" ending, non-exclusive suggestions alongside free-form
+ * input, and support for a player's Simplify/Recap/Explain requests) that applies REGARDLESS of
+ * these axis choices, matching the issue's title: none of this ever narrows what a player may
+ * type back.
+ */
+export const AiDmReadingComplexity = z.enum(['default', 'simple', 'standard', 'rich']);
+export type AiDmReadingComplexity = z.infer<typeof AiDmReadingComplexity>;
+
+export const AiDmParagraphLength = z.enum(['default', 'short', 'standard', 'long']);
+export type AiDmParagraphLength = z.infer<typeof AiDmParagraphLength>;
+
+export const AiDmSensoryIntensity = z.enum(['default', 'minimal', 'standard', 'vivid']);
+export type AiDmSensoryIntensity = z.infer<typeof AiDmSensoryIntensity>;
+
+/** How many non-exclusive suggested actions should close a turn (baseline default is 2-4). */
+export const AiDmChoiceCount = z.enum(['default', 'two', 'three', 'four']);
+export type AiDmChoiceCount = z.infer<typeof AiDmChoiceCount>;
+
+export const AI_DM_COMPREHENSION_PROFILE_DEFAULTS = {
+  readingComplexity: 'default',
+  paragraphLength: 'default',
+  sensoryIntensity: 'default',
+  choiceCount: 'default',
+} as const;
+
+export const AiDmComprehensionProfile = z
+  .object({
+    readingComplexity: AiDmReadingComplexity.default('default'),
+    paragraphLength: AiDmParagraphLength.default('default'),
+    sensoryIntensity: AiDmSensoryIntensity.default('default'),
+    choiceCount: AiDmChoiceCount.default('default'),
+  })
+  .default({ ...AI_DM_COMPREHENSION_PROFILE_DEFAULTS });
+export type AiDmComprehensionProfile = z.infer<typeof AiDmComprehensionProfile>;
+
+/**
+ * Ceiling for the WHOLE rendered `## Comprehension` section — its fixed baseline (see
+ * driver-comprehension.ts) PLUS whatever optional per-axis lines a DM's choices add on top.
+ * Mirrors {@link AI_DM_STYLE_SECTION_MAX_TOKENS} for the same reason: a closed enum for the
+ * optional axes gives a compile-time worst case, asserted by a unit test, so this section can
+ * share a prompt with elastic consumers without crowding them. Unlike the style section this
+ * ceiling is never zero-cost — the baseline alone is a real, unconditional per-turn cost — so
+ * the unit test also pins the baseline-only figure to keep it a reviewable number on its own.
+ *
+ * Held at 290 through review. Subordinating the ending shape to the session phase direction
+ * was first written as its own bullet, which took the worst case to ~321 and the COMBINED
+ * #1038 x #1049 x #874 budget past half a 4k context window. The guards caught it, so the
+ * qualification was folded into the ending-shape line instead of the ceiling being raised.
+ */
+export const AI_DM_COMPREHENSION_SECTION_MAX_TOKENS = 290;
+
+const AI_DM_COMPREHENSION_LABELS = {
+  readingComplexity: {
+    default: 'Default (no preference)',
+    simple: 'Simple — plain words, short sentences',
+    standard: 'Standard — everyday vocabulary',
+    rich: 'Rich — fuller vocabulary, longer sentences',
+  },
+  paragraphLength: {
+    default: 'Default (no preference)',
+    short: 'Short — 1-2 sentences per beat',
+    standard: 'Standard — a few sentences per beat',
+    long: 'Long — fuller paragraphs, fewer breaks',
+  },
+  sensoryIntensity: {
+    default: 'Default (no preference)',
+    minimal: 'Minimal — only what a player needs to act',
+    standard: 'Standard — a moderate amount of detail',
+    vivid: 'Vivid — rich sensory description',
+  },
+  choiceCount: {
+    default: 'Default (2-4, at the AI’s judgement)',
+    two: 'Two suggestions',
+    three: 'Three suggestions',
+    four: 'Four suggestions',
+  },
+} as const;
+
+export const AI_DM_COMPREHENSION_PROFILE_OPTIONS = {
+  readingComplexity: styleOptions(AiDmReadingComplexity.options, AI_DM_COMPREHENSION_LABELS.readingComplexity),
+  paragraphLength: styleOptions(AiDmParagraphLength.options, AI_DM_COMPREHENSION_LABELS.paragraphLength),
+  sensoryIntensity: styleOptions(AiDmSensoryIntensity.options, AI_DM_COMPREHENSION_LABELS.sensoryIntensity),
+  choiceCount: styleOptions(AiDmChoiceCount.options, AI_DM_COMPREHENSION_LABELS.choiceCount),
+} as const;
+
+/** Axis order + field labels for the seat-config form, matching {@link AI_DM_STYLE_PRESET_AXES}. */
+export const AI_DM_COMPREHENSION_PROFILE_AXES = [
+  { key: 'readingComplexity', label: 'Reading complexity' },
+  { key: 'paragraphLength', label: 'Paragraph length' },
+  { key: 'sensoryIntensity', label: 'Sensory intensity' },
+  { key: 'choiceCount', label: 'Suggested choices' },
+] as const;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
@@ -7701,6 +7814,8 @@ export const AiDmSeat = z.object({
   proactiveSettings: AiDmProactiveSettings.default({}),
   /** Structured table style (#1049) — prompt guidance, not enforcement. See AiDmStylePresets. */
   stylePresets: AiDmStylePresets.default({ ...AI_DM_STYLE_PRESET_DEFAULTS }),
+  /** Comprehension profile (#874) — prompt guidance, not enforcement. See AiDmComprehensionProfile. */
+  comprehensionProfile: AiDmComprehensionProfile.default({ ...AI_DM_COMPREHENSION_PROFILE_DEFAULTS }),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   /**
    * Which fields on THIS seat came from the server defaults rather than from a DM's own
@@ -7837,6 +7952,9 @@ export const AI_DM_SEAT_NON_INHERITED_FIELDS = {
   // house style is ever wanted, the change is to add it to AiDmSeatDefaults and move this key
   // into AI_DM_SEAT_INHERITED_FIELDS — the two are deliberately one edit apart.
   stylePresets: 'No server-wide default exists to inherit from; AiDmSeatDefaults has no style field.',
+  // #874 — same reasoning as stylePresets immediately above: pure prompt guidance, and there is
+  // no server-wide comprehension default to inherit FROM (AiDmSeatDefaults has no such field).
+  comprehensionProfile: 'No server-wide default exists to inherit from; AiDmSeatDefaults has no comprehension field.',
   tokensUsed: 'Per-campaign meter reading — spend belongs to the campaign that spent it.',
   tokensReserved: 'Per-campaign meter reading — in-flight capacity held by this campaign alone.',
   tokensRefunded: 'Per-campaign meter reading — refunds settle against this campaign only.',
@@ -7860,6 +7978,7 @@ export const AiDmSeatUpdate = z.object({
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
   proactiveSettings: AiDmProactiveSettings.optional(),
   stylePresets: AiDmStylePresets.optional(),
+  comprehensionProfile: AiDmComprehensionProfile.optional(),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;

@@ -10,8 +10,10 @@ import {
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
+  AI_DM_COMPREHENSION_PROFILE_DEFAULTS,
   AI_DM_SEAT_INHERITED_FIELDS,
   AI_DM_STYLE_PRESET_DEFAULTS,
+  AiDmComprehensionProfile,
   AiDmProactiveSettings,
   AiDmSeatDefaults,
   AiDmStylePresets,
@@ -44,6 +46,7 @@ import { AiPricingService } from '../ai-pricing/ai-pricing.service';
 import { providerCapabilities } from './providers';
 import type { AiProviderConfig } from './providers/factory';
 import { renderTableStyleSection } from '../ai-driver/driver-style';
+import { renderComprehensionSection } from '../ai-driver/driver-comprehension';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -109,6 +112,10 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     // #1049: '{}' on an upgraded row parses to the all-`default` preset, i.e. "no preference",
     // so a seat that predates this feature renders no style section at all.
     stylePresets: AiDmStylePresets.parse(row.stylePresets ?? {}),
+    // #874: same "'{}' parses to all-`default`" reading as stylePresets above — the FIXED
+    // baseline `## Comprehension` guidance still applies (see driver-comprehension.ts), just
+    // with no optional per-axis line added on top.
+    comprehensionProfile: AiDmComprehensionProfile.parse(row.comprehensionProfile ?? {}),
     // #1070: a persisted seat inherits nothing. Detach is whole-seat on first configure,
     // matching the provider's row-granularity override, so a configured campaign is its own
     // truth and must not report otherwise.
@@ -152,6 +159,9 @@ function defaultSeat(campaignId: number, defaults?: AiDmSeatDefaults): AiDmSeat 
       maxProactiveTokensPerHour: 5000,
     },
     stylePresets: { ...AI_DM_STYLE_PRESET_DEFAULTS },
+    // #874 — same reasoning as stylePresets immediately above: a server default for the
+    // comprehension profile does not exist yet, so this stays a built-in all-`default` value.
+    comprehensionProfile: { ...AI_DM_COMPREHENSION_PROFILE_DEFAULTS },
     // #1070 supplies actionQueueDepth from the server defaults; #1049's stylePresets stays a
     // built-in all-`default` value because a server default for style does not exist yet.
     actionQueueDepth: defaults?.actionQueueDepth ?? 8,
@@ -195,6 +205,23 @@ function inheritedFieldsFor(defaults: AiDmSeatDefaults): string[] {
 function withTableStyle(instructions: string, presets: AiDmSeat['stylePresets']): string {
   const section = renderTableStyleSection(presets);
   if (!section) return instructions;
+  return instructions ? `${instructions}\n\n${section}` : section;
+}
+
+/**
+ * Append the rendered `## Comprehension` section to a seat's instructions (#874) — the same
+ * "same narration, different entry point" reasoning `withTableStyle` above states for #1049
+ * applies here: a DM who configured a comprehension profile and then narrated through
+ * POST /ai-dm/turn (or the MCP `ai_dm_narrate` tool) must get the same guidance the Driver's own
+ * `assembleSystemPrompt` gives it, not a silently different persona depending on entry point.
+ *
+ * UNLIKE `withTableStyle`, {@link renderComprehensionSection} never returns null — its fixed
+ * baseline (chunking, the "What changed" / "What can you do" ending, non-exclusive suggestions
+ * alongside free text, Simplify/Recap/Explain support) is the issue's stated DEFAULT and always
+ * applies, so this always appends a section rather than only when the DM has opted in.
+ */
+function withComprehensionProfile(instructions: string, profile: AiDmSeat['comprehensionProfile']): string {
+  const section = renderComprehensionSection(profile);
   return instructions ? `${instructions}\n\n${section}` : section;
 }
 
@@ -1076,6 +1103,7 @@ export class AiDmService implements OnApplicationBootstrap {
         updatedAt: ts,
         proactiveSettings: (input.proactiveSettings ?? base.proactiveSettings) as any,
         stylePresets: (input.stylePresets ?? base.stylePresets) as any,
+        comprehensionProfile: (input.comprehensionProfile ?? base.comprehensionProfile) as any,
       });
     } else {
       await this.db
@@ -1088,6 +1116,7 @@ export class AiDmService implements OnApplicationBootstrap {
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
           ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
           ...(input.stylePresets !== undefined ? { stylePresets: input.stylePresets as any } : {}),
+          ...(input.comprehensionProfile !== undefined ? { comprehensionProfile: input.comprehensionProfile as any } : {}),
           ...(input.actionQueueDepth !== undefined ? { actionQueueDepth: input.actionQueueDepth } : {}),
           updatedAt: ts,
         })
@@ -1288,7 +1317,7 @@ export class AiDmService implements OnApplicationBootstrap {
         // Excluding `recap` here would give one kind a different persona from the other two on
         // the same endpoint and the same seat — a sharper inconsistency, hit far more often,
         // than the cross-service one it would resolve.
-        instructions: withTableStyle(seat.instructions, seat.stylePresets),
+        instructions: withComprehensionProfile(withTableStyle(seat.instructions, seat.stylePresets), seat.comprehensionProfile),
         model: execModel,
         maxTokens: reservation.tokensReserved,
       });
