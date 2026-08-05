@@ -333,9 +333,13 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
   test('End during load: detail 404 means no live rail', async () => {
     const sequencer = new PlayerDisplayLoadSequencer();
     const freshSummary = summaryFor(7, 'Ashfall Renewed');
+    let listCalls = 0;
     const fetchers: PlayerDisplayFetchers = {
       getSummary: async () => freshSummary,
-      getRunningEncounters: async () => [runningEncounter(9, 7)],
+      getRunningEncounters: async () => {
+        listCalls += 1;
+        return listCalls === 1 ? [runningEncounter(9, 7)] : [];
+      },
       getEncounter: async () => {
         throw new ApiError(404, 'Encounter not found');
       },
@@ -345,6 +349,33 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
     expect(result).toMatchObject({
       kind: 'ok',
       projection: { campaignId: 7, summary: freshSummary, encounter: null },
+    });
+    expect(listCalls).toBe(2);
+  });
+
+  test('detail 404 keeps a revoked cast display as a failure', async () => {
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const summary = summaryFor(7, 'Ashfall');
+    let listCalls = 0;
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: async () => summary,
+      getRunningEncounters: async () => {
+        listCalls += 1;
+        if (listCalls === 1) return [runningEncounter(9, 7)];
+        throw new ApiError(404, 'Cast session not found');
+      },
+      getEncounter: async () => {
+        throw new ApiError(404, 'Encounter not found');
+      },
+    };
+
+    const result = await runPlayerDisplayLoad(sequencer, 7, fetchers);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: false,
+      transient: false,
+      message: 'Cast session not found',
+      summary,
     });
   });
 
