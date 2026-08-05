@@ -64,6 +64,8 @@ export function ActionUsePanel({
   onApplied,
   onError,
   onPreview,
+  onPreviewStart,
+  onPreviewError,
   onBackToTargets,
 }: {
   encounterId: number;
@@ -88,6 +90,8 @@ export function ActionUsePanel({
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
   onPreview: () => void;
+  onPreviewStart: () => void;
+  onPreviewError: () => void;
   onBackToTargets: () => void;
 }) {
   const { t } = useTranslation();
@@ -134,14 +138,14 @@ export function ActionUsePanel({
         commit: false,
         rollMode,
       }),
-    onMutate: () => onError(null),
+    onMutate: () => { onPreviewStart(); onError(null); },
     onSuccess: (res) => {
       setPreview(res);
       setStep('preview');
       onPreview();
       announce(res.resolution.playerSummary);
     },
-    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })),
+    onError: (err) => { onPreviewError(); onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })); },
   });
 
   const commit = useMutation({

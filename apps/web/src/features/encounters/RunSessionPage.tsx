@@ -1639,7 +1639,7 @@ export default function RunSessionPage() {
       return previous.length >= max ? previous : [...previous, id];
     });
   }, [pendingActionUse, actionTargetsDeclared]);
-  const actionLegalTargetIds = useMemo(() => pendingActionUse
+  const actionLegalTargetIds = useMemo(() => pendingActionUse && pendingActionUse.spec.targets.count > 0
     ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
     : [], [encounter?.combatants, pendingActionUse]);
 
@@ -3802,6 +3802,8 @@ export default function RunSessionPage() {
           targetIds={actionTargetIds}
           onToggleTarget={toggleActionTarget}
           onPreview={() => setActionTargetsDeclared(true)}
+          onPreviewStart={() => setActionTargetsDeclared(true)}
+          onPreviewError={() => setActionTargetsDeclared(false)}
           onBackToTargets={() => setActionTargetsDeclared(false)}
           isDm={isDm}
           // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
