@@ -71,7 +71,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('does not use a prior combatant\'s /turn result as the hidden-tab fallback', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/turnWorkspace\?\.current\?\.combatantId === currentCombatantId\s*&&\s*turnWorkspace\?\.isYourTurn === true/);
-    expect(source).toMatch(/turnOwnerFromEvent != null && turnOwnerFromEvent\.combatantId === currentCombatantId\s*\? turnOwnerFromEvent\.isYourTurn/);
+    expect(source).toMatch(/turnOwnerFromEvent != null && turnOwnerFromEvent\.combatantId === turnBeat\?\.combatantId\s*\? turnOwnerFromEvent\.isYourTurn/);
   });
 
   test('releases a pending owner marker when the workspace confirms a polled actor change', () => {

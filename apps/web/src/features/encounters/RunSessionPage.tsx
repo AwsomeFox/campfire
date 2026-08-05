@@ -3332,7 +3332,7 @@ export default function RunSessionPage() {
         isYourTurn={encounter?.status === 'running'
           && !characterOwnershipRefreshPending
           && turnOwnerPendingCombatantId == null
-          && (turnOwnerFromEvent != null && turnOwnerFromEvent.combatantId === currentCombatantId
+          && (turnOwnerFromEvent != null && turnOwnerFromEvent.combatantId === turnBeat?.combatantId
             ? turnOwnerFromEvent.isYourTurn
             : turnWorkspace?.current?.combatantId === currentCombatantId
               && turnWorkspace?.isYourTurn === true)}
