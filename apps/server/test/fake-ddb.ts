@@ -11,7 +11,10 @@ import type { Server } from 'node:http';
  * error paths it would against the live API without any network access.
  *
  * Ids exposed by the fake:
- *   PUBLIC_CHARACTER.id — a full public sheet (200 success:true)
+ *   PUBLIC_DDB_CHARACTER_ID — a full public sheet (200 success:true), a martial fighter
+ *     with equipped weapon + armor + a text-only class feature (issue #1903 attacks coverage)
+ *   CASTER_DDB_CHARACTER_ID — a full public sheet (200 success:true), a Wizard with class
+ *     spells + a feat-granted spell (issue #1903 spells/spell-slots coverage)
  *   777 — a private sheet: 403 (the character-service's private response)
  *   9999 — 200 with `success:false` (the "public flag off" 200 variant)
  *   any other id — 404
@@ -72,10 +75,20 @@ export const PUBLIC_DDB_CHARACTER = {
     customBackground: { name: null },
   },
   // Chain mail (heavy, armorTypeId 3, AC 16, no Dex) + shield (armorTypeId 4, +2) = AC 18.
+  // Plus an equipped Longsword (STR mod +3, proficiency +3 at level 5 -> +6 to hit,
+  // 1d8+3 slashing) and an unequipped Dagger that must NOT produce an attack row.
   inventory: [
     { equipped: true, definition: { armorClass: 16, armorTypeId: 3, name: 'Chain Mail' } },
     { equipped: true, definition: { armorClass: 2, armorTypeId: 4, name: 'Shield' } },
     { equipped: false, definition: { armorClass: 12, armorTypeId: 1, name: 'Leather Armor (stowed)' } },
+    {
+      equipped: true,
+      definition: { name: 'Longsword', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d8' }, damageType: 'Slashing', properties: [] },
+    },
+    {
+      equipped: false,
+      definition: { name: 'Dagger', filterType: 'Weapon', attackType: 1, damage: { diceString: '1d4' }, damageType: 'Piercing', properties: [{ name: 'Finesse' }] },
+    },
   ],
   modifiers: {
     race: [{ type: 'bonus', subType: 'constitution-score', value: 2 }],
@@ -90,8 +103,70 @@ export const PUBLIC_DDB_CHARACTER = {
     feat: [],
     condition: [],
   },
+  // A class feature with no attack/save shape -> imports as a text-only action, enumerated
+  // in the import summary rather than dropped (issue #1903).
+  actions: {
+    class: [{ name: 'Second Wind', snippet: 'Regain 1d10+5 hit points as a bonus action.' }],
+    race: [],
+    background: [],
+    item: [],
+    feat: [],
+  },
   decorations: { avatarUrl: 'https://www.dndbeyond.com/avatars/thornbeard.png' },
   notes: { backstory: 'A dwarf who left the mountain halls to hunt the orcs that razed his clanhold.' },
+};
+
+export const CASTER_DDB_CHARACTER_ID = 87654321;
+
+/**
+ * A level-5 Wizard (full caster) with a class spell list (one cantrip + two 1st-level
+ * spells, one of them unprepared) plus a feat-granted ritual spell, for the attacks/spells
+ * import coverage (issue #1903). INT 18 (mod +4); no weapons/armor so AC/HP paths stay
+ * exercised by the fighter fixture above.
+ */
+export const CASTER_DDB_CHARACTER = {
+  id: CASTER_DDB_CHARACTER_ID,
+  name: 'Elowen Nightshade',
+  stats: [
+    { id: 1, value: 8 },
+    { id: 2, value: 14 },
+    { id: 3, value: 12 },
+    { id: 4, value: 18 },
+    { id: 5, value: 10 },
+    { id: 6, value: 10 },
+  ],
+  bonusStats: [],
+  overrideStats: [],
+  race: { fullName: 'High Elf', baseName: 'Elf' },
+  classes: [{ level: 5, definition: { name: 'Wizard' }, subclassDefinition: { name: 'Evocation' } }],
+  baseHitPoints: 22,
+  bonusHitPoints: null,
+  overrideHitPoints: null,
+  removedHitPoints: 0,
+  temporaryHitPoints: 0,
+  currentXp: 6500,
+  background: { hasCustomBackground: false, definition: { name: 'Sage' }, customBackground: { name: null } },
+  inventory: [],
+  modifiers: { race: [], class: [], background: [], item: [], feat: [], condition: [] },
+  classSpells: [
+    {
+      characterClassId: 1,
+      spells: [
+        { definition: { name: 'Fire Bolt', level: 0, description: 'A mote of fire streaks toward a target.' }, prepared: true },
+        { definition: { name: 'Magic Missile', level: 1, description: 'Three darts of force strike unerringly.' }, prepared: true },
+        { definition: { name: 'Mage Armor', level: 1, description: 'AC 13 + Dex modifier.' }, prepared: false },
+      ],
+    },
+  ],
+  spells: {
+    race: [],
+    class: [],
+    background: [],
+    item: [],
+    feat: [{ definition: { name: 'Find Familiar', level: 1, description: 'Summon a spirit in animal form.', ritual: true }, prepared: true }],
+  },
+  decorations: { avatarUrl: null },
+  notes: { backstory: '' },
 };
 
 export interface FakeDdb {
@@ -118,6 +193,10 @@ export async function startFakeDdb(): Promise<FakeDdb> {
     const id = req.params.id;
     if (id === String(PUBLIC_DDB_CHARACTER_ID)) {
       res.json({ id: PUBLIC_DDB_CHARACTER_ID, success: true, message: '', data: PUBLIC_DDB_CHARACTER });
+      return;
+    }
+    if (id === String(CASTER_DDB_CHARACTER_ID)) {
+      res.json({ id: CASTER_DDB_CHARACTER_ID, success: true, message: '', data: CASTER_DDB_CHARACTER });
       return;
     }
     if (id === '777') {

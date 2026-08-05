@@ -3,7 +3,8 @@
  * and plain-language breakdowns. Extracted from PartyPage for readability.
  */
 import { useMemo, useState, type FormEvent } from 'react';
-import type { RuleSystemAdapter } from '@campfire/schema';
+import { useTranslation } from 'react-i18next';
+import type { RuleSystemAdapter, DdbImportResult } from '@campfire/schema';
 import {
   blankCharacterCreate,
   characterCreateFromTemplate,
@@ -20,12 +21,31 @@ export function NewCharacterForm({
   ddbAllowed,
   onCancel,
   onCreated,
+  onImportStarted,
 }: {
   campaignId: number;
   adapter: RuleSystemAdapter;
   ddbAllowed: boolean;
   onCancel?: () => void;
   onCreated: () => void;
+  /**
+   * Fired the instant a DDB import STARTS, before the request is even sent (issue #1903
+   * review, round 11 — renamed from `onImportSucceeded` and moved earlier). PartyPage's
+   * render guard for this form is `creating || party.length === 0` — when the form is open
+   * only because the party was empty (`creating` false), the character-creation side effect
+   * this import triggers can flip `party.length` to 1 via a live campaign-event reload
+   * (`character.updated`, see PartyPage's `useCampaignEvents`) BEFORE this component's own
+   * `await api.post(...)` for the import even resolves — the server can broadcast that event
+   * as soon as the character row is created, independent of when the HTTP response body
+   * finishes arriving at this client. Firing this callback only after the import "succeeded"
+   * (the previous behavior) left exactly that window open: `creating` was still false when
+   * the reload's `party.length` bump raced ahead of it, unmounting the form and discarding
+   * the summary before it could ever be set. Firing it before the request starts closes the
+   * window entirely — the parent should treat this as "keep me open" independent of party
+   * size (e.g. flip its own `creating` flag true) for the whole lifetime of the import, until
+   * `onCreated`/`onCancel` fire from the "Done" button.
+   */
+  onImportStarted?: () => void;
 }) {
   const templates = useMemo(() => starterTemplatesForAdapter(adapter, 1), [adapter]);
   const [path, setPath] = useState<CharacterCreationPath>('template');
@@ -36,8 +56,13 @@ export function NewCharacterForm({
   const [level, setLevel] = useState('1');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useTranslation();
   const [ddbRef, setDdbRef] = useState('');
   const [importing, setImporting] = useState(false);
+  // Issue #1903: the import summary (attacks/spells/slots counts + any text-only entries)
+  // is shown before the form closes, so a DM/player sees what needs a manual touch-up
+  // instead of discovering it only inside the sheet.
+  const [importSummary, setImportSummary] = useState<DdbImportResult['summary'] | null>(null);
 
   const levelCap = adapter.maxLevel === Infinity ? 99 : adapter.maxLevel;
   const levelNum = Math.max(1, Math.min(levelCap, Number(level) || 1));
@@ -48,14 +73,24 @@ export function NewCharacterForm({
   async function importFromDdb() {
     const ref = ddbRef.trim();
     if (!ref) return;
+    // Pin the parent open BEFORE the request is even sent (issue #1903 review, round 11) —
+    // see onImportStarted's own doc comment for why firing this after the request resolves
+    // (the previous behavior) left a race window open where a live campaign-event reload
+    // could unmount this form before the summary was ever set.
+    onImportStarted?.();
     setImporting(true);
     setError(null);
     try {
       const body = /^\d+$/.test(ref) ? { ddbId: ref } : { url: ref };
-      await api.post(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
+      const res = await api.post<DdbImportResult>(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
       setDdbRef('');
-      onCancel?.();
-      onCreated();
+      // Hold the form open to show what imported (issue #1903) — defer onCreated()/onCancel()
+      // to finishDdbImport() (the "Done" button) rather than calling them here. PartyPage wires
+      // onCreated to close the create panel and reload the roster; calling it immediately would
+      // unmount this form (the render guard is `creating || party.length === 0`, and both
+      // closeCreating() and the reload's `loading=true` flip that guard false) before the
+      // summary set on the next line ever gets a render — the panel would never be visible.
+      setImportSummary(res.summary);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");
     } finally {
@@ -63,8 +98,19 @@ export function NewCharacterForm({
     }
   }
 
+  function finishDdbImport() {
+    setImportSummary(null);
+    onCancel?.();
+    onCreated();
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
+    // A DDB import already in flight must not race with a manual-create submit (review
+    // finding on PR #1950 round 14) — pressing Enter in a text field triggers the form's
+    // implicit submit regardless of the visible button's disabled state, so this guard is
+    // needed in addition to (not instead of) disabling the button below.
+    if (importing) return;
     if (!name.trim()) return;
     setSaving(true);
     setError(null);
@@ -112,7 +158,44 @@ export function NewCharacterForm({
       </div>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
-      {ddbAllowed && (
+      {ddbAllowed && importSummary && (
+        <div className="space-y-2 rounded-md border border-emerald-700/60 bg-emerald-950/20 p-3" role="status">
+          <span className="text-xs font-bold text-emerald-300 uppercase tracking-wide">{t('characters.ddbImport.summaryTitle')}</span>
+          <ul className="space-y-1 text-xs text-slate-300">
+            <li>{t('characters.ddbImport.actionsCount', { count: importSummary.actionsImported })}</li>
+            <li>{t('characters.ddbImport.spellsCount', { count: importSummary.spellsImported })}</li>
+            {importSummary.spellSlotsImported && <li>{t('characters.ddbImport.spellSlotsSet')}</li>}
+          </ul>
+          {importSummary.textOnly.length > 0 && (
+            <div className="text-xs text-amber-300">
+              <p>{t('characters.ddbImport.textOnlyIntro')}</p>
+              <ul className="list-disc space-y-0.5 pl-4">
+                {importSummary.textOnly.map((name, i) => (
+                  // Keyed by name+index, not name alone (review finding on PR #1950 round 9):
+                  // two equipped weapons (or features) with the same name are legitimately
+                  // separate entries — computeWeaponActions/computeFeatureActions do not
+                  // (and should not) de-duplicate them the way spells are — so a name-only key
+                  // risks React's standard duplicate-key hazards on any future re-render of
+                  // this list (a stale/misapplied component identity across renders), even
+                  // though the single static render this list currently gets does not lose
+                  // either item from the DOM today.
+                  <li key={`${name}-${i}`}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {importSummary.entriesOmitted > 0 && (
+            <p className="text-xs text-amber-300">{t('characters.ddbImport.entriesOmitted', { count: importSummary.entriesOmitted })}</p>
+          )}
+          <div className="flex justify-end">
+            <Btn type="button" onClick={finishDdbImport}>
+              {t('characters.ddbImport.done')}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {ddbAllowed && !importSummary && (
         <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
           <span className="text-xs font-bold text-secondary uppercase tracking-wide">Import from D&amp;D Beyond</span>
           <div className="flex gap-2">
@@ -131,7 +214,7 @@ export function NewCharacterForm({
         </div>
       )}
 
-      {ddbAllowed && (
+      {ddbAllowed && !importSummary && (
         <div className="flex items-center gap-2 text-xs text-secondary">
           <span className="h-px flex-1 bg-slate-700/60" />
           or create in Campfire
@@ -139,6 +222,8 @@ export function NewCharacterForm({
         </div>
       )}
 
+      {!importSummary && (
+      <>
       <fieldset className="space-y-2">
         <legend className="text-xs font-bold text-secondary uppercase tracking-wide">How do you want to start?</legend>
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -251,15 +336,23 @@ export function NewCharacterForm({
 
         <div className="flex gap-2 justify-end">
           {onCancel && (
-            <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+            // `|| importing` (review finding on PR #1950 round 14): while a DDB import is in
+            // flight, `importSummary` is still null, so this manual-create form stays
+            // rendered underneath the "Importing…" state. Without this, Cancel unmounts the
+            // component while the import's POST can still create a character server-side —
+            // the eventual `setImportSummary` call lands on an unmounted component, and the
+            // summary is lost.
+            <Btn ghost type="button" onClick={onCancel} disabled={saving || importing}>
               Cancel
             </Btn>
           )}
-          <Btn type="submit" disabled={saving || !name.trim()}>
+          <Btn type="submit" disabled={saving || importing || !name.trim()}>
             {saving ? 'Creating…' : path === 'blank' ? 'Create blank draft' : 'Create from template'}
           </Btn>
         </div>
       </form>
+      </>
+      )}
     </Card>
   );
 }
