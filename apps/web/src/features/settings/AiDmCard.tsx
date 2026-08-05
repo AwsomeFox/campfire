@@ -36,15 +36,19 @@ import type {
 } from '@campfire/schema';
 import {
   AI_COST_BASIS_UNKNOWN,
+  AI_DM_COMPREHENSION_PROFILE_AXES,
+  AI_DM_COMPREHENSION_PROFILE_OPTIONS,
   AI_DM_STYLE_PRESET_AXES,
   AI_DM_STYLE_PRESET_OPTIONS,
   NARRATION_LANGUAGE_OPTIONS,
+  type AiDmComprehensionProfile,
   type AiDmStylePresets,
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { Card, SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { AI_DM_STYLE_SECTION_ID, aiDmStyleSelectId } from './aiDmStyleIds';
+import { AI_DM_COMPREHENSION_SECTION_ID, aiDmComprehensionSelectId } from './aiDmComprehensionIds';
 import { ProviderForm } from './ProviderForm';
 import { queryKeys } from '../../lib/query';
 import { useAuth } from '../../app/auth';
@@ -237,6 +241,7 @@ export default function AiDmCard({
       />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
       <TableStyleSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
+      <ComprehensionProfileSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
     </Card>
   );
 }
@@ -762,6 +767,89 @@ function TableStyleSection({
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
           {saving ? t('common.saving') : t('settings.aiDm.tableStyle.save')}
+        </button>
+        {feedback.announcement}
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * Comprehension profile (#874).
+ *
+ * A DIFFERENT axis from the table style above: style is a voice/taste preference, this is an
+ * ACCESSIBILITY preference — how readable a turn's narration is for the humans at this table.
+ * Same shape as {@link TableStyleSection} on purpose (closed dropdowns beside the freeform
+ * textarea, never replacing it), and the same honesty about what it is: each choice adds a line
+ * of guidance to the prompt, never a rule the server enforces. Unlike table style, some of this
+ * feature's behaviour — chunked narration, a "What changed"/"What can you do" ending, and
+ * support for Simplify/Recap/Explain — is always on regardless of these dropdowns; the copy
+ * below says so rather than implying every default here is a no-op the way an all-default style
+ * preset is.
+ */
+function ComprehensionProfileSection({
+  campaignId,
+  seat,
+  onChanged,
+}: {
+  campaignId: number;
+  seat: AiDmSeat;
+  onChanged: (seat: AiDmSeat) => void;
+}) {
+  const { t } = useTranslation();
+  const [profile, setProfile] = useState<AiDmComprehensionProfile>(seat.comprehensionProfile);
+  const feedback = useSaveFeedback(t('settings.aiDm.comprehension.feedbackSubject'));
+  const saving = feedback.state === 'saving';
+
+  // Deliberately NOT re-synced from `seat` — same reasoning as TableStyleSection above.
+
+  async function save() {
+    if (saving) return;
+    feedback.begin();
+    try {
+      const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { comprehensionProfile: profile });
+      onChanged(updated);
+      feedback.succeed();
+    } catch (e) {
+      if (e instanceof ApiError) {
+        feedback.fail(e.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveComprehension'), { generic: true });
+      }
+    }
+  }
+
+  return (
+    <Section title={t('settings.aiDm.comprehension.sectionTitle')} id={AI_DM_COMPREHENSION_SECTION_ID}>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        {t('settings.aiDm.comprehension.body')}
+      </p>
+      <div className="flex gap-2 flex-wrap">
+        {AI_DM_COMPREHENSION_PROFILE_AXES.map((axis) => (
+          <div className="field" style={{ maxWidth: 260 }} key={axis.key}>
+            <label htmlFor={aiDmComprehensionSelectId(axis.key)}>
+              {t(`settings.aiDm.comprehension.axes.${axis.key}`, { defaultValue: axis.label })}
+            </label>
+            <select
+              id={aiDmComprehensionSelectId(axis.key)}
+              className="input"
+              value={profile[axis.key]}
+              disabled={saving}
+              aria-describedby={feedback.statusId}
+              onChange={(e) => { const value = e.target.value; const next = { ...profile, [axis.key]: value }; setProfile(next); feedback.syncDirty(JSON.stringify(next) !== JSON.stringify(seat.comprehensionProfile)); }}
+            >
+              {AI_DM_COMPREHENSION_PROFILE_OPTIONS[axis.key].map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {t(`settings.aiDm.comprehension.options.${axis.key}.${opt.value}`, { defaultValue: opt.label })}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2 items-center">
+        <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
+          {saving ? t('common.saving') : t('settings.aiDm.comprehension.save')}
         </button>
         {feedback.announcement}
       </div>

@@ -1522,6 +1522,7 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   last_turn_at TEXT,
   proactive_settings TEXT DEFAULT '{}',
   style_presets TEXT DEFAULT '{}',
+  comprehension_profile TEXT DEFAULT '{}',
   action_queue_depth INTEGER DEFAULT 8,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

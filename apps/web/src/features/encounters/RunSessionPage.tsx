@@ -15,7 +15,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -49,7 +49,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
-import { ActionUsePanel } from './ActionUseFlow';
+import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -652,12 +652,19 @@ export default function RunSessionPage() {
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
+    id: number;
     combatantId: number;
     actorName: string;
     actionIndex: number;
     actionName: string;
     spec: ActionSpec;
   } | null>(null);
+  const pendingActionUseSequence = useRef(0);
+  const pendingActionUseIdRef = useRef<number | null>(null);
+  const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
+  const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
+  const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
+  const actionImpactTimerRef = useRef<number | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -679,6 +686,9 @@ export default function RunSessionPage() {
   }, [announce]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
+  }, []);
+  useEffect(() => () => {
+    if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
@@ -1583,6 +1593,15 @@ export default function RunSessionPage() {
   }, [eid, encounter, announce]);
 
   const myUserId = me?.user.id;
+  const membersQuery = useQuery({
+    queryKey: queryKeys.campaignMembers(cid),
+    queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`),
+    enabled: encounter?.mapAttachmentId != null,
+  });
+  const aoeDeclarerNames = useMemo(
+    () => new Map((membersQuery.data ?? []).map((member) => [String(member.userId), member.displayName || member.username || String(member.userId)])),
+    [membersQuery.data],
+  );
   const ownedCharacterIds = useMemo(
     () =>
       new Set(
@@ -1620,11 +1639,30 @@ export default function RunSessionPage() {
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
+      const id = ++pendingActionUseSequence.current;
+      pendingActionUseIdRef.current = id;
       setPendingApply(null);
-      setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
+      setActionTargetIds([]);
+      setActionTargetsDeclared(false);
+      setPendingActionUse({ id, combatantId, actorName, actionIndex, actionName, spec });
     },
     [],
   );
+
+  const toggleActionTarget = useCallback((id: number) => {
+    setActionTargetIds((previous) => {
+      if (!pendingActionUse || actionTargetsDeclared) return previous;
+      if (previous.includes(id)) return previous.filter((targetId) => targetId !== id);
+      const max = pendingActionUse.spec.targets.count > 0 ? pendingActionUse.spec.targets.count : 50;
+      return previous.length >= max ? previous : [...previous, id];
+    });
+  }, [pendingActionUse, actionTargetsDeclared]);
+  const actionLegalTargetIds = useMemo(() => pendingActionUse && pendingActionUse.spec.targets.count > 0
+    ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
+    : [], [encounter?.combatants, pendingActionUse]);
+  const actionTargetsAtCapacity = !!pendingActionUse
+    && pendingActionUse.spec.targets.count > 0
+    && actionTargetIds.length >= pendingActionUse.spec.targets.count;
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
     setAoeHitLayout(layout);
@@ -2188,6 +2226,23 @@ export default function RunSessionPage() {
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
+  // Issue #1909 scope note: earlier rounds of this PR added a CAS token + debounce/
+  // serialization queue to this whole-statblock PATCH (the in-app statblock editor's
+  // onChange path), trying to close a pre-existing lost-update on a caller this issue
+  // never named. That mechanism went through five review-caught regressions in a row (no
+  // token → lost updates; token added → 409 on every keystroke; token re-read at send time
+  // → guard defeated by a concurrent writer; token latched per-combatant → permanent
+  // lockout after any other encounter write; draft leaked across an encounter-id change
+  // mid-debounce) — a strong signal it was being built in the wrong place for this PR.
+  // Reverted back to this endpoint's actual, and already-solved, scope: `patchCombatant`
+  // sends every patch (including `statblock`) as a plain, immediate, token-less PATCH,
+  // exactly as it did before this PR touched this file. This restores the PRE-EXISTING
+  // whole-statblock-editor concurrency gap (a concurrent whole-statblock save can still
+  // revert another writer's unrelated edit) rather than introducing a new one — that gap
+  // predates this PR and is now tracked as its own follow-up issue rather than solved here.
+  // What #1909 actually asked for — flipping ONE resource pip no longer clobbers the WHOLE
+  // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
+  // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
@@ -2653,6 +2708,44 @@ export default function RunSessionPage() {
   }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+  // Player declarations use scoped routes so the server, not the browser, owns
+  // declarer attribution and per-template authorization (#1913).
+  const declareAoeTemplate = useCallback(async (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+    setActionError(null);
+    await api.post(`${API}/encounters/${eid}/aoe-templates`, template);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+    setActionError(null);
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current
+        ? { ...current, aoe: current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template)) }
+        : current,
+    );
+    try {
+      await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    } catch (error) {
+      // A refetch is a rollback that does not clobber a later local nudge that
+      // may already have updated the same cache entry.
+      invalidateEncounter(queryClient, eid);
+      throw error;
+    }
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const removeAoeTemplate = useCallback(async (templateId: string) => {
+    setActionError(null);
+    await api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const clearPlayerAoeTemplates = useCallback(async () => {
+    const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
+    if (playerTemplates.length === 0) return;
+    setActionError(null);
+    const results = await Promise.allSettled(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    invalidateEncounter(queryClient, eid);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }, [eid, encounter?.aoe, queryClient]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
@@ -3483,6 +3576,19 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
+          aoeDeclarerNames={aoeDeclarerNames}
+          canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
+          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
+          onUpdateAoe={async (templateId, patch) => {
+            try {
+              await updateAoeTemplate(templateId, patch);
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
+          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
+          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
@@ -3502,6 +3608,8 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: toggleActionTarget } : null}
+          impactTargetIds={actionImpactTargetIds}
         />
       )}
 
@@ -3756,13 +3864,21 @@ export default function RunSessionPage() {
 
       {pendingActionUse && (
         <ActionUsePanel
+          key={pendingActionUse.id}
           encounterId={eid}
           actorCombatantId={pendingActionUse.combatantId}
           actorName={pendingActionUse.actorName}
           actionIndex={pendingActionUse.actionIndex}
           actionName={pendingActionUse.actionName}
+          actionToken={pendingActionUse.id}
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
+          targetIds={actionTargetIds}
+          onToggleTarget={toggleActionTarget}
+          onPreview={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewStart={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewError={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
+          onBackToTargets={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
           isDm={isDm}
           // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
           // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
@@ -3776,12 +3892,23 @@ export default function RunSessionPage() {
           // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
           applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
-          onDismiss={() => setPendingActionUse(null)}
+          onDismiss={() => { pendingActionUseIdRef.current = null; setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
+            pendingActionUseIdRef.current = null;
             setPendingActionUse(null);
+            if (!prefersReducedMotion()) {
+              if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
+              setActionImpactTargetIds(actionTargetIds);
+              actionImpactTimerRef.current = window.setTimeout(() => {
+                setActionImpactTargetIds([]);
+                actionImpactTimerRef.current = null;
+              }, 250);
+            }
+            setActionTargetIds([]);
+            setActionTargetsDeclared(false);
             if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
             dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
@@ -3965,6 +4092,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}
@@ -3996,7 +4124,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 

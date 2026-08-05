@@ -2,7 +2,7 @@
  * Pure helpers for {@link ResourceTrackerPanel} (issue #1902), split out so the request
  * bodies and the gating matrix can be unit-tested without rendering the component.
  */
-import type { ResourcePatch, RestOptionDef, SpellSlotPatch } from '@campfire/schema';
+import type { CombatantResourceAdjust, ResourcePatch, RestOptionDef, SpellSlotPatch } from '@campfire/schema';
 
 /**
  * Body for `POST /characters/:id/rest`. `kind` is `RestOptionDef['type']` — the same
@@ -81,6 +81,36 @@ export function spellSlotPatchBody(
 }
 
 /**
+ * Body for `POST /encounters/:id/combatants/:cid/resources` (issue #1909) — the
+ * combatant-scoped counterpart to {@link resourcePatchBody}/{@link spellSlotPatchBody},
+ * for a monster/NPC statblock pip. `CombatantResourceAdjust.strict()` is
+ * `{ key, delta }` XOR `{ spellLevel, delta }`, not `{ [key]: { used, max } }` — sending
+ * the nested shape (the whole-statblock PATCH this replaces used to build) is a
+ * guaranteed 400. `target` is exactly one of `{ key }` or `{ spellLevel }`; `delta` is
+ * computed relative to the rendered `currentUsed`, matching {@link spellSlotPatchBody}.
+ *
+ * No whole-encounter `expectedUpdatedAt`/CAS token: unlike the whole-statblock PATCH, this
+ * endpoint reads the combatant row fresh inside its own transaction, so a second writer's
+ * write never gets silently overwritten by a stale whole-blob PATCH. But `currentUsed` IS
+ * still sent as `expectedUsed` (issue #1909 review, Codex P2) — a DIFFERENT race the fresh
+ * row-read does NOT close: a pip click is an ABSOLUTE intent ("set used to N") converted
+ * to a relative `delta` against whatever `used` THIS client last rendered. If two clients
+ * both last rendered `used: 0` and both click the first pip, both send `delta: 1`; the
+ * transactional read makes each write internally consistent, but nothing stops the SECOND
+ * caller's delta from applying on top of the FIRST's fresh result (committing `used: 2`,
+ * not the `1` either caller intended). `expectedUsed` closes that: the server verifies it
+ * against the FRESH value inside its own transaction and 409s on a mismatch instead of
+ * applying a delta computed from a baseline that has since moved.
+ */
+export function combatantResourceAdjustBody(
+  target: { key: string } | { spellLevel: number },
+  currentUsed: number,
+  nextUsed: number,
+): Pick<CombatantResourceAdjust, 'key' | 'spellLevel' | 'delta' | 'expectedUsed'> {
+  return { ...target, delta: nextUsed - currentUsed, expectedUsed: currentUsed };
+}
+
+/**
  * Whether the current viewer may interact with a combatant's pips/rest controls (issue
  * #1902 acceptance criterion 3). Mirrors the server's dm-or-owner rule
  * (`CharactersService.assertCanWrite`) for UX only — the server remains authoritative.
@@ -136,19 +166,22 @@ export type PipOwnerScope = { characterId: number } | { combatantId: number };
  *     racing past each other means the second one's token is stale by the time it lands,
  *     rejected with a "someone else changed this" the user never caused (their own prior
  *     click did);
- *   - a statblock combatant's resource/slot writes each PATCH the ENTIRE saved
- *     `statblock` object rebuilt from whatever this client currently has cached — two
- *     such writes racing past each other means the second is composed from a snapshot
- *     that doesn't yet include the first's change, and silently reverts it on success.
+  *   - (historically) a statblock combatant's resource/slot writes each PATCHed the ENTIRE
+ *     saved `statblock` object rebuilt from whatever this client currently had cached — two
+ *     such writes racing past each other meant the second was composed from a snapshot
+ *     that didn't yet include the first's change, and silently reverted it on success.
  *
  * Collapsing the key to the TARGET (not the specific resource/slot) serializes every
- * control on that one character sheet against each other, while different characters remain
- * fully independent. Statblock combatants share the encounter-wide `encounterUpdatedAt` CAS token,
- * so statblock writes across all monsters in an encounter map to the encounter-wide
- * `'combatant:statblock'` key to prevent concurrent writes from sending stale concurrency tokens.
+ * control on that one character sheet, or that one statblock combatant, against each
+ * other, while a DIFFERENT character/combatant remains fully independent. Issue #1909
+ * replaced the statblock branch's whole-statblock PATCH with the delta-based, per-
+ * combatant `POST .../combatants/:cid/resources` (no shared CAS token, no lost-update
+ * race even across concurrent writers), so statblock combatants now map to their OWN
+ * `combatant:<id>` key instead of a single encounter-wide one — a DM spending one
+ * monster's Ki pip no longer disables every other monster's pips in the same encounter.
  */
 export function pendingTargetKey(scope: PipOwnerScope): string {
-  return 'characterId' in scope ? `char:${scope.characterId}` : 'combatant:statblock';
+  return 'characterId' in scope ? `char:${scope.characterId}` : `combatant:${scope.combatantId}`;
 }
 
 /**
