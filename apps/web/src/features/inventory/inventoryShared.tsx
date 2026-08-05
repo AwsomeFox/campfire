@@ -2,7 +2,7 @@
  * Shared inventory item UI — used by the campaign Inventory page and character
  * sheet inventory section (issue #454).
  */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Character, InventoryItem, PartyCharacter, RuleEntry } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
@@ -115,6 +115,114 @@ export function ItemRow({
     setCommitted(item);
   }, [item]);
 
+  // Equip/unequip (issue #1901) — a character-owned item can carry an authored
+  // `equippedAction` that surfaces as a usable combat action once equipped (server-side,
+  // action-resolver.service.ts). `equipSlot` is a free string (not an enum, see
+  // packages/schema), so the slot input below is plain text with common-slot suggestions.
+  const [equipOpen, setEquipOpen] = useState(false);
+  const [slotDraft, setSlotDraft] = useState('');
+  const [equipBusy, setEquipBusy] = useState(false);
+  const [equipError, setEquipError] = useState<string | null>(null);
+  const [slotConflict, setSlotConflict] = useState<{ itemId: number; itemName: string; slot: string } | null>(null);
+  const slotSuggestionsMap = t('inventory.equip.slotSuggestions', { returnObjects: true }) as Record<string, string>;
+  const slotSuggestions = useMemo(() => Object.values(slotSuggestionsMap ?? {}), [slotSuggestionsMap]);
+
+  async function submitEquip(slot: string) {
+    const trimmed = slot.trim();
+    if (!trimmed) {
+      setEquipError(t('inventory.equip.slotRequired'));
+      return;
+    }
+    setEquipBusy(true);
+    setEquipError(null);
+    try {
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equipped: true, equipSlot: trimmed });
+      setCommitted(updated);
+      setSlotConflict(null);
+      setEquipOpen(false);
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
+        setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? trimmed });
+      } else {
+        setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+      }
+    } finally {
+      setEquipBusy(false);
+    }
+  }
+
+  /**
+   * One-tap swap (issue #1901 rework, review: devin-ai-integration + chatgpt-codex-connector
+   * P2 on PR #1951): a single atomic PATCH — `displaceEquipped: true` tells the server to
+   * unequip the slot-conflicting incumbent and equip THIS item in the same transaction. This
+   * used to be two client-orchestrated requests (unequip incumbent, then retry the original
+   * equip) with a real half-applied window: another writer could claim the slot between the
+   * two requests, or the second request could simply fail — either way leaving the character
+   * wearing neither item, and (because the second request went through `submitEquip`, which
+   * silently returns without touching `equipBusy` when its slot argument is empty) the equip
+   * controls could stay disabled forever with no error shown. One request removes both the
+   * race and the swallowed-failure path entirely; there's no intermediate committed state to
+   * roll back because the server never applies the unequip half without the equip half.
+   *
+   * Rework round 3 (review: devin-ai-integration): the button reads "Replace <incumbent>"
+   * and the warning above it names `slotConflict.itemName`/`.slot` — that is the
+   * confirmation the player is acting on, so the request below MUST target that exact
+   * slot. It deliberately ignores the separate slot-text-input state, which stays open and
+   * editable while this warning is shown — reading it here would let a player edit that box
+   * after seeing the conflict and have "Replace X" silently displace whatever now occupies
+   * the freshly typed slot instead of X. The plain equip button (`submitEquip`) is the path
+   * for trying a different slot.
+   *
+   * Rework round (review: chatgpt-codex-connector P2): also sends `expectedConflictingItemId`
+   * so the server rejects (with a FRESH 409) rather than silently displacing a DIFFERENT item
+   * than the one confirmed, if another writer swapped who occupies the slot between the
+   * original 409 and this request — e.g. unequipping the named incumbent and equipping a
+   * third item into the same slot while this warning was on screen. On that fresh 409 the
+   * catch below re-arms `slotConflict` with the new incumbent, same as `submitEquip`'s own
+   * conflict handling, so the player re-confirms against current reality instead of the
+   * request just failing opaquely or silently displacing the wrong item.
+   */
+  async function swapEquip() {
+    if (!slotConflict) return;
+    setEquipBusy(true);
+    setEquipError(null);
+    try {
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, {
+        equipped: true,
+        equipSlot: slotConflict.slot,
+        displaceEquipped: true,
+        expectedConflictingItemId: slotConflict.itemId,
+      });
+      setCommitted(updated);
+      setSlotConflict(null);
+      setEquipOpen(false);
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
+        setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });
+      } else {
+        setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+      }
+    } finally {
+      setEquipBusy(false);
+    }
+  }
+
+  async function unequip() {
+    setEquipBusy(true);
+    setEquipError(null);
+    try {
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equipped: false });
+      setCommitted(updated);
+      onChanged();
+    } catch (err) {
+      setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+    } finally {
+      setEquipBusy(false);
+    }
+  }
+
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
     setError(null);
@@ -218,6 +326,116 @@ export function ItemRow({
           </div>
         )}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
+
+        {/* Equip/unequip (issue #1901) — party-stash items can never be equipped. */}
+        {committed.ownerType === 'character' && (
+          <div className="mt-1.5 space-y-1" data-testid="inventory-equip">
+            {committed.equipped ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="tag tag-accent text-[11px]" data-testid="inventory-equipped-badge">
+                  {committed.equipSlot
+                    ? t('inventory.equip.equippedInSlot', { slot: committed.equipSlot })
+                    : t('inventory.equip.badge')}
+                </span>
+                {editable && (
+                  <Btn
+                    density="xs"
+                    ghost
+                    className="!px-2 text-xs cf-print-hide"
+                    disabled={equipBusy}
+                    onClick={() => void unequip()}
+                    aria-label={t('inventory.equip.unequipAria', { name: committed.name })}
+                    data-testid="inventory-unequip-btn"
+                  >
+                    {t('inventory.equip.unequipButton')}
+                  </Btn>
+                )}
+              </div>
+            ) : (
+              editable && (
+                <>
+                  {!equipOpen ? (
+                    <Btn
+                      density="xs"
+                      ghost
+                      type="button"
+                      className="!px-2 text-xs cf-print-hide"
+                      onClick={() => setEquipOpen(true)}
+                      aria-label={t('inventory.equip.equipAria', { name: committed.name })}
+                      data-testid="inventory-equip-btn"
+                    >
+                      {t('inventory.equip.equipButton')}
+                    </Btn>
+                  ) : (
+                    <form
+                      className="flex flex-wrap items-center gap-1.5"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void submitEquip(slotDraft);
+                      }}
+                    >
+                      <input
+                        type="text"
+                        className="input text-xs"
+                        style={{ minHeight: 32, maxWidth: 180 }}
+                        list={`inventory-slot-suggestions-${committed.id}`}
+                        value={slotDraft}
+                        onChange={(e) => setSlotDraft(e.target.value)}
+                        placeholder={t('inventory.equip.slotPlaceholder')}
+                        aria-label={t('inventory.equip.slotLabel')}
+                        autoFocus
+                        disabled={equipBusy}
+                      />
+                      <datalist id={`inventory-slot-suggestions-${committed.id}`}>
+                        {slotSuggestions.map((slot) => (
+                          <option key={slot} value={slot} />
+                        ))}
+                      </datalist>
+                      <Btn density="xs" type="submit" className="text-xs" disabled={equipBusy}>
+                        {t('inventory.equip.equipButton')}
+                      </Btn>
+                      <Btn
+                        density="xs"
+                        ghost
+                        type="button"
+                        className="text-xs"
+                        disabled={equipBusy}
+                        onClick={() => {
+                          setEquipOpen(false);
+                          setEquipError(null);
+                          setSlotConflict(null);
+                        }}
+                      >
+                        {t('common.cancel')}
+                      </Btn>
+                    </form>
+                  )}
+                </>
+              )
+            )}
+            {/* Issue #1901 review (devin-ai-integration): an authored equippedAction only
+                contributes to the merged usable-action list while the item is EQUIPPED
+                (ActionResolverService.equippedItemActionRows filters on equipped=true) — this
+                line must not claim a stowed item grants a combat action it doesn't currently
+                offer. */}
+            {committed.equipped && committed.equippedAction && (
+              <p className="text-[11px] text-secondary" data-testid="inventory-grants-action">
+                {t('inventory.equip.grantsAction', { name: committed.equippedAction.name })}
+              </p>
+            )}
+            {slotConflict && (
+              <div className="text-[11px] text-amber-400 flex flex-wrap items-center gap-2" data-testid="inventory-slot-conflict">
+                <span>{t('inventory.equip.conflictBody', { incumbent: slotConflict.itemName, slot: slotConflict.slot })}</span>
+                {editable && (
+                  <Btn density="xs" className="text-xs" disabled={equipBusy} onClick={() => void swapEquip()} data-testid="inventory-slot-swap-btn">
+                    {equipBusy ? t('inventory.equip.swapping') : t('inventory.equip.swapButton', { incumbent: slotConflict.itemName })}
+                  </Btn>
+                )}
+              </div>
+            )}
+            {equipError && <p className="text-[12px] text-rose-400">{equipError}</p>}
+          </div>
+        )}
       </div>
       {editable && (
         <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end cf-print-hide">
