@@ -71,11 +71,19 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
 
       // Step 4: Condition editor. The real toggle is `add-condition-toggle-${combatantId}`
       // (CombatantRow.tsx) — `add-condition-trigger` does not exist anywhere in the app.
+      // Clicking it first opens a compact "Quick condition" picker (suggestion chips +
+      // "More options…"), NOT the full form directly — confirmed against a live browser run
+      // (the original `input[id^="condition-name-"]` assertion here failed in CI because
+      // that input only mounts after "More options…" is clicked). The full, ten-control form
+      // is exactly the overflow-prone UI issue #1465 calls out, so click through to it.
       const conditionTrigger = page.locator('[data-testid^="add-condition-toggle-"]').first();
       await expect(conditionTrigger).toBeVisible();
       await conditionTrigger.click();
-      // Clicking the toggle mounts the condition-name field inline in the same row —
-      // confirm the editor actually expanded before checking overflow.
+      const moreOptionsBtn = page.getByRole('button', { name: 'More options…' });
+      await expect(moreOptionsBtn).toBeVisible();
+      await checkOverflow('quick condition picker expanded');
+      await moreOptionsBtn.click();
+      // Confirm the full condition form actually expanded before checking overflow.
       await expect(page.locator('input[id^="condition-name-"]').first()).toBeVisible();
       await checkOverflow('condition editor expanded');
 
