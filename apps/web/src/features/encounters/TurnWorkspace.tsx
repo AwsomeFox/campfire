@@ -452,7 +452,7 @@ export function TurnWorkspace({
               type="text"
               className="input cf-target-44"
               placeholder={t('encounters.workspace.readiedPlaceholder')}
-              aria-label={t('encounters.workspace.readiedPlaceholder')}
+              aria-label={t('encounters.workspace.readiedAria')}
               value={readiedDraft}
               disabled={controlsDisabled}
               maxLength={200}

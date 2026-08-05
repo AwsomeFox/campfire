@@ -110,7 +110,8 @@
     },
     "workspace": {
       "yourTurn": "It's your turn.",
-      "readiedPlaceholder": "What is readied and what is the trigger?",
+      "readiedPlaceholder": "Ready action trigger…",
+      "readiedAria": "Readied action trigger",
       "setReady": "Set ready",
       "clearReady": "Clear ready",
       "readiedLabel": "Readied",
