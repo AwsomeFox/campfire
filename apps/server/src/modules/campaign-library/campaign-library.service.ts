@@ -950,6 +950,7 @@ export class CampaignLibraryService {
               deathSaveSuccesses: 0,
               deathSaveFailures: 0,
               conditions: '[]',
+              conditionInstances: null,
             }).run();
           }
           currentSortOrder = itemSortOrder + names.length;
